@@ -47,6 +47,7 @@ class DocumentReader:
                 project_id,
                 session_id,
                 visibility_scope,
+                ownership_mode,
                 display_name,
                 last_synced_at,
                 last_manifest_candidate_count,
@@ -70,6 +71,117 @@ class DocumentReader:
         )
         return rows[0] if rows else None
 
+    async def fetch_managed_workspace_source(self) -> Optional[Dict]:
+        """Return the one project-owned managed workspace source, if present."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                source_id,
+                project_id,
+                session_id,
+                visibility_scope,
+                ownership_mode,
+                display_name,
+                last_synced_at,
+                last_manifest_candidate_count,
+                last_manifest_included_count,
+                last_manifest_excluded_count,
+                last_manifest_excluded_reason_counts,
+                created_at,
+                updated_at
+            FROM public.document_workspace_sources
+            WHERE project_id = %s
+              AND ownership_mode = 'managed_project_workspace'
+            ORDER BY created_at ASC, source_id ASC
+            LIMIT 1
+            """,
+            (self._project_id,),
+        )
+        return rows[0] if rows else None
+
+    async def list_managed_workspace_documents(
+        self,
+        *,
+        path_prefix: Optional[str],
+        limit: int,
+    ) -> List[Dict]:
+        """List managed workspace files without exposing other projects."""
+        query = """
+            SELECT
+                pd.document_id,
+                pd.project_id,
+                pd.session_id,
+                pd.visibility_scope,
+                pd.source_kind,
+                pd.original_name,
+                pd.relative_path,
+                pd.extension,
+                pd.size_bytes,
+                pd.content_hash,
+                pd.status,
+                pd.created_at,
+                pd.updated_at,
+                pd.indexed_at,
+                pd.error_message,
+                0::INTEGER AS chunk_count
+            FROM public.project_documents AS pd
+            JOIN public.document_workspace_sources AS ws
+              ON ws.source_id = pd.source_id
+             AND ws.project_id = pd.project_id
+            WHERE pd.project_id = %s
+              AND ws.ownership_mode = 'managed_project_workspace'
+              AND pd.status <> 'deleted'
+        """
+        params: list = [self._project_id]
+        if path_prefix is not None:
+            escaped = self._escape_like(path_prefix)
+            query += " AND (pd.relative_path = %s OR pd.relative_path LIKE %s ESCAPE '\\')"
+            params.extend([path_prefix, f"{escaped}/%"])
+        query += " ORDER BY pd.relative_path ASC, pd.document_id ASC LIMIT %s"
+        params.append(limit)
+        return await self._client.fetch_all(query, tuple(params))
+
+    async def fetch_managed_workspace_file(
+        self,
+        *,
+        relative_path: str,
+    ) -> Optional[Dict]:
+        """Fetch one managed file and its raw UTF-8 bytes."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                pd.document_id,
+                pd.project_id,
+                pd.session_id,
+                pd.visibility_scope,
+                pd.source_kind,
+                pd.original_name,
+                pd.relative_path,
+                pd.extension,
+                pd.size_bytes,
+                pd.content_hash,
+                pd.status,
+                pd.created_at,
+                pd.updated_at,
+                pd.indexed_at,
+                pd.error_message,
+                dc.content
+            FROM public.project_documents AS pd
+            JOIN public.document_workspace_sources AS ws
+              ON ws.source_id = pd.source_id
+             AND ws.project_id = pd.project_id
+            JOIN public.document_content AS dc
+              ON dc.document_id = pd.document_id
+            WHERE pd.project_id = %s
+              AND ws.ownership_mode = 'managed_project_workspace'
+              AND pd.relative_path = %s
+              AND pd.status <> 'deleted'
+            LIMIT 1
+            """,
+            (self._project_id, relative_path),
+        )
+        return rows[0] if rows else None
+
     async def fetch_workspace_indexing_status(
         self,
         *,
@@ -84,6 +196,7 @@ class DocumentReader:
                 ws.project_id,
                 ws.session_id,
                 ws.visibility_scope,
+                ws.ownership_mode,
                 ws.display_name,
                 ws.last_synced_at,
                 ws.last_manifest_candidate_count,
@@ -108,6 +221,7 @@ class DocumentReader:
             FROM public.document_workspace_sources AS ws
             LEFT JOIN public.project_documents AS pd
                 ON pd.source_id = ws.source_id
+               AND pd.status <> 'deleted'
             WHERE ws.source_id = %s
               AND ws.project_id = %s
               AND (
@@ -175,6 +289,7 @@ class DocumentReader:
             + selector
             + """
               AND pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -186,6 +301,55 @@ class DocumentReader:
             LIMIT 2
             """,
             (selector_value, self._project_id, session_id),
+        )
+
+    async def find_deleted_replacement_candidates(
+        self,
+        *,
+        original_name: str,
+        relative_path: str,
+        session_id: Optional[str],
+        visibility_scope: str,
+    ) -> List[Dict]:
+        """Return deleted visible files that may be explicitly replaced."""
+
+        return await self._client.fetch_all(
+            """
+            SELECT
+                document_id,
+                project_id,
+                session_id,
+                visibility_scope,
+                original_name,
+                relative_path,
+                content_hash,
+                version_number,
+                deleted_at
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND status = 'deleted'
+              AND visibility_scope = %s
+              AND (
+                  relative_path = %s
+                  OR lower(original_name) = lower(%s)
+              )
+              AND (
+                  visibility_scope = 'project'
+                  OR (
+                      visibility_scope = 'session'
+                      AND session_id = %s
+                  )
+              )
+            ORDER BY deleted_at DESC NULLS LAST, document_id DESC
+            LIMIT 5
+            """,
+            (
+                self._project_id,
+                visibility_scope,
+                relative_path,
+                original_name,
+                session_id,
+            ),
         )
 
     async def fetch_document_content(
@@ -203,6 +367,7 @@ class DocumentReader:
                 ON pd.document_id = dc.document_id
             WHERE dc.document_id = %s
               AND pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -236,6 +401,7 @@ class DocumentReader:
               AND dc.extracted_content_hash = pd.content_hash
               AND dc.extracted_text IS NOT NULL
               AND pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -375,6 +541,7 @@ class DocumentReader:
             LEFT JOIN public.document_chunks AS dc
                 ON dc.document_id = pd.document_id
             WHERE pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -516,6 +683,7 @@ class DocumentReader:
                 ON dc.document_id = pd.document_id
             WHERE pd.project_id = %s
               AND pd.folder_root_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -571,13 +739,21 @@ class DocumentReader:
                     pd.folder_root_id,
                     pd.original_name,
                     pd.relative_path,
+                    pd.extension,
+                    pd.content_hash,
                     dc.chunk_index,
                     dc.content,
                     dc.language,
                     dc.chunk_kind,
                     dc.symbol_name,
+                    dc.page_number,
                     dc.start_line,
                     dc.end_line,
+                    dc.start_row,
+                    dc.end_row,
+                    dc.section_path,
+                    dc.start_paragraph,
+                    dc.end_paragraph,
                     dc.embedding,
                     dc.search_vector
                 FROM public.document_chunks AS dc
@@ -655,13 +831,21 @@ class DocumentReader:
                 vc.folder_root_id,
                 vc.original_name,
                 vc.relative_path,
+                vc.extension,
+                vc.content_hash,
                 vc.chunk_index,
                 vc.content,
                 vc.language,
                 vc.chunk_kind,
                 vc.symbol_name,
+                vc.page_number,
                 vc.start_line,
                 vc.end_line,
+                vc.start_row,
+                vc.end_row,
+                vc.section_path,
+                vc.start_paragraph,
+                vc.end_paragraph,
                 1 - (vc.embedding <=> qv.embedding) AS score
             FROM candidate_ids AS ci
             JOIN visible_chunks AS vc ON vc.chunk_id = ci.chunk_id

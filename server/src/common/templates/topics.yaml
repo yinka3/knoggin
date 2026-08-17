@@ -2,12 +2,10 @@ General:
   active: false
   hot: false
   labels: []
-  hierarchy: {}
   aliases: []
 Identity:
   active: true
   hot: false
   labels:
     - person
-  hierarchy: {}
   aliases: []

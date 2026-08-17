@@ -1,29 +1,24 @@
 ## Generate Episode
-You are creating bounded episodic memory for {user_name}'s conversation.
+You are creating bounded, project-wide episodic memory for {user_name}.
 
 <task>
-Given one eligible message window, choose exactly one action:
-- `create`: create a new episode from this window;
-- `consolidate`: merge this window into one supplied prior episode;
-- `skip`: this window has too little durable meaning to store.
+Given one eligible project window, return zero to three independent proposals.
+Each proposal either creates a new episode or revises one supplied prior episode.
+Ungrouped material may be omitted; an empty proposal list is valid.
+Keep the combined narrative text in every proposal at or below
+{prompt_narrative_chars} characters. The server hard limit is
+{max_narrative_chars} characters.
 </task>
 
 <grounding>
-- Messages are canonical evidence. The supplied `message_id` values are local
-  `mN` references for this call; use only those references.
-- `entity_refs_by_message` and `relationship_refs_by_message` are the complete
-  available graph memberships for this window. They use local `eN` and `rN`
-  references; never invent references.
-- `entity_catalog` resolves `eN` references to canonical names, semantic types,
-  and aliases. `relationship_catalog` supplies each `rN` relationship type,
-  endpoint entities, confidence, context, and `mN` evidence references. Use
-  this context to interpret the messages, but keep all selected references
-  within the memberships.
+- The evidence brief is readable conversation input, organized by its source
+  session. `mN`, `eN`, `rN`, and `epN` are stable local references only.
+- Session boundaries and the supplied pairing/topic hints are evidence aids,
+  not mandatory groups. Decide coherence yourself.
 - You may select at most two focus entities and only from the supplied entity
   memberships. You may select central relationships only from the supplied
   relationship memberships.
-- For `consolidate`, `target_episode_id` must be one of the local `epN`
-  references in `prior_episodes`.
+- A revision target must be one of the supplied `epN` prior episodes.
 </grounding>
 
 <decision_rules>
@@ -31,17 +26,20 @@ Given one eligible message window, choose exactly one action:
   continuing topic and the resulting episode remains coherent.
 - Choose `create` for a meaningful new topic, decision, development, or
   unresolved thread.
-- Choose `skip` for acknowledgements, filler, or other low-signal windows.
+- Do not create a proposal for acknowledgements, filler, or low-signal material.
+- Proposals may not share any current-window `mN` source. Each consolidation
+  target may occur at most once. Do not merge two existing episodes.
 - Do not phrase the summary as permanent atomic claims. Write a concise,
   contextual account grounded in the window.
 </decision_rules>
 
 <output_contract>
-Return exactly the structured response requested by the schema.
+Return exactly the structured response requested by the schema: an array named
+`proposals`, containing at most three create/consolidate proposals.
 
 For `create` and `consolidate`:
-- provide `summary` and exactly one `message_influences` item for every input
-  `mN` message reference;
+- provide `summary` and exactly one `message_influences` item for every `mN`
+  assigned to that proposal, and no unassigned `mN` references;
 - provide weights greater than or equal to zero;
 - omit `skip_reason`.
 
@@ -52,36 +50,27 @@ For `consolidate`:
 - provide `target_episode_id` from the supplied local `epN` prior-episode
   references.
 
-For `skip`:
-- provide only `action: "skip"` and `skip_reason`; omit all episode content.
+Do not emit individual `skip` proposals.
 </output_contract>
 
-## Regenerate Consolidated Episode
-You are regenerating one existing episodic memory for {user_name}'s conversation.
+## Repair Episode Narrative
+You are repairing a proposed episodic-memory response for {user_name}.
 
 <task>
-The selected target episode and all of its source messages, plus one new eligible
-window, have been supplied as one complete source set. Regenerate the current
-episode narrative and rank every supplied source message by influence.
+The evidence brief and a readable draft are supplied. Return an equivalent
+structured response whose combined narrative text in each proposal is at most
+{max_narrative_chars} characters.
 </task>
 
 <grounding>
-- Messages are canonical evidence. Use every supplied local `mN` message
-  reference exactly once in `message_influences`; do not invent references.
-- Entity and relationship memberships are closed sets. Focus `eN` entities and
-  central `rN` relationships must come only from the supplied memberships.
-- Use `entity_catalog` and `relationship_catalog` to interpret the resolved
-  entities, relationship types, endpoints, and evidence. They do not authorize
-  references outside the supplied memberships.
-- The output updates the supplied target episode. Do not choose an action or a
-  different target.
+- Preserve the proposal actions, source references, and consolidation targets.
+- Compress prose and remove lower-value list items before altering the summary.
+- Do not invent references or create additional proposals.
 </grounding>
 
 <output_contract>
 Return exactly the structured response requested by the schema:
 
-- provide a concise contextual `summary`, `new_developments`, `updates`,
-  `unresolved`, and `importance`;
-- provide exactly one `message_influences` item for every supplied source message;
-- select at most two focus entities and only supplied central relationships.
+- meet the character limit exactly; the server will reject another overage;
+- preserve the structured proposal shape and its existing references.
 </output_contract>

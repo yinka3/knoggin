@@ -2,7 +2,8 @@ import json
 import math
 from typing import Dict, List
 
-from common.schema.primitives import (
+from common.schema.episode.models import (
+    EPISODE_EMBEDDING_DIMENSION,
     EntityEpisode,
     Episode,
     EpisodeCheckpoint,
@@ -648,6 +649,227 @@ class EpisodeReader:
             for row in rows
         ]
 
+    async def get_next_project_episode_window(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        message_count: int,
+    ) -> List[Dict]:
+        """Merge each session's next ready stream into one project window.
+
+        A session stops at its first non-ready message, preserving its own
+        chronology.  Other sessions are intentionally independent, so a draft
+        or failed claim in one cannot starve project memory from another.
+        """
+
+        if message_count <= 0:
+            raise ValueError("message_count must be positive")
+        rows = await self.client.fetch_all(
+            """
+            SELECT
+                m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
+                m.user_msg_id, m.lifecycle_state, m.ingestion_state,
+                m.episode_eligible,
+                s.episode_participation_enabled,
+                s.episode_participation_after_message_id,
+                parent.ingestion_state AS parent_ingestion_state,
+                parent.lifecycle_state AS parent_lifecycle_state,
+                COALESCE(ec.last_evaluated_message_id, 0) AS checkpoint_message_id,
+                ec.last_evaluated_timestamp_ms AS checkpoint_timestamp_ms
+            FROM messages m
+            JOIN sessions s
+              ON s.session_id = m.session_id AND s.project_id = m.project_id
+            LEFT JOIN episode_processing_checkpoints ec
+              ON ec.project_id = m.project_id AND ec.session_id = m.session_id
+            LEFT JOIN messages parent
+              ON parent.message_id = m.user_msg_id
+             AND parent.project_id = m.project_id
+             AND parent.session_id = m.session_id
+            WHERE m.user_name = %s
+              AND m.project_id = %s
+              AND s.status <> 'deleted'
+              AND s.episode_participation_enabled = TRUE
+              AND m.message_id > s.episode_participation_after_message_id
+              AND (
+                    (COALESCE(ec.last_evaluated_message_id, 0) = 0
+                     AND ec.last_evaluated_timestamp_ms IS NULL)
+                 OR (
+                    ec.last_evaluated_timestamp_ms IS NOT NULL AND (
+                        m.timestamp_ms > ec.last_evaluated_timestamp_ms
+                        OR (m.timestamp_ms = ec.last_evaluated_timestamp_ms
+                            AND m.message_id > ec.last_evaluated_message_id)
+                        OR m.timestamp_ms IS NULL
+                    ))
+                 OR (ec.last_evaluated_timestamp_ms IS NULL
+                     AND COALESCE(ec.last_evaluated_message_id, 0) > 0
+                     AND m.timestamp_ms IS NULL
+                     AND m.message_id > ec.last_evaluated_message_id)
+              )
+            ORDER BY m.session_id, m.timestamp_ms ASC NULLS LAST, m.message_id
+            """,
+            (user_name, project_id),
+        )
+        streams: Dict[str, List[Dict]] = {}
+        for row in rows:
+            ready = (
+                row["role"] == "user"
+                and row["lifecycle_state"] == "sealed"
+                and row["ingestion_state"] == "processed"
+                and row["episode_eligible"]
+            ) or (
+                row["role"] == "assistant"
+                and row["parent_lifecycle_state"] == "sealed"
+                and row["parent_ingestion_state"] == "processed"
+            )
+            session_id = str(row["session_id"])
+            if not ready:
+                # The first blocked record holds only this session's stream.
+                streams.setdefault(session_id, [])
+                streams[session_id].append({"_blocked": True})
+                continue
+            if any(item.get("_blocked") for item in streams.get(session_id, [])):
+                continue
+            streams.setdefault(session_id, []).append(dict(row))
+
+        bundles: List[List[Dict]] = []
+        for stream in streams.values():
+            index = 0
+            while index < len(stream) and not stream[index].get("_blocked"):
+                bundle = [stream[index]]
+                user_id = int(stream[index]["message_id"])
+                index += 1
+                while (
+                    index < len(stream)
+                    and not stream[index].get("_blocked")
+                    and stream[index].get("role") == "assistant"
+                    and stream[index].get("user_msg_id") == user_id
+                ):
+                    bundle.append(stream[index])
+                    index += 1
+                bundles.append(bundle)
+        bundles.sort(
+            key=lambda bundle: (
+                bundle[0].get("timestamp_ms") is None,
+                bundle[0].get("timestamp_ms") or 0,
+                bundle[0]["message_id"],
+            )
+        )
+        selected: List[Dict] = []
+        for bundle in bundles:
+            if len(selected) >= message_count:
+                break
+            selected.extend(bundle)
+        if len(selected) < message_count:
+            return []
+        return [
+            {
+                key: value
+                for key, value in row.items()
+                if key not in {"lifecycle_state", "ingestion_state", "episode_eligible", "parent_ingestion_state", "parent_lifecycle_state", "checkpoint_message_id", "checkpoint_timestamp_ms", "episode_participation_enabled", "episode_participation_after_message_id"}
+            }
+            for row in selected
+        ]
+
+    async def get_project_episode(
+        self, episode_id: str, *, user_name: str, project_id: str
+    ) -> Episode | None:
+        row = await self.client.fetch_one(
+            """
+            SELECT e.* FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id
+            WHERE e.episode_id = %s AND e.project_id = %s AND p.user_name = %s
+            """,
+            (episode_id, project_id, user_name),
+        )
+        return await self._hydrate_episode(row) if row else None
+
+    async def get_recent_project_episodes(
+        self, *, user_name: str, project_id: str, limit: int
+    ) -> List[Episode]:
+        rows = await self.client.fetch_all(
+            """
+            SELECT e.* FROM episodes e JOIN projects p ON p.project_id = e.project_id
+            WHERE e.project_id = %s AND p.user_name = %s
+            ORDER BY e.updated_at DESC LIMIT %s
+            """,
+            (project_id, user_name, limit),
+        )
+        return [await self._hydrate_episode(row) for row in rows]
+
+    async def search_project_episodes(
+        self, query: str, *, user_name: str, project_id: str, limit: int
+    ) -> List[Episode]:
+        rows = await self.client.fetch_all(
+            """
+            WITH terms AS (SELECT websearch_to_tsquery('simple', %s) AS query)
+            SELECT e.* FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id CROSS JOIN terms
+            WHERE e.project_id = %s AND p.user_name = %s
+              AND e.search_tsvector @@ terms.query
+            ORDER BY ts_rank_cd(e.search_tsvector, terms.query) DESC,
+                     e.importance DESC, e.updated_at DESC LIMIT %s
+            """,
+            (query, project_id, user_name, limit),
+        )
+        return [await self._hydrate_episode(row) for row in rows]
+
+    async def search_project_episodes_by_embedding(
+        self, embedding: List[float], *, user_name: str, project_id: str,
+        limit: int, score_threshold: float = 0.35,
+    ) -> List[tuple[Episode, float]]:
+        vector = json.dumps(self._normalize_embedding(embedding))
+        rows = await self.client.fetch_all(
+            """
+            SELECT e.*, 1 - (e.embedding <=> %s::vector) AS similarity
+            FROM episodes e JOIN projects p ON p.project_id = e.project_id
+            WHERE e.project_id = %s AND p.user_name = %s AND e.embedding IS NOT NULL
+              AND 1 - (e.embedding <=> %s::vector) >= %s
+            ORDER BY e.embedding <=> %s::vector ASC LIMIT %s
+            """,
+            (vector, project_id, user_name, vector, score_threshold, vector, limit),
+        )
+        return [(await self._hydrate_episode(row), float(row["similarity"])) for row in rows]
+
+    async def get_project_episodes_for_entities(
+        self, entity_ids: List[int], *, user_name: str, project_id: str, limit: int
+    ) -> List[Episode]:
+        if not entity_ids:
+            return []
+        rows = await self.client.fetch_all(
+            """
+            SELECT e.*, COUNT(DISTINCT ee.entity_id) AS entity_overlap
+            FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id
+            JOIN episode_entities ee ON ee.episode_id = e.episode_id AND ee.project_id = e.project_id
+            WHERE e.project_id = %s AND p.user_name = %s AND ee.entity_id = ANY(%s)
+              AND e.user_modified = FALSE
+            GROUP BY e.episode_id
+            ORDER BY entity_overlap DESC, e.updated_at DESC LIMIT %s
+            """,
+            (project_id, user_name, entity_ids, limit),
+        )
+        return [await self._hydrate_episode(row) for row in rows]
+
+    async def get_project_episode_source_messages(
+        self, episode_id: str, *, user_name: str, project_id: str
+    ) -> List[Dict]:
+        return await self.client.fetch_all(
+            """
+            SELECT m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
+                   em.influence_weight, em.influence_reason, em.message_position,
+                   em.attached_at
+            FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id
+            JOIN episode_messages em ON em.episode_id = e.episode_id AND em.project_id = e.project_id
+            JOIN messages m ON m.message_id = em.message_id AND m.project_id = em.project_id
+                           AND m.session_id = em.session_id
+            WHERE e.episode_id = %s AND e.project_id = %s AND p.user_name = %s
+            ORDER BY em.message_position
+            """,
+            (episode_id, project_id, user_name),
+        )
+
     async def get_relationship_ids_for_messages(
         self,
         message_ids: List[int],
@@ -919,6 +1141,7 @@ class EpisodeReader:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             generator_metadata=self._json_dict(row.get("generator_metadata")),
+            user_modified=bool(row.get("user_modified", False)),
         )
 
     async def _load_messages(self, episode_id: str) -> List[MessageEpisode]:
@@ -926,6 +1149,7 @@ class EpisodeReader:
             """
             SELECT
                 message_id,
+                session_id,
                 influence_weight,
                 influence_reason,
                 message_position,
@@ -939,6 +1163,7 @@ class EpisodeReader:
         return [
             MessageEpisode(
                 message_id=int(row["message_id"]),
+                session_id=str(row["session_id"]),
                 influence_weight=float(row["influence_weight"]),
                 influence_reason=row.get("influence_reason"),
                 message_position=int(row["message_position"]),
@@ -1032,8 +1257,11 @@ class EpisodeReader:
     @staticmethod
     def _normalize_embedding(embedding: List[float]) -> List[float]:
         normalized = [float(value) for value in embedding]
-        if len(normalized) != 1024:
-            raise ValueError("episode embedding must contain exactly 1024 dimensions")
+        if len(normalized) != EPISODE_EMBEDDING_DIMENSION:
+            raise ValueError(
+                "episode embedding must contain exactly "
+                f"{EPISODE_EMBEDDING_DIMENSION} dimensions"
+            )
         if not all(math.isfinite(value) for value in normalized):
             raise ValueError("episode embedding must contain only finite values")
         return normalized

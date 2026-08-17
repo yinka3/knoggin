@@ -4,16 +4,105 @@ import os
 import sys
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import onnxruntime as ort
 import torch
+from huggingface_hub import snapshot_download
 from loguru import logger
 from sentence_transformers import CrossEncoder, SentenceTransformer
+from transformers import AutoTokenizer
 
-from common.schema.contracts import EngineWorkUnit
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
+from infrastructure.work_record import WorkRecord
+
+
+class _DirectOnnxSentenceEmbedder:
+    """Run ONNX exports that already return pooled sentence embeddings.
+
+    Stella's ONNX export exposes a ``sentence_embedding`` output rather than
+    the token-level ``last_hidden_state`` expected by SentenceTransformers'
+    generic ONNX pipeline.  Keeping this small adapter behind the existing
+    embedder interface lets those exports use the same service contract.
+    """
+
+    def __init__(
+        self,
+        model_path: Path,
+        provider: str,
+        *,
+        session: ort.InferenceSession | None = None,
+    ) -> None:
+        self._model_path = model_path
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            str(model_path),
+            trust_remote_code=True,
+        )
+        self._session = session or ort.InferenceSession(
+            str(model_path / "onnx" / "model.onnx"),
+            providers=[provider],
+        )
+        outputs = self._session.get_outputs()
+        self._output_names = [output.name for output in outputs]
+        try:
+            self._embedding_output_index = self._output_names.index(
+                "sentence_embedding"
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Direct ONNX sentence embedder requires a "
+                "'sentence_embedding' output"
+            ) from exc
+
+        output_shape = outputs[self._embedding_output_index].shape
+        dimension = output_shape[-1] if output_shape else None
+        if not isinstance(dimension, int) or dimension <= 0:
+            raise ValueError(
+                "Direct ONNX sentence embedder must expose a fixed embedding "
+                f"dimension, got {output_shape!r}"
+            )
+        self._embedding_dimension = dimension
+
+    def get_sentence_embedding_dimension(self) -> int:
+        return self._embedding_dimension
+
+    def encode(self, texts: List[str]) -> np.ndarray:
+        features = self._tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            return_tensors="np",
+        )
+        model_inputs = {}
+        missing_inputs = []
+        for model_input in self._session.get_inputs():
+            if model_input.name not in features:
+                missing_inputs.append(model_input.name)
+                continue
+            model_inputs[model_input.name] = np.asarray(features[model_input.name])
+        if missing_inputs:
+            raise ValueError(
+                "Tokenizer did not provide ONNX inputs: "
+                f"{', '.join(missing_inputs)}"
+            )
+
+        outputs = self._session.run(self._output_names, model_inputs)
+        embeddings = np.asarray(
+            outputs[self._embedding_output_index],
+            dtype=np.float32,
+        )
+        if embeddings.ndim != 2 or embeddings.shape[0] != len(texts):
+            raise RuntimeError(
+                "ONNX sentence embedding output must have shape "
+                f"(batch, dimension), got {embeddings.shape!r}"
+            )
+        return embeddings
+
+    def close(self) -> None:
+        self._session = None
+        self._tokenizer = None
 
 
 @dataclass(frozen=True)
@@ -30,7 +119,7 @@ class EmbeddingService:
     """Embedding infrastructure for the knowledge graph."""
 
     BATCH_SIZE = 64
-    supports_model_work_units = True
+    supports_model_work_records = True
     _ONNX_PROVIDER_ALIASES = {
         "cpu": "CPUExecutionProvider",
         "coreml": "CoreMLExecutionProvider",
@@ -157,23 +246,27 @@ class EmbeddingService:
         name: str,
         priority: ModelWorkPriority,
         work_kind: str,
-        parent_work_unit: EngineWorkUnit | None = None,
+        parent_work_record: WorkRecord | None = None,
     ):
+        if parent_work_record is not None and not isinstance(
+            parent_work_record, WorkRecord
+        ):
+            raise TypeError("parent_work_record must be a WorkRecord")
         if self._model_work is not None:
-            work_unit = None
-            if parent_work_unit is not None:
-                work_unit = EngineWorkUnit.for_model_operation(
-                    kind=work_kind,
-                    scope=parent_work_unit.scope,
-                    parent_work_unit_id=parent_work_unit.id,
-                    priority=parent_work_unit.priority,
+            work_record = None
+            if parent_work_record is not None:
+                work_record = WorkRecord.for_model_operation(
+                    work_kind,
+                    parent_work_record.scope,
+                    parent_id=parent_work_record.id,
+                    priority=parent_work_record.priority,
                 )
             return await self._model_work.run_blocking(
                 operation,
                 priority=priority,
                 name=name,
-                work_unit=work_unit,
-                parent_work_unit=parent_work_unit,
+                work_record=work_record,
+                parent_work_record=parent_work_record,
             )
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, operation)
@@ -182,6 +275,23 @@ class EmbeddingService:
         """Load the always-needed sentence embedding model."""
         if self._embedder:
             return
+
+        # ONNX Runtime sessions for pooled exports must be created and used on
+        # the event-loop thread.  In this environment, handing that session to
+        # the generic executor can strand the asyncio future after inference.
+        if self._backend == "onnx":
+            direct_embedder = self._load_direct_onnx_embedder()
+            if direct_embedder is not None:
+                self._embedder = direct_embedder
+                self._embedding_dim = (
+                    direct_embedder.get_sentence_embedding_dimension()
+                )
+                logger.info(
+                    "Loaded direct pooled ONNX embedding model from "
+                    f"{direct_embedder._model_path} | "
+                    f"dims={self._embedding_dim}"
+                )
+                return
 
         await self._run_blocking(
             self._load_embedder_sync,
@@ -210,6 +320,42 @@ class EmbeddingService:
                     config_kwargs=self._config_kwargs,
                     backend=self._backend,
                 )
+
+    def _load_direct_onnx_embedder(self) -> _DirectOnnxSentenceEmbedder | None:
+        """Use a cached pooled ONNX export when its output is self-contained."""
+        if self._backend != "onnx":
+            return None
+
+        model_path = Path(self._embedding_model)
+        if not model_path.is_dir():
+            try:
+                model_path = Path(
+                    snapshot_download(
+                        self._embedding_model,
+                        local_files_only=True,
+                    )
+                )
+            except Exception:
+                # SentenceTransformer remains responsible for downloading and
+                # loading models that are not already in the local cache.
+                return None
+
+        onnx_path = model_path / "onnx" / "model.onnx"
+        if not onnx_path.is_file():
+            return None
+
+        session = ort.InferenceSession(
+            str(onnx_path),
+            providers=[self._onnx_provider],
+        )
+        output_names = {output.name for output in session.get_outputs()}
+        if "sentence_embedding" not in output_names:
+            return None
+        return _DirectOnnxSentenceEmbedder(
+            model_path,
+            self._onnx_provider,
+            session=session,
+        )
 
     async def load_reranker(
         self,
@@ -289,18 +435,21 @@ class EmbeddingService:
         self,
         texts: List[str],
         *,
-        parent_work_unit: EngineWorkUnit | None = None,
+        parent_work_record: WorkRecord | None = None,
     ) -> List[List[float]]:
         """Batch encode texts to vectors with chunking for large inputs (async)."""
         if not texts:
             return []
+
+        if isinstance(self._embedder, _DirectOnnxSentenceEmbedder):
+            return self._encode_sync(texts)
 
         return await self._run_blocking(
             lambda: self._encode_sync(texts),
             name="embedding-encode",
             priority=ModelWorkPriority.BACKGROUND,
             work_kind="embedding",
-            parent_work_unit=parent_work_unit,
+            parent_work_record=parent_work_record,
         )
 
     def _encode_sync(self, texts: List[str]) -> List[List[float]]:
@@ -321,6 +470,9 @@ class EmbeddingService:
 
     async def encode_single(self, text: str) -> List[float]:
         """Encode single text, returns list for JSON serialization (async)."""
+        if isinstance(self._embedder, _DirectOnnxSentenceEmbedder):
+            return self._encode_single_sync(text)
+
         return await self._run_blocking(
             lambda: self._encode_single_sync(text),
             name="embedding-encode-single",
@@ -448,6 +600,9 @@ class EmbeddingService:
     def cleanup(self):
         """Explicitly free model memory."""
         if hasattr(self, "_embedder") and self._embedder is not None:
+            close = getattr(self._embedder, "close", None)
+            if close is not None:
+                close()
             del self._embedder
             self._embedder = None
 

@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
+from common.exceptions import StorageUnavailableError
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -11,7 +12,6 @@ from common.scoping import (
 )
 from common.utils.time_utils import get_now
 from infrastructure.postgres_client import PostgresClient
-
 
 _MAX_QUERY_LIMIT = 100
 _MAX_ENTITY_LIST_OFFSET = 10_000
@@ -283,7 +283,7 @@ class EntityReader:
         )
         params = [entity_id, visible_project_ids, IDENTITY_ENTITY_ID]
 
-        query = f"""
+        query = """
         SELECT
             e.entity_id AS id,
             e.session_id,
@@ -292,7 +292,7 @@ class EntityReader:
             COALESCE(
                 array_agg(a.alias ORDER BY a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
-                '{{}}'
+                '{}'
             ) AS aliases,
             e.type,
             e.topic,
@@ -454,7 +454,7 @@ class EntityReader:
         lower_names = [n.lower() for n in names]
         params = [lower_names, lower_names, visible_project_ids, IDENTITY_ENTITY_ID]
 
-        query = f"""
+        query = """
         SELECT
             e.entity_id AS id,
             e.project_id,
@@ -463,8 +463,8 @@ class EntityReader:
             COALESCE(
                 array_agg(DISTINCT a.alias ORDER BY a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
-                '{{}}'
-            ) AS aliases,
+                '{}'
+            ) AS aliases
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE (
@@ -496,7 +496,10 @@ class EntityReader:
             ]
         except Exception as e:
             logger.error(f"Failed to get entities by names: {e}")
-            return []
+            raise StorageUnavailableError(
+                "get_entities_by_names",
+                details={"error_type": type(e).__name__},
+            ) from e
 
     async def search_similar_entities(
         self,
@@ -527,7 +530,7 @@ class EntityReader:
             visible_project_ids,
             IDENTITY_ENTITY_ID,
         ]
-        query = f"""
+        query = """
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE entity_id != %s
@@ -566,7 +569,7 @@ class EntityReader:
             visible_project_ids,
             IDENTITY_ENTITY_ID,
         ]
-        query = f"""
+        query = """
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entity_search
         WHERE 1 - (embedding <=> %s::vector) >= %s

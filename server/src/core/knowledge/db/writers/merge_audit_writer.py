@@ -241,6 +241,18 @@ class MergeAuditWriter:
         async with self._restore_cursor(cur) as cur:
             await cur.execute(
                 """
+                DELETE FROM relationship_observations
+                WHERE relationship_id IN (
+                    SELECT relationship_id
+                    FROM relationships
+                    WHERE project_id = %s
+                      AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
+                )
+                """,
+                (project_id, ids, ids),
+            )
+            await cur.execute(
+                """
                 DELETE FROM relationship_evidence_refs
                 WHERE relationship_id IN (
                     SELECT relationship_id
@@ -401,12 +413,19 @@ class MergeAuditWriter:
                         entity_a_id,
                         entity_b_id,
                         relationship_type,
+                        canonical_relationship_type,
+                        observed_relationship_label,
+                        domain_status,
+                        symmetric,
                         weight,
                         confidence,
                         context,
                         last_seen_ms
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
                     """,
                     (
                         relationship["relationship_id"],
@@ -415,6 +434,11 @@ class MergeAuditWriter:
                         int(relationship["entity_a_id"]),
                         int(relationship["entity_b_id"]),
                         relationship.get("relationship_type"),
+                        relationship.get("canonical_relationship_type"),
+                        relationship.get("observed_relationship_label")
+                        or relationship.get("relationship_type"),
+                        relationship.get("domain_status") or "unrecognized",
+                        bool(relationship.get("symmetric", False)),
                         int(relationship.get("weight") or 1),
                         float(relationship.get("confidence") or 1.0),
                         relationship.get("context"),
@@ -447,6 +471,65 @@ class MergeAuditWriter:
                             int(ref["message_id"]),
                         ),
                     )
+
+            for observation in before_state.get("relationship_observations", []):
+                await cur.execute(
+                    """
+                    INSERT INTO relationship_observations (
+                        relationship_id,
+                        project_id,
+                        user_name,
+                        session_id,
+                        message_id,
+                        source_entity_id,
+                        target_entity_id,
+                        source_type,
+                        target_type,
+                        observed_relationship_label,
+                        canonical_relationship_type,
+                        domain_status,
+                        confidence,
+                        context,
+                        observed_at_ms
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (
+                        project_id,
+                        user_name,
+                        session_id,
+                        message_id,
+                        source_entity_id,
+                        target_entity_id,
+                        observed_relationship_label
+                    ) DO UPDATE SET
+                        relationship_id = EXCLUDED.relationship_id,
+                        canonical_relationship_type = EXCLUDED.canonical_relationship_type,
+                        domain_status = EXCLUDED.domain_status,
+                        confidence = EXCLUDED.confidence,
+                        context = EXCLUDED.context,
+                        observed_at_ms = EXCLUDED.observed_at_ms
+                    """,
+                    (
+                        observation["relationship_id"],
+                        observation["project_id"],
+                        observation["user_name"],
+                        observation["session_id"],
+                        int(observation["message_id"]),
+                        int(observation["source_entity_id"]),
+                        int(observation["target_entity_id"]),
+                        observation.get("source_type"),
+                        observation.get("target_type"),
+                        observation["observed_relationship_label"],
+                        observation.get("canonical_relationship_type"),
+                        observation.get("domain_status") or "unrecognized",
+                        float(observation.get("confidence") or 1.0),
+                        observation.get("context"),
+                        int(observation["observed_at_ms"]),
+                    ),
+                )
 
             for episode_relationship in before_state.get("episode_relationships", []):
                 await cur.execute(

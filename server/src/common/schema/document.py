@@ -1,11 +1,13 @@
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Set
+from datetime import datetime, timezone
+from typing import Annotated, Dict, List, Literal, Optional, Set, Union
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -25,8 +27,8 @@ class WorkspaceSyncChanges(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    upserts: List[FolderUploadEntry] = Field(default_factory=list)
-    deleted_paths: List[str] = Field(default_factory=list)
+    upserts: tuple[FolderUploadEntry, ...] = Field(default_factory=tuple)
+    deleted_paths: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class FolderScanSettings(BaseModel):
@@ -36,11 +38,11 @@ class FolderScanSettings(BaseModel):
 
     respect_gitignore: bool = True
     include_hidden: bool = False
-    ignored_patterns: List[str] = Field(default_factory=list)
-    allowed_extensions: Optional[Set[str]] = None
-    blocked_extensions: Set[str] = Field(default_factory=set)
-    blocked_file_names: Set[str] = Field(default_factory=set)
-    blocked_directory_names: Set[str] = Field(default_factory=set)
+    ignored_patterns: tuple[str, ...] = Field(default_factory=tuple)
+    allowed_extensions: Optional[frozenset[str]] = None
+    blocked_extensions: frozenset[str] = Field(default_factory=frozenset)
+    blocked_file_names: frozenset[str] = Field(default_factory=frozenset)
+    blocked_directory_names: frozenset[str] = Field(default_factory=frozenset)
     max_document_size_bytes: int = Field(
         25 * 1024 * 1024,
         ge=1,
@@ -54,8 +56,8 @@ class FolderScanSettings(BaseModel):
 
     @field_validator("ignored_patterns")
     @classmethod
-    def _normalize_patterns(cls, values: List[str]) -> List[str]:
-        return [value.strip() for value in values if value.strip()]
+    def _normalize_patterns(cls, values: List[str]) -> tuple[str, ...]:
+        return tuple(value.strip() for value in values if value.strip())
 
     @field_validator(
         "allowed_extensions",
@@ -71,9 +73,7 @@ class FolderScanSettings(BaseModel):
             extension = str(value).strip().lower()
             if not extension:
                 continue
-            normalized.add(
-                extension if extension.startswith(".") else f".{extension}"
-            )
+            normalized.add(extension if extension.startswith(".") else f".{extension}")
         return normalized
 
     @field_validator(
@@ -84,10 +84,23 @@ class FolderScanSettings(BaseModel):
     @classmethod
     def _normalize_names(cls, values):
         return {
-            str(value).strip().lower()
-            for value in (values or [])
-            if str(value).strip()
+            str(value).strip().lower() for value in (values or []) if str(value).strip()
         }
+
+    @model_validator(mode="after")
+    def _validate_consistent_limits_and_extensions(self) -> "FolderScanSettings":
+        if self.max_document_size_bytes > self.max_total_size_bytes:
+            raise ValueError(
+                "max_document_size_bytes must not exceed max_total_size_bytes"
+            )
+        if self.allowed_extensions is not None:
+            overlap = self.allowed_extensions & self.blocked_extensions
+            if overlap:
+                raise ValueError(
+                    "allowed_extensions and blocked_extensions must not overlap: "
+                    f"{sorted(overlap)}"
+                )
+        return self
 
 
 @dataclass(slots=True)
@@ -143,62 +156,119 @@ class FolderPreview:
     excluded: List[FolderPreviewEntry] = field(default_factory=list)
 
 
-class DocumentFocus(BaseModel):
-    """Validated session-scoped document focus."""
+class _DocumentFocusBase(BaseModel):
+    """Common immutable metadata for a session- or request-scoped focus."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
-    mode: Literal["pinned"] = "pinned"
-    target_type: Literal["document", "subtree", "folder_upload"]
-    document_id: Optional[str] = None
-    relative_path: Optional[str] = None
-    folder_root_id: Optional[str] = None
-    path_prefix: Optional[str] = None
-    created_at: str
+    mode: Literal["pinned", "request"] = "pinned"
+    created_at: datetime
 
-    @field_validator(
-        "document_id",
-        "relative_path",
-        "folder_root_id",
-        "path_prefix",
-    )
+    @field_validator("created_at")
     @classmethod
-    def _reject_blank_values(cls, value):
-        if value is not None and not str(value).strip():
-            raise ValueError("document focus values must not be blank")
-        return value
+    def _require_timezone_aware_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("document focus created_at must include a timezone")
+        return value.astimezone(timezone.utc)
 
-    @model_validator(mode="after")
-    def _validate_target_shape(self):
-        if self.target_type == "document":
-            if self.document_id is None or self.relative_path is None:
-                raise ValueError(
-                    "document focus requires document_id and relative_path"
-                )
-            if self.path_prefix is not None:
-                raise ValueError(
-                    "document focus cannot include path_prefix"
-                )
-        elif self.target_type == "subtree":
-            if self.folder_root_id is None or self.path_prefix is None:
-                raise ValueError(
-                    "subtree focus requires folder_root_id and path_prefix"
-                )
-            if self.document_id is not None or self.relative_path is not None:
-                raise ValueError(
-                    "subtree focus cannot include document selectors"
-                )
-        elif self.target_type == "folder_upload":
-            if self.folder_root_id is None:
-                raise ValueError(
-                    "folder upload focus requires folder_root_id"
-                )
-            if (
-                self.document_id is not None
-                or self.relative_path is not None
-                or self.path_prefix is not None
-            ):
-                raise ValueError(
-                    "folder upload focus cannot include other selectors"
-                )
-        return self
+
+class DocumentFocusDocument(_DocumentFocusBase):
+    """A focus targeting one exact document."""
+
+    target_type: Literal["document"]
+    document_id: str = Field(min_length=1)
+    relative_path: str = Field(min_length=1)
+
+    @field_validator("document_id", "relative_path")
+    @classmethod
+    def _normalize_selectors(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("document focus selectors must not be blank")
+        return normalized
+
+
+class DocumentFocusSubtree(_DocumentFocusBase):
+    """A focus targeting a path subtree within one uploaded folder."""
+
+    target_type: Literal["subtree"]
+    folder_root_id: str = Field(min_length=1)
+    path_prefix: str = Field(min_length=1)
+
+    @field_validator("folder_root_id", "path_prefix")
+    @classmethod
+    def _normalize_selectors(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("document focus selectors must not be blank")
+        return normalized
+
+
+class DocumentFocusFolderUpload(_DocumentFocusBase):
+    """A focus targeting every visible document from one folder upload."""
+
+    target_type: Literal["folder_upload"]
+    folder_root_id: str = Field(min_length=1)
+
+    @field_validator("folder_root_id")
+    @classmethod
+    def _normalize_folder_root_id(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("document focus selectors must not be blank")
+        return normalized
+
+
+DocumentFocus = Annotated[
+    Union[DocumentFocusDocument, DocumentFocusSubtree, DocumentFocusFolderUpload],
+    Field(discriminator="target_type"),
+]
+
+_DOCUMENT_FOCUS_ADAPTER = TypeAdapter(DocumentFocus)
+_LEGACY_OPTIONAL_SELECTORS = {
+    "document_id",
+    "relative_path",
+    "folder_root_id",
+    "path_prefix",
+}
+
+
+def parse_document_focus(value: object) -> DocumentFocus:
+    """Validate a focus, accepting legacy persisted null selector fields.
+
+    Newly written focus values contain only the selectors owned by their
+    discriminated variant. Removing null legacy fields makes old persisted
+    records readable without allowing conflicting non-null selectors.
+    """
+
+    if isinstance(
+        value,
+        (DocumentFocusDocument, DocumentFocusSubtree, DocumentFocusFolderUpload),
+    ):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("document focus must be an object")
+    normalized = dict(value)
+    for selector in _LEGACY_OPTIONAL_SELECTORS:
+        if normalized.get(selector) is None:
+            normalized.pop(selector, None)
+    return _DOCUMENT_FOCUS_ADAPTER.validate_python(normalized)
+
+
+def create_document_focus(
+    *,
+    mode: Literal["pinned", "request"] = "pinned",
+    created_at: datetime | str,
+    **target: object,
+) -> DocumentFocus:
+    """Create one focus variant from a resolved document-service target."""
+
+    return parse_document_focus({"mode": mode, "created_at": created_at, **target})
+
+
+def dump_document_focus(value: DocumentFocus) -> dict:
+    """Serialize a validated focus using only its variant's selector fields."""
+
+    focus = parse_document_focus(value)
+    payload = focus.model_dump(mode="json")
+    # Keep the application's stable ISO-8601 UTC form (+00:00) rather than
+    # inheriting Pydantic's version-dependent `Z` JSON rendering.
+    payload["created_at"] = focus.created_at.isoformat()
+    return payload

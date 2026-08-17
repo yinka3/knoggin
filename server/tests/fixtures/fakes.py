@@ -291,6 +291,30 @@ class FakeRedis:
 
     async def eval(self, script, numkeys, *args):
         self.evals.append((script, args))
+        if numkeys == 4 and len(args) >= 8:
+            (
+                checkpoint_key,
+                session_last_processed_key,
+                project_last_processed_key,
+                commit_key,
+                batch_size,
+                checkpoint_interval,
+                last_id,
+                ttl,
+            ) = args[:8]
+            self._purge_expired(commit_key)
+            previous = self.strings.get(commit_key)
+            if previous:
+                count, reached = previous.split(":", 1)
+                return [int(count), int(reached)]
+            count = int(self.strings.get(checkpoint_key, 0)) + int(batch_size)
+            reached = int(count >= int(checkpoint_interval))
+            self.strings[checkpoint_key] = "0" if reached else str(count)
+            self.strings[session_last_processed_key] = str(last_id)
+            self.strings[project_last_processed_key] = str(last_id)
+            self.strings[commit_key] = f"{count}:{reached}"
+            await self.expire(commit_key, int(ttl))
+            return [count, reached]
         if numkeys == 1 and len(args) >= 3:
             key, expected_value, ttl = args[0], str(args[1]), args[2]
             self._purge_expired(key)
@@ -427,6 +451,7 @@ class FakeKnowledgeStore:
         self.next_entity_id = 2
         self.next_message_id = 1
         self.search_rebuild_calls = []
+        self.parked_dlq_items = {}
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -466,9 +491,56 @@ class FakeKnowledgeStore:
         self.saved_message_logs.append(messages)
         return True
 
+    async def create_editable_user_message(self, message, *, edit_window_seconds):
+        row = {
+            **message,
+            "lifecycle_state": "editable",
+            "ingestion_state": "waiting_for_seal",
+            "episode_eligible": False,
+            "edit_window_seconds": edit_window_seconds,
+        }
+        self.saved_message_logs.append([row])
+
+    async def save_assistant_message_with_source_refs(self, message, candidates):
+        self.saved_message_logs.append([message])
+        return list(candidates)
+
     async def save_candidate_suggestions(self, scope, suggestions):
         self.saved_candidate_suggestions.append((scope, list(suggestions)))
         return len(suggestions)
+
+    async def park_dlq_item(self, *, dlq_id, user_name, project_id, entry):
+        self.parked_dlq_items[(user_name, project_id, dlq_id)] = {
+            **dict(entry),
+            "dlq_id": dlq_id,
+            "user_name": user_name,
+            "project_id": project_id,
+            "status": "parked",
+        }
+
+    async def get_parked_dlq_item(self, *, dlq_id, user_name, project_id):
+        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "parked":
+            return None
+        return dict(entry)
+
+    async def mark_parked_dlq_item_requeued(
+        self, *, dlq_id, user_name, project_id
+    ):
+        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "parked":
+            return False
+        entry["status"] = "requeued"
+        return True
+
+    async def mark_parked_dlq_item_completed_if_requeued(
+        self, *, dlq_id, user_name, project_id
+    ):
+        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "requeued":
+            return False
+        entry["status"] = "completed"
+        return True
 
     async def get_recent_project_messages(
         self, user_name, project_id, limit, before_message_id=None
@@ -584,7 +656,26 @@ class FakePostgresClient:
             "description": None,
             "access_mode": "open",
             "status": status,
-            "topic_config": {},
+            "domain_config": {
+                "version": 1,
+                "topics": {
+                    "Identity": {"description": "", "active": True},
+                    "General": {"description": "", "active": True},
+                },
+                "entity_types": {
+                    "Identity": {
+                        "topic": "Identity",
+                        "description": "",
+                        "labels": ["person"],
+                    },
+                    "Concept": {
+                        "topic": "General",
+                        "description": "",
+                        "labels": ["concept"],
+                    },
+                },
+                "relationships": {},
+            },
             "created_at": self._now(),
             "updated_at": self._now(),
             "archived_at": None,
@@ -599,6 +690,7 @@ class FakePostgresClient:
             1
             for session in self.sessions.values()
             if session.get("project_id") == row.get("project_id")
+            and session.get("status") != "deleted"
         )
         result["allowed_projects"] = sorted(self.project_read_scopes.get(key, set()))
         return result
@@ -617,9 +709,9 @@ class FakePostgresClient:
                 "description": params.get("description"),
                 "access_mode": params.get("access_mode", "open"),
                 "status": params.get("status", "active"),
-                "topic_config": json.loads(params["topic_config"])
-                if isinstance(params.get("topic_config"), str)
-                else params.get("topic_config", {}),
+                "domain_config": json.loads(params["domain_config"])
+                if isinstance(params.get("domain_config"), str)
+                else params.get("domain_config", {}),
                 "created_at": now,
                 "updated_at": now,
                 "archived_at": None,
@@ -677,6 +769,10 @@ class FakePostgresClient:
                     for row in rows
                     if row.get("session_id") == params.get("session_id")
                 ]
+            if "status <> 'deleted'" in normalized:
+                rows = [row for row in rows if row.get("status") != "deleted"]
+            if "status = 'open'" in normalized:
+                rows = [row for row in rows if row.get("status", "open") == "open"]
             return rows[:1] if "limit 1" in normalized else rows
 
         if "from public.messages" in normalized:
@@ -719,6 +815,29 @@ class FakePostgresClient:
 
     def _execute_against_stores(self, query, params):
         normalized = " ".join(query.lower().split())
+        if "insert into public.projects" in normalized:
+            project_id = params.get("project_id")
+            if not project_id:
+                return
+            now = self._now()
+            self.projects[project_id] = {
+                "project_id": project_id,
+                "user_name": params.get("user_name"),
+                "name": params.get("name"),
+                "description": params.get("description"),
+                "access_mode": params.get("access_mode", "open"),
+                "status": params.get("status", "active"),
+                "domain_config": json.loads(params["domain_config"])
+                if isinstance(params.get("domain_config"), str)
+                else params.get("domain_config", {}),
+                "created_at": now,
+                "updated_at": now,
+                "archived_at": None,
+                "deleted_at": None,
+                "last_activity_at": None,
+            }
+            return
+
         if "insert into public.project_read_scopes" in normalized:
             key = (params.get("user_name"), params.get("project_id"))
             self.project_read_scopes[key].add(params.get("readable"))
@@ -764,12 +883,32 @@ class FakePostgresClient:
                 )
             if "last_active_at = now()" in normalized:
                 row["last_active_at"] = self._now()
+            if "status = 'closed'" in normalized:
+                row["status"] = "closed"
+            if "status = 'deleted'" in normalized:
+                row["status"] = "deleted"
+                row["deleted_at"] = row.get("deleted_at") or self._now()
+                row["model"] = None
+                row["agent_id"] = None
+                row["enabled_tools"] = None
+                row["document_focus"] = None
             for field in ("model", "agent_id", "enabled_tools"):
                 if field in params:
                     value = params[field]
                     if field == "enabled_tools" and isinstance(value, str):
                         value = json.loads(value)
                     row[field] = value
+            return
+
+        if "update public.messages" in normalized and "ingestion_state = 'excluded'" in normalized:
+            for row in self.messages:
+                if (
+                    row.get("user_name") == params.get("user_name")
+                    and row.get("session_id") == params.get("session_id")
+                    and row.get("ingestion_state") != "processed"
+                ):
+                    row["ingestion_state"] = "excluded"
+                    row["episode_eligible"] = False
             return
 
         if "delete from public.messages" in normalized:
@@ -808,10 +947,17 @@ class FakePostgresClient:
             row = self.projects.get(params.get("project_id"))
             if not row:
                 return
-            for field in ("name", "description", "status", "topic_config"):
+            for field in (
+                "name",
+                "description",
+                "status",
+                "domain_config",
+            ):
                 if field in params:
                     value = params[field]
-                    if field == "topic_config" and isinstance(value, str):
+                    if field == "domain_config" and isinstance(
+                        value, str
+                    ):
                         value = json.loads(value)
                     row[field] = value
             if "archived_at = now()" in normalized:
@@ -889,6 +1035,14 @@ class _FakePostgresCursor:
         self.client._execute_against_stores(query, params or {})
         return self.client.write_count
 
+    async def fetchone(self):
+        if not self.client.read_results:
+            return None
+        result = self.client.read_results.pop(0)
+        if isinstance(result, list):
+            return result[0] if result else None
+        return result
+
 
 @dataclass
 class FakeResources:
@@ -953,22 +1107,29 @@ class FakeProjectManager:
     def __init__(self, project_state=None):
         self.project_state = project_state
         self.acquire_calls: list[tuple[str, str]] = []
-        self.acquire_topic_configs = []
         self.release_calls: list[str] = []
         self.add_session_calls: list[tuple[str, str]] = []
         self.remove_session_calls: list[tuple[str, str]] = []
 
-    async def acquire_project_for_session(
-        self, project_id, session_id, topics_config=None
-    ):
+    async def acquire_project_for_session(self, project_id, session_id):
         self.acquire_calls.append((project_id, session_id))
-        self.acquire_topic_configs.append(topics_config)
         if self.project_state is not None:
             return self.project_state
         return object()
 
     async def release_project(self, project_id):
         self.release_calls.append(project_id)
+
+    @asynccontextmanager
+    async def project_runtime(self, project_id, session_id):
+        project_state = await self.acquire_project_for_session(
+            project_id,
+            session_id,
+        )
+        try:
+            yield project_state
+        finally:
+            await self.release_project(project_id)
 
     async def add_session(self, project_id, session_id):
         self.add_session_calls.append((project_id, session_id))
@@ -987,7 +1148,12 @@ class FakeConfigValue:
                     "Limits",
                     (),
                     {"conversation_context_turns": conversation_context_turns},
-                )()
+                )(),
+                "ingestion": type(
+                    "Ingestion",
+                    (),
+                    {"message_edit_window_seconds": 600},
+                )(),
             },
         )()
 

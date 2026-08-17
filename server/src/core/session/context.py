@@ -3,41 +3,39 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.contracts import (
-    BatchResult,
-    MessageConnections,
-    MessageUserConnections,
-)
+from common.schema.agent.stream import AgentExecutionEvent
+from common.schema.document import DocumentFocus
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
+from common.schema.source.references import SourceReference, SourceReferenceCandidate
 from common.utils.core_utils import (
     fetch_conversation_turns,
 )
-from common.utils.events import EventEmitter, emit
+from common.utils.events import emit
 from common.utils.tasks import BackgroundTaskGroup
-from common.utils.time_utils import parse_iso_time_or_now
-from core.ingestion.services.batch_consumer import IngestionWorker
-from core.ingestion.services.pipeline_service import IngestionPipeline
-from core.knowledge.db.write_graph_db import (
-    write_batch_callback,
-    write_batch_to_graph,
-)
+from common.utils.time_utils import get_now, parse_iso_time_or_now
+from core.ingestion.batch import IngestionBatch
+from core.ingestion.graph_commit import write_batch_callback
+from core.ingestion.pipeline import IngestionPipeline
+from core.ingestion.worker import IngestionWorker
 from core.knowledge.documents import DocumentService
-from core.project.state import ProjectState
 from infrastructure.redis_client import (
     SESSION_RUNTIME_TTL_SECONDS,
     SHORT_LIVED_DEDUP_TTL_SECONDS,
     RedisKeys,
 )
-from infrastructure.resources import ResourceManager
+from runtime.project_runtime import ProjectRuntime
+from runtime.resources import ResourceManager
 
 SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS
+MAX_LOCAL_DURABLE_MESSAGE_CLAIMS = 1024
 
 
 class Session:
@@ -62,7 +60,7 @@ class Session:
 
         self.session_id: Optional[str] = None
         self.project_id: Optional[str] = None
-        self.project: Optional[ProjectState] = None
+        self.project: Optional[ProjectRuntime] = None
 
         self._max_conversation_history: int = 10000
 
@@ -71,6 +69,16 @@ class Session:
         self.task_group = BackgroundTaskGroup("SessionTasks")
         self.config_unsubscribers: List = []
         self._message_add_lock = asyncio.Lock()
+        # Conversation turns are accepted independently, but only the oldest
+        # accepted turn may advance the session's agent state at a time.
+        self._agent_submission_lock = asyncio.Lock()
+        self._agent_queue_condition = asyncio.Condition()
+        self._agent_run_queue: list[tuple[object, int]] = []
+        self._active_agent_task: Optional[asyncio.Task] = None
+        self._agent_run_state = "idle"
+        self._agent_queue_paused = False
+        self._agent_runs_closed = False
+        self._durable_message_claims: OrderedDict[str, int] = OrderedDict()
 
     @property
     def current_config(self) -> RootConfig:
@@ -104,10 +112,10 @@ class Session:
         topics_config: dict = None,
         session_id: str = None,
         model: str = None,
-        project_state: ProjectState = None,
+        project_state: ProjectRuntime = None,
     ) -> "Session":
         """Assembles and launches a new session context."""
-        from core.session.boot import SessionFactory
+        from runtime.session_factory import SessionFactory
 
         assembler = SessionFactory(user_name, resources)
         ctx = await assembler.bootstrap(project_state, session_id, model)
@@ -121,15 +129,243 @@ class Session:
         async with self._message_add_lock:
             return await self._add_user_message(msg)
 
+    def agent_run_snapshot(self) -> dict[str, object]:
+        """Return the bounded, session-owned state of agent execution."""
+
+        return {
+            "state": self._agent_run_state,
+            "active": self._active_agent_task is not None
+            and not self._active_agent_task.done(),
+            "queued_message_ids": [
+                message_id for _, message_id in self._agent_run_queue
+            ],
+            "queue_paused": self._agent_queue_paused,
+        }
+
+    async def resume_agent_queue(self) -> bool:
+        """Permit the next already-accepted turn after an interrupted run.
+
+        The caller represents the user or a higher-level interaction policy.
+        The session itself never advances queued work automatically after a
+        failed, cancelled, or clarification-only run.
+        """
+
+        async with self._agent_queue_condition:
+            if (
+                self._agent_runs_closed
+                or self._active_agent_task is not None
+                or not self._agent_queue_paused
+                or not self._agent_run_queue
+            ):
+                return False
+            self._agent_queue_paused = False
+            self._agent_run_state = "idle"
+            self._agent_queue_condition.notify_all()
+            return True
+
+    async def cancel_active_agent_run(self) -> bool:
+        """Cancel only this session's active agent execution, if any."""
+
+        async with self._agent_queue_condition:
+            task = self._active_agent_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return False
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return True
+
+    async def run_agent_stream(
+        self,
+        message: Message,
+        *,
+        orchestrator: Any = None,
+        user_timezone: Optional[str] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+        document_focus: Optional[DocumentFocus] = None,
+        pasted_text_spans: Optional[List[Dict]] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
+        """Run the canonical server-owned message-to-answer workflow.
+
+        The user message becomes durable before it can wait behind an active
+        run. Streamed tokens remain transient; a final ``response`` is exposed
+        only after the assistant message and its consulted sources commit.
+        """
+
+        ticket = object()
+        queued = False
+        running = False
+        outcome = "failed"
+        task: Optional[asyncio.Task] = None
+
+        try:
+            # Serialize acceptance enough to preserve FIFO queue order without
+            # blocking an unrelated session or a currently running agent.
+            async with self._agent_submission_lock:
+                if self._agent_runs_closed:
+                    raise RuntimeError("Session is shutting down")
+                if idempotency_key:
+                    message.metadata["idempotency_key"] = idempotency_key
+                accepted = await self.add(message)
+                async with self._agent_queue_condition:
+                    self._agent_run_queue.append((ticket, accepted.id))
+                    queued = True
+                    self._agent_queue_condition.notify_all()
+
+            task = asyncio.current_task()
+            if task is None:
+                raise RuntimeError("Agent stream must run in an asyncio task")
+
+            async with self._agent_queue_condition:
+                while True:
+                    if self._agent_runs_closed:
+                        raise RuntimeError("Session is shutting down")
+                    is_head = (
+                        bool(self._agent_run_queue)
+                        and self._agent_run_queue[0][0] is ticket
+                    )
+                    if (
+                        is_head
+                        and self._active_agent_task is None
+                        and not self._agent_queue_paused
+                    ):
+                        self._active_agent_task = task
+                        self._agent_run_state = "running"
+                        running = True
+                        break
+                    await self._agent_queue_condition.wait()
+
+            history = await self.get_conversation_context(
+                self.current_config.developer_settings.limits.conversation_context_turns,
+                up_to_msg_id=accepted.id - 1,
+            )
+            if orchestrator is None:
+                from core.agent.orchestrator import Orchestrator
+
+                orchestrator = Orchestrator()
+
+            response_seen = False
+            async for event in orchestrator.run_stream(
+                user_query=accepted.content.strip(),
+                user_name=self.user_name,
+                session_id=self.session_id,
+                context=self,
+                user_timezone=user_timezone,
+                model=model or self.model,
+                agent_id=agent_id,
+                enabled_tools=enabled_tools,
+                request_document_focus=document_focus,
+                conversation_history=history,
+                user_message_id=accepted.id,
+                pasted_text_spans=pasted_text_spans,
+            ):
+                if event["event"] == "response":
+                    if response_seen:
+                        raise RuntimeError(
+                            "Agent stream emitted multiple final responses"
+                        )
+                    response_seen = True
+                    response = event["data"]
+                    commit = await self.add_assistant_turn(
+                        content=response["content"],
+                        timestamp=get_now(),
+                        metadata=self._assistant_response_metadata(response),
+                        user_msg_id=accepted.id,
+                        source_candidates=self._response_source_candidates(response),
+                    )
+                    response = dict(response)
+                    response["assistant_message_id"] = commit["message_id"]
+                    response["source_ref_ids"] = commit["source_ref_ids"]
+                    event = {"event": "response", "data": response}
+                    outcome = "completed"
+                elif event["event"] == "clarification":
+                    outcome = "awaiting_input"
+                elif event["event"] == "error":
+                    outcome = "failed"
+                yield event
+
+            if not response_seen and outcome == "failed":
+                logger.error(
+                    "Agent stream ended without a final response for session {}",
+                    self.session_id,
+                )
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except Exception:
+            outcome = "failed"
+            logger.exception(
+                "Canonical agent turn failed for session {}", self.session_id
+            )
+            yield {
+                "event": "error",
+                "data": {
+                    "message": "The response could not be completed or saved. Please try again."
+                },
+            }
+        finally:
+            async with self._agent_queue_condition:
+                if queued:
+                    self._agent_run_queue = [
+                        entry
+                        for entry in self._agent_run_queue
+                        if entry[0] is not ticket
+                    ]
+                if running and self._active_agent_task is task:
+                    self._active_agent_task = None
+                if running:
+                    self._agent_run_state = outcome
+                    if outcome != "completed":
+                        self._agent_queue_paused = True
+                self._agent_queue_condition.notify_all()
+
+    @staticmethod
+    def _assistant_response_metadata(response: Dict[str, Any]) -> dict:
+        """Persist server-owned response metadata, not client presentation state."""
+
+        metadata = {"usage": response["usage"]}
+        if response.get("fallback"):
+            metadata["fallback"] = True
+        return metadata
+
+    @staticmethod
+    def _response_source_candidates(
+        response: Dict[str, Any],
+    ) -> List[SourceReferenceCandidate]:
+        """Recover strict source candidates from the validated agent event."""
+
+        raw_candidates = response.get("sources_consulted", [])
+        if raw_candidates is None:
+            return []
+        if not isinstance(raw_candidates, list):
+            raise ValueError("Agent response sources_consulted must be a list")
+        return [
+            SourceReferenceCandidate.model_validate(candidate)
+            for candidate in raw_candidates
+        ]
+
     async def _add_user_message(self, msg: Message) -> Message:
         """Durably accept and idempotently enqueue one user message."""
 
         msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
-        # Deterministic ID: same content + session + timestamp_ns = same ID
+        idempotency_key = str(msg.metadata.get("idempotency_key", "")).strip()
+        # Prefer the application request key for retries. Keep the existing
+        # content/timestamp fallback for internal callers that do not provide
+        # an application idempotency key.
         timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
         content_hash = hashlib.sha256(
-            f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}".encode()
+            (
+                f"{self.session_id}:request:{idempotency_key}"
+                if idempotency_key
+                else f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}"
+            ).encode()
         ).hexdigest()[:12]
 
         dedup_key = RedisKeys.message_dedup(
@@ -138,44 +374,50 @@ class Session:
             content_hash,
         )
 
-        existing_id = await self.redis_client.get(dedup_key)
-        if existing_id:
-            status, message_id = self._parse_message_dedup(existing_id)
-            msg.id = message_id
-            if status == "accepted":
-                return msg
-        else:
-            new_id = await self.knowledge_store.allocate_message_id()
-            was_set = await self.redis_client.set(
-                dedup_key,
-                f"pending:{new_id}",
-                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
-                nx=True,
-            )
-
-            if was_set:
-                msg.id = new_id
-            else:
-                existing_id = await self.redis_client.get(dedup_key)
-                if not existing_id:
-                    raise RuntimeError("Message dedup claim disappeared during add")
+        durable = False
+        while True:
+            existing_id = await self.redis_client.get(dedup_key)
+            if existing_id:
                 status, message_id = self._parse_message_dedup(existing_id)
                 msg.id = message_id
                 if status == "accepted":
                     return msg
 
-        durable = False
+                resolution = await self._wait_for_pending_message_claim(
+                    dedup_key,
+                    msg,
+                )
+                if resolution == "accepted":
+                    return msg
+                if resolution == "durable":
+                    durable = True
+                    break
+                continue
+
+            new_id = await self.knowledge_store.allocate_message_id()
+            if await self.redis_client.set(
+                dedup_key,
+                f"pending:{new_id}",
+                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
+                nx=True,
+            ):
+                msg.id = new_id
+                break
+
         try:
-            await self._persist_user_turn(msg)
-            durable = True
+            if not durable:
+                await self._persist_user_turn(msg)
+                self._remember_durable_message(dedup_key, msg.id)
+                durable = True
             await self._record_conversation_message(
                 message_id=msg.id,
                 role="user",
                 content=msg.content.strip(),
                 timestamp=msg.timestamp,
                 user_msg_id=msg.id,
+                metadata=msg.metadata,
             )
-            await self._enqueue_user_message(msg)
+            await self._signal_user_message()
             await self.redis_client.set(
                 dedup_key,
                 f"accepted:{msg.id}",
@@ -197,6 +439,85 @@ class Session:
         await self.refresh_session_ttls()
 
         return msg
+
+    async def _wait_for_pending_message_claim(
+        self,
+        dedup_key: str,
+        msg: Message,
+    ) -> str:
+        """Wait for another runtime to finish a shared acceptance claim.
+
+        A pending claim can mean either an active writer or a crashed writer
+        that already committed PostgreSQL.  Let the active writer publish its
+        accepted state first; after a bounded wait, a durable row can safely be
+        completed by this runtime without allocating or inserting a second ID.
+        """
+
+        durable_id: Optional[int] = None
+        for attempt in range(50):
+            local_durable_id = self._durable_message_claims.get(dedup_key)
+            if local_durable_id is not None:
+                msg.id = local_durable_id
+                return "durable"
+
+            current = await self.redis_client.get(dedup_key)
+            if current is None:
+                return "retry"
+
+            status, message_id = self._parse_message_dedup(current)
+            msg.id = message_id
+            if status == "accepted":
+                return "accepted"
+
+            if attempt % 5 == 0:
+                durable_id = await self._find_durable_user_message(msg)
+                if durable_id is not None and attempt >= 20:
+                    msg.id = durable_id
+                    return "durable"
+            await asyncio.sleep(0.01)
+
+        if durable_id is not None:
+            msg.id = durable_id
+            return "durable"
+        raise RuntimeError("Message dedup claim remained pending")
+
+    async def _find_durable_user_message(self, msg: Message) -> Optional[int]:
+        """Find a committed row matching the deterministic acceptance identity."""
+
+        if not self.session_id or not self.project_id:
+            return None
+        row = await self.resources.postgres.fetch_one(
+            """
+            SELECT message_id
+            FROM public.messages
+            WHERE user_name = %s
+              AND session_id = %s
+              AND project_id = %s
+              AND role = 'user'
+              AND content = %s
+              AND timestamp_ms = %s
+            ORDER BY message_id
+            LIMIT 1
+            """,
+            (
+                self.user_name,
+                self.session_id,
+                self.project_id,
+                msg.content.strip(),
+                int(msg.timestamp.timestamp() * 1000),
+            ),
+        )
+        if not row or row.get("message_id") is None:
+            return None
+        return int(row["message_id"])
+
+    def _remember_durable_message(self, dedup_key: str, message_id: int) -> None:
+        """Keep only a bounded local retry hint; PostgreSQL remains canonical."""
+
+        self._durable_message_claims[dedup_key] = message_id
+        self._durable_message_claims.move_to_end(dedup_key)
+        while len(self._durable_message_claims) > MAX_LOCAL_DURABLE_MESSAGE_CLAIMS:
+            self._durable_message_claims.popitem(last=False)
 
     @staticmethod
     def _parse_message_dedup(value: str) -> tuple[str, int]:
@@ -273,24 +594,26 @@ class Session:
         await pipe.execute()
 
     async def _persist_user_turn(self, msg: Message):
-        """Write the canonical user message before acknowledging or enqueueing."""
-        await self.knowledge_store.save_message_logs(
-            [
-                {
-                    "id": msg.id,
-                    "content": msg.content.strip(),
-                    "role": "user",
-                    "user_name": self.user_name,
-                    "session_id": self.session_id,
-                    "project_id": self.project_id,
-                    "timestamp": msg.timestamp.timestamp() * 1000,
-                    "metadata": {},
-                    "user_msg_id": msg.id,
-                }
-            ]
+        """Durably create an editable canonical user message and revision one."""
+        await self.knowledge_store.create_editable_user_message(
+            {
+                "id": msg.id,
+                "content": msg.content.strip(),
+                "role": "user",
+                "user_name": self.user_name,
+                "session_id": self.session_id,
+                "project_id": self.project_id,
+                "timestamp": msg.timestamp.timestamp() * 1000,
+                "metadata": msg.metadata,
+                "user_msg_id": msg.id,
+            },
+            edit_window_seconds=(
+                self.current_config.developer_settings.ingestion.message_edit_window_seconds
+            ),
         )
 
-    async def _enqueue_user_message(self, msg: Message):
+    async def _signal_user_message(self):
+        """Refresh operational counters; Postgres owns the ingestion queue."""
         await self.redis_client.incr(
             RedisKeys.heartbeat_counter(self.user_name, self.session_id)
         )
@@ -300,25 +623,14 @@ class Session:
             RedisKeys.project_heartbeat_counter(self.user_name, self.project_id)
         )
 
-        buffer_key = RedisKeys.buffer(self.user_name, self.session_id)
-        payload = json.dumps(
-            {
-                "id": msg.id,
-                "message": msg.content.strip(),
-                "timestamp": msg.timestamp.isoformat(),
-                "role": "user",
-            }
-        )
-        await self.redis_client.lrem(buffer_key, 0, payload)
-        await self.redis_client.rpush(buffer_key, payload)
-
     async def add_assistant_turn(
         self,
         content: str,
         timestamp: datetime,
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
-    ):
+        source_candidates: Optional[List[SourceReferenceCandidate]] = None,
+    ) -> dict[str, Any]:
         """Add assistant turn to conversation log."""
         if metadata is None:
             metadata = {}
@@ -335,12 +647,13 @@ class Session:
         )
 
         try:
-            await self._persist_assistant_message_log(
+            source_references = await self._persist_assistant_message_log(
                 message_id,
                 content,
                 timestamp,
                 metadata=metadata,
                 user_msg_id=user_msg_id,
+                source_candidates=source_candidates,
             )
         except Exception:
             try:
@@ -352,11 +665,22 @@ class Session:
                 )
             raise
         await self.refresh_session_ttls()
+        return {
+            "message_id": message_id,
+            "source_ref_ids": [
+                reference.source_ref_id
+                for reference in source_references
+                if getattr(reference, "source_ref_id", None)
+            ],
+        }
 
     async def _delete_conversation_message(self, message_id: int) -> None:
         """Remove all staged Postgres and Redis state for one canonical message."""
         # Delete from Postgres
-        query = "DELETE FROM public.messages WHERE user_name = %(user_name)s AND session_id = %(session_id)s AND message_id = %(message_id)s"
+        query = (
+            "DELETE FROM public.messages WHERE user_name = %(user_name)s "
+            "AND session_id = %(session_id)s AND message_id = %(message_id)s"
+        )
         await self.resources.postgres.execute(
             query,
             {
@@ -389,7 +713,8 @@ class Session:
         timestamp: datetime,
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
-    ):
+        source_candidates: Optional[List[SourceReferenceCandidate]] = None,
+    ) -> List[SourceReference]:
         """Write an assistant message log, raising after bounded retries."""
         max_retries = 3
 
@@ -406,11 +731,21 @@ class Session:
                         "timestamp": timestamp.timestamp() * 1000,
                         "metadata": metadata or {},
                         "user_msg_id": user_msg_id,
+                        "lifecycle_state": "sealed",
+                        "sealed_at_ms": int(timestamp.timestamp() * 1000),
+                        "ingestion_state": "excluded",
+                        "episode_eligible": False,
                     }
                 ]
 
-                await self.knowledge_store.save_message_logs(agent_msg_batch)
-                return
+                if source_candidates:
+                    return await self.knowledge_store.save_assistant_message_with_source_refs(
+                        agent_msg_batch[0],
+                        source_candidates,
+                    )
+                else:
+                    await self.knowledge_store.save_message_logs(agent_msg_batch)
+                    return []
 
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -455,40 +790,11 @@ class Session:
 
         return results
 
-    async def _write_to_graph(
-        self,
-        entity_ids: list[int],
-        new_entity_ids: set[int],
-        alias_updated_ids: set[int],
-        relationship_observations: list[MessageConnections],
-        user_relationship_observations: list[MessageUserConnections] = None,
-        alias_updates=None,
-    ):
-        """Delegate to shared graph write logic."""
-        batch = BatchResult(
-            entity_ids=entity_ids,
-            new_entity_ids=new_entity_ids,
-            alias_updated_ids=alias_updated_ids,
-            relationship_observations=relationship_observations,
-            user_relationship_observations=user_relationship_observations or [],
-            alias_updates=alias_updates or {},
-        )
-        batch.set_scope(self.user_name, self.session_id, self.project_id)
-        await write_batch_to_graph(
-            batch,
-            knowledge_store=self.knowledge_store,
-            entities=self.project.entities,
-            session_id=self.session_id,
-            project_id=self.project_id,
-            user_name=self.user_name,
-            redis_client=self.redis_client,
-        )
-
     async def _write_to_graph_callback(
-        self, result: BatchResult
+        self, batch: IngestionBatch
     ) -> tuple[bool, str | None]:
         return await write_batch_callback(
-            result,
+            batch,
             knowledge_store=self.knowledge_store,
             entities=self.project.entities,
             session_id=self.session_id,
@@ -505,6 +811,11 @@ class Session:
         await pipe.execute()
 
     async def shutdown(self):
+        async with self._agent_queue_condition:
+            self._agent_runs_closed = True
+            self._agent_queue_condition.notify_all()
+        await self.cancel_active_agent_run()
+
         for unsubscribe in self.config_unsubscribers:
             unsubscribe()
         self.config_unsubscribers.clear()
@@ -514,4 +825,3 @@ class Session:
 
         await self.task_group.shutdown(timeout=10.0)
         await emit(self.session_id, "system", "session_shutdown", {})
-        await EventEmitter.get().cleanup_scope(self.session_id)

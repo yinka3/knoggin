@@ -23,7 +23,7 @@ from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.services.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:
-    from infrastructure.knowledge_store import KnowledgeStore
+    from core.knowledge.store import KnowledgeStore
 
 
 VECTOR_MERGE_SIM_THRESHOLD = 0.90
@@ -83,7 +83,6 @@ class EntityResolver:
         embedding_service: EmbeddingService,
         project_id: str,
         readable_project_ids: List[str],
-        hierarchy_config: Optional[dict] = None,
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
         generic_token_freq: int = 10,
@@ -92,7 +91,6 @@ class EntityResolver:
     ):
 
         self.knowledge_store = knowledge_store
-        self.hierarchy_config = hierarchy_config or {}
         self.project_id = require_scope_value(
             project_id,
             "project_id",
@@ -319,7 +317,12 @@ class EntityResolver:
         }
 
     async def get_candidate_ids(
-        self, mention: str, precomputed_embedding: List[float] = None
+        self,
+        mention: str,
+        precomputed_embedding: List[float] = None,
+        *,
+        candidate_fuzzy_threshold: int | None = None,
+        candidate_vector_threshold: float | None = None,
     ) -> List[EntityCandidate]:
 
         if not mention:
@@ -327,14 +330,22 @@ class EntityResolver:
 
         candidates: Dict[int, EntityCandidate] = {}
         mention_lower = mention.strip().casefold()
+        fuzzy_threshold = (
+            self.candidate_fuzzy_threshold
+            if candidate_fuzzy_threshold is None
+            else candidate_fuzzy_threshold
+        )
+        vector_threshold = (
+            self.candidate_vector_threshold
+            if candidate_vector_threshold is None
+            else candidate_vector_threshold
+        )
 
         with self._lock:
             exact_ids = self._index.get_entity_ids_for_name(mention_lower)
             exact_is_ambiguous = len(exact_ids) > 1
             for exact_id in exact_ids:
-                candidate = candidates.setdefault(
-                    exact_id, EntityCandidate(exact_id)
-                )
+                candidate = candidates.setdefault(exact_id, EntityCandidate(exact_id))
                 candidate.add_signal("exact", 1.0)
                 if exact_is_ambiguous:
                     candidate.add_signal("ambiguous_alias", 1.0)
@@ -345,7 +356,7 @@ class EntityResolver:
                 mention_lower,
                 choices,
                 limit=50,
-                score_cutoff=self.candidate_fuzzy_threshold,
+                score_cutoff=fuzzy_threshold,
                 scorer=scorer,
             )
 
@@ -382,7 +393,7 @@ class EntityResolver:
                     await self.knowledge_store.search_entities_by_embedding(
                         vector,
                         limit=5,
-                        score_threshold=self.candidate_vector_threshold,
+                        score_threshold=vector_threshold,
                         visible_project_ids=self.readable_project_ids,
                     )
                 )
@@ -771,7 +782,9 @@ class EntityResolver:
         fuzz_score = candidate_meta["fuzz_score"]
         cosine_score = candidate_meta.get("cosine_score")
         reasons = set(candidate_meta.get("reasons") or [])
-        vector_only = "vector_similarity" in reasons and "name_similarity" not in reasons
+        vector_only = (
+            "vector_similarity" in reasons and "name_similarity" not in reasons
+        )
 
         type_compatible = self._merge_type_compatible(type_a, type_b)
         topic_compatible = self._merge_topic_compatible(topic_a, topic_b)
@@ -808,7 +821,10 @@ class EntityResolver:
 
         evidence_a = evidence_by_entity.get(id_a, [])
         evidence_b = evidence_by_entity.get(id_b, [])
-        evidence_support, evidence_support_pairs = await self._classify_evidence_support(
+        (
+            evidence_support,
+            evidence_support_pairs,
+        ) = await self._classify_evidence_support(
             evidence_a,
             evidence_b,
         )

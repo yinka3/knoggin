@@ -1,9 +1,16 @@
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from loguru import logger
 
-from common.schema.contracts import EpisodeEligibility
+from common.schema.ingestion.contracts import (
+    EntityWrite,
+    EpisodeEligibility,
+    ExecutionScope,
+    MessageEntityRef,
+    RelationshipWrite,
+    relationship_identity,
+)
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     IDENTITY_SCOPE,
@@ -26,50 +33,8 @@ class EntityWriter:
         return get_now_ms()
 
     @staticmethod
-    def _require_scope(data: Dict, fields: List[str], label: str) -> None:
-        missing = [field for field in fields if not data.get(field)]
-        if missing:
-            raise ValueError(f"{label} missing required scope fields: {missing}")
-
-    @staticmethod
     def _require_project_id(project_id: str, operation: str) -> str:
         return require_scope_value(project_id, "project_id", operation)
-
-    @staticmethod
-    def _parse_message_id(message_id) -> int:
-        if isinstance(message_id, str):
-            if message_id.startswith("msg_"):
-                return int(message_id.split("_", 1)[1])
-            if message_id.startswith("turn_"):
-                raise ValueError(
-                    "Conversation turn IDs are not canonical message IDs"
-                )
-        return int(message_id)
-
-    @classmethod
-    def _build_evidence_ref(cls, rel: Dict) -> Dict:
-        evidence_ref = rel.get("evidence_ref")
-        if isinstance(evidence_ref, dict):
-            return {
-                "user_name": evidence_ref["user_name"],
-                "session_id": evidence_ref["session_id"],
-                "message_id": cls._parse_message_id(evidence_ref["message_id"]),
-            }
-
-        if not rel.get("user_name") or not rel.get("session_id"):
-            raise ValueError(
-                "Relationship evidence requires user_name and session_id scope"
-            )
-
-        return {
-            "user_name": rel["user_name"],
-            "session_id": rel["session_id"],
-            "message_id": cls._parse_message_id(rel["message_id"]),
-        }
-
-    @staticmethod
-    def _relationship_id(project_id: str, entity_a_id: int, entity_b_id: int) -> str:
-        return f"{project_id}:{entity_a_id}:{entity_b_id}"
 
     @staticmethod
     def _normalized_identity_value(value: object) -> str:
@@ -125,9 +90,7 @@ class EntityWriter:
                 existing["project_id"] != IDENTITY_SCOPE
                 or self._normalized_identity_value(existing["user_name"])
                 != canonical_key
-                or self._normalized_identity_value(
-                    existing["canonical_name"]
-                )
+                or self._normalized_identity_value(existing["canonical_name"])
                 != canonical_key
             ):
                 raise RuntimeError(
@@ -210,47 +173,50 @@ class EntityWriter:
 
     async def write_batch(
         self,
-        entities: List[Dict],
-        relationships: List[Dict],
+        entities: Sequence[EntityWrite],
+        relationships: Sequence[RelationshipWrite],
         *,
-        message_entity_refs: Optional[List[Dict]] = None,
-        eligible_messages: Optional[List[EpisodeEligibility]] = None,
-        message_entity_scope: Optional[Dict] = None,
-    ):
-        # We need a transaction for both Graph and Hybrid tables
+        message_entity_refs: Sequence[MessageEntityRef] = (),
+        eligible_messages: Sequence[EpisodeEligibility] = (),
+        scope: ExecutionScope,
+    ) -> bool:
+        """Persist typed graph commands inside one explicit execution scope."""
+
+        if not isinstance(scope, ExecutionScope):
+            raise TypeError("write_batch requires an ExecutionScope")
+        user_name = require_scope_value(scope.user_name, "user_name", "graph write")
+        session_id = require_scope_value(scope.session_id, "session_id", "graph write")
+        project_id = self._require_project_id(scope.project_id, "graph write")
         now_ms = self._current_time_ms()
-        message_entity_refs = message_entity_refs or []
-        eligible_messages = eligible_messages or []
-        if (message_entity_refs or eligible_messages) and not message_entity_scope:
-            raise ValueError("Message-derived writes require a write scope")
 
         async with self.client.transaction() as cur:
-            # Write Entities to Graph
             if entities:
                 entity_params = []
-                for e in entities:
-                    self._require_scope(
-                        e,
-                        ["user_name", "session_id", "project_id"],
-                        f"Entity {e.get('id')}",
+                for entity in entities:
+                    if not isinstance(entity, EntityWrite):
+                        raise TypeError("entities must be EntityWrite instances")
+                    if entity.entity_id == IDENTITY_ENTITY_ID:
+                        raise ValueError(
+                            "Identity entity writes must use ensure_identity_entity"
+                        )
+
+                    entity_params.append(
+                        {
+                            "id": entity.entity_id,
+                            "user_name": user_name,
+                            "session_id": session_id,
+                            "project_id": project_id,
+                            "canonical_name": entity.canonical_name,
+                            "aliases": list(entity.aliases),
+                            "type": entity.entity_type,
+                            "topic": entity.topic,
+                            "confidence": entity.confidence,
+                            "embedding": entity.embedding,
+                            "now": now_ms,
+                        }
                     )
-                    if "is_new" not in e:
-                        raise ValueError(
-                            f"Entity {e.get('id')} missing is_new write intent"
-                        )
-                    if e.get("id") == IDENTITY_ENTITY_ID:
-                        raise ValueError(
-                            "Identity entity writes must use "
-                            "ensure_identity_entity"
-                        )
 
-                    e_clean = e.copy()
-                    is_new = bool(e_clean.pop("is_new"))
-                    e_clean["aliases"] = e.get("aliases") or []
-                    e_clean["now"] = now_ms
-                    entity_params.append(e_clean)
-
-                    if is_new:
+                    if entity.is_new:
                         await cur.execute(
                             """
                             INSERT INTO entities (
@@ -270,21 +236,36 @@ class EntityWriter:
                                 %s, %s, %s, %s, %s, %s,
                                 %s, %s, %s, %s, %s
                             )
+                            ON CONFLICT (entity_id) DO UPDATE SET
+                                session_id = EXCLUDED.session_id,
+                                canonical_name = EXCLUDED.canonical_name,
+                                type = EXCLUDED.type,
+                                topic = EXCLUDED.topic,
+                                confidence = EXCLUDED.confidence,
+                                last_mentioned_ms = EXCLUDED.last_mentioned_ms,
+                                last_updated_ms = EXCLUDED.last_updated_ms
+                            WHERE entities.project_id = EXCLUDED.project_id
+                            RETURNING entity_id
                             """,
                             (
-                                e_clean["id"],
-                                e_clean["user_name"],
-                                e_clean["project_id"],
-                                e_clean["session_id"],
-                                e_clean["canonical_name"],
-                                e_clean.get("type"),
-                                e_clean.get("topic", "General"),
-                                e_clean.get("confidence", 1.0),
+                                entity.entity_id,
+                                user_name,
+                                project_id,
+                                session_id,
+                                entity.canonical_name,
+                                entity.entity_type,
+                                entity.topic,
+                                entity.confidence,
                                 now_ms,
                                 now_ms,
-                                e_clean.get("last_profiled_msg_id"),
+                                None,
                             ),
                         )
+                        if await cur.fetchone() is None:
+                            raise RuntimeError(
+                                f"Entity {entity.entity_id} already exists "
+                                f"outside project {project_id}"
+                            )
                     else:
                         await cur.execute(
                             """
@@ -308,16 +289,16 @@ class EntityWriter:
                             RETURNING entity_id
                             """,
                             (
-                                e_clean["session_id"],
-                                e_clean["canonical_name"],
-                                e_clean.get("type"),
-                                e_clean.get("topic", "General"),
-                                e_clean.get("confidence", 1.0),
+                                session_id,
+                                entity.canonical_name,
+                                entity.entity_type,
+                                entity.topic,
+                                entity.confidence,
                                 now_ms,
                                 now_ms,
-                                e_clean.get("last_profiled_msg_id"),
-                                e_clean["id"],
-                                e_clean["project_id"],
+                                None,
+                                entity.entity_id,
+                                project_id,
                                 IDENTITY_ENTITY_ID,
                             ),
                         )
@@ -325,11 +306,11 @@ class EntityWriter:
                         persisted = await cur.fetchone()
                         if not persisted:
                             raise RuntimeError(
-                                f"Existing entity {e_clean['id']} was not "
-                                f"found in project {e_clean['project_id']}"
+                                f"Existing entity {entity.entity_id} was not "
+                                f"found in project {project_id}"
                             )
 
-                    for alias in e_clean["aliases"]:
+                    for alias in entity.aliases:
                         if not alias:
                             continue
                         await cur.execute(
@@ -338,12 +319,11 @@ class EntityWriter:
                             VALUES (%s, %s)
                             ON CONFLICT (entity_id, alias) DO NOTHING
                             """,
-                            (e_clean["id"], alias),
+                            (entity.entity_id, alias),
                         )
 
                 await self.projection.project_entities(cur, entity_params)
 
-                # Handle topics in AGE without FOREACH
                 topic_params = [
                     {"id": e["id"], "topic": e["topic"]}
                     for e in entity_params
@@ -351,10 +331,9 @@ class EntityWriter:
                 ]
                 await self.projection.project_entity_topics(cur, topic_params)
 
-                # 2. Write Hybrid Search Data (Vectors)
-                for original, e in zip(entities, entity_params):
-                    if "embedding" in e and e["embedding"]:
-                        if original["is_new"]:
+                for entity in entities:
+                    if entity.embedding:
+                        if entity.is_new:
                             await cur.execute(
                                 """
                                 INSERT INTO entity_search (
@@ -365,13 +344,19 @@ class EntityWriter:
                                     embedding
                                 )
                                 VALUES (%s, %s, %s, %s, %s::vector)
-                                """,
+                                ON CONFLICT (entity_id) DO UPDATE SET
+                                    canonical_name = EXCLUDED.canonical_name,
+                                    user_name = EXCLUDED.user_name,
+                                    project_id = EXCLUDED.project_id,
+                                    embedding = EXCLUDED.embedding
+                                WHERE entity_search.project_id = EXCLUDED.project_id
+                            """,
                                 (
-                                    e["id"],
-                                    e["canonical_name"],
-                                    e["user_name"],
-                                    e["project_id"],
-                                    json.dumps(e["embedding"]),
+                                    entity.entity_id,
+                                    entity.canonical_name,
+                                    user_name,
+                                    project_id,
+                                    json.dumps(entity.embedding),
                                 ),
                             )
                         else:
@@ -390,13 +375,13 @@ class EntityWriter:
                                     user_name = EXCLUDED.user_name,
                                     project_id = EXCLUDED.project_id,
                                     embedding = EXCLUDED.embedding
-                                """,
+                            """,
                                 (
-                                    e["id"],
-                                    e["canonical_name"],
-                                    e["user_name"],
-                                    e["project_id"],
-                                    json.dumps(e["embedding"]),
+                                    entity.entity_id,
+                                    entity.canonical_name,
+                                    user_name,
+                                    project_id,
+                                    json.dumps(entity.embedding),
                                 ),
                             )
 
@@ -404,43 +389,32 @@ class EntityWriter:
                 await self._write_message_entity_refs(
                     cur,
                     message_entity_refs,
-                    message_entity_scope,
+                    scope,
                 )
 
-            if eligible_messages:
-                await self._mark_episode_eligible_messages(
-                    cur,
-                    eligible_messages,
-                    message_entity_scope,
-                )
+            # Graph writes are part of an ingestion claim, not its durable
+            # completion boundary.  MessageLifecycleWriter marks the claimed
+            # user turns episode-ready only after the claim finishes.
 
-            # 3. Write Relationships to Graph
             if relationships:
                 rel_params = []
-                for r in relationships:
-                    label = (
-                        f"Relationship {r.get('entity_a_id')}:"
-                        f"{r.get('entity_b_id')}"
+                for relationship in relationships:
+                    if not isinstance(relationship, RelationshipWrite):
+                        raise TypeError(
+                            "relationships must be RelationshipWrite instances"
+                        )
+                    relationship_id = relationship_identity(
+                        project_id,
+                        relationship.entity_a_id,
+                        relationship.entity_b_id,
+                        relationship.relationship_type,
+                        symmetric=relationship.symmetric,
                     )
-                    self._require_scope(
-                        r,
-                        ["user_name", "session_id", "project_id"],
-                        label,
-                    )
-                    r_clean = r.copy()
-                    # AGE MERGE can be touchy when sorting IDs in Cypher.
-                    a_id, b_id = r["entity_a_id"], r["entity_b_id"]
-                    if a_id > b_id:
-                        a_id, b_id = b_id, a_id
-                    r_clean["entity_a_id"] = a_id
-                    r_clean["entity_b_id"] = b_id
-
-                    evidence_ref = self._build_evidence_ref(r)
-                    relationship_id = self._relationship_id(
-                        r["project_id"],
-                        a_id,
-                        b_id,
-                    )
+                    evidence_ref = {
+                        "user_name": user_name,
+                        "session_id": session_id,
+                        "message_id": relationship.message_id,
+                    }
                     await cur.execute(
                         """
                         INSERT INTO relationships (
@@ -450,13 +424,17 @@ class EntityWriter:
                             entity_a_id,
                             entity_b_id,
                             relationship_type,
+                            canonical_relationship_type,
+                            observed_relationship_label,
+                            domain_status,
+                            "symmetric",
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
                         SELECT
-                            %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
                         WHERE EXISTS (
                             SELECT 1
                             FROM entities
@@ -484,7 +462,30 @@ class EntityWriter:
                                 EXCLUDED.relationship_type,
                                 relationships.relationship_type
                             ),
-                            weight = relationships.weight + 1,
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationships.canonical_relationship_type
+                            ),
+                            observed_relationship_label = COALESCE(
+                                EXCLUDED.observed_relationship_label,
+                                relationships.observed_relationship_label
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            "symmetric" = EXCLUDED."symmetric",
+                            weight = relationships.weight + CASE
+                                WHEN EXISTS (
+                                    SELECT 1
+                                    FROM relationship_evidence_refs
+                                        AS existing_evidence
+                                    WHERE existing_evidence.relationship_id =
+                                        relationships.relationship_id
+                                      AND existing_evidence.project_id = %s
+                                      AND existing_evidence.user_name = %s
+                                      AND existing_evidence.session_id = %s
+                                      AND existing_evidence.message_id = %s
+                                ) THEN 0
+                                ELSE 1
+                            END,
                             confidence = GREATEST(
                                 relationships.confidence,
                                 EXCLUDED.confidence
@@ -498,35 +499,39 @@ class EntityWriter:
                         """,
                         (
                             relationship_id,
-                            r["user_name"],
-                            r["project_id"],
-                            a_id,
-                            b_id,
-                            r.get("relationship"),
-                            r.get("confidence", 1.0),
-                            r.get("context"),
+                            user_name,
+                            project_id,
+                            relationship.entity_a_id,
+                            relationship.entity_b_id,
+                            relationship.relationship_type,
+                            relationship.canonical_type,
+                            relationship.observed_label,
+                            relationship.domain_status,
+                            relationship.symmetric,
+                            relationship.confidence,
+                            relationship.context,
                             now_ms,
-                            a_id,
-                            r["project_id"],
+                            relationship.entity_a_id,
+                            project_id,
                             IDENTITY_ENTITY_ID,
-                            b_id,
-                            r["project_id"],
+                            relationship.entity_b_id,
+                            project_id,
                             IDENTITY_ENTITY_ID,
+                            project_id,
+                            user_name,
+                            session_id,
+                            relationship.message_id,
                         ),
                     )
                     record = await cur.fetchone()
                     if not record:
                         raise ValueError(
                             "Relationship endpoints must exist in the "
-                            f"project scope: {r['project_id']}/"
-                            f"{a_id}/{b_id}"
+                            f"project scope: {project_id}/"
+                            f"{relationship.entity_a_id}/"
+                            f"{relationship.entity_b_id}"
                         )
 
-                    if evidence_ref["user_name"] != r["user_name"]:
-                        raise ValueError(
-                            "Relationship evidence must belong to the "
-                            "relationship user"
-                        )
                     await cur.execute(
                         """
                         SELECT message_id
@@ -538,9 +543,9 @@ class EntityWriter:
                         """,
                         (
                             evidence_ref["message_id"],
-                            evidence_ref["user_name"],
-                            evidence_ref["session_id"],
-                            r["project_id"],
+                            user_name,
+                            session_id,
+                            project_id,
                         ),
                     )
                     if await cur.fetchone() is None:
@@ -568,17 +573,99 @@ class EntityWriter:
                         """,
                         (
                             relationship_id,
-                            r["project_id"],
-                            evidence_ref["user_name"],
-                            evidence_ref["session_id"],
+                            project_id,
+                            user_name,
+                            session_id,
                             evidence_ref["message_id"],
                         ),
                     )
 
-                    r_clean["evidence_ref"] = json.dumps(evidence_ref)
-                    r_clean["confidence"] = r.get("confidence", 1.0)
-                    r_clean["now"] = now_ms
-                    rel_params.append(r_clean)
+                    await cur.execute(
+                        """
+                        INSERT INTO relationship_observations (
+                            relationship_id,
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            source_type,
+                            target_type,
+                            observed_relationship_label,
+                            canonical_relationship_type,
+                            domain_status,
+                            confidence,
+                            context,
+                            observed_at_ms
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            observed_relationship_label
+                        ) DO UPDATE SET
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationship_observations.canonical_relationship_type
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            confidence = GREATEST(
+                                relationship_observations.confidence,
+                                EXCLUDED.confidence
+                            ),
+                            context = COALESCE(
+                                EXCLUDED.context,
+                                relationship_observations.context
+                            ),
+                            observed_at_ms = GREATEST(
+                                relationship_observations.observed_at_ms,
+                                EXCLUDED.observed_at_ms
+                            )
+                        """,
+                        (
+                            relationship_id,
+                            project_id,
+                            user_name,
+                            session_id,
+                            evidence_ref["message_id"],
+                            relationship.source_entity_id,
+                            relationship.target_entity_id,
+                            relationship.source_type,
+                            relationship.target_type,
+                            relationship.observed_label,
+                            relationship.canonical_type,
+                            relationship.domain_status,
+                            relationship.confidence,
+                            relationship.context,
+                            now_ms,
+                        ),
+                    )
+
+                    rel_params.append(
+                        {
+                            "relationship_id": relationship_id,
+                            "project_id": project_id,
+                            "entity_a_id": relationship.entity_a_id,
+                            "entity_b_id": relationship.entity_b_id,
+                            "relationship_type": relationship.relationship_type,
+                            "canonical_relationship_type": relationship.canonical_type,
+                            "observed_relationship_label": relationship.observed_label,
+                            "domain_status": relationship.domain_status,
+                            "symmetric": relationship.symmetric,
+                            "evidence_ref": json.dumps(evidence_ref),
+                            "confidence": relationship.confidence,
+                            "context": relationship.context,
+                            "now": now_ms,
+                        }
+                    )
 
                 await self.projection.project_relationships(cur, rel_params)
 
@@ -587,21 +674,20 @@ class EntityWriter:
     async def _write_message_entity_refs(
         self,
         cur,
-        references: List[Dict],
-        scope: Dict,
+        references: Sequence[MessageEntityRef],
+        scope: ExecutionScope,
     ) -> None:
         user_name = require_scope_value(
-            scope.get("user_name"), "user_name", "message-entity write"
+            scope.user_name, "user_name", "message-entity write"
         )
         session_id = require_scope_value(
-            scope.get("session_id"), "session_id", "message-entity write"
+            scope.session_id, "session_id", "message-entity write"
         )
-        project_id = self._require_project_id(
-            scope.get("project_id"), "message-entity write"
-        )
+        project_id = self._require_project_id(scope.project_id, "message-entity write")
+        if any(not isinstance(reference, MessageEntityRef) for reference in references):
+            raise TypeError("message_entity_refs must be MessageEntityRef instances")
         normalized_references = {
-            (int(reference["message_id"]), int(reference["entity_id"]))
-            for reference in references
+            (reference.message_id, reference.entity_id) for reference in references
         }
         if any(
             message_id <= 0 or entity_id <= 0
@@ -622,9 +708,7 @@ class EntityWriter:
             """,
             (message_ids, user_name, session_id, project_id),
         )
-        scoped_message_ids = {
-            int(row["message_id"]) for row in await cur.fetchall()
-        }
+        scoped_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
         if scoped_message_ids != set(message_ids):
             raise ValueError("Message-entity references include messages outside scope")
 
@@ -637,9 +721,7 @@ class EntityWriter:
             """,
             (entity_ids, project_id, IDENTITY_ENTITY_ID),
         )
-        scoped_entity_ids = {
-            int(row["entity_id"]) for row in await cur.fetchall()
-        }
+        scoped_entity_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
         if scoped_entity_ids != set(entity_ids):
             raise ValueError("Message-entity references include entities outside scope")
 
@@ -656,20 +738,24 @@ class EntityWriter:
     async def _mark_episode_eligible_messages(
         self,
         cur,
-        eligible_messages: List[EpisodeEligibility],
-        scope: Dict,
+        eligible_messages: Sequence[EpisodeEligibility],
+        scope: ExecutionScope,
     ) -> None:
         user_name = require_scope_value(
-            scope.get("user_name"), "user_name", "episode eligibility write"
+            scope.user_name, "user_name", "episode eligibility write"
         )
         session_id = require_scope_value(
-            scope.get("session_id"), "session_id", "episode eligibility write"
+            scope.session_id, "session_id", "episode eligibility write"
         )
         project_id = self._require_project_id(
-            scope.get("project_id"), "episode eligibility write"
+            scope.project_id, "episode eligibility write"
         )
         eligibility_by_message_id: Dict[int, EpisodeEligibility] = {}
         for eligibility in eligible_messages:
+            if not isinstance(eligibility, EpisodeEligibility):
+                raise TypeError(
+                    "eligible_messages must be EpisodeEligibility instances"
+                )
             message_id = int(eligibility.message_id)
             prior = eligibility_by_message_id.get(message_id)
             if (
@@ -683,9 +769,8 @@ class EntityWriter:
                 )
             eligibility_by_message_id[message_id] = EpisodeEligibility(
                 message_id=message_id,
-                episode_type=eligibility.episode_type or (
-                    prior.episode_type if prior else None
-                ),
+                episode_type=eligibility.episode_type
+                or (prior.episode_type if prior else None),
             )
         normalized_message_ids = sorted(eligibility_by_message_id)
         if any(message_id <= 0 for message_id in normalized_message_ids):
@@ -702,9 +787,7 @@ class EntityWriter:
             """,
             (normalized_message_ids, user_name, session_id, project_id),
         )
-        scoped_message_ids = {
-            int(row["message_id"]) for row in await cur.fetchall()
-        }
+        scoped_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
         if scoped_message_ids != set(normalized_message_ids):
             raise ValueError("Episode-eligible messages include messages outside scope")
 

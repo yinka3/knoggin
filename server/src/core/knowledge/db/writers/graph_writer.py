@@ -5,6 +5,10 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.schema.ingestion.contracts import (
+    normalize_relationship_type,
+    relationship_identity,
+)
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from common.utils.time_utils import get_now_ms
 from core.knowledge.db.writers.age_projection_writer import (
@@ -60,9 +64,21 @@ class GraphWriter:
         return merged
 
     @staticmethod
-    def _relationship_id(project_id: str, entity_a_id: int, entity_b_id: int) -> str:
-        a_id, b_id = sorted((entity_a_id, entity_b_id))
-        return f"{project_id}:{a_id}:{b_id}"
+    def _relationship_id(
+        project_id: str,
+        entity_a_id: int,
+        entity_b_id: int,
+        relationship_type: str,
+        *,
+        symmetric: bool = True,
+    ) -> str:
+        return relationship_identity(
+            project_id,
+            entity_a_id,
+            entity_b_id,
+            relationship_type,
+            symmetric=symmetric,
+        )
 
     @staticmethod
     def _clean_string(value):
@@ -105,9 +121,13 @@ class GraphWriter:
             ]
             params.append(
                 {
+                    "relationship_id": row["relationship_id"],
                     "project_id": row["project_id"],
                     "entity_a_id": int(row["entity_a_id"]),
                     "entity_b_id": int(row["entity_b_id"]),
+                    "relationship_type": normalize_relationship_type(
+                        row["relationship_type"]
+                    ),
                     "weight": int(row.get("weight") or 1),
                     "confidence": float(row.get("confidence") or 0),
                     "context": row.get("context"),
@@ -115,6 +135,28 @@ class GraphWriter:
                     "message_ids": evidence_refs,
                 }
             )
+            if any(
+                key in row
+                for key in (
+                    "canonical_relationship_type",
+                    "observed_relationship_label",
+                    "domain_status",
+                    "symmetric",
+                )
+            ):
+                params[-1].update(
+                    {
+                        "canonical_relationship_type": row.get(
+                            "canonical_relationship_type"
+                        ),
+                        "observed_relationship_label": row.get(
+                            "observed_relationship_label"
+                        )
+                        or normalize_relationship_type(row["relationship_type"]),
+                        "domain_status": row.get("domain_status") or "unrecognized",
+                        "symmetric": bool(row.get("symmetric", False)),
+                    }
+                )
         return params
 
     @staticmethod
@@ -129,11 +171,11 @@ class GraphWriter:
             for row in rows
         ]
 
-    async def save_message_logs(self, messages: List[Dict]) -> bool:
+    async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
         if not messages:
             return True
 
-        async with self.client.transaction() as cur:
+        async with self._merge_cursor(cur) as cur:
             batch_params = []
             for msg in messages:
                 missing = [
@@ -161,6 +203,18 @@ class GraphWriter:
                         ),
                         "metadata": json.dumps(msg.get("metadata") or {}),
                         "timestamp": self._normalize_timestamp_ms(msg.get("timestamp")),
+                        "lifecycle_state": msg.get("lifecycle_state", "sealed"),
+                        "editable_until_ms": msg.get("editable_until_ms"),
+                        "sealed_at_ms": msg.get("sealed_at_ms"),
+                        "selected_revision": int(msg.get("selected_revision", 1)),
+                        "replaces_message_id": msg.get("replaces_message_id"),
+                        "superseded_at_ms": msg.get("superseded_at_ms"),
+                        "ingestion_state": msg.get("ingestion_state", "excluded"),
+                        "ingestion_not_before_ms": msg.get("ingestion_not_before_ms"),
+                        "ingestion_claim_id": msg.get("ingestion_claim_id"),
+                        "ingestion_claimed_at_ms": msg.get("ingestion_claimed_at_ms"),
+                        "episode_eligible": bool(msg.get("episode_eligible", False)),
+                        "episode_type": msg.get("episode_type"),
                     }
                 )
 
@@ -177,9 +231,24 @@ class GraphWriter:
                         content,
                         user_msg_id,
                         metadata,
-                        timestamp_ms
+                        timestamp_ms,
+                        lifecycle_state,
+                        editable_until_ms,
+                        sealed_at_ms,
+                        selected_revision,
+                        replaces_message_id,
+                        superseded_at_ms,
+                        ingestion_state,
+                        ingestion_not_before_ms,
+                        ingestion_claim_id,
+                        ingestion_claimed_at_ms,
+                        episode_eligible,
+                        episode_type
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
                     ON CONFLICT (user_name, session_id, message_id)
                     DO UPDATE SET
                         message_id = EXCLUDED.message_id,
@@ -201,6 +270,18 @@ class GraphWriter:
                         msg["user_msg_id"],
                         msg["metadata"],
                         msg["timestamp"],
+                        msg["lifecycle_state"],
+                        msg["editable_until_ms"],
+                        msg["sealed_at_ms"],
+                        msg["selected_revision"],
+                        msg["replaces_message_id"],
+                        msg["superseded_at_ms"],
+                        msg["ingestion_state"],
+                        msg["ingestion_not_before_ms"],
+                        msg["ingestion_claim_id"],
+                        msg["ingestion_claimed_at_ms"],
+                        msg["episode_eligible"],
+                        msg["episode_type"],
                     ),
                 )
                 persisted = await cur.fetchone()
@@ -211,7 +292,29 @@ class GraphWriter:
                         f"{msg['id']}"
                     )
 
-            await self.projection.project_messages(cur, batch_params)
+            # Lifecycle and ingestion fields are relational authority. AGE is
+            # a derived traversal projection and intentionally receives only
+            # the message fields it exposes to graph queries.
+            await self.projection.project_messages(
+                cur,
+                [
+                    {
+                        key: msg[key]
+                        for key in (
+                            "id",
+                            "content",
+                            "role",
+                            "user_name",
+                            "session_id",
+                            "project_id",
+                            "user_msg_id",
+                            "metadata",
+                            "timestamp",
+                        )
+                    }
+                    for msg in batch_params
+                ],
+            )
 
             # Write to Hybrid Full Text Search Table
             for msg in batch_params:
@@ -341,7 +444,12 @@ class GraphWriter:
             return False
 
     async def delete_relationship(
-        self, entity_a_id: int, entity_b_id: int, *, project_id: str
+        self,
+        entity_a_id: int,
+        entity_b_id: int,
+        *,
+        relationship_type: str,
+        project_id: str,
     ) -> bool:
         project_id = self._require_project_id(project_id, "delete_relationship")
         try:
@@ -349,6 +457,7 @@ class GraphWriter:
                 project_id,
                 entity_a_id,
                 entity_b_id,
+                relationship_type,
             )
             async with self.client.transaction() as cur:
                 await cur.execute(
@@ -369,15 +478,15 @@ class GraphWriter:
                 canonical_record = await cur.fetchone()
                 projected_deleted = await self.projection.delete_relationship(
                     cur,
-                    entity_a_id,
-                    entity_b_id,
+                    relationship_id,
                     project_id,
                 )
 
             return bool(canonical_record or projected_deleted)
         except Exception as e:
             logger.error(
-                f"Failed to delete relationship ({entity_a_id}, {entity_b_id}): {e}"
+                "Failed to delete relationship "
+                f"({entity_a_id}, {entity_b_id}, {relationship_type}): {e}"
             )
             return False
 
@@ -670,7 +779,6 @@ class GraphWriter:
                         JOIN episodes episode
                           ON episode.episode_id = em.episode_id
                          AND episode.project_id = em.project_id
-                         AND episode.session_id = em.session_id
                         JOIN messages m
                           ON m.message_id = em.message_id
                          AND m.project_id = em.project_id
@@ -736,6 +844,14 @@ class GraphWriter:
                         )
                         await cur.execute(
                             """
+                            DELETE FROM relationship_observations
+                            WHERE relationship_id = %s
+                              AND project_id = %s
+                            """,
+                            (old_relationship_id, project_id),
+                        )
+                        await cur.execute(
+                            """
                             DELETE FROM relationships
                             WHERE relationship_id = %s
                             """,
@@ -743,11 +859,19 @@ class GraphWriter:
                         )
                         continue
 
-                    new_a, new_b = sorted((primary_id, target_id))
+                    symmetric = bool(rel.get("symmetric", False))
+                    if symmetric:
+                        new_a, new_b = sorted((primary_id, target_id))
+                    elif rel["entity_a_id"] == secondary_id:
+                        new_a, new_b = primary_id, target_id
+                    else:
+                        new_a, new_b = target_id, primary_id
                     new_relationship_id = self._relationship_id(
                         project_id,
                         new_a,
                         new_b,
+                        rel["relationship_type"],
+                        symmetric=symmetric,
                     )
                     await cur.execute(
                         """
@@ -758,12 +882,19 @@ class GraphWriter:
                             entity_a_id,
                             entity_b_id,
                             relationship_type,
+                            canonical_relationship_type,
+                            observed_relationship_label,
+                            domain_status,
+                            "symmetric",
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s
+                        )
                         ON CONFLICT (relationship_id) DO UPDATE SET
                             weight = relationships.weight + EXCLUDED.weight,
                             confidence = GREATEST(
@@ -774,6 +905,16 @@ class GraphWriter:
                                 EXCLUDED.relationship_type,
                                 relationships.relationship_type
                             ),
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationships.canonical_relationship_type
+                            ),
+                            observed_relationship_label = COALESCE(
+                                EXCLUDED.observed_relationship_label,
+                                relationships.observed_relationship_label
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            "symmetric" = EXCLUDED."symmetric",
                             context = COALESCE(
                                 EXCLUDED.context,
                                 relationships.context
@@ -790,6 +931,11 @@ class GraphWriter:
                             new_a,
                             new_b,
                             rel.get("relationship_type"),
+                            rel.get("canonical_relationship_type"),
+                            rel.get("observed_relationship_label")
+                            or rel.get("relationship_type"),
+                            rel.get("domain_status") or "unrecognized",
+                            bool(rel.get("symmetric", False)),
                             rel["weight"],
                             rel["confidence"],
                             rel["context"],
@@ -816,6 +962,114 @@ class GraphWriter:
                         ) DO NOTHING
                         """,
                         (new_relationship_id, project_id, old_relationship_id),
+                    )
+                    await cur.execute(
+                        """
+                        WITH rewritten AS (
+                            SELECT
+                                project_id,
+                                user_name,
+                                session_id,
+                                message_id,
+                                CASE
+                                    WHEN source_entity_id = %s THEN %s
+                                    ELSE source_entity_id
+                                END AS rewritten_source_id,
+                                CASE
+                                    WHEN target_entity_id = %s THEN %s
+                                    ELSE target_entity_id
+                                END AS rewritten_target_id,
+                                source_type,
+                                target_type,
+                                observed_relationship_label,
+                                canonical_relationship_type,
+                                domain_status,
+                                confidence,
+                                context,
+                                observed_at_ms
+                            FROM relationship_observations
+                            WHERE relationship_id = %s
+                              AND project_id = %s
+                        )
+                        INSERT INTO relationship_observations (
+                            relationship_id,
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            source_type,
+                            target_type,
+                            observed_relationship_label,
+                            canonical_relationship_type,
+                            domain_status,
+                            confidence,
+                            context,
+                            observed_at_ms
+                        )
+                        SELECT
+                            %s,
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            CASE WHEN %s
+                                THEN LEAST(rewritten_source_id, rewritten_target_id)
+                                ELSE rewritten_source_id
+                            END,
+                            CASE WHEN %s
+                                THEN GREATEST(rewritten_source_id, rewritten_target_id)
+                                ELSE rewritten_target_id
+                            END,
+                            source_type,
+                            target_type,
+                            observed_relationship_label,
+                            canonical_relationship_type,
+                            domain_status,
+                            confidence,
+                            context,
+                            observed_at_ms
+                        FROM rewritten
+                        ON CONFLICT (
+                            project_id,
+                            user_name,
+                            session_id,
+                            message_id,
+                            source_entity_id,
+                            target_entity_id,
+                            observed_relationship_label
+                        ) DO UPDATE SET
+                            relationship_id = EXCLUDED.relationship_id,
+                            canonical_relationship_type = COALESCE(
+                                EXCLUDED.canonical_relationship_type,
+                                relationship_observations.canonical_relationship_type
+                            ),
+                            domain_status = EXCLUDED.domain_status,
+                            confidence = GREATEST(
+                                relationship_observations.confidence,
+                                EXCLUDED.confidence
+                            ),
+                            context = COALESCE(
+                                EXCLUDED.context,
+                                relationship_observations.context
+                            ),
+                            observed_at_ms = GREATEST(
+                                relationship_observations.observed_at_ms,
+                                EXCLUDED.observed_at_ms
+                            )
+                        """,
+                        (
+                            secondary_id,
+                            primary_id,
+                            secondary_id,
+                            primary_id,
+                            old_relationship_id,
+                            project_id,
+                            new_relationship_id,
+                            bool(rel.get("symmetric", False)),
+                            bool(rel.get("symmetric", False)),
+                        ),
                     )
                     await cur.execute(
                         """
@@ -892,6 +1146,14 @@ class GraphWriter:
                             WHERE relationship_id = %s
                             """,
                             (old_relationship_id,),
+                        )
+                        await cur.execute(
+                            """
+                            DELETE FROM relationship_observations
+                            WHERE relationship_id = %s
+                              AND project_id = %s
+                            """,
+                            (old_relationship_id, project_id),
                         )
                         await cur.execute(
                             """
@@ -979,6 +1241,10 @@ class GraphWriter:
                         rel.entity_a_id,
                         rel.entity_b_id,
                         rel.relationship_type,
+                        rel.canonical_relationship_type,
+                        rel.observed_relationship_label,
+                        rel.domain_status,
+                        rel.symmetric,
                         rel.weight,
                         rel.confidence,
                         rel.context,

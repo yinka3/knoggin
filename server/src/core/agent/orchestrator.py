@@ -6,19 +6,23 @@ from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.agent_stream import PublicAgentStreamEvent
-from common.schema.document import DocumentFocus
+from common.schema.agent.stream import (
+    AgentExecutionEvent,
+    validate_agent_execution_event,
+)
+from common.schema.document import (
+    DocumentFocus,
+    create_document_focus,
+    dump_document_focus,
+    parse_document_focus,
+)
 from common.utils.json_utils import safe_json_loads
 from core.agent.executor import AgentExecutor
 from core.agent.maintenance import build_maintenance_candidates
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
+from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
-from core.agent.types import (
-    AgentContext,
-    AgentRunConfig,
-    AgentState,
-    RetrievedEvidence,
-)
 
 if TYPE_CHECKING:
     from core.session.context import Session
@@ -56,25 +60,25 @@ class Orchestrator:
         hot_topics: Optional[List[str]] = None,
         agent_persona_override: Optional[str] = None,
         agent_name_override: Optional[str] = None,
-        client_tools: Optional[List[Dict]] = None,
-    ) -> AsyncGenerator[PublicAgentStreamEvent, None]:
+        additional_tool_schemas: Optional[List[Dict]] = None,
+        user_message_id: Optional[int] = None,
+        pasted_text_spans: Optional[List[Dict]] = None,
+        request_document_focus: Optional[DocumentFocus] = None,
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """
         Main entry point for agent execution. Uses modular helpers for initialization.
         """
         tools = None
         try:
+            incoming_user_query = user_query
+            run_id = str(uuid.uuid4())
+            if request_document_focus is not None:
+                request_document_focus = parse_document_focus(request_document_focus)
+
             # Configuration
             config = ConfigManager.get().config
             limits = config.developer_settings.limits
-            run_config = AgentRunConfig(
-                max_calls=limits.max_tool_calls,
-                tool_timeout=limits.tool_timeout,
-                max_attempts=limits.max_attempts,
-                max_history_turns=limits.agent_history_turns,
-                max_accumulated_messages=limits.max_accumulated_messages,
-                max_consecutive_errors=limits.max_consecutive_errors,
-                tool_limits=tuple(limits.tool_limits.items()),
-            )
+            run_limits = AgentRunLimits.from_settings(limits)
 
             # Identity & Persona
             identity = await self._resolve_agent_identity(
@@ -83,7 +87,7 @@ class Orchestrator:
                 agent_name_override,
                 agent_persona_override,
             )
-            agent_cfg = identity["config"]
+            agent_cfg = identity.config
             effective_model = model or (agent_cfg.model if agent_cfg else None)
             effective_temperature = (
                 agent_temperature
@@ -96,12 +100,15 @@ class Orchestrator:
             )
 
             # Services (Session-Aware)
-            services = await self._bootstrap_services(
+            tools = await self._bootstrap_services(
                 context,
                 agent_cfg.id if agent_cfg else None,
             )
-            tools = services["tools"]
-            topic_config = services["topic_config"]
+            if request_document_focus is not None:
+                # Request focus is ephemeral.  It overrides a persisted session
+                # focus for this run without writing to session state.
+                tools.document_focus = request_document_focus.model_dump(mode="json")
+            compiled_domain = context.project.compiled_domain
 
             effective_enabled_tools = (
                 enabled_tools
@@ -113,16 +120,15 @@ class Orchestrator:
                 user_name=user_name,
                 project_id=context.project_id,
                 enabled_tools=effective_enabled_tools,
-                topic_settings=config.developer_settings.topic_evaluation,
             )
 
-            # Context & State Assembly
-            requested_hot_topics = (
-                hot_topics if hot_topics is not None else topic_config.hot_topics
-            )
-            effective_hot_topics = topic_config.validate_hot_topics(
-                requested_hot_topics
-            )
+            # One aggregate owns all mutable state for this execution.
+            requested_hot_topics = hot_topics or []
+            effective_hot_topics = []
+            for topic in requested_hot_topics:
+                normalized = compiled_domain.normalize_topic(topic)
+                if normalized and normalized not in effective_hot_topics:
+                    effective_hot_topics.append(normalized)
             hot_topic_context = {}
             if effective_hot_topics:
                 try:
@@ -133,33 +139,39 @@ class Orchestrator:
                 except Exception as exc:
                     logger.warning(f"Failed to preload hot topic context: {exc}")
 
-            ctx = AgentContext(
-                config=run_config,
-                state=AgentState(),
-                evidence=RetrievedEvidence(),
+            run = AgentRun.open(
                 user_name=user_name,
                 session_id=session_id,
                 project_id=context.project_id or "",
                 user_query=user_query,
-                run_id=str(uuid.uuid4()),
+                run_id=run_id,
+                agent=identity,
+                limits=run_limits,
+                model=effective_model,
+                temperature=effective_temperature,
+                enabled_tools=effective_enabled_tools,
                 hot_topics=effective_hot_topics,
-                active_topics=topic_config.active_topics,
+                active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
-                agent_name=identity["name"],
-                agent_persona=identity["persona"],
                 history=conversation_history or [],
                 maintenance_candidates=maintenance_candidates,
-                use_local_references=getattr(
-                    getattr(config.developer_settings, "local_references", None),
-                    "enabled",
-                    True,
+                document_focus=request_document_focus,
+                initial_source_candidates=(
+                    build_pasted_text_candidates(
+                        project_id=context.project_id or "",
+                        session_id=session_id,
+                        source_message_id=user_message_id,
+                        message_content=incoming_user_query,
+                        agent_run_id=run_id,
+                        spans=pasted_text_spans,
+                    )
+                    if user_message_id is not None
+                    else []
                 ),
             )
 
             # Execution via AgentExecutor
-            executor = AgentExecutor(
-                ctx, context.llm, tools
-            )
+            executor = AgentExecutor(run, context.llm, tools)
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
@@ -167,19 +179,20 @@ class Orchestrator:
                 enabled_tools=effective_enabled_tools,
                 simulated_date=simulated_date,
                 agent_temperature=effective_temperature,
-                agent_brain=agent_brain
-                or (agent_cfg.brain if agent_cfg else None),
+                agent_brain=agent_brain or (agent_cfg.brain if agent_cfg else None),
                 agent_directives=agent_directives,
-                client_tools=client_tools,
+                additional_tool_schemas=additional_tool_schemas,
             ):
-                yield event
+                yield validate_agent_execution_event(event)
 
         except Exception as e:
             logger.exception(f"Orchestrator error: {e}")
-            yield {
-                "event": "error",
-                "data": {"message": PUBLIC_AGENT_ERROR_MESSAGE},
-            }
+            yield validate_agent_execution_event(
+                {
+                    "event": "error",
+                    "data": {"message": PUBLIC_AGENT_ERROR_MESSAGE},
+                }
+            )
         finally:
             if tools:
                 try:
@@ -193,7 +206,7 @@ class Orchestrator:
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
-    ) -> Dict:
+    ) -> AgentIdentity:
         """Resolve the durable Postgres agent used for this run."""
         manager = AgentManager(context.resources, context.user_name, {})
         resolved_id = agent_id or await manager.get_default_agent_id()
@@ -201,20 +214,21 @@ class Orchestrator:
         if agent_cfg is None:
             raise ValueError(f"Agent identity not found: {resolved_id}")
 
-        return {
-            "config": agent_cfg,
-            "name": name_override
-            or agent_cfg.name,
-            "persona": persona_override
-            or agent_cfg.persona_markdown
-            or "A helpful and thorough personal intelligence assistant.",
-        }
+        return AgentIdentity(
+            config=agent_cfg,
+            name=name_override or agent_cfg.name,
+            persona=(
+                persona_override
+                or agent_cfg.persona_markdown
+                or "A helpful and thorough personal intelligence assistant."
+            ),
+        )
 
     async def _bootstrap_services(
         self,
         context: Session,
         agent_id: Optional[str] = None,
-    ) -> Dict:
+    ) -> Tools:
         """Retrieve context services and instantiate the agent tool suite."""
         config = ConfigManager.get().config
         search_cfg = {
@@ -228,28 +242,20 @@ class Orchestrator:
             user_name=context.user_name,
             entities=context.project.entities,
             session_id=context.session_id,
-            topic_config=context.project.topic_config,
+            compiled_domain=context.project.compiled_domain,
             search_config=search_cfg,
             document_service=context.document_service,
+            workspace_service=getattr(context.project, "workspace_service", None),
             document_focus=document_focus,
             knowledge_store=context.knowledge_store,
             postgres=context.resources.postgres,
             redis=context.redis_client,
             agent_id=agent_id,
             episode_settings=config.developer_settings.jobs.episode,
-            topic_refresh_callback=(
-                context.project.refresh_topic_mappings
-                if context.project
-                else None
-            ),
+            health_service=getattr(context.resources, "health_service", None),
         )
 
-        return {
-            "topic_config": context.project.topic_config,
-            "entities": context.project.entities,
-            "document_service": context.document_service,
-            "tools": tools,
-        }
+        return tools
 
     async def _load_document_focus(
         self,
@@ -276,7 +282,7 @@ class Orchestrator:
         if focus is None:
             return None
         try:
-            persisted = DocumentFocus.model_validate(focus)
+            persisted = parse_document_focus(focus)
             if context.document_service is None:
                 return None
             target = await context.document_service.resolve_focus_target(
@@ -297,11 +303,13 @@ class Orchestrator:
                     else None
                 ),
             )
-            return DocumentFocus(
-                mode="pinned",
-                created_at=persisted.created_at,
-                **target,
-            ).model_dump(mode="json")
+            return dump_document_focus(
+                create_document_focus(
+                    mode="pinned",
+                    created_at=persisted.created_at,
+                    **target,
+                )
+            )
         except (FileNotFoundError, ValueError) as exc:
             logger.warning(
                 "Ignoring invalid or inaccessible document focus for session "

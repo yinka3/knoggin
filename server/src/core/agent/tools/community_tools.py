@@ -5,8 +5,8 @@ from typing import Dict, List, Mapping
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.aac_schema import AAC_DEFAULT_ENABLED_TOOLS
-from common.schema.agent_contracts import PersonaProfile
+from common.schema.agent.community_tools import AAC_DEFAULT_ENABLED_TOOLS
+from common.schema.agent.identity import PersonaProfile
 from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     normalize_agent_brain,
@@ -38,9 +38,10 @@ class CommunityTools(Tools):
             user_name=user_name,
             entities=base_tools.entities,
             session_id=base_tools.session_id,
-            topic_config=base_tools.topic_config,
+            compiled_domain=getattr(base_tools, "compiled_domain", None),
             search_config=base_tools.search_cfg,
             document_service=getattr(base_tools, "document_service", None),
+            workspace_service=getattr(base_tools, "workspace_service", None),
             document_focus=getattr(base_tools, "document_focus", None),
             knowledge_store=base_tools.knowledge_store,
             postgres=base_tools.postgres,

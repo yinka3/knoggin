@@ -8,7 +8,7 @@ from common.utils.events import emit
 if TYPE_CHECKING:
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.services.embedding_service import EmbeddingService
-    from infrastructure.knowledge_store import KnowledgeStore
+    from core.knowledge.store import KnowledgeStore
 
 class GraphTools:
     # Attributes provided by the composed Tools class
@@ -31,7 +31,9 @@ class GraphTools:
             entity_name: The entity to find connections for.
 
         Returns:
-            Connections with target entity, strength, and hydrated evidence.
+            Observed relationships with evidence counts, observation dates,
+            and hydrated source messages. These records are not a current-state
+            claim about the relationship.
         """
         canonical = await self._resolve_entity_name(entity_name)
         if not canonical:
@@ -124,8 +126,8 @@ class GraphTools:
         entity_id = await self.entities.get_id(entity_name) if entity_name else None
 
         if entity_id is not None:
-            episodes = await self.knowledge_store.get_episodes_for_entity(
-                entity_id,
+            episodes = await self.knowledge_store.get_project_episodes_for_entities(
+                [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
                 session_id=self.session_id,
@@ -177,11 +179,10 @@ class GraphTools:
                 for eid in candidate_ids:
                     profile = await self.entities.get_profile(eid)
                     canonical = profile.canonical_name if profile else str(eid)
-                    episodes = await self.knowledge_store.get_episodes_for_entity(
-                        eid,
+                    episodes = await self.knowledge_store.get_project_episodes_for_entities(
+                        [eid],
                         user_name=self.user_name,
                         project_id=self.project_id,
-                        session_id=self.session_id,
                         limit=self._episode_retrieval_limit(),
                     )
 
@@ -210,11 +211,10 @@ class GraphTools:
         embedding_service = getattr(self, "embedding_service", None)
         if embedding_service is not None:
             query_embedding = await embedding_service.encode_single(query)
-            semantic_matches = await self.knowledge_store.search_episodes_by_embedding(
+            semantic_matches = await self.knowledge_store.search_project_episodes_by_embedding(
                 query_embedding,
                 user_name=self.user_name,
                 project_id=self.project_id,
-                session_id=self.session_id,
                 limit=self._episode_retrieval_limit(),
             )
             if semantic_matches:
@@ -246,11 +246,10 @@ class GraphTools:
                     ],
                 }
 
-        episodes = await self.knowledge_store.search_episodes(
+        episodes = await self.knowledge_store.search_project_episodes(
             query,
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
             limit=self._episode_retrieval_limit(),
         )
         if episodes:
@@ -289,20 +288,18 @@ class GraphTools:
     async def read_episode(self, episode_id: str) -> List[Dict]:
         """Expand one retrieved episode into all of its source messages."""
 
-        episode = await self.knowledge_store.get_episode(
+        episode = await self.knowledge_store.get_project_episode(
             episode_id,
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
         )
         if episode is None:
             return []
         expansion_started_at = perf_counter()
-        sources = await self.knowledge_store.get_episode_source_messages(
+        sources = await self.knowledge_store.get_project_episode_source_messages(
             episode.episode_id,
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
         )
         await emit(
             self.session_id,
@@ -328,10 +325,9 @@ class GraphTools:
             raise ValueError("read_recent_episodes limit must be positive")
         effective_limit = min(limit, self._episode_retrieval_limit())
         retrieval_started_at = perf_counter()
-        episodes = await self.knowledge_store.get_recent_episodes(
+        episodes = await self.knowledge_store.get_recent_project_episodes(
             user_name=self.user_name,
             project_id=self.project_id,
-            session_id=self.session_id,
             limit=effective_limit,
         )
         retrieval_metrics: Dict[str, int | float] = {}
@@ -371,11 +367,10 @@ class GraphTools:
         returned_evidence_count = 0
         for episode in episodes or []:
             expansion_started_at = perf_counter()
-            sources = await self.knowledge_store.get_episode_source_messages(
+            sources = await self.knowledge_store.get_project_episode_source_messages(
                 episode.episode_id,
                 user_name=self.user_name,
                 project_id=self.project_id,
-                session_id=self.session_id,
             )
             expansion_latency_ms += (perf_counter() - expansion_started_at) * 1000
             expanded_source_message_count += len(sources)
@@ -385,6 +380,20 @@ class GraphTools:
                 reverse=True,
             )
             returned_evidence_count += len(evidence)
+            source_reference_reader = getattr(
+                self.knowledge_store,
+                "get_project_episode_source_refs",
+                None,
+            )
+            sources_consulted = (
+                await source_reference_reader(
+                    episode.episode_id,
+                    user_name=self.user_name,
+                    project_id=self.project_id,
+                )
+                if callable(source_reference_reader)
+                else []
+            )
             serialized_episode = {
                 "episode_id": episode.episode_id,
                 "summary": episode.summary,
@@ -439,6 +448,12 @@ class GraphTools:
                     for version in episode.version_history
                 ],
                 "evidence": evidence,
+                "sources_consulted": [
+                    source.model_dump(mode="json")
+                    if hasattr(source, "model_dump")
+                    else source
+                    for source in sources_consulted
+                ],
             }
             if similarity_by_episode and episode.episode_id in similarity_by_episode:
                 serialized_episode["similarity"] = similarity_by_episode[
@@ -695,7 +710,7 @@ class GraphTools:
     ) -> Dict[str, Dict]:
         """
         Retrieve pre-cached context for frequently accessed topics.
-        Called automatically at start — you already have this data in hot_topic_context.
+        Called automatically at start; this data is already in hot_topic_context.
         Only call manually if hot topics changed mid-conversation.
 
         Args:

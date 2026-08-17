@@ -4,12 +4,37 @@ from typing import List, Mapping, Optional, Union
 
 from loguru import logger
 
-from common.schema.agent_contracts import AgentConfig, PersonaProfile
+from common.schema.agent.identity import AgentConfig, PersonaProfile
 from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     normalize_agent_brain,
     should_snapshot_brain_revision,
 )
+from core.agent.tools.registry import get_registered_tool_names
+
+
+def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
+    """Translate the agents-table row once at the repository boundary."""
+
+    return AgentConfig(
+        id=str(row["agent_id"]),
+        name=str(row["name"]),
+        persona=row["persona"] or "",
+        brain=normalize_agent_brain(
+            row["brain"] or "",
+            row["persona"] or "",
+        ),
+        model=row["model"],
+        # Existing rows predate the application default and may store NULL.
+        # Normalize that legacy absence before applying the strict contract.
+        temperature=row["temperature"] if row["temperature"] is not None else 0.7,
+        enabled_tools=row["enabled_tools"],
+        is_default=bool(row["is_default"]),
+        is_spawned=bool(row["is_spawned"]),
+        spawned_by=row["spawned_by"],
+        brain_revision=int(row.get("brain_revision", 1)),
+        created_at=row["created_at"],
+    )
 
 
 class AgentManager:
@@ -18,6 +43,14 @@ class AgentManager:
         self.user_name = user_name
         self.active_sessions = active_sessions
         self.pg = resources.postgres
+
+    @staticmethod
+    def _validate_enabled_tools(enabled_tools: Optional[List[str]]) -> None:
+        if enabled_tools is None:
+            return
+        unknown = sorted(set(enabled_tools) - get_registered_tool_names())
+        if unknown:
+            raise ValueError("Unknown agent tools: " + ", ".join(unknown))
 
     async def list_agents(self) -> List[AgentConfig]:
         """List all agents for the user."""
@@ -34,27 +67,7 @@ class AgentManager:
             await self._seed_default_agents()
             rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
 
-        agents = []
-        for row in rows:
-            tools = row["enabled_tools"]
-            agents.append(AgentConfig(
-                id=row["agent_id"],
-                name=row["name"],
-                persona=row["persona"],
-                brain=normalize_agent_brain(
-                    row["brain"] or "",
-                    row["persona"] or "",
-                ),
-                model=row["model"],
-                temperature=row["temperature"],
-                enabled_tools=tools,
-                is_default=row["is_default"],
-                is_spawned=row["is_spawned"],
-                spawned_by=row["spawned_by"],
-                brain_revision=row.get("brain_revision", 1),
-                created_at=row["created_at"]
-            ))
-        return agents
+        return [agent_from_row(row) for row in rows]
 
     async def get_agent(self, agent_id: str) -> Optional[AgentConfig]:
         """Get agent by ID."""
@@ -72,25 +85,7 @@ class AgentManager:
         if not rows:
             return None
 
-        row = rows[0]
-        tools = row["enabled_tools"]
-        return AgentConfig(
-            id=row["agent_id"],
-            name=row["name"],
-            persona=row["persona"],
-            brain=normalize_agent_brain(
-                row["brain"] or "",
-                row["persona"] or "",
-            ),
-            model=row["model"],
-            temperature=row["temperature"],
-            enabled_tools=tools,
-            is_default=row["is_default"],
-            is_spawned=row["is_spawned"],
-            spawned_by=row["spawned_by"],
-            brain_revision=row.get("brain_revision", 1),
-            created_at=row["created_at"]
-        )
+        return agent_from_row(rows[0])
 
     async def get_agent_by_name(self, name: str) -> Optional[AgentConfig]:
         """Get agent by name (case-insensitive)."""
@@ -109,25 +104,7 @@ class AgentManager:
         if not rows:
             return None
 
-        row = rows[0]
-        tools = row["enabled_tools"]
-        return AgentConfig(
-            id=row["agent_id"],
-            name=row["name"],
-            persona=row["persona"],
-            brain=normalize_agent_brain(
-                row["brain"] or "",
-                row["persona"] or "",
-            ),
-            model=row["model"],
-            temperature=row["temperature"],
-            enabled_tools=tools,
-            is_default=row["is_default"],
-            is_spawned=row["is_spawned"],
-            spawned_by=row["spawned_by"],
-            brain_revision=row.get("brain_revision", 1),
-            created_at=row["created_at"]
-        )
+        return agent_from_row(rows[0])
 
     async def get_default_agent_id(self) -> str:
         """Get default agent ID. Seeds defaults if none exist."""
@@ -155,9 +132,23 @@ class AgentManager:
         """Create a new agent."""
         agent_id = str(uuid.uuid4())
         persona_profile = PersonaProfile.from_value(persona)
+        candidate = AgentConfig(
+            id=agent_id,
+            name=name,
+            persona=persona_profile,
+            brain=brain,
+            model=model,
+            temperature=0.7 if temperature is None else temperature,
+            enabled_tools=enabled_tools,
+        )
+        self._validate_enabled_tools(candidate.enabled_tools)
         persona_markdown = persona_profile.to_markdown()
         brain = normalize_agent_brain(brain or "", persona_markdown)
-        tools_json = json.dumps(enabled_tools) if enabled_tools else None
+        tools_json = (
+            json.dumps(candidate.enabled_tools)
+            if candidate.enabled_tools is not None
+            else None
+        )
 
         query = '''
             WITH inserted AS (
@@ -187,11 +178,11 @@ class AgentManager:
         await self.pg.execute(query, {
             "agent_id": agent_id,
             "user_name": self.user_name,
-            "name": name,
+            "name": candidate.name,
             "persona": persona_markdown,
             "brain": brain,
             "model": model,
-            "temperature": temperature,
+            "temperature": candidate.temperature,
             "enabled_tools": tools_json
         })
 
@@ -212,12 +203,32 @@ class AgentManager:
         if not config:
             return None
 
+        candidate = AgentConfig(
+            id=config.id,
+            name=name if name is not None else config.name,
+            persona=config.persona,
+            brain=brain if brain is not None else config.brain,
+            model=model if model is not None else config.model,
+            temperature=(
+                temperature if temperature is not None else config.temperature
+            ),
+            enabled_tools=(
+                enabled_tools if enabled_tools is not None else config.enabled_tools
+            ),
+            is_default=config.is_default,
+            is_spawned=config.is_spawned,
+            spawned_by=config.spawned_by,
+            brain_revision=config.brain_revision,
+            created_at=config.created_at,
+        )
+        self._validate_enabled_tools(candidate.enabled_tools)
+
         updates = []
         params = {"user_name": self.user_name, "agent_id": agent_id}
 
         if name is not None:
             updates.append("name = %(name)s")
-            params["name"] = name
+            params["name"] = candidate.name
         if brain is not None:
             new_revision = int(config.brain_revision or 1) + 1
             brain = normalize_agent_brain(
@@ -232,10 +243,10 @@ class AgentManager:
             params["model"] = model
         if temperature is not None:
             updates.append("temperature = %(temperature)s")
-            params["temperature"] = temperature
+            params["temperature"] = candidate.temperature
         if enabled_tools is not None:
             updates.append("enabled_tools = %(enabled_tools)s")
-            params["enabled_tools"] = json.dumps(enabled_tools)
+            params["enabled_tools"] = json.dumps(candidate.enabled_tools)
 
         if not updates:
             return config
@@ -376,7 +387,8 @@ class AgentManager:
         temperature = default_config.temperature if default_config else 0.7
         tools_json = (
             json.dumps(default_config.enabled_tools)
-            if default_config and default_config.enabled_tools
+            if default_config is not None
+            and default_config.enabled_tools is not None
             else None
         )
 

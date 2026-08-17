@@ -52,9 +52,11 @@ class GraphBuilder:
             ]
             params.append(
                 {
+                    "relationship_id": row["relationship_id"],
                     "project_id": row["project_id"],
                     "entity_a_id": int(row["entity_a_id"]),
                     "entity_b_id": int(row["entity_b_id"]),
+                    "relationship_type": row["relationship_type"],
                     "weight": int(row.get("weight") or 1),
                     "confidence": float(row.get("confidence") or 0),
                     "context": row.get("context"),
@@ -62,6 +64,28 @@ class GraphBuilder:
                     "message_ids": evidence_refs,
                 }
             )
+            if any(
+                key in row
+                for key in (
+                    "canonical_relationship_type",
+                    "observed_relationship_label",
+                    "domain_status",
+                    "symmetric",
+                )
+            ):
+                params[-1].update(
+                    {
+                        "canonical_relationship_type": row.get(
+                            "canonical_relationship_type"
+                        ),
+                        "observed_relationship_label": row.get(
+                            "observed_relationship_label"
+                        )
+                        or row["relationship_type"],
+                        "domain_status": row.get("domain_status") or "unrecognized",
+                        "symmetric": bool(row.get("symmetric", False)),
+                    }
+                )
         return params
 
     @staticmethod
@@ -242,6 +266,10 @@ class GraphBuilder:
                 rel.entity_a_id,
                 rel.entity_b_id,
                 rel.relationship_type,
+                rel.canonical_relationship_type,
+                rel.observed_relationship_label,
+                rel.domain_status,
+                rel.symmetric,
                 rel.weight,
                 rel.confidence,
                 rel.context,

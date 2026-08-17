@@ -176,14 +176,12 @@ class RedisKeys:
             "dlq_parked",
             "dlq_completed",
             "community_discussion_active",
-            "community_pubsub_channel",
             "dirty_entities",
         }
     )
     LEGACY_NON_AUTHORITATIVE = frozenset(
         {
             "projects",
-            "project_topic_config",
             "sessions",
             "project_sessions",
             "agents",
@@ -321,6 +319,10 @@ class RedisKeys:
         return f"checkpoint_count:{user}:{session}"
 
     @staticmethod
+    def checkpoint_commit(user: str, session: str, batch_id: str) -> str:
+        return f"checkpoint_commit:{user}:{session}:{batch_id}"
+
+    @staticmethod
     def message_content(user: str, session: str) -> str:
         return f"message_content:{user}:{session}"
 
@@ -357,10 +359,6 @@ class RedisKeys:
     @staticmethod
     def projects(user: str) -> str:
         return f"projects:{user}"
-
-    @staticmethod
-    def project_topic_config(user: str) -> str:
-        return f"project_topic_config:{user}"
 
     @staticmethod
     def sessions(user: str) -> str:
@@ -401,7 +399,3 @@ class RedisKeys:
     @staticmethod
     def community_agent_memory(user_name: str, agent_id: str) -> str:
         return f"community:{user_name}:agent_memory:{agent_id}"
-
-    @staticmethod
-    def community_pubsub_channel() -> str:
-        return "community:events"

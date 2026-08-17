@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from loguru import logger
 
 from common.exceptions import ToolExecutionError
-from common.schema.tool_schema import (
+from common.schema.agent.tool_contracts import (
     READ_CAPABILITY,
     TOOL_SCHEMAS,
     TOOL_SCHEMAS_BY_NAME,
@@ -27,8 +27,8 @@ from core.agent.formatters import (
     format_path_results,
     format_retrieved_messages,
 )
+from core.agent.run import AgentRun
 from core.agent.tools.registry import TOOL_DISPATCH, Tools
-from core.agent.types import AgentContext, RetrievedEvidence
 
 _TOOL_PARAM_TYPES: Dict[str, Dict[str, str]] = {}
 for _schema in TOOL_SCHEMAS:
@@ -124,7 +124,7 @@ def _iter_uuid_reference_values(value, field_prefixes: Dict[str, str]):
 
 
 def _register_result_uuid_references(
-    ctx: AgentContext,
+    ctx: AgentRun,
     tool_name: str,
     data,
 ) -> Dict[str, Dict[str, str]]:
@@ -139,7 +139,7 @@ def _register_result_uuid_references(
         prefix: register_short_uuid_references(
             identifiers,
             prefix,
-            ctx.state.short_uuid_references,
+            ctx.short_uuid_references,
         )
         for prefix, identifiers in identifiers_by_prefix.items()
     }
@@ -192,8 +192,28 @@ def _localize_tool_data(
     return localized
 
 
+def model_safe_tool_result(result: Dict) -> Dict:
+    """Remove executor-only source payloads before a result enters prompt state."""
+    model_result = deepcopy(result)
+    if isinstance(model_result, dict) and "data" in model_result:
+        model_result["data"] = _remove_source_context(model_result["data"])
+    return model_result
+
+
+def _remove_source_context(value):
+    if isinstance(value, list):
+        return [_remove_source_context(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _remove_source_context(item)
+        for key, item in value.items()
+        if key != "source_context"
+    }
+
+
 def localize_agent_tool_result(
-    ctx: AgentContext,
+    ctx: AgentRun,
     tool_name: str,
     result: Dict,
 ) -> Dict:
@@ -203,7 +223,7 @@ def localize_agent_tool_result(
     The returned copy is what enters the agent's evidence and the next LLM turn.
     """
 
-    localized_result = deepcopy(result)
+    localized_result = model_safe_tool_result(result)
     if not isinstance(localized_result, dict) or "data" not in localized_result:
         return localized_result
 
@@ -295,12 +315,12 @@ def _coerce_arg(value, expected_type: str):
 
 
 def build_user_message(
-    ctx: AgentContext, last_result: Optional[Union[Dict, List[Dict]]] = None
+    ctx: AgentRun, last_result: Optional[Union[Dict, List[Dict]]] = None
 ) -> str:
     msg = ""
 
     if ctx.history:
-        recent = ctx.history[-ctx.config.max_history_turns :]
+        recent = ctx.history[-ctx.limits.max_history_turns :]
         msg += "**Recent conversation:**\n"
         for turn in recent:
             role = "USER" if turn["role"] == "user" else "AGENT"
@@ -319,10 +339,10 @@ def build_user_message(
         msg += f"**Participants:** {', '.join(ctx.current_participants)}\n\n"
 
     msg += f"**Query:** {ctx.user_query}\n"
-    msg += f"**Calls remaining:** {ctx.config.max_calls - ctx.state.call_count}\n"
+    msg += f"**Calls remaining:** {ctx.limits.max_calls - ctx.call_count}\n"
 
-    if ctx.state.last_error:
-        msg += f"\n**Last action rejected:** {ctx.state.last_error}\n"
+    if ctx.last_error:
+        msg += f"\n**Last action rejected:** {ctx.last_error}\n"
 
     # Latest tool results — full detail
     if last_result:
@@ -384,15 +404,15 @@ def build_user_message(
             f"{format_hot_topic_context(ctx.hot_topic_context)}\n"
         )
 
-    if ctx.evidence.has_any():
+    if ctx.has_any():
         msg += "\n**Accumulated context:**\n"
-        msg += _format_evidence(ctx.evidence, last_result)
+        msg += _format_evidence(ctx, last_result)
 
     return msg
 
 
 def _format_evidence(
-    evidence: RetrievedEvidence, last_result: Optional[Union[Dict, List[Dict]]] = None
+    evidence: AgentRun, last_result: Optional[Union[Dict, List[Dict]]] = None
 ) -> str:
     """
     Format evidence with full detail for new results,
@@ -429,8 +449,8 @@ def _format_evidence(
                 # Episode checks are structured context rather than list evidence.
                 pass
 
-    if evidence.summary:
-        msg += f"**Core Evidence Summary:**\n{evidence.summary}\n\n"
+    if evidence.evidence_summary:
+        msg += f"**Core Evidence Summary:**\n{evidence.evidence_summary}\n\n"
 
     if evidence.profiles:
         new_profiles = [p for p in evidence.profiles if p.get("id") in new_profile_ids]
@@ -496,7 +516,7 @@ def _format_evidence(
     return msg
 
 
-def build_evidence_context(evidence: RetrievedEvidence) -> str:
+def build_evidence_context(evidence: AgentRun) -> str:
     """Serialize all evidence to a string for token counting."""
     return _format_evidence(evidence, last_result=None)
 
@@ -607,7 +627,7 @@ def _normalize_document_chunks(data: List[Dict]) -> List[Dict]:
     ]
 
 
-def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
+def update_accumulators(ctx: AgentRun, tool_name: str, result: Dict):
     """
     Merge newly retrieved tool results into accumulated evidence context.
     Prevents duplicate entries and applies ranking or limits where required.
@@ -718,7 +738,7 @@ def update_accumulators(ctx: AgentContext, tool_name: str, result: Dict):
 
     strategy = strategies.get(tool_name)
     if strategy:
-        strategy(ctx.evidence, data, ctx.config)
+        strategy(ctx, data, ctx.limits)
 
 
 def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
@@ -771,6 +791,20 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
     if tool_name in ("list_documents", "list_folder_uploads", "list_folder_tree"):
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} items", count
+
+    if tool_name == "list_workspace_files":
+        count = len(data) if isinstance(data, list) else 0
+        return f"Found {count} managed workspace files", count
+
+    if tool_name == "read_workspace_file":
+        return "Read managed workspace file", 1
+
+    if tool_name in (
+        "create_workspace_file",
+        "update_workspace_file",
+        "append_workspace_file",
+    ):
+        return "Managed workspace file updated", 1
 
     if tool_name == "get_folder_upload_summary":
         if isinstance(data, dict):

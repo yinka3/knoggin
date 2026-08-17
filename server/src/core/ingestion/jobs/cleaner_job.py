@@ -7,8 +7,8 @@ from common.schema.settings import CleanerSettings
 from common.utils.events import emit
 from common.utils.time_utils import get_now_ms
 from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
-from infrastructure.knowledge_store import KnowledgeStore
 from infrastructure.redis_client import RedisKeys
 
 

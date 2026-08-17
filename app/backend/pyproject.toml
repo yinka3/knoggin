@@ -1,0 +1,26 @@
+[project]
+name = "knoggin-app-backend"
+version = "0.1.0"
+description = "UI-specific FastAPI backend for the Knoggin web application"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.128.0",
+    "knoggin-sdk",
+    "loguru>=0.7.3",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["knoggin_app_api*"]
+
+[tool.uv.sources]
+knoggin-sdk = { workspace = true }
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "../../sdk/src", "../../server/src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

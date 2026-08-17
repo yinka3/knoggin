@@ -3,124 +3,24 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 import httpx
 
-from common.conf.topics_config import TopicConfig
-from common.schema.aac_schema import AAC_SPECIFIC_SCHEMAS
-from common.schema.settings import EpisodeSettings
-from common.schema.tool_schema import (
+from common.conf.domain_config import CompiledDomain
+from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
+from common.schema.agent.tool_contracts import (
     CAPABILITY_CLASSES,
     DESTRUCTIVE_WRITE_CAPABILITY,
     SAFE_DEFAULT_CAPABILITIES,
     TOOL_SCHEMAS,
     get_schema_capability,
 )
+from common.schema.settings import EpisodeSettings
 from core.agent.tools.graph import GraphTools
+from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools
-from core.agent.tools.topic_tools import TopicTools
+from core.agent.tools.workspace import WorkspaceTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
-
-TOOL_DISPATCH = {
-    "search_messages": ("search_messages", ["query", "limit"]),
-    "search_entity": ("search_entity", ["query", "limit"]),
-    "get_connections": ("get_connections", ["entity_name"]),
-    "get_recent_activity": ("get_recent_activity", ["entity_name", "hours"]),
-    "episode_check": ("episode_check", ["query", "entity_name"]),
-    "read_episode": ("read_episode", ["episode_id"]),
-    "read_recent_episodes": ("read_recent_episodes", ["limit"]),
-    "find_path": ("find_path", ["entity_a", "entity_b"]),
-    "get_hierarchy": ("get_hierarchy", ["entity_name", "direction"]),
-    "read_brain": ("read_brain", []),
-    "list_brain_snapshots": ("list_brain_snapshots", []),
-    "read_brain_snapshot": ("read_brain_snapshot", ["revision"]),
-    "edit_brain": (
-        "edit_brain",
-        ["section", "content", "expected_revision", "change_note"],
-    ),
-    "restore_brain_section": (
-        "restore_brain_section",
-        [
-            "section",
-            "from_snapshot_revision",
-            "expected_current_revision",
-            "change_note",
-        ],
-    ),
-    "list_documents": (
-        "list_documents",
-        [
-            "folder_root_id",
-            "path_prefix",
-            "visibility_scope",
-            "limit",
-            "use_focus",
-        ],
-    ),
-    "list_folder_uploads": (
-        "list_folder_uploads",
-        ["visibility_scope", "limit"],
-    ),
-    "get_folder_upload_summary": (
-        "get_folder_upload_summary",
-        ["folder_root_id", "use_focus"],
-    ),
-    "list_folder_tree": (
-        "list_folder_tree",
-        ["folder_root_id", "path_prefix", "max_depth", "use_focus"],
-    ),
-    "get_document_info": (
-        "get_document_info",
-        ["document_id", "relative_path", "use_focus"],
-    ),
-    "read_document": (
-        "read_document",
-        [
-            "document_id",
-            "relative_path",
-            "start_line",
-            "end_line",
-            "use_focus",
-        ],
-    ),
-    "search_documents": (
-        "search_documents",
-        [
-            "query",
-            "document_name",
-            "relative_path",
-            "path_prefix",
-            "folder_root_id",
-            "limit",
-            "use_focus",
-        ],
-    ),
-    "web_search": ("web_search", ["query", "limit", "freshness"]),
-    "news_search": ("news_search", ["query", "limit", "freshness"]),
-    "request_clarification": None,  # handled specially
-    "request_replanning": None,  # handled specially
-    "save_insight": ("save_insight", ["content"]),
-    "spawn_specialist": (
-        "spawn_specialist",
-        ["name", "persona", "initial_directives"],
-    ),
-    "update_topics": (
-        "update_topics",
-        ["add_topics", "deactivate_topics", "reasoning"],
-    ),
-    "check_graph_health": ("check_graph_health", []),
-    "propose_entity_merge": (
-        "propose_entity_merge",
-        [
-            "primary_id",
-            "duplicate_id",
-            "evidence_message_ids",
-            "evidence_episode_ids",
-            "reasoning",
-            "confidence",
-        ],
-    ),
-}
 
 SPECIAL_TOOL_NAMES = frozenset(
     {"request_clarification", "request_replanning", "submit_answer"}
@@ -130,61 +30,14 @@ CORE_TOOL_LAYERS = frozenset({"core_memory", "core_brain"})
 FEATURE_TOOL_LAYERS = frozenset(
     {
         "feature_external",
-        "feature_project_admin",
+        "feature_project_workspace",
         "feature_maintenance",
         "feature_community",
     }
 )
-RUNTIME_TOOL_LAYERS = frozenset({"runtime_special"})
+RUNTIME_TOOL_LAYERS = frozenset({"runtime_special", "runtime_health"})
 VALID_TOOL_LAYERS = CORE_TOOL_LAYERS | FEATURE_TOOL_LAYERS | RUNTIME_TOOL_LAYERS
 
-TOOL_LAYERS = {
-    "core_memory": frozenset(
-        {
-            "search_messages",
-            "search_entity",
-            "get_connections",
-            "get_recent_activity",
-            "episode_check",
-            "read_episode",
-            "read_recent_episodes",
-            "find_path",
-            "get_hierarchy",
-            "list_documents",
-            "list_folder_uploads",
-            "get_folder_upload_summary",
-            "list_folder_tree",
-            "get_document_info",
-            "read_document",
-            "search_documents",
-        }
-    ),
-    "core_brain": frozenset(
-        {
-            "read_brain",
-            "list_brain_snapshots",
-            "read_brain_snapshot",
-            "edit_brain",
-            "restore_brain_section",
-        }
-    ),
-    "feature_external": frozenset({"web_search", "news_search"}),
-    "feature_project_admin": frozenset({"update_topics"}),
-    "feature_maintenance": frozenset(
-        {
-            "check_graph_health",
-            "propose_entity_merge",
-        }
-    ),
-    "feature_community": frozenset({"save_insight", "spawn_specialist"}),
-    "runtime_special": SPECIAL_TOOL_NAMES,
-}
-
-TOOL_LAYER_BY_NAME = {
-    tool_name: layer
-    for layer, tool_names in TOOL_LAYERS.items()
-    for tool_name in tool_names
-}
 BASE_TOOL_SCHEMA_BY_NAME = {
     schema["function"]["name"]: schema for schema in TOOL_SCHEMAS
 }
@@ -199,25 +52,34 @@ class ToolModule:
     name: str
     layer: str
     tools: frozenset[str]
-    schema_names: frozenset[str]
     default_limits: tuple[tuple[str, int], ...] = ()
     after_tool_result: Optional[ToolResultHook] = None
     after_tool_error: Optional[ToolErrorHook] = None
     runtime_instructions: Optional[RuntimeInstructionHook] = None
 
+    @property
+    def schema_names(self) -> frozenset[str]:
+        """Every owned tool has exactly one schema in this catalog."""
 
-async def _project_admin_after_tool_result(
-    ctx,
-    tools,
-    tool_name: str,
-    result: Dict,
-) -> None:
-    del tools
-    if tool_name != "update_topics":
-        return
-    data = result.get("data")
-    if isinstance(data, dict) and data.get("success"):
-        ctx.active_topics = list(data.get("active_topics", ctx.active_topics))
+        return self.tools
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    """Canonical runtime description of one callable agent tool.
+
+    The public maps below are derived indexes retained for callers that need a
+    lookup by name, layer, or module. New runtime behavior should be added to
+    this definition rather than consulting parallel maps.
+    """
+
+    name: str
+    schema: dict
+    dispatch: tuple[str, tuple[str, ...]] | None
+    layer: str
+    module: ToolModule
+    capability: str
+    default_limit: Optional[int] = None
 
 
 async def _maintenance_after_tool_result(
@@ -233,11 +95,6 @@ async def _maintenance_after_tool_result(
     data = result.get("data")
     if isinstance(data, dict) and data.get("error"):
         await _record_maintenance_failure(ctx, tools, candidate)
-        return
-
-    if tool_name == "update_topics" and isinstance(data, dict):
-        if data.get("success"):
-            await _mark_maintenance_handled(ctx, tools, candidate)
         return
 
     if tool_name == "check_graph_health" and isinstance(data, dict):
@@ -279,6 +136,29 @@ def _maintenance_runtime_instructions(ctx, active_tool_names: frozenset[str]) ->
     return "\n".join(lines)
 
 
+def _health_runtime_instructions(ctx, active_tool_names: frozenset[str]) -> str:
+    del ctx
+    health_tools = sorted(
+        active_tool_names
+        & {
+            "get_engine_health",
+            "get_resource_health",
+            "get_ingestion_health",
+            "get_background_health",
+        }
+    )
+    if not health_tools:
+        return ""
+    return (
+        "[SYSTEM NOTICE: Runtime health tools are read-only diagnostics. "
+        "Use them only when the user asks about Knoggin health, availability, "
+        "capacity, or delays; do not use them for ordinary project questions. "
+        "Each health tool is intentionally limited to one call per run. "
+        "Health results may describe runtime state but do not authorize any "
+        "administrative or mutating action.]"
+    )
+
+
 def _maintenance_candidate_for_tool(ctx, tool_name: str):
     from core.agent.maintenance import find_candidate_for_tool
 
@@ -291,13 +171,13 @@ async def _mark_maintenance_handled(ctx, tools, candidate) -> None:
     from core.agent.maintenance import mark_maintenance_handled
 
     redis = getattr(tools, "redis", None)
-    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
+    project_id = ctx.scope.project_id or str(getattr(tools, "project_id", ""))
     if redis is not None and project_id:
         try:
             await mark_maintenance_handled(
                 redis,
                 candidate,
-                user_name=ctx.user_name,
+                user_name=ctx.scope.user_name,
                 project_id=project_id,
             )
         except Exception as exc:
@@ -314,13 +194,13 @@ async def _record_maintenance_failure(ctx, tools, candidate) -> None:
     from core.agent.maintenance import record_maintenance_failure
 
     redis = getattr(tools, "redis", None)
-    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
+    project_id = ctx.scope.project_id or str(getattr(tools, "project_id", ""))
     if redis is not None and project_id:
         try:
             await record_maintenance_failure(
                 redis,
                 candidate,
-                user_name=ctx.user_name,
+                user_name=ctx.scope.user_name,
                 project_id=project_id,
             )
         except Exception as exc:
@@ -341,8 +221,26 @@ TOOL_MODULES = {
     "core_memory": ToolModule(
         name="core_memory",
         layer="core_memory",
-        tools=TOOL_LAYERS["core_memory"],
-        schema_names=TOOL_LAYERS["core_memory"],
+        tools=frozenset(
+            {
+                "search_messages",
+                "search_entity",
+                "get_connections",
+                "get_recent_activity",
+                "episode_check",
+                "read_episode",
+                "read_recent_episodes",
+                "find_path",
+                "get_hierarchy",
+                "list_documents",
+                "list_folder_uploads",
+                "get_folder_upload_summary",
+                "list_folder_tree",
+                "get_document_info",
+                "read_document",
+                "search_documents",
+            }
+        ),
         default_limits=(
             ("search_messages", 6),
             ("get_connections", 8),
@@ -365,23 +263,41 @@ TOOL_MODULES = {
     "feature_external": ToolModule(
         name="feature_external",
         layer="feature_external",
-        tools=TOOL_LAYERS["feature_external"],
-        schema_names=TOOL_LAYERS["feature_external"],
+        tools=frozenset({"web_search", "news_search"}),
         default_limits=(("web_search", 8), ("news_search", 8)),
     ),
-    "feature_project_admin": ToolModule(
-        name="feature_project_admin",
-        layer="feature_project_admin",
-        tools=TOOL_LAYERS["feature_project_admin"],
-        schema_names=TOOL_LAYERS["feature_project_admin"],
-        default_limits=(("update_topics", 1),),
-        after_tool_result=_project_admin_after_tool_result,
+    "feature_project_workspace": ToolModule(
+        name="feature_project_workspace",
+        layer="feature_project_workspace",
+        tools=frozenset(
+            {
+                "list_workspace_files",
+                "read_workspace_file",
+                "create_workspace_file",
+                "update_workspace_file",
+                "append_workspace_file",
+            }
+        ),
+        default_limits=(
+            ("list_workspace_files", 4),
+            ("read_workspace_file", 4),
+            ("create_workspace_file", 2),
+            ("update_workspace_file", 2),
+            ("append_workspace_file", 2),
+        ),
     ),
     "core_brain": ToolModule(
         name="core_brain",
         layer="core_brain",
-        tools=TOOL_LAYERS["core_brain"],
-        schema_names=TOOL_LAYERS["core_brain"],
+        tools=frozenset(
+            {
+                "read_brain",
+                "list_brain_snapshots",
+                "read_brain_snapshot",
+                "edit_brain",
+                "restore_brain_section",
+            }
+        ),
         default_limits=(
             ("read_brain", 4),
             ("list_brain_snapshots", 4),
@@ -393,15 +309,19 @@ TOOL_MODULES = {
     "feature_community": ToolModule(
         name="feature_community",
         layer="feature_community",
-        tools=TOOL_LAYERS["feature_community"],
-        schema_names=TOOL_LAYERS["feature_community"],
+        tools=frozenset({"save_insight", "spawn_specialist"}),
         default_limits=(("save_insight", 4), ("spawn_specialist", 2)),
     ),
     "feature_maintenance": ToolModule(
         name="feature_maintenance",
         layer="feature_maintenance",
-        tools=TOOL_LAYERS["feature_maintenance"],
-        schema_names=TOOL_LAYERS["feature_maintenance"],
+        tools=frozenset(
+            {
+                "check_graph_health",
+                "propose_entity_merge",
+                "report_relationship_conflict",
+            }
+        ),
         after_tool_result=_maintenance_after_tool_result,
         after_tool_error=_maintenance_after_tool_error,
         runtime_instructions=_maintenance_runtime_instructions,
@@ -409,27 +329,97 @@ TOOL_MODULES = {
     "runtime_special": ToolModule(
         name="runtime_special",
         layer="runtime_special",
-        tools=TOOL_LAYERS["runtime_special"],
-        schema_names=TOOL_LAYERS["runtime_special"],
+        tools=SPECIAL_TOOL_NAMES,
         default_limits=(("request_replanning", 2),),
+    ),
+    "runtime_health": ToolModule(
+        name="runtime_health",
+        layer="runtime_health",
+        tools=frozenset(
+            {
+                "get_engine_health",
+                "get_resource_health",
+                "get_ingestion_health",
+                "get_background_health",
+            }
+        ),
+        default_limits=(
+            ("get_engine_health", 1),
+            ("get_resource_health", 1),
+            ("get_ingestion_health", 1),
+            ("get_background_health", 1),
+        ),
+        runtime_instructions=_health_runtime_instructions,
     ),
 }
 
-TOOL_MODULE_BY_NAME = {
+_SCHEMA_BY_NAME = {
+    schema["function"]["name"]: schema
+    for schema in [*TOOL_SCHEMAS, *AAC_SPECIFIC_SCHEMAS]
+}
+
+
+def _dispatch_from_schema(
+    name: str,
+    schema: dict,
+) -> tuple[str, tuple[str, ...]] | None:
+    """Derive direct method dispatch from the public tool schema.
+
+    Runtime-special tools are interpreted by the executor rather than a Tools
+    method. Every other callable tool deliberately uses the schema name as its
+    method name, so parameter keys cannot drift from the schema contract.
+    """
+
+    if name in SPECIAL_TOOL_NAMES:
+        return None
+    parameters = schema["function"].get("parameters", {}).get("properties", {})
+    return name, tuple(parameters)
+
+
+_DECLARED_MODULE_BY_TOOL = {
     tool_name: module
     for module in TOOL_MODULES.values()
     for tool_name in module.tools
 }
-
-DEFAULT_TOOL_LIMITS = {
-    tool_name: limit
-    for module in TOOL_MODULES.values()
-    for tool_name, limit in module.default_limits
+TOOL_DEFINITIONS = {
+    name: ToolDefinition(
+        name=name,
+        schema=schema,
+        dispatch=_dispatch_from_schema(name, schema),
+        layer=_DECLARED_MODULE_BY_TOOL[name].layer,
+        module=_DECLARED_MODULE_BY_TOOL[name],
+        capability=get_schema_capability(schema),
+        default_limit=dict(_DECLARED_MODULE_BY_TOOL[name].default_limits).get(name),
+    )
+    for name, schema in _SCHEMA_BY_NAME.items()
+    if name in _DECLARED_MODULE_BY_TOOL
 }
-TOOL_SCHEMA_MODULE_BY_NAME = {
-    schema_name: module
-    for module in TOOL_MODULES.values()
-    for schema_name in module.schema_names
+
+# Derived compatibility indexes. ToolDefinition is the runtime authority.
+TOOL_DISPATCH = {
+    name: definition.dispatch
+    for name, definition in TOOL_DEFINITIONS.items()
+    if definition.dispatch is not None
+}
+TOOL_LAYERS = {
+    layer: frozenset(
+        definition.name
+        for definition in TOOL_DEFINITIONS.values()
+        if definition.layer == layer
+    )
+    for layer in VALID_TOOL_LAYERS
+}
+TOOL_LAYER_BY_NAME = {
+    definition.name: definition.layer for definition in TOOL_DEFINITIONS.values()
+}
+TOOL_MODULE_BY_NAME = {
+    definition.name: definition.module for definition in TOOL_DEFINITIONS.values()
+}
+TOOL_SCHEMA_MODULE_BY_NAME = dict(TOOL_MODULE_BY_NAME)
+DEFAULT_TOOL_LIMITS = {
+    definition.name: definition.default_limit
+    for definition in TOOL_DEFINITIONS.values()
+    if definition.default_limit is not None
 }
 
 
@@ -451,6 +441,12 @@ def is_feature_tool(tool_name: str) -> bool:
 
 def get_default_tool_limits() -> Dict[str, int]:
     return dict(DEFAULT_TOOL_LIMITS)
+
+
+def get_registered_tool_names() -> frozenset[str]:
+    """Return every callable tool name owned by the runtime registry."""
+
+    return frozenset(TOOL_DEFINITIONS)
 
 
 def get_tool_module(tool_name: str) -> Optional[ToolModule]:
@@ -617,6 +613,23 @@ def validate_registry_contract() -> None:
             f"Duplicate tool schemas: {sorted(duplicate_names)}"
         )
 
+    definition_names = set(TOOL_DEFINITIONS)
+    missing_definitions = schema_names - definition_names
+    extra_definitions = definition_names - schema_names
+    if missing_definitions or extra_definitions:
+        raise RuntimeError(
+            "Tool definition contract mismatch: "
+            f"missing={sorted(missing_definitions)}, "
+            f"extra={sorted(extra_definitions)}"
+        )
+    for name, definition in TOOL_DEFINITIONS.items():
+        if definition.name != name:
+            raise RuntimeError(f"Tool definition key/name mismatch: {name}")
+        if definition.schema["function"]["name"] != name:
+            raise RuntimeError(f"Tool definition '{name}' schema mismatch")
+        if definition.capability != get_schema_capability(definition.schema):
+            raise RuntimeError(f"Tool definition '{name}' capability mismatch")
+
     dispatch_names = set(TOOL_DISPATCH)
     missing_dispatch = schema_names - SPECIAL_TOOL_NAMES - dispatch_names
     missing_schema = dispatch_names - schema_names
@@ -779,13 +792,20 @@ def validate_registry_contract() -> None:
             )
 
 
-class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
+class Tools(
+    SearchTools,
+    GraphTools,
+    MemoryTools,
+    MaintenanceTools,
+    HealthTools,
+    WorkspaceTools,
+):
     def __init__(
         self,
         user_name: str,
         entities: EntityResolver,
         session_id: str,
-        topic_config: Optional[TopicConfig] = None,
+        compiled_domain: Optional[CompiledDomain] = None,
         search_config: Optional[dict] = None,
         document_service: Optional[DocumentService] = None,
         document_focus: Optional[dict] = None,
@@ -793,8 +813,9 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         postgres=None,
         redis=None,
         agent_id: Optional[str] = None,
-        topic_refresh_callback=None,
         episode_settings: Optional[EpisodeSettings] = None,
+        health_service=None,
+        workspace_service=None,
     ):
         if knowledge_store is None or postgres is None or redis is None:
             raise ValueError(
@@ -810,17 +831,20 @@ class Tools(SearchTools, GraphTools, MemoryTools, TopicTools, MaintenanceTools):
         self.embedding_service = entities.embedding_service
         self.project_id = entities.project_id
         self.readable_project_ids = entities.readable_project_ids
-        self.topic_config = topic_config
+        self.compiled_domain = compiled_domain
         self.document_service = document_service
+        self.workspace_service = workspace_service
         self.document_focus = document_focus
-        self.active_topics = topic_config.active_topics if topic_config else None
+        self.active_topics = (
+            list(compiled_domain.active_topics) if compiled_domain else None
+        )
         self.search_cfg = search_config or {}
         episode_settings = episode_settings or EpisodeSettings()
         self.episode_retrieval_limit = episode_settings.retrieval_episode_limit
         self.agent_id = agent_id or "AGENT_IDENTITY"
-        self.topic_refresh_callback = topic_refresh_callback
         self.tool_authorization: Optional[ToolPermissions] = None
         self.active_tool_schemas: Dict[str, dict] = {}
+        self.health_service = health_service
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
 

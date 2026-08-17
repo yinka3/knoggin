@@ -439,7 +439,7 @@ class GraphReader:
         WHERE (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
           AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
           AND r.project_id IN $visible_project_ids
-        RETURN neighbor.id, neighbor.canonical_name
+        RETURN DISTINCT neighbor.id, neighbor.canonical_name
         ORDER BY neighbor.last_mentioned DESC
         LIMIT $limit
         """
@@ -850,7 +850,7 @@ class GraphReader:
           AND (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
           AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
           AND r.project_id IN $visible_project_ids
-        RETURN e.id as entity_id, collect(neighbor.id) as neighbor_ids
+        RETURN e.id as entity_id, collect(DISTINCT neighbor.id) as neighbor_ids
         """
         query = self.client.build_cypher(
             cypher, "entity_id agtype, neighbor_ids agtype"

@@ -22,6 +22,7 @@ from core.knowledge.documents.constants import (
     GENERATED_CONTENT_MARKERS,
     GENERATED_FILE_PATTERNS,
     IMAGE_EXTENSIONS,
+    MAX_RELATIVE_PATH_BYTES,
     SENSITIVE_FILE_PATTERNS,
     VIDEO_EXTENSIONS,
     document_extension,
@@ -50,6 +51,11 @@ def normalize_relative_path(
     normalized = posix_path.as_posix()
     if normalized in {"", "."}:
         raise ValueError("relative_path must identify a document")
+    if len(normalized.encode("utf-8")) > MAX_RELATIVE_PATH_BYTES:
+        raise ValueError(
+            "relative_path exceeds the "
+            f"{MAX_RELATIVE_PATH_BYTES}-byte limit"
+        )
     return normalized
 
 

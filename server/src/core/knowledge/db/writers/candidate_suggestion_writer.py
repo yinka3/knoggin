@@ -1,7 +1,7 @@
 import hashlib
 import json
 
-from common.schema.contracts import CandidateSuggestion, EngineScope
+from common.schema.ingestion.contracts import CandidateSuggestion, ExecutionScope
 from common.scoping import require_scope_value
 
 
@@ -13,7 +13,7 @@ class CandidateSuggestionWriter:
 
     async def save_candidate_suggestions(
         self,
-        scope: EngineScope,
+        scope: ExecutionScope,
         suggestions: list[CandidateSuggestion],
     ) -> int:
         if not suggestions:

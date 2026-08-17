@@ -185,6 +185,41 @@ class AgeProjectionWriter:
             (json.dumps({"batch": list(canonical_topics.values())}),),
         )
 
+    async def project_entity_domain(self, cur, entities: List[Dict]) -> None:
+        """Update type and timestamp properties for explicit reclassification."""
+
+        if not entities:
+            return
+
+        batch = []
+        for entity in entities:
+            entity_id = int(entity["id"])
+            project_id = str(entity["project_id"])
+            entity_type = str(entity["type"]).strip()
+            if not entity_type or not project_id:
+                raise ValueError("Reclassified entity projection fields are required")
+            batch.append(
+                {
+                    "id": entity_id,
+                    "project_id": project_id,
+                    "type": entity_type,
+                    "last_updated": int(entity["last_updated"]),
+                }
+            )
+
+        cypher = """
+        UNWIND $batch AS data
+        MATCH (e:Entity {id: data.id})
+        WHERE e.project_id = data.project_id
+        SET e.type = data.type,
+            e.last_updated = data.last_updated
+        RETURN count(e)
+        """
+        await cur.execute(
+            self._build_cypher(cypher),
+            (json.dumps({"batch": batch}),),
+        )
+
     async def project_relationships(self, cur, relationships: List[Dict]) -> None:
         if not relationships:
             return
@@ -195,9 +230,18 @@ class AgeProjectionWriter:
         MATCH (b:Entity {id: rel.entity_b_id})
         WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
           AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
-        MERGE (a)-[r:RELATED_TO]->(b)
+        MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
-            r.weight = coalesce(r.weight, 0) + 1,
+            r.relationship_type = rel.relationship_type,
+            r.canonical_relationship_type = rel.canonical_relationship_type,
+            r.observed_relationship_label = rel.observed_relationship_label,
+            r.domain_status = rel.domain_status,
+            r.symmetric = rel.symmetric,
+            r.weight = CASE
+                WHEN rel.evidence_ref IN coalesce(r.message_ids, [])
+                    THEN coalesce(r.weight, 0)
+                ELSE coalesce(r.weight, 0) + 1
+            END,
             r.confidence = CASE
                 WHEN r.confidence IS NULL THEN rel.confidence
                 WHEN rel.confidence > r.confidence THEN rel.confidence
@@ -272,8 +316,13 @@ class AgeProjectionWriter:
         MATCH (b:Entity {id: rel.entity_b_id})
         WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
           AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
-        MERGE (a)-[r:RELATED_TO]->(b)
+        MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
+            r.relationship_type = rel.relationship_type,
+            r.canonical_relationship_type = rel.canonical_relationship_type,
+            r.observed_relationship_label = rel.observed_relationship_label,
+            r.domain_status = rel.domain_status,
+            r.symmetric = rel.symmetric,
             r.weight = rel.weight,
             r.confidence = rel.confidence,
             r.last_seen = rel.last_seen,
@@ -451,15 +500,12 @@ class AgeProjectionWriter:
     async def delete_relationship(
         self,
         cur,
-        entity_a_id: int,
-        entity_b_id: int,
+        relationship_id: str,
         project_id: str,
     ) -> bool:
         cypher = """
-        MATCH (a:Entity {id: $a_id})-[r:RELATED_TO]-(b:Entity {id: $b_id})
-        WHERE (a.project_id = $project_id OR a.id = $identity_entity_id)
-          AND (b.project_id = $project_id OR b.id = $identity_entity_id)
-          AND r.project_id = $project_id
+        MATCH ()-[r:RELATED_TO {relationship_id: $relationship_id}]-()
+        WHERE r.project_id = $project_id
         DELETE r
         RETURN count(r) AS deleted
         """
@@ -468,10 +514,8 @@ class AgeProjectionWriter:
             (
                 json.dumps(
                     {
-                        "a_id": entity_a_id,
-                        "b_id": entity_b_id,
+                        "relationship_id": relationship_id,
                         "project_id": project_id,
-                        "identity_entity_id": IDENTITY_ENTITY_ID,
                     }
                 ),
             ),

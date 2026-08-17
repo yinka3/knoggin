@@ -5,7 +5,6 @@ description = "A transparent, self-hosted knowledge graph for personal AI memory
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi[standard]>=0.128.0",
     "httpx>=0.28.1",
     "loguru>=0.7.3",
     "numpy>=2.3.5",
@@ -32,7 +31,7 @@ dependencies = [
     "huggingface-hub[cli]>=0.36.0",
     "psycopg[binary]>=3.2.3",
     "psycopg-pool>=3.2.4",
-    "docx2txt>=0.9",
+    "python-docx>=1.2.0",
     "llama-index-core>=0.12.0",
     "pillow>=11.0.0",
     "pypdf>=6.6.2",
@@ -49,7 +48,7 @@ dependencies = [
     "tree-sitter-c>=0.24.2",
     "tree-sitter-cpp>=0.23.4",
     "tree-sitter-c-sharp>=0.23.5",
-    "tree-sitter-dockerfile>=0.2.0",
+    "tree-sitter-dockerfile>=0.2.0; sys_platform != 'win32'",
     "tree-sitter-go>=0.25.0",
     "tree-sitter-java>=0.23.5",
     "tree-sitter-sql>=0.3.11",
@@ -71,9 +70,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["common*", "core*", "infrastructure*", "log*"]
-
-[tool.uvicorn]
-reload-exclude = ["redis_data", "*.log"]
 
 [tool.uv.sources]
 en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }
@@ -107,7 +103,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
-ignore = []
+# Long literal strings are intentional in tool schemas and test fixtures. Ruff's
+# formatter remains available for layout; E501 would otherwise create a noisy,
+# non-actionable baseline.
+ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["common", "infrastructure", "core", "log"]

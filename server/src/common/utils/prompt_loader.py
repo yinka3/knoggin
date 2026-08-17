@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, Mapping
 import yaml
 
 if TYPE_CHECKING:
-    from common.schema.agent_contracts import AgentConfig
+    from common.schema.agent.identity import AgentConfig
 
 
 _TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
@@ -35,12 +35,12 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
     "generate_episode": PromptDefinition(
         "prompts/episode.md",
         "Generate Episode",
-        frozenset({"user_name"}),
+        frozenset({"user_name", "prompt_narrative_chars", "max_narrative_chars"}),
     ),
-    "regenerate_episode_consolidation": PromptDefinition(
+    "repair_episode_narrative": PromptDefinition(
         "prompts/episode.md",
-        "Regenerate Consolidated Episode",
-        frozenset({"user_name"}),
+        "Repair Episode Narrative",
+        frozenset({"user_name", "max_narrative_chars"}),
     ),
 }
 
@@ -253,7 +253,7 @@ def load_agent_file(agent_id: str) -> tuple[dict, str]:
 
 def load_agent_config(agent_id: str = "AGENT_IDENTITY") -> "AgentConfig":
     """Load the packaged default agent used to seed Postgres."""
-    from common.schema.agent_contracts import AgentConfig
+    from common.schema.agent.identity import AgentConfig
 
     frontmatter, body = load_agent_file(agent_id)
     return AgentConfig(

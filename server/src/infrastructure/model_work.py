@@ -8,7 +8,9 @@ from enum import IntEnum
 from time import perf_counter
 from typing import Awaitable, Callable, Optional, TypeVar
 
-from common.schema.contracts import EngineWorkUnit
+from common.exceptions import KnogginError
+from common.schema.health import sanitize_health_details
+from infrastructure.work_record import WorkRecord
 
 ResultT = TypeVar("ResultT")
 
@@ -20,16 +22,34 @@ class ModelWorkPriority(IntEnum):
     BACKGROUND = 10
 
 
+class ModelWorkRejected(KnogginError):
+    """Raised when a model-work lane reaches its bounded queue limit."""
+
+    def __init__(self, *, priority: ModelWorkPriority, name: str, limit: int, queued: int):
+        lane = priority.name.lower()
+        super().__init__(
+            f"Model work '{name}' was rejected because the {lane} queue is full",
+            code="model_work_rejected",
+            details={
+                "priority": lane,
+                "name": name,
+                "reason": "queue_full",
+                "limit": limit,
+                "queued": queued,
+            },
+        )
+
+
 @dataclass
 class QueuedModelTask:
-    """Runtime-only queue payload; never serialized into an EngineWorkUnit."""
+    """Runtime-only queue payload owned by workflow telemetry."""
 
     future: asyncio.Future
     operation: Optional[Callable[[], Awaitable]]
     queued_at: float
     name: str
-    work_unit: Optional[EngineWorkUnit] = None
-    parent_work_unit: Optional[EngineWorkUnit] = None
+    work_record: Optional[WorkRecord] = None
+    parent_work_record: Optional[WorkRecord] = None
     cancellation_summary: str = "Caller cancelled before execution"
 
 
@@ -46,15 +66,23 @@ class ModelWorkCoordinator:
         *,
         foreground_concurrency: int = 1,
         background_concurrency: int = 1,
+        max_queued_foreground: int = 32,
+        max_queued_background: int = 64,
         foreground_timeout_seconds: float | None = 30.0,
     ):
         if foreground_concurrency < 1 or background_concurrency < 1:
             raise ValueError("each model-work lane must have at least one worker")
+        if max_queued_foreground < 1 or max_queued_background < 1:
+            raise ValueError("each model-work queue limit must be positive")
         if foreground_timeout_seconds is not None and foreground_timeout_seconds <= 0:
             raise ValueError("foreground_timeout_seconds must be positive or None")
         self._executor = executor
         self._foreground_concurrency = foreground_concurrency
         self._background_concurrency = background_concurrency
+        self._max_queued = {
+            ModelWorkPriority.FOREGROUND: max_queued_foreground,
+            ModelWorkPriority.BACKGROUND: max_queued_background,
+        }
         self._foreground_timeout_seconds = foreground_timeout_seconds
         self._queues = {
             ModelWorkPriority.FOREGROUND: asyncio.PriorityQueue(),
@@ -70,6 +98,8 @@ class ModelWorkCoordinator:
         self._completed = 0
         self._failed = 0
         self._timed_out = 0
+        self._cancelled = 0
+        self._rejected = 0
         self._wait_seconds_total = 0.0
         self._run_seconds_total = 0.0
         self._queued_by_priority = {
@@ -105,8 +135,8 @@ class ModelWorkCoordinator:
         *,
         priority: ModelWorkPriority,
         name: str,
-        work_unit: Optional[EngineWorkUnit] = None,
-        parent_work_unit: Optional[EngineWorkUnit] = None,
+        work_record: Optional[WorkRecord] = None,
+        parent_work_record: Optional[WorkRecord] = None,
         timeout_seconds: float | None = None,
     ) -> ResultT:
         loop = asyncio.get_running_loop()
@@ -114,8 +144,8 @@ class ModelWorkCoordinator:
             lambda: loop.run_in_executor(self._executor, operation),
             priority=priority,
             name=name,
-            work_unit=work_unit,
-            parent_work_unit=parent_work_unit,
+            work_record=work_record,
+            parent_work_record=parent_work_record,
             timeout_seconds=timeout_seconds,
         )
 
@@ -125,18 +155,30 @@ class ModelWorkCoordinator:
         *,
         priority: ModelWorkPriority,
         name: str,
-        work_unit: Optional[EngineWorkUnit] = None,
-        parent_work_unit: Optional[EngineWorkUnit] = None,
+        work_record: Optional[WorkRecord] = None,
+        parent_work_record: Optional[WorkRecord] = None,
         timeout_seconds: float | None = None,
     ) -> ResultT:
         if self._closed:
             raise RuntimeError("ModelWorkCoordinator is closed")
+        self._require_work_record("work_record", work_record)
+        self._require_work_record("parent_work_record", parent_work_record)
         await self.start()
 
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         queued_at = perf_counter()
         priority_name = priority.name.lower()
+        queued = self._queued_by_priority[priority_name]
+        limit = self._max_queued[priority]
+        if queued >= limit:
+            self._rejected += 1
+            raise ModelWorkRejected(
+                priority=priority,
+                name=name,
+                limit=limit,
+                queued=queued,
+            )
         self._submitted += 1
         self._queued_by_priority[priority_name] += 1
         metrics = self._work_by_name.setdefault(
@@ -157,11 +199,11 @@ class ModelWorkCoordinator:
             operation=operation,
             queued_at=queued_at,
             name=name,
-            work_unit=work_unit,
-            parent_work_unit=parent_work_unit,
+            work_record=work_record,
+            parent_work_record=parent_work_record,
         )
-        if work_unit is not None:
-            work_unit.mark_queued()
+        if work_record is not None:
+            work_record.mark_queued()
         await self._queues[priority].put((int(priority), next(self._sequence), task))
         deadline = timeout_seconds
         if deadline is None and priority is ModelWorkPriority.FOREGROUND:
@@ -175,6 +217,11 @@ class ModelWorkCoordinator:
                 task.cancellation_summary = "Foreground deadline exceeded before completion"
                 future.cancel()
                 self._timed_out += 1
+            raise
+        except asyncio.CancelledError:
+            if not future.done():
+                task.cancellation_summary = "Caller cancelled before model work completed"
+                future.cancel()
             raise
 
     async def _worker(self, lane: ModelWorkPriority, index: int) -> None:
@@ -198,8 +245,8 @@ class ModelWorkCoordinator:
             wait_seconds = perf_counter() - task.queued_at
             self._wait_seconds_total += wait_seconds
             metrics["wait_seconds_total"] += wait_seconds
-            if task.work_unit is not None:
-                task.work_unit.mark_running()
+            if task.work_record is not None:
+                task.work_record.mark_running()
             started_at = perf_counter()
             try:
                 result = await task.operation()
@@ -208,16 +255,16 @@ class ModelWorkCoordinator:
                 metrics["failed"] += 1
                 if isinstance(exc, asyncio.CancelledError):
                     self._mark_cancelled(task, "Model work cancelled during execution")
-                elif task.work_unit is not None:
-                    task.work_unit.mark_failed(str(exc))
+                elif task.work_record is not None:
+                    task.work_record.mark_failed(str(exc))
                     self._attach_child_summary(task)
                 if not task.future.done():
                     task.future.set_exception(exc)
             else:
                 self._completed += 1
                 metrics["completed"] += 1
-                if task.work_unit is not None:
-                    task.work_unit.mark_succeeded()
+                if task.work_record is not None:
+                    task.work_record.mark_succeeded()
                     self._attach_child_summary(task)
                 if not task.future.done():
                     task.future.set_result(result)
@@ -230,13 +277,19 @@ class ModelWorkCoordinator:
 
     @staticmethod
     def _attach_child_summary(task: QueuedModelTask) -> None:
-        if task.work_unit is not None and task.parent_work_unit is not None:
-            task.parent_work_unit.add_model_work_summary(task.work_unit)
+        if task.work_record is not None and task.parent_work_record is not None:
+            task.parent_work_record.add_model_work_summary(task.work_record)
 
     def _mark_cancelled(self, task: QueuedModelTask, summary: str) -> None:
-        if task.work_unit is not None:
-            task.work_unit.mark_cancelled(summary)
+        self._cancelled += 1
+        if task.work_record is not None:
+            task.work_record.mark_cancelled(summary)
             self._attach_child_summary(task)
+
+    @staticmethod
+    def _require_work_record(name: str, value: Optional[WorkRecord]) -> None:
+        if value is not None and not isinstance(value, WorkRecord):
+            raise TypeError(f"{name} must be a WorkRecord")
 
     def snapshot(self) -> dict[str, object]:
         """Return cheap in-memory metrics suitable for future API instrumentation."""
@@ -244,6 +297,10 @@ class ModelWorkCoordinator:
             "foreground_concurrency": self._foreground_concurrency,
             "background_concurrency": self._background_concurrency,
             "foreground_timeout_seconds": self._foreground_timeout_seconds,
+            "max_queued_by_priority": {
+                priority.name.lower(): limit
+                for priority, limit in self._max_queued.items()
+            },
             "queued": sum(queue.qsize() for queue in self._queues.values()),
             "queued_by_priority": dict(self._queued_by_priority),
             "in_flight": sum(self._in_flight_by_priority.values()),
@@ -252,12 +309,19 @@ class ModelWorkCoordinator:
             "completed": self._completed,
             "failed": self._failed,
             "timed_out": self._timed_out,
+            "cancelled": self._cancelled,
+            "rejected": self._rejected,
             "wait_seconds_total": self._wait_seconds_total,
             "run_seconds_total": self._run_seconds_total,
             "work_by_name": {
                 name: dict(metrics) for name, metrics in self._work_by_name.items()
             },
         }
+
+    def snapshot_for_health(self) -> dict[str, object]:
+        """Return a bounded public projection of the internal metrics."""
+
+        return sanitize_health_details(self.snapshot())
 
     async def shutdown(self) -> None:
         if self._closed:

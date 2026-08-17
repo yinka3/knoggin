@@ -1,12 +1,25 @@
-"""Public SDK primitives for Knoggin."""
+"""Python SDK for controlling an installed Knoggin engine."""
 
-from .decorators import tool, tool_to_schema
-from .topics_sdk import TopicBuilder
-from .types import AgentResult
+from .client import Knoggin
+from .contracts import (
+    DocumentFocus,
+    DocumentFocusDocument,
+    DocumentFocusFolderUpload,
+    DocumentFocusSubtree,
+    SessionHandle,
+    SourceProvenance,
+    Turn,
+    source_provenance_from_response,
+)
 
 __all__ = [
-    "AgentResult",
-    "TopicBuilder",
-    "tool",
-    "tool_to_schema",
+    "DocumentFocus",
+    "DocumentFocusDocument",
+    "DocumentFocusFolderUpload",
+    "DocumentFocusSubtree",
+    "Knoggin",
+    "SessionHandle",
+    "SourceProvenance",
+    "Turn",
+    "source_provenance_from_response",
 ]

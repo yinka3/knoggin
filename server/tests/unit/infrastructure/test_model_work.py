@@ -1,241 +1,148 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from common.schema.contracts import EngineScope, EngineWorkUnit
-from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
+from common.schema.ingestion.contracts import ExecutionScope
+from infrastructure.model_work import (
+    ModelWorkCoordinator,
+    ModelWorkPriority,
+    ModelWorkRejected,
+)
+from infrastructure.work_record import WorkRecord, WorkStatus
 
 
-class InlineExecutor:
-    def submit(self, fn, *args, **kwargs):
-        raise AssertionError("run_in_executor should not use InlineExecutor directly")
-
-
-def parent_work_unit():
-    scope = EngineScope(
-        user_name="ada",
-        session_id="session-1",
-        project_id="project-1",
-    )
-    return EngineWorkUnit.for_message_batch(scope, [1, 2])
-
-
-@pytest.mark.no_network
-async def test_model_work_prioritizes_foreground_items_already_in_queue():
-    coordinator = ModelWorkCoordinator(InlineExecutor())
-    order = []
-    release_first = asyncio.Event()
-
-    async def first_background():
-        order.append("first-background")
-        await release_first.wait()
-        return "first-background"
-
-    async def second_background():
-        order.append("second-background")
-        return "second-background"
-
-    async def foreground():
-        order.append("foreground")
-        return "foreground"
-
-    first_task = asyncio.create_task(
-        coordinator.submit(
-            first_background,
-            priority=ModelWorkPriority.BACKGROUND,
-            name="first-background",
-        )
-    )
-    await asyncio.sleep(0)
-    second_background_task = asyncio.create_task(
-        coordinator.submit(
-            second_background,
-            priority=ModelWorkPriority.BACKGROUND,
-            name="second-background",
-        )
-    )
-    foreground_task = asyncio.create_task(
-        coordinator.submit(
-            foreground,
-            priority=ModelWorkPriority.FOREGROUND,
-            name="foreground",
-        )
-    )
-    # The background lane is occupied, but the foreground lane is reserved and
-    # can complete before the profile-like work is released.
-    assert await foreground_task == "foreground"
-    assert order == ["first-background", "foreground"]
-    release_first.set()
-
-    assert await first_task == "first-background"
-    assert await second_background_task == "second-background"
-    assert order == ["first-background", "foreground", "second-background"]
-    snapshot = coordinator.snapshot()
-    assert snapshot["foreground_concurrency"] == 1
-    assert snapshot["background_concurrency"] == 1
-    assert snapshot["completed"] == 3
-    assert snapshot["work_by_name"]["foreground"]["completed"] == 1
-    assert snapshot["work_by_name"]["second-background"]["completed"] == 1
-
-    await coordinator.shutdown()
-
-
-@pytest.mark.no_network
-async def test_model_work_shutdown_cancels_queued_items():
-    coordinator = ModelWorkCoordinator(InlineExecutor())
-    release_first = asyncio.Event()
-
-    async def first_work():
-        await release_first.wait()
-
-    async def never_runs():
-        raise AssertionError("queued work should be cancelled at shutdown")
-
-    first_task = asyncio.create_task(
-        coordinator.submit(
-            first_work,
-            priority=ModelWorkPriority.BACKGROUND,
-            name="first",
-        )
-    )
-    await asyncio.sleep(0)
-    task = asyncio.create_task(
-        coordinator.submit(
-            never_runs,
-            priority=ModelWorkPriority.BACKGROUND,
-            name="queued",
-        )
-    )
-    await asyncio.sleep(0)
-    shutdown_task = asyncio.create_task(coordinator.shutdown())
-    release_first.set()
-    await shutdown_task
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await first_task
-    assert coordinator.snapshot()["work_by_name"]["queued"]["queued"] == 0
-
-
-@pytest.mark.no_network
-async def test_model_work_records_serializable_child_unit_on_parent():
-    coordinator = ModelWorkCoordinator(InlineExecutor())
-    parent = parent_work_unit()
-    child = EngineWorkUnit.for_model_operation(
-        "gliner",
-        parent.scope,
-        parent_work_unit_id=parent.id,
-        priority=parent.priority,
-    )
-
-    async def extract_mentions():
-        return ["Ada"]
-
-    result = await coordinator.submit(
-        extract_mentions,
-        priority=ModelWorkPriority.BACKGROUND,
-        name="gliner-mentions",
-        work_unit=child,
-        parent_work_unit=parent,
-    )
-
-    assert result == ["Ada"]
-    assert child.status == "succeeded"
-    assert child.parent_work_unit_id == parent.id
-    assert child.trace.queued_at is not None
-    assert child.trace.started_at is not None
-    assert child.trace.finished_at is not None
-    assert parent.metadata["model_work"] == [
-        {
-            "id": child.id,
-            "kind": "gliner",
-            "status": "succeeded",
-            "priority": parent.priority,
-            "stage": "gliner",
-            "queue_wait_ms": child.trace.queue_wait_ms,
-            "duration_ms": child.trace.duration_ms,
-            "summary": None,
-        }
-    ]
-    assert "operation" not in parent.model_dump(mode="json")
-
-    await coordinator.shutdown()
-
-
-@pytest.mark.no_network
-async def test_model_work_marks_queued_child_cancelled_on_shutdown():
-    coordinator = ModelWorkCoordinator(InlineExecutor())
-    parent = parent_work_unit()
-    release_first = asyncio.Event()
-    child = EngineWorkUnit.for_model_operation(
-        "embedding",
-        parent.scope,
-        parent_work_unit_id=parent.id,
-    )
-
-    async def first_work():
-        await release_first.wait()
-
-    async def queued_work():
-        raise AssertionError("queued work should not execute")
-
-    first_task = asyncio.create_task(
-        coordinator.submit(
-            first_work,
-            priority=ModelWorkPriority.BACKGROUND,
-            name="first",
-        )
-    )
-    await asyncio.sleep(0)
-    queued_task = asyncio.create_task(
-        coordinator.submit(
-            queued_work,
-            priority=ModelWorkPriority.BACKGROUND,
-            name="embedding-encode",
-            work_unit=child,
-            parent_work_unit=parent,
-        )
-    )
-    await asyncio.sleep(0)
-
-    shutdown_task = asyncio.create_task(coordinator.shutdown())
-    release_first.set()
-    await shutdown_task
-
-    with pytest.raises(asyncio.CancelledError):
-        await queued_task
-    await first_task
-    assert child.status == "cancelled"
-    assert parent.metadata["model_work"][0]["status"] == "cancelled"
-
-
-@pytest.mark.no_network
-async def test_foreground_deadline_returns_without_interrupting_running_work():
+@pytest.fixture
+async def model_work():
+    executor = ThreadPoolExecutor(max_workers=2)
     coordinator = ModelWorkCoordinator(
-        InlineExecutor(),
-        foreground_timeout_seconds=0.01,
+        executor,
+        foreground_concurrency=1,
+        background_concurrency=1,
+        max_queued_foreground=1,
+        max_queued_background=1,
+        foreground_timeout_seconds=None,
     )
+    try:
+        yield coordinator
+    finally:
+        await coordinator.shutdown()
+        executor.shutdown(wait=True)
+
+
+@pytest.mark.no_network
+async def test_model_work_rejects_a_lane_that_reaches_its_queue_limit(model_work):
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def slow_foreground_work():
+    async def active_work():
         started.set()
         await release.wait()
-        return "completed after caller timeout"
+        return "active"
 
-    task = asyncio.create_task(
-        coordinator.submit(
-            slow_foreground_work,
+    active = asyncio.create_task(
+        model_work.submit(
+            active_work,
             priority=ModelWorkPriority.FOREGROUND,
-            name="foreground-test",
+            name="embedding",
         )
     )
     await started.wait()
+    queued = asyncio.create_task(
+        model_work.submit(
+            lambda: asyncio.sleep(0, result="queued"),
+            priority=ModelWorkPriority.FOREGROUND,
+            name="embedding",
+        )
+    )
+    await asyncio.sleep(0)
 
-    with pytest.raises(asyncio.TimeoutError):
-        await task
-    assert coordinator.snapshot()["timed_out"] == 1
+    with pytest.raises(ModelWorkRejected) as error:
+        await model_work.submit(
+            lambda: asyncio.sleep(0, result="rejected"),
+            priority=ModelWorkPriority.FOREGROUND,
+            name="embedding",
+        )
+
+    assert error.value.details == {
+        "priority": "foreground",
+        "name": "embedding",
+        "reason": "queue_full",
+        "limit": 1,
+        "queued": 1,
+    }
+    assert model_work.snapshot()["rejected"] == 1
 
     release.set()
+    assert await active == "active"
+    assert await queued == "queued"
+
+
+@pytest.mark.no_network
+async def test_model_work_cancelling_a_queued_caller_does_not_run_or_leak(model_work):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    queued_calls = 0
+
+    async def active_work():
+        started.set()
+        await release.wait()
+
+    async def queued_work():
+        nonlocal queued_calls
+        queued_calls += 1
+
+    active = asyncio.create_task(
+        model_work.submit(
+            active_work,
+            priority=ModelWorkPriority.BACKGROUND,
+            name="document-index",
+        )
+    )
+    await started.wait()
+    queued = asyncio.create_task(
+        model_work.submit(
+            queued_work,
+            priority=ModelWorkPriority.BACKGROUND,
+            name="document-index",
+        )
+    )
     await asyncio.sleep(0)
-    await coordinator.shutdown()
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+
+    release.set()
+    await active
+    await asyncio.sleep(0)
+    snapshot = model_work.snapshot()
+    assert queued_calls == 0
+    assert snapshot["queued"] == 0
+    assert snapshot["in_flight"] == 0
+    assert snapshot["cancelled"] == 1
+
+
+@pytest.mark.no_network
+async def test_model_work_records_terminal_state_and_parent_summary(model_work):
+    scope = ExecutionScope(
+        user_name="ada", project_id="project-1", session_id="session-1"
+    )
+    parent = WorkRecord.for_ingestion(scope, [1])
+    child = WorkRecord.for_model_operation("embedding", scope, parent_id=parent.id)
+
+    result = await model_work.submit(
+        lambda: asyncio.sleep(0, result="embedded"),
+        priority=ModelWorkPriority.FOREGROUND,
+        name="embedding",
+        work_record=child,
+        parent_work_record=parent,
+    )
+
+    assert result == "embedded"
+    assert child.status is WorkStatus.SUCCEEDED
+    assert parent.metadata["model_work"][0]["status"] == WorkStatus.SUCCEEDED
+    snapshot = model_work.snapshot()
+    assert snapshot["queued"] == 0
+    assert snapshot["in_flight"] == 0
+    assert snapshot["completed"] == 1
+    assert snapshot["work_by_name"]["embedding"]["queued"] == 0

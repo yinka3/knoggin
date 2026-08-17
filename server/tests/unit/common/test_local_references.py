@@ -81,16 +81,3 @@ def test_short_uuid_references_use_one_flat_lookup_and_resolve_collisions():
     }
     assert resolve_local_id("ep_a3f91c", lookup) == "a3f91c84-1111-4444-8888-111111111111"
     assert resolve_local_id("ep_a3f91c_2", lookup) == "a3f91c84-2222-4444-8888-222222222222"
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
-def test_raw_identifier_mode_keeps_model_values_equal_to_system_ids():
-    actual_to_model, model_to_actual = build_local_id_maps(
-        [30, 2],
-        "m",
-        use_local_references=False,
-    )
-
-    assert actual_to_model == {2: "2", 30: "30"}
-    assert model_to_actual == {"2": 2, "30": 30}

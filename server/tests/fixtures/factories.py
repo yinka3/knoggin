@@ -1,7 +1,5 @@
-
-from common.conf.topics_config import TopicConfig
-from common.schema.settings import TopicSchema
-from core.project.state import ProjectState
+from common.conf.domain_config import DomainConfig
+from runtime.project_factory import ProjectFactory
 from tests.fixtures.fakes import (
     FakeEmbeddingService,
     FakePipeline,
@@ -11,13 +9,24 @@ from tests.fixtures.fakes import (
 )
 
 
-def make_topic_config():
-    return TopicConfig(
+def make_domain_config(version=1):
+    return DomainConfig.from_mapping(
         {
-            "General": TopicSchema(active=True, labels=[], hierarchy={}, aliases=[]),
-            "Identity": TopicSchema(
-                active=True, labels=["person"], hierarchy={}, aliases=["me"]
-            ),
+            "version": version,
+            "topics": {
+                "Identity": {"active": True},
+                "General": {"active": True},
+            },
+            "entity_types": {
+                "Identity": {
+                    "topic": "Identity",
+                    "labels": ["person", "identity"],
+                },
+                "Concept": {
+                    "topic": "General",
+                    "labels": ["concept", "thing"],
+                },
+            },
         }
     )
 
@@ -28,14 +37,14 @@ def make_project_state(
     scheduler=None,
     postgres=None,
     embedding=None,
+    domain_config=None,
 ):
     redis = redis or FakeRedis()
     scheduler = scheduler or FakeScheduler()
     postgres = postgres or FakePostgresClient()
     embedding = embedding or FakeEmbeddingService()
-    return ProjectState(
+    return ProjectFactory.create_runtime(
         project_id=project_id,
-        topic_config=make_topic_config(),
         entities=object(),
         pipeline=FakePipeline(),
         scheduler=scheduler,
@@ -43,5 +52,6 @@ def make_project_state(
         redis_client=redis,
         postgres_client=postgres,
         embedding_service=embedding,
+        domain_config=domain_config or make_domain_config(),
         readable_project_ids=[project_id],
     )

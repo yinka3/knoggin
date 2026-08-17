@@ -8,30 +8,33 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.schema.aac_schema import AAC_READ_TOOL_NAMES, AAC_SPECIFIC_SCHEMAS
-from common.schema.agent_contracts import AgentConfig
+from common.schema.agent.community_tools import (
+    AAC_READ_TOOL_NAMES,
+    AAC_SPECIFIC_SCHEMAS,
+)
+from common.schema.agent.identity import AgentConfig
 from common.scoping import IDENTITY_SCOPE
 from common.utils.events import emit_community
 from common.utils.json_utils import safe_json_loads
 from common.utils.local_references import build_local_id_maps, resolve_local_id
 from common.utils.time_utils import get_now
 from core.agent.executor import AgentExecutor
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.system_prompt import get_agent_prompt
 from core.agent.tools.community_tools import CommunityTools
-from core.agent.types import (
-    AgentContext,
-    AgentRunConfig,
-    AgentState,
-    RetrievedEvidence,
+from core.community.policy import (
+    CommunityDiscussionAdmission,
+    CommunityDiscussionAdmissionOutcome,
+    CommunityDiscussionPolicy,
 )
-from core.project.state import ProjectState
 from infrastructure.redis_client import RedisKeys
+from runtime.project_runtime import ProjectRuntime
 
 COMMUNITY_ENABLED_TOOLS = [*AAC_READ_TOOL_NAMES, "restore_brain_section"]
 ACTIVE_DISCUSSION_TTL_SECONDS = 2 * 60 * 60
 
-COMMUNITY_RUN_CONFIG = AgentRunConfig(
+COMMUNITY_RUN_LIMITS = AgentRunLimits(
     max_calls=5,
     max_attempts=6,
     max_history_turns=4,
@@ -60,7 +63,7 @@ class CommunityExecutionContext:
     """Minimal project context for AAC agent turns without a session runtime."""
 
     session_id: str
-    project: ProjectState
+    project: ProjectRuntime
     document_service: Optional[object]
 
 
@@ -81,7 +84,7 @@ class CommunityManager:
     return 0
     """
 
-    def __init__(self, project_state: ProjectState, user_name: str, resources):
+    def __init__(self, project_state: ProjectRuntime, user_name: str, resources):
         self.project_state = project_state
         self.user_name = user_name
         self.resources = resources
@@ -91,6 +94,22 @@ class CommunityManager:
     async def _get_agent_directives(self, agent_id: str) -> str:
         """Legacy directives are now part of the durable Markdown brain."""
         return ""
+
+    async def _load_project_context(self) -> str:
+        """Load canonical project context without blocking community startup."""
+        workspace_service = getattr(self.project_state, "workspace_service", None)
+        reader = getattr(workspace_service, "read_project_context", None)
+        if reader is None:
+            return ""
+        try:
+            content = await reader()
+        except Exception as exc:
+            logger.warning(
+                "CommunityManager: project context unavailable ({})",
+                type(exc).__name__,
+            )
+            return ""
+        return content if isinstance(content, str) else ""
 
     async def _is_discussion_active(self) -> bool:
         return bool(await self.resources.redis.get(self._active_discussion_key()))
@@ -142,8 +161,13 @@ class CommunityManager:
 
     def _track_discussion_task(self, task: asyncio.Task) -> None:
         self._discussion_task = task
+        task.add_done_callback(self._clear_discussion_task)
         if hasattr(self.project_state, "track_community_task"):
             self.project_state.track_community_task(task)
+
+    def _clear_discussion_task(self, task: asyncio.Task) -> None:
+        if self._discussion_task is task:
+            self._discussion_task = None
 
     async def _release_active_discussion(self, discussion_id: str) -> None:
         await self.resources.redis.eval(
@@ -163,11 +187,14 @@ class CommunityManager:
         )
         return bool(renewed)
 
-    async def trigger_discussion(self) -> None:
-        """Main entry point called by scheduler."""
+    async def trigger_discussion(self) -> CommunityDiscussionAdmission:
+        """Claim and start one project-owned community discussion."""
         if await self._is_discussion_active():
             logger.info("AAC: Discussion already in progress, skipping.")
-            return
+            return CommunityDiscussionAdmission(
+                outcome=CommunityDiscussionAdmissionOutcome.SKIPPED,
+                reason="already_active",
+            )
 
         discussion_id = str(uuid.uuid4())
         claimed = await self.resources.redis.set(
@@ -178,21 +205,29 @@ class CommunityManager:
         )
         if not claimed:
             logger.info("AAC: Discussion claimed by another runtime, skipping.")
-            return
+            return CommunityDiscussionAdmission(
+                outcome=CommunityDiscussionAdmissionOutcome.SKIPPED,
+                reason="claimed_elsewhere",
+            )
         self._active_discussion_id = discussion_id
 
         try:
             community_settings = (
                 ConfigManager.get().config.developer_settings.community
             )
+            policy = CommunityDiscussionPolicy.capture(community_settings)
             seed_data = await asyncio.wait_for(
                 self._seed_discussion(),
-                timeout=community_settings.seeding_timeout_seconds,
+                timeout=policy.seeding_timeout_seconds,
             )
             if not seed_data:
                 await self._release_active_discussion(discussion_id)
                 self._active_discussion_id = None
-                return
+                return CommunityDiscussionAdmission(
+                    outcome=CommunityDiscussionAdmissionOutcome.SKIPPED,
+                    reason="no_seed",
+                    policy_version=policy.version,
+                )
 
             raw_agent_ids = seed_data.get("agent_ids", [])
             valid_agent_ids = []
@@ -222,62 +257,131 @@ class CommunityManager:
             )
             await self._release_active_discussion(discussion_id)
             self._active_discussion_id = None
-            return
+            return CommunityDiscussionAdmission(
+                outcome=CommunityDiscussionAdmissionOutcome.SKIPPED,
+                reason="seeding_timeout",
+                policy_version=policy.version,
+            )
         except BaseException:
             await self._release_active_discussion(discussion_id)
             self._active_discussion_id = None
             raise
 
-        await emit_community(
-            self.user_name,
-            "community",
-            "discussion_started",
-            {"id": discussion_id, "topic": topic, "agents": valid_agent_ids},
+        try:
+            task = asyncio.create_task(
+                self._run_discussion(
+                    discussion_id,
+                    topic,
+                    valid_agent_ids,
+                    policy,
+                ),
+                name=f"aac:{self.user_name}:{self.project_state.project_id}",
+            )
+            self._track_discussion_task(task)
+        except BaseException:
+            if "task" in locals():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await self._finalize_discussion(
+                discussion_id,
+                outcome="admission_failed",
+                policy=policy,
+            )
+            raise
+        return CommunityDiscussionAdmission(
+            outcome=CommunityDiscussionAdmissionOutcome.STARTED,
+            reason="admitted",
+            discussion_id=discussion_id,
+            policy_version=policy.version,
         )
 
-        async def _run_and_cleanup():
-            try:
-                await self._run_loop(discussion_id, topic, valid_agent_ids)
-            except asyncio.CancelledError:
-                logger.info(f"AAC discussion {discussion_id} cancelled")
-                raise
-            except Exception as e:
-                logger.error(f"AAC discussion {discussion_id} error: {e}")
-            finally:
-                try:
-                    await self._release_active_discussion(discussion_id)
-                except Exception as e:
-                    logger.warning(
-                        "AAC: Failed to release active discussion marker "
-                        f"for {discussion_id}: {e}"
-                    )
-                self._active_discussion_id = None
-                try:
-                    await self.resources.knowledge_store.community.close_discussion(
-                        discussion_id,
-                        user_name=self.user_name,
-                        project_id=self.project_state.project_id,
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"AAC: Failed to close discussion {discussion_id} in DB: {e}"
-                    )
+    async def _run_discussion(
+        self,
+        discussion_id: str,
+        topic: str,
+        agent_ids: List[str],
+        policy: CommunityDiscussionPolicy,
+    ) -> None:
+        """Run and finalize one task owned by this project's runtime."""
+        outcome = "completed"
+        try:
+            await self._safe_emit_community(
+                "discussion_started",
+                {
+                    "id": discussion_id,
+                    "topic": topic,
+                    "agents": agent_ids,
+                    "policy_version": policy.version,
+                },
+            )
+            await self._run_loop(
+                discussion_id,
+                topic,
+                agent_ids,
+                policy=policy,
+            )
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            logger.info(f"AAC discussion {discussion_id} cancelled")
+            raise
+        except Exception as exc:
+            outcome = "failed"
+            logger.error(f"AAC discussion {discussion_id} error: {exc}")
+        finally:
+            await self._finalize_discussion(
+                discussion_id,
+                outcome=outcome,
+                policy=policy,
+            )
 
-                await emit_community(
-                    self.user_name,
-                    "community",
-                    "discussion_ended",
-                    {"id": discussion_id},
-                )
-
-        task = asyncio.create_task(
-            _run_and_cleanup(),
-            name=f"aac:{self.user_name}:{self.project_state.project_id}",
+    async def _finalize_discussion(
+        self,
+        discussion_id: str,
+        *,
+        outcome: str,
+        policy: CommunityDiscussionPolicy,
+    ) -> None:
+        """Release the distributed lease and close durable discussion state."""
+        try:
+            await self._release_active_discussion(discussion_id)
+        except Exception as exc:
+            logger.warning(
+                "AAC: Failed to release active discussion marker for {}: {}",
+                discussion_id,
+                exc,
+            )
+        if self._active_discussion_id == discussion_id:
+            self._active_discussion_id = None
+        try:
+            await self.resources.knowledge_store.community.close_discussion(
+                discussion_id,
+                user_name=self.user_name,
+                project_id=self.project_state.project_id,
+            )
+        except Exception as exc:
+            logger.error("AAC: Failed to close discussion {} in DB: {}", discussion_id, exc)
+        await self._safe_emit_community(
+            "discussion_ended",
+            {
+                "id": discussion_id,
+                "outcome": outcome,
+                "policy_version": policy.version,
+            },
         )
-        self._track_discussion_task(task)
+
+    async def _safe_emit_community(self, event: str, data: Dict) -> None:
+        try:
+            await emit_community(self.user_name, "community", event, data)
+        except Exception as exc:
+            logger.warning("AAC: Failed to emit {}: {}", event, exc)
 
     async def _run_loop(
-        self, discussion_id: str, topic: str, initial_agent_ids: List[str]
+        self,
+        discussion_id: str,
+        topic: str,
+        initial_agent_ids: List[str],
+        *,
+        policy: Optional[CommunityDiscussionPolicy] = None,
     ) -> None:
         ctx = CommunityExecutionContext(
             session_id=f"aac_{discussion_id}",
@@ -285,14 +389,15 @@ class CommunityManager:
             document_service=getattr(self.project_state, "document_service", None),
         )
 
-        config = ConfigManager.get().config
-        comm_cfg = config.developer_settings.community
-        max_turns = comm_cfg.max_turns
+        if policy is None:
+            policy = CommunityDiscussionPolicy.capture(
+                ConfigManager.get().config.developer_settings.community
+            )
 
         participants = list(initial_agent_ids)
         history = []
 
-        for turn in range(max_turns):
+        for turn in range(policy.max_turns):
             if not await self._renew_active_discussion(discussion_id):
                 logger.info(
                     f"AAC [{discussion_id}]: Discussion manually closed or "
@@ -314,7 +419,7 @@ class CommunityManager:
                     self._agent_turn(
                         discussion_id, agent_config, topic, history, participants, ctx
                     ),
-                    timeout=1200.0,
+                    timeout=policy.turn_timeout_seconds,
                 )
             except asyncio.TimeoutError:
                 logger.warning(
@@ -370,19 +475,17 @@ class CommunityManager:
     ) -> Optional[str]:
         """Runs a single agent turn using the core AgentExecutor."""
 
-        agent_state = AgentState()
-        evidence = RetrievedEvidence()
-
         agent_directives = await self._get_agent_directives(agent.id)
 
         readable_project_ids = await self._resolve_project_scope()
         base_tools = SimpleNamespace(
             entities=ctx.project.entities,
             session_id=ctx.session_id,
-            topic_config=ctx.project.topic_config,
+            compiled_domain=getattr(ctx.project, "compiled_domain", None),
             search_cfg={},
             knowledge_store=self.resources.knowledge_store,
             document_service=ctx.document_service,
+            workspace_service=getattr(ctx.project, "workspace_service", None),
             document_focus=None,
             postgres=self.resources.postgres,
             redis=self.resources.redis,
@@ -398,33 +501,34 @@ class CommunityManager:
             participants,
         )
 
-        agent_ctx = AgentContext(
-            config=COMMUNITY_RUN_CONFIG,
-            state=agent_state,
-            evidence=evidence,
+        run = AgentRun.open(
             user_name=self.user_name,
-            user_query=f"Community Discussion Topic: {topic}",
             session_id=ctx.session_id,
+            project_id=ctx.project.project_id,
+            user_query=f"Community Discussion Topic: {topic}",
             run_id=f"run_{uuid.uuid4().hex[:8]}",
-            agent_id=agent.id,
-            agent_name=agent.name,
-            agent_persona=agent.persona_markdown,
+            agent=AgentIdentity(
+                config=agent,
+                name=agent.name,
+                persona=agent.persona_markdown,
+            ),
+            limits=COMMUNITY_RUN_LIMITS,
+            model=agent.model,
+            temperature=agent.temperature,
+            enabled_tools=None,
             history=history,
             is_community=True,
             current_participants=participants,
-            use_local_references=(
-                ConfigManager.get().config.developer_settings.local_references.enabled
-            ),
         )
 
         executor = AgentExecutor(
-            ctx=agent_ctx,
+            ctx=run,
             llm=self.resources.llm_service,
             tools=comm_tools,
         )
 
         full_response: str = ""
-        enabled_tools, client_tools = self._resolve_agent_tools(agent)
+        enabled_tools, additional_tool_schemas = self._resolve_agent_tools(agent)
 
         try:
             async for event in executor.execute(
@@ -433,7 +537,7 @@ class CommunityManager:
                 agent_brain=agent.brain,
                 agent_directives=agent_directives,
                 enabled_tools=enabled_tools,
-                client_tools=client_tools,
+                additional_tool_schemas=additional_tool_schemas,
             ):
                 e_type = event.get("event")
                 data = event.get("data", {})
@@ -470,12 +574,12 @@ class CommunityManager:
 
         allowed = set(agent.enabled_tools)
         enabled_tools = [name for name in COMMUNITY_ENABLED_TOOLS if name in allowed]
-        client_tools = [
+        additional_tool_schemas = [
             schema
             for schema in AAC_SPECIFIC_SCHEMAS
             if schema["function"]["name"] in allowed
         ]
-        return enabled_tools, client_tools
+        return enabled_tools, additional_tool_schemas
 
     async def _seed_discussion(self) -> Optional[Dict]:
         """Use seeding agent to analyze graph and initiate a discussion."""
@@ -496,6 +600,7 @@ class CommunityManager:
             return None
 
         directives_str = await self._get_agent_directives(seeding_agent.id)
+        project_context = await self._load_project_context()
 
         base_prompt = get_agent_prompt(
             user_name=self.user_name,
@@ -504,6 +609,7 @@ class CommunityManager:
             agent_name=seeding_agent.name,
             agent_directives=directives_str,
             agent_brain=seeding_agent.brain,
+            project_context=project_context,
             documents_context="",
             is_community=False,
             current_mode="Architect",
@@ -541,11 +647,6 @@ class CommunityManager:
             required_agent=seeding_agent,
         )
         system_prompt = base_prompt + seeding_instructions
-        if not ConfigManager.get().config.developer_settings.local_references.enabled:
-            system_prompt += (
-                "\nLegacy ID mode is active. Return only exact agent IDs listed "
-                "in this call."
-            )
 
         user_prompt = f"""
     {graph_context}
@@ -746,13 +847,9 @@ class CommunityManager:
         if required_agent and all(agent.id != required_agent.id for agent in agents):
             agents.append(required_agent)
         agents = sorted(agents, key=lambda agent: agent.id)
-        use_local_references = (
-            ConfigManager.get().config.developer_settings.local_references.enabled
-        )
         agent_local_ids, agent_ids_by_local = build_local_id_maps(
             (agent.id for agent in agents),
             "a",
-            use_local_references=use_local_references,
         )
         descriptions = []
         for agent in agents:

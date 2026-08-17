@@ -38,6 +38,18 @@ class StorageUnavailableError(KnogginError):
         )
 
 
+class WorkspaceConflictError(KnogginError, ValueError):
+    """Raised when an optimistic-concurrency workspace write is stale."""
+
+    def __init__(self, message: str = "Workspace file changed", details: Optional[Dict] = None):
+        KnogginError.__init__(
+            self,
+            message,
+            code="workspace_conflict",
+            details=details,
+        )
+
+
 class LLMError(KnogginError):
     """Base class for LLM request and response failures."""
 
@@ -63,6 +75,13 @@ class LLMResponseError(LLMError):
 
     def __init__(self, message: str, details: Optional[Dict] = None):
         super().__init__(message, code="llm_response_error", details=details)
+
+
+class LLMBudgetExceededError(LLMError):
+    """Raised before an external LLM attempt after the shared budget is spent."""
+
+    def __init__(self, message: str, details: Optional[Dict] = None):
+        super().__init__(message, code="llm_budget_exhausted", details=details)
 
 
 class ToolExecutionError(KnogginError):
