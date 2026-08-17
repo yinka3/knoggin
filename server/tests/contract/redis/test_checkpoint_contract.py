@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from common.schema.settings import RedisConnectionSettings
+from common.schema.settings import IngestionSettings, RedisConnectionSettings
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.recovery import checkpoint as checkpoint_module
 from core.ingestion.recovery.checkpoint import (
@@ -14,10 +14,16 @@ from core.ingestion.recovery.checkpoint import (
 )
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.work_record import WorkRecord
+from tests.fixtures.ingestion import ingestion_policy
 
 
 def _batch(
-    *, user_name: str, project_id: str, session_id: str, message_ids: list[int]
+    *,
+    user_name: str,
+    project_id: str,
+    session_id: str,
+    message_ids: list[int],
+    checkpoint_interval: int = 32,
 ) -> IngestionBatch:
     batch = IngestionBatch.open(
         user_name=user_name,
@@ -29,6 +35,9 @@ def _batch(
         ],
         session_text="\n".join(
             f"[USER]: Checkpoint message {message_id}." for message_id in message_ids
+        ),
+        policy=ingestion_policy(
+            ingestion=IngestionSettings(checkpoint_interval=checkpoint_interval)
         ),
         batch_id=f"batch-{uuid4()}",
     )
@@ -61,6 +70,8 @@ def _batch(
         dirty_entity_ids=set(),
     )
     batch.seal_for_commit()
+    batch.graph_work_unit.start()
+    batch.graph_work_unit.succeed()
     batch.mark_graph_committed()
     return batch
 
@@ -107,8 +118,8 @@ async def test_real_redis_checkpoint_returns_lua_count_and_threshold_response():
                 project_id=project_id,
                 session_id=session_id,
                 message_ids=[11, 12],
+                checkpoint_interval=3,
             ),
-            checkpoint_interval=3,
         )
         second = await commit_ingestion_checkpoint(
             client,
@@ -117,8 +128,8 @@ async def test_real_redis_checkpoint_returns_lua_count_and_threshold_response():
                 project_id=project_id,
                 session_id=session_id,
                 message_ids=[13],
+                checkpoint_interval=3,
             ),
-            checkpoint_interval=3,
         )
 
         assert first == CheckpointCommit(count_before_reset=2, threshold_reached=False)
@@ -159,6 +170,7 @@ async def test_real_redis_same_batch_commit_is_atomic_and_idempotent():
                 project_id=project_id,
                 session_id=session_id,
                 message_ids=[21, 22],
+                checkpoint_interval=10,
             )
             for _ in range(8)
         ]
@@ -167,7 +179,6 @@ async def test_real_redis_same_batch_commit_is_atomic_and_idempotent():
                 commit_ingestion_checkpoint(
                     client,
                     batch,
-                    checkpoint_interval=10,
                 )
                 for batch in batches
             )
@@ -210,20 +221,20 @@ async def test_real_redis_concurrent_batches_cross_threshold_once():
                 _batch(
                     user_name=user_name,
                     project_id=project_id,
-                    session_id=session_id,
-                    message_ids=[31, 32],
-                ),
+                session_id=session_id,
+                message_ids=[31, 32],
                 checkpoint_interval=4,
+                ),
             ),
             commit_ingestion_checkpoint(
                 client,
                 _batch(
                     user_name=user_name,
                     project_id=project_id,
-                    session_id=session_id,
-                    message_ids=[33, 34],
-                ),
+                session_id=session_id,
+                message_ids=[33, 34],
                 checkpoint_interval=4,
+                ),
             ),
         )
 
@@ -279,12 +290,13 @@ async def test_real_redis_reconstructed_retry_after_lost_response_commits_once()
         project_id=project_id,
         session_id=session_id,
         message_ids=[41],
+        checkpoint_interval=10,
     )
     try:
         with pytest.raises(ConnectionError, match="response lost"):
-            await commit_ingestion_checkpoint(proxy, batch, checkpoint_interval=10)
+            await commit_ingestion_checkpoint(proxy, batch)
 
-        retry = await commit_ingestion_checkpoint(proxy, batch, checkpoint_interval=10)
+        retry = await commit_ingestion_checkpoint(proxy, batch)
 
         assert retry == CheckpointCommit(count_before_reset=1, threshold_reached=False)
         assert await client.get(RedisKeys.checkpoint(user_name, session_id)) == "1"
@@ -316,6 +328,7 @@ async def test_real_redis_expired_commit_token_allows_explicit_replay(monkeypatc
         project_id=project_id,
         session_id=session_id,
         message_ids=[51],
+        checkpoint_interval=10,
     )
     token_key = RedisKeys.checkpoint_commit(
         user_name,
@@ -323,7 +336,7 @@ async def test_real_redis_expired_commit_token_allows_explicit_replay(monkeypatc
         checkpoint_module._checkpoint_commit_token(batch),
     )
     try:
-        first = await commit_ingestion_checkpoint(client, batch, checkpoint_interval=10)
+        first = await commit_ingestion_checkpoint(client, batch)
         assert first.count_before_reset == 1
         assert 0 < await client.ttl(token_key) <= 1
 
@@ -338,7 +351,6 @@ async def test_real_redis_expired_commit_token_allows_explicit_replay(monkeypatc
                 session_id=session_id,
                 message_ids=[51],
             ),
-            checkpoint_interval=10,
         )
         assert replay == CheckpointCommit(count_before_reset=2, threshold_reached=False)
         assert await client.get(RedisKeys.checkpoint(user_name, session_id)) == "2"
@@ -372,8 +384,8 @@ async def test_real_redis_session_and_project_cursors_are_monotonic():
                 project_id=project_id,
                 session_id=first_session,
                 message_ids=[100],
+                checkpoint_interval=100,
             ),
-            checkpoint_interval=100,
         )
         await commit_ingestion_checkpoint(
             client,
@@ -382,8 +394,8 @@ async def test_real_redis_session_and_project_cursors_are_monotonic():
                 project_id=project_id,
                 session_id=first_session,
                 message_ids=[10],
+                checkpoint_interval=100,
             ),
-            checkpoint_interval=100,
         )
         await commit_ingestion_checkpoint(
             client,
@@ -392,8 +404,8 @@ async def test_real_redis_session_and_project_cursors_are_monotonic():
                 project_id=project_id,
                 session_id=second_session,
                 message_ids=[50],
+                checkpoint_interval=100,
             ),
-            checkpoint_interval=100,
         )
 
         assert (

@@ -11,6 +11,39 @@ from infrastructure.job.base import JobContext
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 
 
+class _EmptyStore:
+    def __init__(self):
+        self.parked = {}
+
+    async def get_requeued_dlq_items(self, **_kwargs):
+        return []
+
+    async def park_dlq_item(self, *, dlq_id, user_name, project_id, entry):
+        self.parked[(user_name, project_id, dlq_id)] = {
+            **dict(entry),
+            "status": "parked",
+        }
+
+    async def get_parked_dlq_item(self, *, dlq_id, user_name, project_id):
+        return self.parked.get((user_name, project_id, dlq_id))
+
+    async def mark_parked_dlq_item_requeued(self, *, dlq_id, user_name, project_id):
+        entry = self.parked.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "parked":
+            return False
+        entry["status"] = "requeued"
+        return True
+
+    async def mark_parked_dlq_item_completed_if_requeued(
+        self, *, dlq_id, user_name, project_id
+    ):
+        entry = self.parked.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "requeued":
+            return False
+        entry["status"] = "completed"
+        return True
+
+
 @pytest.mark.integration
 @pytest.mark.requires_redis
 @pytest.mark.slow
@@ -43,7 +76,7 @@ async def test_real_redis_dlq_park_requeue_and_repark_lifecycle(monkeypatch):
     client = await manager.connect()
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_EmptyStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(max_attempts=2),

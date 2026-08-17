@@ -885,7 +885,7 @@ class GraphWriter:
                             canonical_relationship_type,
                             observed_relationship_label,
                             domain_status,
-                            symmetric,
+                            "symmetric",
                             weight,
                             confidence,
                             context,
@@ -914,7 +914,7 @@ class GraphWriter:
                                 relationships.observed_relationship_label
                             ),
                             domain_status = EXCLUDED.domain_status,
-                            symmetric = EXCLUDED.symmetric,
+                            "symmetric" = EXCLUDED."symmetric",
                             context = COALESCE(
                                 EXCLUDED.context,
                                 relationships.context

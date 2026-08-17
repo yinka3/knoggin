@@ -9,7 +9,7 @@ from core.project.workspace_service import (
     ProjectWorkspaceService,
     build_project_markdown,
 )
-from tests.knowledge.test_document_service import MemoryPostgres
+from tests.unit.core.knowledge.test_document_service import MemoryPostgres
 
 
 class InlineBackgroundWork:

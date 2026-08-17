@@ -300,7 +300,7 @@ CREATE TABLE IF NOT EXISTS public.relationships (
             (domain_status = 'recognized')
             = (canonical_relationship_type IS NOT NULL)
         ),
-    symmetric BOOLEAN NOT NULL DEFAULT FALSE,
+    "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
     weight INTEGER NOT NULL DEFAULT 1,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     context TEXT,
@@ -312,9 +312,9 @@ CREATE TABLE IF NOT EXISTS public.relationships (
             relationship_id = format(
                 '%s:%s:%s:%s',
                 project_id,
-                CASE WHEN symmetric THEN LEAST(entity_a_id, entity_b_id)
+                CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
                      ELSE entity_a_id END,
-                CASE WHEN symmetric THEN GREATEST(entity_a_id, entity_b_id)
+                CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
                      ELSE entity_b_id END,
                 lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
             )
@@ -718,7 +718,7 @@ ALTER TABLE public.relationships
 ADD COLUMN IF NOT EXISTS canonical_relationship_type TEXT,
 ADD COLUMN IF NOT EXISTS observed_relationship_label TEXT,
 ADD COLUMN IF NOT EXISTS domain_status TEXT NOT NULL DEFAULT 'unrecognized',
-ADD COLUMN IF NOT EXISTS symmetric BOOLEAN NOT NULL DEFAULT FALSE;
+ADD COLUMN IF NOT EXISTS "symmetric" BOOLEAN NOT NULL DEFAULT FALSE;
 
 UPDATE public.relationships
 SET observed_relationship_label = relationship_type
@@ -736,9 +736,9 @@ BEGIN
            OR relationship_id <> format(
                '%s:%s:%s:%s',
                project_id,
-               CASE WHEN symmetric THEN LEAST(entity_a_id, entity_b_id)
+               CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
                     ELSE entity_a_id END,
-               CASE WHEN symmetric THEN GREATEST(entity_a_id, entity_b_id)
+               CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
                     ELSE entity_b_id END,
                lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
            )
@@ -764,9 +764,9 @@ BEGIN
             relationship_id = format(
                 '%s:%s:%s:%s',
                 project_id,
-                CASE WHEN symmetric THEN LEAST(entity_a_id, entity_b_id)
+                CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
                      ELSE entity_a_id END,
-                CASE WHEN symmetric THEN GREATEST(entity_a_id, entity_b_id)
+                CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
                      ELSE entity_b_id END,
                 lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
             )
@@ -2514,36 +2514,7 @@ AFTER INSERT OR UPDATE OF episode_id, is_focus_entity
 ON public.episode_entities
 FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();
 
--- Upgrade the unreleased session-owned shape without losing provenance:
--- source rows already carry the session that produced each message.
+-- Preserve the session-owned episode shape while adding the current user-edit
+-- marker to databases created before that field was introduced.
 ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS user_modified BOOLEAN NOT NULL DEFAULT FALSE;
-
-ALTER TABLE public.episode_messages
-DROP CONSTRAINT IF EXISTS episode_messages_episode_scope_fk;
-
-ALTER TABLE public.episodes
-DROP CONSTRAINT IF EXISTS episodes_session_project_fk,
-DROP CONSTRAINT IF EXISTS episodes_scope_key;
-
-ALTER TABLE public.episodes
-DROP COLUMN IF EXISTS session_id;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_messages_episode_project_fk'
-          AND conrelid = 'public.episode_messages'::regclass
-    ) THEN
-        ALTER TABLE public.episode_messages
-        ADD CONSTRAINT episode_messages_episode_project_fk
-        FOREIGN KEY (episode_id, project_id)
-        REFERENCES public.episodes(episode_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-END $$;
-
-DROP INDEX IF EXISTS public.episodes_session_updated_idx;
-CREATE INDEX IF NOT EXISTS episodes_project_updated_idx
-ON public.episodes(project_id, updated_at DESC);

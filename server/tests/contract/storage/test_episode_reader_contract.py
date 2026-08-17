@@ -33,6 +33,7 @@ def attachment_results(*, focus=False):
         [
             {
                 "message_id": 11,
+                "session_id": "session-1",
                 "influence_weight": 0.9,
                 "influence_reason": "introduced the decision",
                 "message_position": 0,
@@ -489,8 +490,11 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
 
     await real_postgres_client.execute(
         """
-        INSERT INTO projects (project_id, user_name, name)
-        VALUES ('project-3', 'bob', 'Bob project');
+        INSERT INTO projects (project_id, user_name, name, domain_config)
+        VALUES (
+            'project-3', 'bob', 'Bob project',
+            '{"version":1,"topics":{"Identity":{"active":true},"General":{"active":true}},"entity_types":{"Identity":{"topic":"Identity","labels":["person"]},"Concept":{"topic":"General","labels":["concept"]}},"relationships":{}}'::jsonb
+        );
 
         INSERT INTO sessions (session_id, user_name, project_id)
         VALUES

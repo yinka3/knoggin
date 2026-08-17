@@ -57,7 +57,7 @@ def test_window_rejects_overlapping_proposals():
 
 def test_user_modified_prior_episode_is_not_an_automation_target():
     prior = Episode(
-        episode_id="prior", project_id="project-1", summary="Existing plan",
+        episode_id="prior", project_id="project-1", session_id="session-a", summary="Existing plan",
         messages=[MessageEpisode(message_id=1, session_id="session-a", message_position=0)],
         user_modified=True,
     )

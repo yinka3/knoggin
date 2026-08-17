@@ -408,7 +408,7 @@ class MessageLifecycleWriter:
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
-                UPDATE public.messages
+                UPDATE public.messages AS message
                 SET ingestion_state = %s,
                     ingestion_claim_id = NULL,
                     ingestion_claimed_at_ms = NULL

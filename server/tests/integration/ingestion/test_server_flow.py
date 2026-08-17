@@ -4,13 +4,17 @@ import asyncio
 import json
 import os
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from common.schema.agent.identity import AgentConfig
-from common.schema.episode.generation import LLMEpisodeDecision
+from common.schema.episode.generation import (
+    LLMEpisodeDecision,
+    LLMEpisodeWindowDecision,
+)
 from common.schema.ingestion.contracts import EpisodeEligibility
 from common.schema.primitives import Message
 from common.schema.settings import (
@@ -38,21 +42,27 @@ from infrastructure.job.base import JobContext
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.work_record import WorkRecord
+from tests.fixtures.factories import make_domain_config
+from tests.fixtures.ingestion import ingestion_policy
 
 
 class _DeterministicEpisodeLLM:
     async def generate_structured(self, **kwargs):
-        assert kwargs["response_model"] is LLMEpisodeDecision
-        return LLMEpisodeDecision(
-            action="create",
-            summary="The accepted message is now durable episodic memory.",
-            new_developments=["The complete server path is grounded in its source."],
-            message_influences=[
-                {
-                    "message_id": "m1",
-                    "influence_weight": 1.0,
-                    "influence_reason": "The accepted message records the decision.",
-                }
+        assert kwargs["response_model"] is LLMEpisodeWindowDecision
+        return LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    action="create",
+                    summary="The accepted message is now durable episodic memory.",
+                    new_developments=["The complete server path is grounded in its source."],
+                    message_influences=[
+                        {
+                            "message_id": "m1",
+                            "influence_weight": 1.0,
+                            "influence_reason": "The accepted message records the decision.",
+                        }
+                    ],
+                )
             ],
         )
 
@@ -126,13 +136,18 @@ class _NoEntityProcessor:
         self.user_name = user_name
         self.knowledge_store = object()
 
-    def open_batch(self, messages, session_text, *, session_id):
+    def capture_policy(self, _settings):
+        return ingestion_policy()
+
+    def open_batch(self, messages, session_text, *, session_id, policy, batch_id=None):
         return IngestionBatch.open(
             user_name=self.user_name,
             project_id=self.project_id,
             session_id=session_id,
             messages=messages,
             session_text=session_text,
+            policy=policy,
+            batch_id=batch_id,
         )
 
     async def process(self, batch: IngestionBatch):
@@ -161,20 +176,6 @@ class _SignalCounter:
         self.calls += 1
 
 
-class _FailOnceStore:
-    """Delegate to the real store while injecting one message-log failure."""
-
-    def __init__(self, store):
-        self.store = store
-        self.fail_message_logs = True
-
-    async def save_message_logs(self, messages):
-        if self.fail_message_logs:
-            self.fail_message_logs = False
-            raise ConnectionError("simulated message-log outage")
-        return await self.store.save_message_logs(messages)
-
-
 class _CheckpointDlqProcessor(_NoEntityProcessor):
     """Use the production DLQ serializer with the deterministic processor."""
 
@@ -188,7 +189,7 @@ class _CheckpointDlqProcessor(_NoEntityProcessor):
             processor=None,
             cpu_executor=None,
             user_name=user_name,
-            topic_config=None,
+            compiled_domain=make_domain_config().compile(),
             get_next_ent_id=None,
             knowledge_store=store,
         )
@@ -229,8 +230,16 @@ async def real_server_scope():
     project_id = f"server-flow-project-{suffix}"
     session_id = f"server-flow-session-{suffix}"
     await postgres.execute(
-        "INSERT INTO projects (project_id, user_name, name) VALUES (%s, %s, %s)",
-        (project_id, user_name, "Server flow integration"),
+        """
+        INSERT INTO projects (project_id, user_name, name, domain_config)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (
+            project_id,
+            user_name,
+            "Server flow integration",
+            json.dumps(asdict(make_domain_config())),
+        ),
     )
     await postgres.execute(
         "INSERT INTO sessions (session_id, user_name, project_id) VALUES (%s, %s, %s)",
@@ -279,8 +288,10 @@ def _prepared_graph_callback(store):
             EpisodeEligibility(message_id=int(message["id"]))
             for message in batch.messages
         ]
+        graph_work = WorkRecord.for_graph_write(batch.scope)
+        graph_work.mark_running()
         batch.set_graph_write_buffers(
-            graph_work_unit=WorkRecord.for_graph_write(batch.scope),
+            graph_work_unit=graph_work,
             safe_entity_ids=set(),
             graph_alias_updates=[],
             entity_writes=[],
@@ -298,6 +309,7 @@ def _prepared_graph_callback(store):
             eligible_messages=batch.eligible_messages,
             scope=batch.scope,
         )
+        graph_work.mark_succeeded("Prepared graph write persisted")
         batch.mark_graph_committed()
         return True, None
 
@@ -329,7 +341,8 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         Session,
         "current_config",
         property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100)
+            limits=SimpleNamespace(conversation_context_turns=100),
+            ingestion=SimpleNamespace(message_edit_window_seconds=1),
         )),),
     )
     context = _session(
@@ -351,6 +364,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             batch_size=1,
             batch_debounce_seconds=0,
             batch_timeout=10,
+            ingestion_batch_settle_delay_seconds=0,
             checkpoint_interval=1,
         ),
     )
@@ -358,12 +372,23 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
     worker.start()
 
     try:
-        accepted = await context.add(
-            Message(
-                content="The complete server path must remain grounded.",
-                timestamp=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
+        accepted_messages = []
+        for index in range(8):
+            content = (
+                "The complete server path must remain grounded."
+                if index == 7
+                else f"Server-flow episode context {index + 1}."
             )
-        )
+            accepted_messages.append(
+                await context.add(
+                    Message(
+                        content=content,
+                        timestamp=datetime(2026, 8, 1, 12, index, tzinfo=timezone.utc),
+                    )
+                )
+            )
+        await asyncio.sleep(1.05)
+        accepted = accepted_messages[-1]
         await worker.flush()
 
         assert await redis.llen(RedisKeys.buffer(scope["user_name"], scope["session_id"])) == 0
@@ -383,18 +408,17 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
 
         episode_job = EpisodeJob(
             knowledge_store=store,
-            settings=EpisodeSettings(batch_multiple=1, max_message_count=1),
-            ingestion_settings=IngestionSettings(batch_size=1),
+            settings=EpisodeSettings(max_message_count=8),
+            episode_window_size=8,
             llm=_DeterministicEpisodeLLM(),
             embedding_service=_DeterministicEmbeddingService(),
         )
         build = await episode_job.process_next_window(
             user_name=scope["user_name"],
             project_id=scope["project_id"],
-            session_id=scope["session_id"],
         )
         assert build is not None
-        assert build.outcome_episode_id
+        assert len(build.final_episodes) == 1
 
         agent_run_id = f"run-{uuid.uuid4().hex}"
         source_candidates = build_pasted_text_candidates(
@@ -511,7 +535,8 @@ async def test_real_concurrent_sessions_accept_one_message_once(
         Session,
         "current_config",
         property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100)
+            limits=SimpleNamespace(conversation_context_turns=100),
+            ingestion=SimpleNamespace(message_edit_window_seconds=1),
         )),),
     )
     contexts = [
@@ -541,13 +566,9 @@ async def test_real_concurrent_sessions_accept_one_message_once(
         (scope["session_id"],),
     )
     assert rows == [{"message_id": results[0].id, "content": "same accepted turn"}]
-    buffered = await scope["redis"].lrange(
-        RedisKeys.buffer(scope["user_name"], scope["session_id"]),
-        0,
-        -1,
-    )
-    assert len(buffered) == 1
-    assert json.loads(buffered[0])["id"] == results[0].id
+    assert await scope["redis"].get(
+        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
+    ) == "1"
 
 
 @pytest.mark.integration
@@ -555,15 +576,14 @@ async def test_real_concurrent_sessions_accept_one_message_once(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_worker_keeps_buffer_after_message_log_failure(
+async def test_real_worker_processes_message_persisted_during_acceptance(
     real_server_scope,
     monkeypatch,
 ):
-    """A message-log outage leaves the Redis buffer available for retry."""
+    """Acceptance persists the canonical message before the worker processes it."""
 
     scope = real_server_scope
     real_store = KnowledgeStore(scope["postgres"], _DeterministicEmbeddingService())
-    failing_store = _FailOnceStore(real_store)
     resources = SimpleNamespace(
         postgres=scope["postgres"],
         redis=scope["redis"],
@@ -574,7 +594,8 @@ async def test_real_worker_keeps_buffer_after_message_log_failure(
         Session,
         "current_config",
         property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100)
+            limits=SimpleNamespace(conversation_context_turns=100),
+            ingestion=SimpleNamespace(message_edit_window_seconds=1),
         )),),
     )
     context = _session(
@@ -584,11 +605,10 @@ async def test_real_worker_keeps_buffer_after_message_log_failure(
         session_id=scope["session_id"],
     )
     processor = _NoEntityProcessor(scope["project_id"], scope["user_name"])
-    processor.move_to_dead_letter = lambda *args, **kwargs: asyncio.sleep(0, result=False)
     worker = IngestionWorker(
         user_name=scope["user_name"],
         session_id=scope["session_id"],
-        knowledge_store=failing_store,
+        knowledge_store=real_store,
         processor=processor,
         redis=scope["redis"],
         get_session_context=context.get_conversation_context,
@@ -597,6 +617,7 @@ async def test_real_worker_keeps_buffer_after_message_log_failure(
             batch_size=1,
             batch_debounce_seconds=0,
             batch_timeout=10,
+            ingestion_batch_settle_delay_seconds=0,
             checkpoint_interval=1,
         ),
     )
@@ -610,16 +631,12 @@ async def test_real_worker_keeps_buffer_after_message_log_failure(
                 timestamp=datetime(2026, 8, 1, 14, 0, tzinfo=timezone.utc),
             )
         )
+        await asyncio.sleep(1.05)
         await worker.flush()
-        buffer_key = RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        assert await scope["redis"].llen(buffer_key) == 1
         assert await scope["postgres"].fetch_one(
-            "SELECT message_id FROM messages WHERE message_id = %s",
+            "SELECT ingestion_state FROM messages WHERE message_id = %s",
             (accepted.id,),
-        )
-
-        await worker.flush()
-        assert await scope["redis"].llen(buffer_key) == 0
+        ) == {"ingestion_state": "processed"}
         assert await scope["redis"].get(
             RedisKeys.last_processed(scope["user_name"], scope["session_id"])
         ) == str(accepted.id)
@@ -651,7 +668,8 @@ async def test_real_worker_checkpoint_failure_replays_through_dlq(
         Session,
         "current_config",
         property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100)
+            limits=SimpleNamespace(conversation_context_turns=100),
+            ingestion=SimpleNamespace(message_edit_window_seconds=1),
         )),),
     )
     context = _session(
@@ -675,6 +693,7 @@ async def test_real_worker_checkpoint_failure_replays_through_dlq(
             batch_size=1,
             batch_debounce_seconds=0,
             batch_timeout=10,
+            ingestion_batch_settle_delay_seconds=0,
             checkpoint_interval=1,
         ),
     )
@@ -688,6 +707,7 @@ async def test_real_worker_checkpoint_failure_replays_through_dlq(
                 timestamp=datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc),
             )
         )
+        await asyncio.sleep(1.05)
         await worker.flush()
 
         dlq_key = RedisKeys.dlq(scope["user_name"], scope["project_id"])

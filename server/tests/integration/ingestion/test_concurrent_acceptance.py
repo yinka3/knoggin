@@ -1,7 +1,6 @@
 """Real PostgreSQL/Redis acceptance and idempotency contracts."""
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -33,7 +32,10 @@ def _configure_context(monkeypatch) -> None:
                         {
                             "limits": type(
                                 "Limits", (), {"conversation_context_turns": 100}
-                            )()
+                            )(),
+                            "ingestion": type(
+                                "Ingestion", (), {"message_edit_window_seconds": 1}
+                            )(),
                         },
                     )()
                 },
@@ -76,7 +78,7 @@ async def _message_rows(scope):
 async def test_real_concurrent_identical_submissions_are_accepted_once(
     real_server_scope, monkeypatch
 ):
-    """Independent runtime instances converge on one message and buffer item."""
+    """Independent runtime instances converge on one durable message signal."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
@@ -99,11 +101,9 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
     assert await _message_rows(scope) == [
         {"message_id": results[0].id, "content": "same concurrent submission"}
     ]
-    buffered = await scope["redis"].lrange(
-        RedisKeys.buffer(scope["user_name"], scope["session_id"]), 0, -1
-    )
-    assert len(buffered) == 1
-    assert json.loads(buffered[0])["id"] == results[0].id
+    assert await scope["redis"].get(
+        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
+    ) == "1"
 
 
 @pytest.mark.integration
@@ -114,26 +114,26 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
 async def test_real_enqueue_failure_keeps_durable_pending_claim_for_retry(
     real_server_scope, monkeypatch
 ):
-    """A durable PostgreSQL write survives a Redis enqueue outage."""
+    """A durable PostgreSQL write survives a Redis signal outage."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
     context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     timestamp = datetime(2026, 8, 1, 16, 1, tzinfo=timezone.utc)
-    original_rpush = scope["redis"].rpush
+    original_incr = scope["redis"].incr
     calls = 0
 
-    async def fail_once(key, value):
+    async def fail_once(*args, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise ConnectionError("simulated enqueue outage")
-        return await original_rpush(key, value)
+            raise ConnectionError("simulated signal outage")
+        return await original_incr(*args, **kwargs)
 
-    monkeypatch.setattr(scope["redis"], "rpush", fail_once)
-    message = Message(content="enqueue retry", timestamp=timestamp)
+    monkeypatch.setattr(scope["redis"], "incr", fail_once)
+    message = Message(content="signal retry", timestamp=timestamp)
 
-    with pytest.raises(ConnectionError, match="enqueue outage"):
+    with pytest.raises(ConnectionError, match="signal outage"):
         await context.add(message)
 
     dedup_keys = []
@@ -144,24 +144,15 @@ async def test_real_enqueue_failure_keeps_durable_pending_claim_for_retry(
     assert len(dedup_keys) == 1
     assert await scope["redis"].get(dedup_keys[0]) == f"pending:{message.id}"
     assert await _message_rows(scope) == [
-        {"message_id": message.id, "content": "enqueue retry"}
+        {"message_id": message.id, "content": "signal retry"}
     ]
-    assert (
-        await scope["redis"].llen(
-            RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        )
-        == 0
-    )
 
-    retried = await context.add(Message(content="enqueue retry", timestamp=timestamp))
+    retried = await context.add(Message(content="signal retry", timestamp=timestamp))
     assert retried.id == message.id
     assert await scope["redis"].get(dedup_keys[0]) == f"accepted:{message.id}"
-    assert (
-        await scope["redis"].llen(
-            RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        )
-        == 1
-    )
+    assert await scope["redis"].get(
+        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
+    ) == "1"
 
 
 @pytest.mark.integration
@@ -191,12 +182,9 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
     assert await _message_rows(scope) == [
         {"message_id": first.id, "content": "response was lost"}
     ]
-    assert (
-        await scope["redis"].llen(
-            RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        )
-        == 1
-    )
+    assert await scope["redis"].get(
+        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
+    ) == "1"
 
 
 @pytest.mark.integration
@@ -213,17 +201,17 @@ async def test_real_restart_reuses_a_pending_acceptance_claim(
     scope = real_server_scope
     first_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     timestamp = datetime(2026, 8, 1, 16, 3, tzinfo=timezone.utc)
-    original_rpush = scope["redis"].rpush
+    original_incr = scope["redis"].incr
 
-    async def fail_enqueue(*_args, **_kwargs):
-        raise ConnectionError("runtime stopped before enqueue")
+    async def fail_signal(*_args, **_kwargs):
+        raise ConnectionError("runtime stopped before signal")
 
-    monkeypatch.setattr(scope["redis"], "rpush", fail_enqueue)
+    monkeypatch.setattr(scope["redis"], "incr", fail_signal)
     with pytest.raises(ConnectionError, match="runtime stopped"):
         await first_runtime.add(
             Message(content="restart pending claim", timestamp=timestamp)
         )
-    monkeypatch.setattr(scope["redis"], "rpush", original_rpush)
+    monkeypatch.setattr(scope["redis"], "incr", original_incr)
 
     restarted = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     retried = await restarted.add(
@@ -233,12 +221,9 @@ async def test_real_restart_reuses_a_pending_acceptance_claim(
     assert await _message_rows(scope) == [
         {"message_id": retried.id, "content": "restart pending claim"}
     ]
-    assert (
-        await scope["redis"].llen(
-            RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        )
-        == 1
-    )
+    assert await scope["redis"].get(
+        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
+    ) == "1"
 
 
 @pytest.mark.integration
@@ -255,15 +240,15 @@ async def test_real_acceptance_claim_expiry_is_reclaimable(
     scope = real_server_scope
     context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     timestamp = datetime(2026, 8, 1, 16, 4, tzinfo=timezone.utc)
-    original_rpush = scope["redis"].rpush
+    original_incr = scope["redis"].incr
 
-    async def fail_enqueue(*_args, **_kwargs):
+    async def fail_signal(*_args, **_kwargs):
         raise ConnectionError("claim owner stopped")
 
-    monkeypatch.setattr(scope["redis"], "rpush", fail_enqueue)
+    monkeypatch.setattr(scope["redis"], "incr", fail_signal)
     with pytest.raises(ConnectionError, match="claim owner stopped"):
         await context.add(Message(content="expired claim", timestamp=timestamp))
-    monkeypatch.setattr(scope["redis"], "rpush", original_rpush)
+    monkeypatch.setattr(scope["redis"], "incr", original_incr)
 
     dedup_keys = [
         key

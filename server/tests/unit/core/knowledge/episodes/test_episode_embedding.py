@@ -13,7 +13,9 @@ def make_episode(**overrides) -> Episode:
         new_developments=["Episode vectors will index maintained summaries."],
         updates=["Question retrieval will use semantic similarity."],
         unresolved=["Choose a hybrid ranking policy."],
-        messages=[MessageEpisode(message_id=1, message_position=0)],
+        messages=[
+            MessageEpisode(message_id=1, session_id="session-1", message_position=0)
+        ],
     )
     return episode.model_copy(update=overrides)
 

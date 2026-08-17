@@ -85,7 +85,7 @@ def test_pool_snapshot_degrades_safely_when_stats_are_unavailable() -> None:
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_resource_work_snapshot_includes_postgres_without_exposing_internal_state() -> None:
-    from infrastructure.resources import ResourceManager
+    from runtime.resources import ResourceManager
 
     class FakePostgres:
         def pool_snapshot(self) -> dict[str, bool | int]:

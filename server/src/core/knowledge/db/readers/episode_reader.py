@@ -1124,6 +1124,7 @@ class EpisodeReader:
         return Episode(
             episode_id=episode_id,
             project_id=str(row["project_id"]),
+            session_id=str(row["session_id"]),
             summary=str(row["summary"]),
             new_developments=self._json_list(row.get("new_developments")),
             updates=self._json_list(row.get("updates")),

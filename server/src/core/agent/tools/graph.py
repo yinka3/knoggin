@@ -126,8 +126,8 @@ class GraphTools:
         entity_id = await self.entities.get_id(entity_name) if entity_name else None
 
         if entity_id is not None:
-            episodes = await self.knowledge_store.get_episodes_for_entity(
-                entity_id,
+            episodes = await self.knowledge_store.get_project_episodes_for_entities(
+                [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
                 session_id=self.session_id,

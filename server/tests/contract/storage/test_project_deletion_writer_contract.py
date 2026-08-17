@@ -218,10 +218,10 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             """
             INSERT INTO relationships (
                 relationship_id, user_name, project_id, entity_a_id, entity_b_id,
-                relationship_type, context
+                relationship_type, observed_relationship_label, context
             ) VALUES
-                ('project-1:42:43:related', 'ada', 'project-1', 42, 43, 'related', 'P1 context'),
-                ('project-2:52:53:related', 'ada', 'project-2', 52, 53, 'related', 'P2 context')
+                ('project-1:42:43:related', 'ada', 'project-1', 42, 43, 'related', 'related', 'P1 context'),
+                ('project-2:52:53:related', 'ada', 'project-2', 52, 53, 'related', 'related', 'P2 context')
             """
         )
         await cur.execute(

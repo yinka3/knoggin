@@ -27,7 +27,6 @@ from common.schema.source.references import SourceConsulted
 def source() -> SourceConsulted:
     return SourceConsulted(
         source_kind="user_pasted_text",
-        display_label="User message",
         locator=PastedTextLocator(start_char=0, end_char=8),
         excerpt="planning",
         source_message_id=12,

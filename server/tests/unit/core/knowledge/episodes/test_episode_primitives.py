@@ -21,6 +21,7 @@ def test_episode_preserves_current_memory_and_attachment_data():
         messages=[
             MessageEpisode(
                 message_id=11,
+                session_id="session-1",
                 influence_weight=0.9,
                 message_position=0,
             )
@@ -56,8 +57,8 @@ def test_episode_accepts_known_messages_and_two_focus_entities():
         summary="The team agreed to build the storage slice first.",
         importance=0.75,
         messages=[
-            MessageEpisode(message_id=11, message_position=0),
-            MessageEpisode(message_id=12, message_position=1),
+            MessageEpisode(message_id=11, session_id="session-1", message_position=0),
+            MessageEpisode(message_id=12, session_id="session-1", message_position=1),
         ],
         entities=[
             EntityEpisode(entity_id=42, is_focus_entity=True, role="subject"),
@@ -88,12 +89,12 @@ def test_episode_requires_at_least_one_message(messages):
     "messages",
     (
         [
-            MessageEpisode(message_id=11, message_position=0),
-            MessageEpisode(message_id=11, message_position=1),
+            MessageEpisode(message_id=11, session_id="session-1", message_position=0),
+            MessageEpisode(message_id=11, session_id="session-1", message_position=1),
         ],
         [
-            MessageEpisode(message_id=1, message_position=0),
-            MessageEpisode(message_id=1, message_position=1),
+            MessageEpisode(message_id=1, session_id="session-1", message_position=0),
+            MessageEpisode(message_id=1, session_id="session-1", message_position=1),
         ],
     ),
 )
@@ -114,7 +115,9 @@ def test_episode_rejects_duplicate_or_excess_focus_entities():
         project_id="project-1",
         session_id="session-1",
         summary="The team agreed to build the storage slice first.",
-        messages=[MessageEpisode(message_id=11, message_position=0)],
+        messages=[
+            MessageEpisode(message_id=11, session_id="session-1", message_position=0)
+        ],
     )
 
     with pytest.raises(ValidationError):
@@ -143,7 +146,9 @@ def test_episode_model_copy_keeps_pydantic_semantics_and_validated_copy_checks_u
         project_id="project-1",
         session_id="session-1",
         summary="The team agreed to build the storage slice first.",
-        messages=[MessageEpisode(message_id=11, message_position=0)],
+        messages=[
+            MessageEpisode(message_id=11, session_id="session-1", message_position=0)
+        ],
     )
 
     unchecked = episode.model_copy(update={"messages": []})

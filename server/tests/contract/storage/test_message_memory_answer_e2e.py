@@ -4,16 +4,20 @@ import hashlib
 import json
 import os
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 
-from common.schema.episode.generation import LLMEpisodeDecision
+from common.schema.episode.generation import (
+    LLMEpisodeDecision,
+    LLMEpisodeWindowDecision,
+)
 from common.schema.primitives import Message
 from common.schema.settings import (
     EpisodeSettings,
-    IngestionSettings,
     RedisConnectionSettings,
 )
 from common.schema.source.locators import PastedTextLocator
@@ -26,10 +30,11 @@ from core.knowledge.store import KnowledgeStore
 from core.session.context import Session
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from tests.fixtures.factories import make_domain_config
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def isolated_e2e_scope():
     """Use one unique project and clean only that project after the test."""
 
@@ -47,10 +52,15 @@ async def isolated_e2e_scope():
     try:
         await client.execute(
             """
-            INSERT INTO projects (project_id, user_name, name)
-            VALUES (%s, %s, %s)
+            INSERT INTO projects (project_id, user_name, name, domain_config)
+            VALUES (%s, %s, %s, %s)
             """,
-            (project_id, user_name, "Message memory e2e"),
+            (
+                project_id,
+                user_name,
+                "Message memory e2e",
+                json.dumps(asdict(make_domain_config())),
+            ),
         )
         project_created = True
         await client.execute(
@@ -79,22 +89,26 @@ class DeterministicEpisodeLLM:
     """Return a valid local-reference decision without network access."""
 
     async def generate_structured(self, **kwargs):
-        assert kwargs["response_model"] is LLMEpisodeDecision
-        return LLMEpisodeDecision(
-            action="create",
-            summary="The team agreed to use durable episodic memory for retrieval.",
-            new_developments=["The memory path is now grounded in source messages."],
-            message_influences=[
-                {
-                    "message_id": "m1",
-                    "influence_weight": 0.8,
-                    "influence_reason": "The first message stated the design goal.",
-                },
-                {
-                    "message_id": "m2",
-                    "influence_weight": 0.9,
-                    "influence_reason": "The second message recorded the decision.",
-                },
+        assert kwargs["response_model"] is LLMEpisodeWindowDecision
+        return LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    action="create",
+                    summary="The team agreed to use durable episodic memory for retrieval.",
+                    new_developments=["The memory path is now grounded in source messages."],
+                    message_influences=[
+                        {
+                            "message_id": "m1",
+                            "influence_weight": 0.8,
+                            "influence_reason": "The first message stated the design goal.",
+                        },
+                        {
+                            "message_id": "m2",
+                            "influence_weight": 0.9,
+                            "influence_reason": "The second message recorded the decision.",
+                        },
+                    ],
+                )
             ],
         )
 
@@ -137,43 +151,40 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
     session_id = isolated_e2e_scope["session_id"]
     message_rows = await real_postgres_client.fetch_all(
         "SELECT nextval('public.message_id_seq') AS message_id "
-        "FROM generate_series(1, 2)"
+        "FROM generate_series(1, 8)"
     )
-    first_message_id, second_message_id = (
-        int(row["message_id"]) for row in message_rows
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO messages (
-            user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, episode_eligible
+    message_ids = [int(row["message_id"]) for row in message_rows]
+    first_message_id, second_message_id = message_ids[:2]
+    contents = [
+        "We need durable episodic memory for retrieval.",
+        "Agreed: source messages must ground every memory answer.",
+        *[f"Supporting retrieval context {index}." for index in range(3, 9)],
+    ]
+    for index, (message_id, content) in enumerate(zip(message_ids, contents)):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO messages (
+                user_name, session_id, message_id, project_id, role, content,
+                timestamp_ms, episode_eligible, ingestion_state
+            )
+            VALUES (%s, %s, %s, %s, 'user', %s, %s, TRUE, 'processed')
+            """,
+            (
+                user_name,
+                session_id,
+                message_id,
+                project_id,
+                content,
+                1700000000000 + index * 1000,
+            ),
         )
-        VALUES
-            (%s, %s, %s, %s, 'user',
-             'We need durable episodic memory for retrieval.',
-             1700000000000, TRUE),
-            (%s, %s, %s, %s, 'user',
-             'Agreed: source messages must ground every memory answer.',
-             1700000001000, TRUE)
-        """,
-        (
-            user_name,
-            session_id,
-            first_message_id,
-            project_id,
-            user_name,
-            session_id,
-            second_message_id,
-            project_id,
-        ),
-    )
 
     embedding_service = DeterministicEmbeddingService()
     knowledge_store = KnowledgeStore(real_postgres_client, embedding_service)
     job = EpisodeJob(
         knowledge_store=knowledge_store,
-        settings=EpisodeSettings(batch_multiple=1, max_message_count=2),
-        ingestion_settings=IngestionSettings(batch_size=2),
+        settings=EpisodeSettings(max_message_count=8),
+        episode_window_size=8,
         llm=DeterministicEpisodeLLM(),
         embedding_service=embedding_service,
     )
@@ -181,15 +192,15 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
     build = await job.process_next_window(
         user_name=user_name,
         project_id=project_id,
-        session_id=session_id,
     )
 
     assert build is not None
-    assert build.outcome_action == "create"
-    assert build.outcome_episode_id
+    assert len(build.final_episodes) == 1
+    episode_id = build.final_episodes[0].episode_id
+    assert build.final_episodes[0].generator_metadata["decision_action"] == "create"
 
     episode = await knowledge_store.get_episode(
-        build.outcome_episode_id,
+        episode_id,
         user_name=user_name,
         project_id=project_id,
         session_id=session_id,
@@ -207,8 +218,8 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
         project_id=project_id,
         session_id=session_id,
     )
-    assert checkpoint.last_evaluated_message_id == second_message_id
-    assert checkpoint.last_evaluated_timestamp_ms == 1700000001000
+    assert checkpoint.last_evaluated_message_id == message_ids[-1]
+    assert checkpoint.last_evaluated_timestamp_ms == 1700000007000
 
     async def no_op_emit(*args, **kwargs):
         return None
@@ -224,7 +235,7 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
     assert result["resolution"] == "question"
     retrieved = result["results"][0]["episodes"]
     assert len(retrieved) == 1
-    assert retrieved[0]["episode_id"] == build.outcome_episode_id
+    assert retrieved[0]["episode_id"] == episode_id
     assert retrieved[0]["summary"].startswith("The team agreed")
     assert [evidence["message_id"] for evidence in retrieved[0]["evidence"]] == [
         second_message_id,
@@ -303,13 +314,12 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_red
             "project_id": project_id,
             "session_id": session_id,
         }
-        buffered = await redis.lrange(
-            RedisKeys.buffer(user_name, session_id),
-            0,
-            -1,
-        )
-        assert len(buffered) == 1
-        assert json.loads(buffered[0])["id"] == accepted.id
+        assert await redis.get(
+            RedisKeys.heartbeat_counter(user_name, session_id)
+        ) == "1"
+        assert await redis.get(
+            RedisKeys.project_heartbeat_counter(user_name, project_id)
+        ) == "1"
         assert activity_calls == [session_id]
         assert context.consumer.signaled == 1
 

@@ -10,6 +10,7 @@ from core.ingestion import graph_commit as write_graph_db
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.graph_commit import GraphWritePostgresCommittedError
 from infrastructure.work_record import WorkRecord
+from tests.fixtures.ingestion import ingestion_policy
 
 
 class _Resolver:
@@ -64,6 +65,7 @@ def _prepared_batch() -> IngestionBatch:
         session_id="session-1",
         messages=[{"id": 7, "message": "Bobby joined the project."}],
         session_text="[USER]: Bobby joined the project.",
+        policy=ingestion_policy(),
     )
     batch.validate_input()
     batch.mark_extracted()

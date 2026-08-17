@@ -456,7 +456,7 @@ class ToolQueries:
             r.canonical_relationship_type,
             r.observed_relationship_label,
             r.domain_status,
-            r.symmetric,
+            r."symmetric",
             r.weight as connection_strength,
             COALESCE(
                 (

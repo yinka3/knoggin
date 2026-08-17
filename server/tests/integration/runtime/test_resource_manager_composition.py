@@ -162,6 +162,7 @@ async def test_real_runtime_startup_and_shutdown_drains_active_work(
     assert manager.embedding is None
     assert manager.llm_service is None
     assert manager.work_snapshot() == {
+        "postgres": None,
         "background_work": None,
         "model_work": None,
     }

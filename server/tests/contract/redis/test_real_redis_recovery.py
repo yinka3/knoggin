@@ -8,7 +8,11 @@ from uuid import uuid4
 import pytest
 
 from common.schema.ingestion.contracts import CandidateSuggestion
-from common.schema.settings import DLQSettings, RedisConnectionSettings
+from common.schema.settings import (
+    DLQSettings,
+    IngestionSettings,
+    RedisConnectionSettings,
+)
 from core.ingestion import pipeline as ingestion_pipeline
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.pipeline import IngestionPipeline
@@ -26,6 +30,7 @@ from core.ingestion.recovery.replay_job import DLQReplayJob
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.work_record import WorkRecord
+from tests.fixtures.ingestion import ingestion_policy
 
 
 class _FailCompletedAckRedis:
@@ -69,6 +74,35 @@ class _ReplayStore:
     def __init__(self):
         self.message_logs = []
         self.candidate_suggestions = []
+        self.parked = {}
+
+    async def get_requeued_dlq_items(self, **_kwargs):
+        return []
+
+    async def park_dlq_item(self, *, dlq_id, user_name, project_id, entry):
+        self.parked[(user_name, project_id, dlq_id)] = {
+            **dict(entry),
+            "status": "parked",
+        }
+
+    async def get_parked_dlq_item(self, *, dlq_id, user_name, project_id):
+        return self.parked.get((user_name, project_id, dlq_id))
+
+    async def mark_parked_dlq_item_requeued(self, *, dlq_id, user_name, project_id):
+        entry = self.parked.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "parked":
+            return False
+        entry["status"] = "requeued"
+        return True
+
+    async def mark_parked_dlq_item_completed_if_requeued(
+        self, *, dlq_id, user_name, project_id
+    ):
+        entry = self.parked.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "requeued":
+            return False
+        entry["status"] = "completed"
+        return True
 
     async def save_message_logs(self, messages):
         self.message_logs.extend(messages)
@@ -85,13 +119,14 @@ class _ReplayProcessor:
         self.project_id = project_id
         self.knowledge_store = store
 
-    def open_batch(self, messages, session_text, *, session_id):
+    def open_batch(self, messages, session_text, *, session_id, policy):
         return IngestionBatch.open(
             user_name=self.user_name,
             project_id=self.project_id,
             session_id=session_id,
             messages=messages,
             session_text=session_text,
+            policy=policy,
         )
 
     async def process(self, batch):
@@ -119,6 +154,9 @@ def _graph_committed_payload(
         session_id=session_id,
         messages=[{"id": message_id, "message": "Recover this checkpoint."}],
         session_text="[USER]: Recover this checkpoint.",
+        policy=ingestion_policy(
+            ingestion=IngestionSettings(checkpoint_interval=2)
+        ),
         batch_id=f"batch-{uuid4()}",
     )
     batch.validate_input()
@@ -135,7 +173,6 @@ def _graph_committed_payload(
     batch.complete()
     batch.mark_message_logs_handled()
     batch.mark_candidate_suggestions_handled()
-    batch.set_checkpoint_policy(2)
     batch.set_graph_write_buffers(
         graph_work_unit=WorkRecord.for_graph_write(batch.scope),
         safe_entity_ids=set(),
@@ -149,6 +186,8 @@ def _graph_committed_payload(
         dirty_entity_ids=set(),
     )
     batch.seal_for_commit()
+    batch.graph_work_unit.start()
+    batch.graph_work_unit.succeed()
     batch.mark_graph_committed()
     return DLQPayload.from_ingestion_batch(batch).model_dump(mode="json")
 
@@ -185,7 +224,7 @@ async def test_real_redis_recovers_an_abandoned_checkpoint_claim(monkeypatch):
     client = await manager.connect()
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(max_attempts=2),
@@ -268,7 +307,7 @@ async def test_real_redis_claim_race_has_one_owner(monkeypatch):
     client = await manager.connect()
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(max_attempts=2),
@@ -332,7 +371,7 @@ async def test_real_redis_live_claim_is_not_requeued_on_restart(monkeypatch):
     client = await manager.connect()
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(max_attempts=2),
@@ -391,7 +430,7 @@ async def test_real_redis_transient_retry_reaches_max_attempts_then_parks(monkey
     client = _FailCheckpointEvalRedis(raw_client)
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(max_attempts=2),
@@ -457,7 +496,7 @@ async def test_real_redis_ack_failure_falls_back_to_parked_state(monkeypatch):
     client = _FailCompletedAckRedis(raw_client, state_key)
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(max_attempts=2),
@@ -518,7 +557,7 @@ async def test_real_redis_corrupt_json_is_parked_with_stable_id(monkeypatch):
     client = await manager.connect()
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(max_attempts=2),
@@ -561,7 +600,7 @@ async def test_real_redis_prunes_completed_markers_without_touching_queue(monkey
     client = await manager.connect()
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(completed_state_retention_hours=0.25),
@@ -610,7 +649,7 @@ async def test_real_redis_dlq_enqueue_deduplicates_logical_work(monkeypatch):
         processor=None,
         cpu_executor=None,
         user_name=user_name,
-        topic_config=None,
+        compiled_domain=ingestion_policy().domain,
         get_next_ent_id=None,
     )
     messages = [{"id": 5, "message": "same logical DLQ work"}]
@@ -657,7 +696,7 @@ async def test_real_redis_scheduler_policy_is_explicitly_disabled(monkeypatch):
     client = await manager.connect()
     job = DLQReplayJob(
         entities=SimpleNamespace(project_id=project_id),
-        processor=SimpleNamespace(knowledge_store=object()),
+        processor=SimpleNamespace(knowledge_store=_ReplayStore()),
         write_to_graph=None,
         redis_client=client,
         settings=DLQSettings(),
@@ -685,6 +724,9 @@ def _completed_replay_payload(
             }
         ],
         session_text="[USER]: Replay this durable stage.",
+        policy=ingestion_policy(
+            ingestion=IngestionSettings(checkpoint_interval=10)
+        ),
         batch_id=f"batch-{uuid4()}",
     )
     batch.validate_input()
@@ -715,7 +757,6 @@ def _completed_replay_payload(
     )
     batch.set_relationship_observations([])
     batch.complete()
-    batch.set_checkpoint_policy(10)
     return DLQPayload.from_ingestion_batch(batch).model_dump(mode="json")
 
 
@@ -735,6 +776,8 @@ async def _replay_graph_callback(batch):
         dirty_entity_ids=set(),
     )
     batch.seal_for_commit()
+    batch.graph_work_unit.start()
+    batch.graph_work_unit.succeed()
     batch.mark_graph_committed()
     return True, None
 
@@ -778,6 +821,12 @@ async def test_real_redis_replays_processing_stage_then_checkpoint(monkeypatch):
         "session_id": session_id,
         "messages": [{"id": 61, "message": "Replay this durable stage."}],
         "session_text": "[USER]: Replay this durable stage.",
+        "batch_result": _completed_replay_payload(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            message_id=61,
+        ),
     }
     dlq_id = ensure_dlq_id(entry)
 

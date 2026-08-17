@@ -240,6 +240,18 @@ class ConflictPacketBuilder:
                 prompt = self._prompt(compacted_rows, compacted=True)
                 if self.token_counter(prompt) > max_tokens:
                     if not accepted_ids:
+                        while retained_overlap and self.token_counter(prompt) > max_tokens:
+                            removed = retained_overlap.pop(0)
+                            records.pop(int(removed["observation_id"]), None)
+                            candidate = dict(records)
+                            candidate[observation_id] = row
+                            compacted_rows = self._collapse(candidate.values())
+                            prompt = self._prompt(compacted_rows, compacted=True)
+                        if self.token_counter(prompt) <= max_tokens:
+                            records = candidate
+                            accepted_ids.append(observation_id)
+                            compacted = True
+                            continue
                         raise ValueError(
                             "A single conflict-discovery observation exceeds the token ceiling"
                         )

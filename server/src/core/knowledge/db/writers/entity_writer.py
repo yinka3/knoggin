@@ -427,14 +427,14 @@ class EntityWriter:
                             canonical_relationship_type,
                             observed_relationship_label,
                             domain_status,
-                            symmetric,
+                            "symmetric",
                             weight,
                             confidence,
                             context,
                             last_seen_ms
                         )
                         SELECT
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
                         WHERE EXISTS (
                             SELECT 1
                             FROM entities
@@ -471,7 +471,7 @@ class EntityWriter:
                                 relationships.observed_relationship_label
                             ),
                             domain_status = EXCLUDED.domain_status,
-                            symmetric = EXCLUDED.symmetric,
+                            "symmetric" = EXCLUDED."symmetric",
                             weight = relationships.weight + CASE
                                 WHEN EXISTS (
                                     SELECT 1

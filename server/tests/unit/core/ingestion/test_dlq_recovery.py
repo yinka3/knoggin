@@ -18,10 +18,11 @@ from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
 from infrastructure.work_record import WorkRecord
 from tests.fixtures.fakes import FakeRedis
+from tests.fixtures.ingestion import ingestion_policy
 
 
 def _job(redis: FakeRedis, *, max_attempts: int = 2) -> DLQReplayJob:
-    processor = SimpleNamespace(knowledge_store=object())
+    processor = SimpleNamespace(knowledge_store=_ReplayStore())
     entities = SimpleNamespace(project_id="project-1")
     return DLQReplayJob(
         entities=entities,
@@ -30,6 +31,18 @@ def _job(redis: FakeRedis, *, max_attempts: int = 2) -> DLQReplayJob:
         redis_client=redis,
         settings=DLQSettings(max_attempts=max_attempts),
     )
+
+
+async def _empty_requeues():
+    return []
+
+
+class _ReplayStore:
+    async def get_requeued_dlq_items(self, **_kwargs):
+        return []
+
+    async def park_dlq_item(self, **_kwargs):
+        return True
 
 
 def _context() -> JobContext:
@@ -43,6 +56,7 @@ def _graph_committed_payload() -> dict:
         session_id="session-1",
         messages=[{"id": 7, "message": "Ada met Grace."}],
         session_text="[USER]: Ada met Grace.",
+        policy=ingestion_policy(),
         batch_id="batch-1",
     )
     batch.validate_input()
@@ -72,6 +86,8 @@ def _graph_committed_payload() -> dict:
         dirty_entity_ids=set(),
     )
     batch.seal_for_commit()
+    batch.graph_work_unit.start()
+    batch.graph_work_unit.succeed()
     batch.mark_graph_committed()
     return DLQPayload.from_ingestion_batch(batch).model_dump(mode="json")
 

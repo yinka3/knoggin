@@ -424,9 +424,37 @@ class IngestionWorker:
                     session_id=self.session_id,
                     batch_id=claim.batch_id,
                 )
-                batch.record_checkpoint_progress(current_count=len(messages))
-                batch.mark_checkpoint_committed()
-                self._mark_batch_work_succeeded(batch)
+                try:
+                    # Postgres remains the queue owner, but Redis retains the
+                    # operational cursor used by checkpoint observers and DLQ
+                    # replay.  Commit it after the durable claim so an outage
+                    # can never cause the canonical user turn to be redriven.
+                    await self._mark_batch_processed(batch)
+                except Exception as exc:
+                    self._record_health_failure("checkpoint")
+                    self._mark_batch_work_failed(batch, exc)
+                    dlq_success = await self.processor.move_to_dead_letter(
+                        batch.messages,
+                        f"CHECKPOINT_COMMIT_FAILED: {type(exc).__name__}: {exc}",
+                        stage="checkpoint",
+                        batch=batch,
+                        session_id=self.session_id,
+                    )
+                    if not dlq_success:
+                        logger.critical(
+                            "Checkpoint failed after durable claim {} and could not "
+                            "be recorded in the DLQ: {}",
+                            claim.batch_id,
+                            exc,
+                        )
+                    else:
+                        logger.error(
+                            "Checkpoint failed after durable claim {}; queued for "
+                            "checkpoint-only replay: {}",
+                            claim.batch_id,
+                            exc,
+                        )
+                    break
                 processed += 1
                 message_ids.extend(message["id"] for message in messages)
                 self._health_last_success_at = get_now()

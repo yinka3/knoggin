@@ -61,7 +61,10 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
             )
             """
         )
-    with pytest.raises(CheckViolation, match="relationships_identity_matches_fields"):
+    with pytest.raises(
+        CheckViolation,
+        match="relationship endpoints must belong to the relationship user and project scope",
+    ):
         await real_postgres_client.execute(
             """
             INSERT INTO relationships (

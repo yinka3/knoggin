@@ -1,7 +1,9 @@
 """Shared real-service fixtures for ingestion integration contracts."""
 
+import json
 import os
 import uuid
+from dataclasses import asdict
 
 import pytest
 
@@ -9,6 +11,7 @@ from common.schema.settings import RedisConnectionSettings
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from tests.fixtures.factories import make_domain_config
 
 
 @pytest.fixture
@@ -26,8 +29,16 @@ async def real_server_scope():
     project_id = f"server-acceptance-project-{suffix}"
     session_id = f"server-acceptance-session-{suffix}"
     await postgres.execute(
-        "INSERT INTO projects (project_id, user_name, name) VALUES (%s, %s, %s)",
-        (project_id, user_name, "Server acceptance integration"),
+        """
+        INSERT INTO projects (project_id, user_name, name, domain_config)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (
+            project_id,
+            user_name,
+            "Server acceptance integration",
+            json.dumps(asdict(make_domain_config())),
+        ),
     )
     await postgres.execute(
         "INSERT INTO sessions (session_id, user_name, project_id) VALUES (%s, %s, %s)",

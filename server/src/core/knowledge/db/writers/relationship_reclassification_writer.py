@@ -99,7 +99,7 @@ class RelationshipReclassificationWriter:
                 r.canonical_relationship_type,
                 r.observed_relationship_label,
                 r.domain_status,
-                r.symmetric,
+                r."symmetric",
                 observed.source_type,
                 observed.target_type
             FROM public.relationships r
@@ -218,7 +218,7 @@ class RelationshipReclassificationWriter:
                 SELECT
                     r.relationship_id, r.project_id, r.entity_a_id, r.entity_b_id,
                     r.relationship_type, r.canonical_relationship_type,
-                    r.observed_relationship_label, r.domain_status, r.symmetric,
+                    r.observed_relationship_label, r.domain_status, r."symmetric",
                     observed.source_type, observed.target_type
                 FROM public.relationships r
                 LEFT JOIN LATERAL (
@@ -262,7 +262,7 @@ class RelationshipReclassificationWriter:
                         relationship_id, user_name, project_id, entity_a_id,
                         entity_b_id, relationship_type,
                         canonical_relationship_type, observed_relationship_label,
-                        domain_status, symmetric, weight, confidence, context,
+                        domain_status, "symmetric", weight, confidence, context,
                         last_seen_ms
                     )
                     SELECT
@@ -287,7 +287,7 @@ class RelationshipReclassificationWriter:
                         relationship_type = EXCLUDED.relationship_type,
                         canonical_relationship_type = EXCLUDED.canonical_relationship_type,
                         domain_status = EXCLUDED.domain_status,
-                        symmetric = EXCLUDED.symmetric,
+                        "symmetric" = EXCLUDED."symmetric",
                         context = COALESCE(EXCLUDED.context, public.relationships.context),
                         last_seen_ms = GREATEST(
                             COALESCE(public.relationships.last_seen_ms, 0),

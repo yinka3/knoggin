@@ -176,17 +176,19 @@ class EpisodeWriter:
                 checkpoints[session_id] = await self._lock_checkpoint(
                     cur, user_name=user_name, project_id=project_id, session_id=session_id
                 )
-            if all(
-                await self._window_is_checkpointed(
-                    cur,
-                    [int(message["message_id"]) for message in messages],
-                    checkpoint=checkpoints[session_id],
-                    user_name=user_name,
-                    project_id=project_id,
-                    session_id=session_id,
+            already_checkpointed = []
+            for session_id, messages in by_session.items():
+                already_checkpointed.append(
+                    await self._window_is_checkpointed(
+                        cur,
+                        [int(message["message_id"]) for message in messages],
+                        checkpoint=checkpoints[session_id],
+                        user_name=user_name,
+                        project_id=project_id,
+                        session_id=session_id,
+                    )
                 )
-                for session_id, messages in by_session.items()
-            ):
+            if all(already_checkpointed):
                 return False
             next_checkpoints: Dict[str, EpisodeCheckpoint] = {}
             for session_id, messages in by_session.items():
@@ -244,7 +246,12 @@ class EpisodeWriter:
         entities = await self._load_entities_by_message(cur, source_ids, project_id=episode.project_id)
         relationships = await self._load_project_relationships(cur, source_ids, project_id=episode.project_id)
         self._validate_ranked_context(episode.entities, episode.relationships, entities, relationships)
-        await self._upsert_episode(cur, episode, timestamps)
+        await self._upsert_episode(
+            cur,
+            episode,
+            timestamps,
+            session_id=episode.session_id,
+        )
         await self._upsert_messages(cur, episode)
         await self._upsert_entities(cur, episode, entities, timestamps)
         await self._upsert_relationships(cur, episode, relationships)
@@ -354,7 +361,12 @@ class EpisodeWriter:
             entities_by_message,
             relationships_by_message,
         )
-        await self._upsert_episode(cur, episode, source_message_timestamps)
+        await self._upsert_episode(
+            cur,
+            episode,
+            source_message_timestamps,
+            session_id=session_id,
+        )
         await self._upsert_messages(cur, episode)
         await self._upsert_entities(
             cur,
@@ -654,6 +666,8 @@ class EpisodeWriter:
         cur,
         episode: Episode,
         source_message_timestamps: Dict[int, int | None],
+        *,
+        session_id: str,
     ) -> None:
         timestamps = [
             timestamp
@@ -683,6 +697,7 @@ class EpisodeWriter:
             INSERT INTO episodes (
                 episode_id,
                 project_id,
+                session_id,
                 summary,
                 new_developments,
                 updates,
@@ -699,7 +714,7 @@ class EpisodeWriter:
                 updated_at
             )
             VALUES (
-                %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+                %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
                 %s, %s, %s, %s, %s::vector, %s::jsonb, %s::jsonb, %s, %s, %s
             )
             ON CONFLICT (episode_id) DO UPDATE
@@ -726,6 +741,7 @@ class EpisodeWriter:
             (
                 episode.episode_id,
                 episode.project_id,
+                session_id,
                 episode.summary,
                 json.dumps(episode.new_developments),
                 json.dumps(episode.updates),

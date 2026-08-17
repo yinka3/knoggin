@@ -5,9 +5,13 @@ import os
 import uuid
 
 import pytest
+import pytest_asyncio
 
-from common.schema.episode.generation import LLMEpisodeDecision
-from common.schema.settings import EpisodeSettings, IngestionSettings
+from common.schema.episode.generation import (
+    LLMEpisodeDecision,
+    LLMEpisodeWindowDecision,
+)
+from common.schema.settings import EpisodeSettings
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.store import KnowledgeStore
@@ -16,14 +20,18 @@ from infrastructure.postgres_client import PostgresClient
 
 class DeterministicEpisodeLLM:
     async def generate_structured(self, **kwargs):
-        assert kwargs["response_model"] is LLMEpisodeDecision
-        return LLMEpisodeDecision(
-            action="create",
-            summary="The durable episode coordination path completed.",
-            new_developments=["The source window was persisted exactly once."],
-            message_influences=[
-                {"message_id": "m1", "influence_weight": 0.8},
-                {"message_id": "m2", "influence_weight": 0.9},
+        assert kwargs["response_model"] is LLMEpisodeWindowDecision
+        return LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    action="create",
+                    summary="The durable episode coordination path completed.",
+                    new_developments=["The source window was persisted exactly once."],
+                    message_influences=[
+                        {"message_id": "m1", "influence_weight": 0.8},
+                        {"message_id": "m2", "influence_weight": 0.9},
+                    ],
+                )
             ],
         )
 
@@ -58,7 +66,7 @@ class FailOnceEmbeddingService(DeterministicEmbeddingService):
         return await super().encode(texts)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def episode_service_scope():
     dsn = os.environ.get(
         "KNOGGIN_TEST_DATABASE_URL",
@@ -74,8 +82,16 @@ async def episode_service_scope():
             project_id = f"episode-coord-project-{suffix}-{index}"
             session_id = f"episode-coord-session-{suffix}-{index}"
             await postgres.execute(
-                "INSERT INTO projects (project_id, user_name, name) VALUES (%s, %s, %s)",
-                (project_id, user_name, "Episode coordination contract"),
+                """
+                INSERT INTO projects (project_id, user_name, name, domain_config)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (
+                    project_id,
+                    user_name,
+                    "Episode coordination contract",
+                    '{"version":1,"topics":{"Identity":{"active":true},"General":{"active":true}},"entity_types":{"Identity":{"topic":"Identity","labels":["person"]},"Concept":{"topic":"General","labels":["concept"]}},"relationships":{}}',
+                ),
             )
             await postgres.execute(
                 "INSERT INTO sessions (session_id, user_name, project_id) VALUES (%s, %s, %s)",
@@ -103,32 +119,33 @@ async def episode_service_scope():
 
 async def _insert_eligible_window(postgres, *, user_name, project_id, session_id):
     rows = await postgres.fetch_all(
-        "SELECT nextval('public.message_id_seq') AS message_id FROM generate_series(1, 2)"
+        "SELECT nextval('public.message_id_seq') AS message_id FROM generate_series(1, 8)"
     )
     message_ids = [int(row["message_id"]) for row in rows]
-    await postgres.execute(
-        """
-        INSERT INTO messages (
-            user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, episode_eligible
+    contents = [
+        "First durable coordination message.",
+        "Second durable coordination message.",
+        *[f"Supporting coordination context {index}." for index in range(3, 9)],
+    ]
+    for index, (message_id, content) in enumerate(zip(message_ids, contents)):
+        await postgres.execute(
+            """
+            INSERT INTO messages (
+                user_name, session_id, message_id, project_id, role, content,
+                timestamp_ms, episode_eligible, ingestion_state
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, 'processed')
+            """,
+            (
+                user_name,
+                session_id,
+                message_id,
+                project_id,
+                "user",
+                content,
+                1700000000000 + index * 1000,
+            ),
         )
-        VALUES
-            (%s, %s, %s, %s, 'user', 'First durable coordination message.',
-             1700000000000, TRUE),
-            (%s, %s, %s, %s, 'assistant', 'Second durable coordination message.',
-             1700000001000, TRUE)
-        """,
-        (
-            user_name,
-            session_id,
-            message_ids[0],
-            project_id,
-            user_name,
-            session_id,
-            message_ids[1],
-            project_id,
-        ),
-    )
     return message_ids
 
 
@@ -136,8 +153,8 @@ def _episode_job(store, llm, embedding=None):
     embedding = embedding or DeterministicEmbeddingService()
     return EpisodeJob(
         knowledge_store=store,
-        settings=EpisodeSettings(batch_multiple=1, max_message_count=2),
-        ingestion_settings=IngestionSettings(batch_size=2),
+        settings=EpisodeSettings(max_message_count=8),
+        episode_window_size=8,
         llm=llm,
         embedding_service=embedding,
     )
@@ -163,11 +180,11 @@ async def test_real_episode_jobs_converge_when_same_window_runs_concurrently(
     results = await asyncio.gather(
         job.process_next_window(
             user_name=resources["user_name"],
-            **scope,
+            project_id=scope["project_id"],
         ),
         job.process_next_window(
             user_name=resources["user_name"],
-            **scope,
+            project_id=scope["project_id"],
         ),
     )
 
@@ -186,7 +203,7 @@ async def test_real_episode_jobs_converge_when_same_window_runs_concurrently(
         **scope,
     )
     assert checkpoint.last_evaluated_message_id == message_ids[-1]
-    assert checkpoint.last_evaluated_timestamp_ms == 1700000001000
+    assert checkpoint.last_evaluated_timestamp_ms == 1700000007000
 
 
 @pytest.mark.integration
@@ -206,26 +223,26 @@ async def test_real_episode_persistence_failure_rolls_back_for_retry(
     embedding = DeterministicEmbeddingService()
     store = KnowledgeStore(resources["postgres"], embedding)
     writer = store._episode_writer
-    original_write_episode = writer._write_episode
+    original_write_episode = writer._write_project_episode
     failed = False
 
-    async def fail_after_relational_write(cur, episode, source_message_ids, **kwargs):
+    async def fail_after_relational_write(cur, episode, *, user_name):
         nonlocal failed
-        await original_write_episode(cur, episode, source_message_ids, **kwargs)
+        await original_write_episode(cur, episode, user_name=user_name)
         if not failed:
             failed = True
             raise ConnectionError("simulated episode transaction outage")
 
-    writer._write_episode = fail_after_relational_write
+    writer._write_project_episode = fail_after_relational_write
     job = _episode_job(store, DeterministicEpisodeLLM())
     try:
         with pytest.raises(ConnectionError, match="transaction outage"):
             await job.process_next_window(
                 user_name=resources["user_name"],
-                **scope,
+                project_id=scope["project_id"],
             )
     finally:
-        writer._write_episode = original_write_episode
+        writer._write_project_episode = original_write_episode
 
     assert await resources["postgres"].fetch_one(
         "SELECT count(*) AS count FROM episodes WHERE project_id = %s AND session_id = %s",
@@ -234,7 +251,7 @@ async def test_real_episode_persistence_failure_rolls_back_for_retry(
 
     retry = await job.process_next_window(
         user_name=resources["user_name"],
-        **scope,
+        project_id=scope["project_id"],
     )
     assert retry is not None
     assert await resources["postgres"].fetch_one(
@@ -264,7 +281,7 @@ async def test_real_episode_embedding_failure_leaves_window_retryable(
     with pytest.raises(ConnectionError, match="embedding outage"):
         await job.process_next_window(
             user_name=resources["user_name"],
-            **scope,
+            project_id=scope["project_id"],
         )
 
     assert await resources["postgres"].fetch_one(
@@ -273,7 +290,7 @@ async def test_real_episode_embedding_failure_leaves_window_retryable(
     ) == {"count": 0}
     retry = await job.process_next_window(
         user_name=resources["user_name"],
-        **scope,
+        project_id=scope["project_id"],
     )
     assert retry is not None
     assert await resources["postgres"].fetch_one(
@@ -302,9 +319,9 @@ async def test_real_episode_jobs_keep_project_and_session_checkpoints_isolated(
 
     results = await asyncio.gather(
         *(
-            job.process_next_window(
-                user_name=resources["user_name"],
-                **scope,
+                job.process_next_window(
+                    user_name=resources["user_name"],
+                    project_id=scope["project_id"],
             )
             for scope in resources["scopes"]
         )

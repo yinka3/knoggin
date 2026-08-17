@@ -4,7 +4,6 @@ import pytest
 
 from core.knowledge.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflicts import (
-    ConflictDiscoveryContinuation,
     ConflictDiscoveryLease,
     ConflictDiscoveryPackage,
     LLMConflictCandidate,
@@ -177,8 +176,10 @@ async def test_oversized_neighborhood_persists_a_continuation_with_overlap():
     ).build(continuation_lease, max_span_days=60, max_tokens=40)
 
     assert next_package is not None
-    assert {seed["observation_id"], *package.continuation.overlap_observation_ids}.issubset(
-        {row["observation_id"] for row in next_package.observations}
+    next_observation_ids = {row["observation_id"] for row in next_package.observations}
+    assert seed["observation_id"] in next_observation_ids
+    assert next_observation_ids.intersection(
+        package.continuation.overlap_observation_ids
     )
 
 

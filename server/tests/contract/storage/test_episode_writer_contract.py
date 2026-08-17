@@ -23,11 +23,13 @@ def make_episode(**overrides):
         messages=[
             MessageEpisode(
                 message_id=11,
+                session_id="session-1",
                 influence_weight=0.6,
                 message_position=0,
             ),
             MessageEpisode(
                 message_id=12,
+                session_id="session-1",
                 influence_weight=0.9,
                 message_position=1,
             ),
@@ -190,8 +192,9 @@ async def test_episode_writer_snapshots_before_consolidation_and_keeps_two_versi
             ),
         )
 
-    assert len(history) == 2
-    assert [item["version"] for item in history] == [2, 3]
+    assert len(history) == 3
+    assert history[-1]["version"] == 3
+    assert [item["version"] for item in history] == [1, 2, 3]
     assert history[-1]["summary"] == "Previous summary."
     assert history[-1]["source_message_ids"] == [11, 12]
 

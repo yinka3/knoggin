@@ -7,13 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.conf.topics_config import TopicConfig
+from common.conf.domain_config import CompiledDomain, DomainConfig
 from common.schema.ingestion.extraction import (
     RelationshipExtraction,
     RelationshipMention,
 )
 from common.schema.primitives import Message
-from common.schema.settings import DLQSettings, IngestionSettings, TopicSchema
+from common.schema.settings import DLQSettings, IngestionSettings
 from core.ingestion.graph_commit import write_ingestion_batch_to_graph
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.recovery.dlq_state import DLQ_STATUS_COMPLETED, ensure_dlq_id
@@ -29,6 +29,12 @@ from tests.integration.ingestion.test_server_flow import _session
 
 class _DeterministicMentionProcessor:
     """Deterministic extraction at the model boundary, with production pipeline state."""
+
+    # IngestionPipeline snapshots these production text-processor settings into
+    # each durable batch before it calls the deterministic extraction hook.
+    gliner_threshold = 0.85
+    vp01_min_confidence = 0.8
+    llm_ner = False
 
     async def extract_mentions(self, batch):
         message_id = int(batch.messages[0]["id"])
@@ -112,25 +118,23 @@ class _FailOnceCheckpointRedis(_RedisProxy):
         return await self.client.eval(*args, **kwargs)
 
 
-class _FailOnceTrimRedis(_RedisProxy):
-    def __init__(self, client):
-        super().__init__(client)
-        self.failed = False
-
-    async def ltrim(self, key, start, end):
-        if not self.failed:
-            self.failed = True
-            raise ConnectionError("source acknowledgement unavailable")
-        return await self.client.ltrim(key, start, end)
-
-
-def _topic_config() -> TopicConfig:
-    return TopicConfig(
+def _compiled_domain() -> CompiledDomain:
+    return DomainConfig.from_mapping(
         {
-            "General": TopicSchema(active=True, labels=[], aliases=[]),
-            "Identity": TopicSchema(active=True, labels=["person"], aliases=["me"]),
+            "version": 1,
+            "topics": {
+                "General": {"active": True},
+                "Identity": {"active": True},
+            },
+            "entity_types": {
+                "Identity": {
+                    "topic": "Identity",
+                    "labels": ["person", "me"],
+                },
+                "General": {"topic": "General", "labels": []},
+            },
         }
-    )
+    ).compile()
 
 
 def _runtime(scope, *, postgres, redis, store=None):
@@ -150,7 +154,7 @@ def _runtime(scope, *, postgres, redis, store=None):
         processor=_DeterministicMentionProcessor(),
         cpu_executor=None,
         user_name=scope["user_name"],
-        topic_config=_topic_config(),
+        compiled_domain=_compiled_domain(),
         get_next_ent_id=store.allocate_entity_id,
         knowledge_store=store,
     )
@@ -180,6 +184,7 @@ def _runtime(scope, *, postgres, redis, store=None):
             batch_size=1,
             batch_debounce_seconds=0,
             batch_timeout=10,
+            ingestion_batch_settle_delay_seconds=0,
             checkpoint_interval=1,
         ),
     )
@@ -204,7 +209,8 @@ def _configure_session(monkeypatch):
         property(
             lambda self: SimpleNamespace(
                 developer_settings=SimpleNamespace(
-                    limits=SimpleNamespace(conversation_context_turns=100)
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
                 )
             )
         ),
@@ -220,6 +226,8 @@ async def _accept_and_flush(context, worker, content):
             timestamp=datetime(2026, 8, 1, 17, 0, tzinfo=timezone.utc),
         )
     )
+    # A manual flush does not bypass the production edit window.
+    await asyncio.sleep(1.05)
     await worker.flush()
     return message
 
@@ -500,28 +508,28 @@ async def test_real_checkpoint_failure_replays_after_graph_commit(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_checkpoint_commit_before_buffer_trim_retries_idempotently(
+async def test_real_durable_claim_completion_is_idempotent(
     real_server_scope, monkeypatch
 ):
-    """A trim outage after checkpoint commit replays the batch without duplication."""
+    """A completed Postgres claim is not redriven by a later worker drain."""
 
     _configure_session(monkeypatch)
     scope = real_server_scope
-    redis = _FailOnceTrimRedis(scope["redis"])
     context, worker, _pipeline, _store, _entities = _runtime(
-        scope, postgres=scope["postgres"], redis=redis
+        scope, postgres=scope["postgres"], redis=scope["redis"]
     )
     try:
         message = await _accept_and_flush(context, worker, "Ada met Grace.")
-        buffer_key = RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        assert await scope["redis"].llen(buffer_key) == 1
         assert await scope["redis"].get(
             RedisKeys.last_processed(scope["user_name"], scope["session_id"])
         ) == str(message.id)
 
-        await worker._drain_buffer(flush_partial=True)
-        assert await scope["redis"].llen(buffer_key) == 0
+        await worker._drain_durable_queue()
         await _assert_graph_state(scope, scope["postgres"], message.id)
+        assert await scope["postgres"].fetch_one(
+            "SELECT ingestion_state FROM messages WHERE message_id = %s",
+            (message.id,),
+        ) == {"ingestion_state": "processed"}
     finally:
         await worker.stop()
 
@@ -531,16 +539,15 @@ async def test_real_checkpoint_commit_before_buffer_trim_retries_idempotently(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_dlq_persistence_before_buffer_ack_converges_after_restart(
+async def test_real_dlq_persistence_keeps_failed_durable_claim_blocked(
     real_server_scope, monkeypatch
 ):
-    """A DLQ item remains recoverable when source-buffer acknowledgement fails."""
+    """A graph failure is captured once without silently redriving the claim."""
 
     _configure_session(monkeypatch)
     scope = real_server_scope
-    redis = _FailOnceTrimRedis(scope["redis"])
     context, worker, pipeline, store, entities = _runtime(
-        scope, postgres=scope["postgres"], redis=redis
+        scope, postgres=scope["postgres"], redis=scope["redis"]
     )
     original_graph_writer = worker.write_to_graph
     failed = True
@@ -555,16 +562,15 @@ async def test_real_dlq_persistence_before_buffer_ack_converges_after_restart(
     worker.write_to_graph = fail_graph_once
     try:
         await _accept_and_flush(context, worker, "Ada Lovelace met Grace Hopper.")
-        buffer_key = RedisKeys.buffer(scope["user_name"], scope["session_id"])
         dlq_key = RedisKeys.dlq(scope["user_name"], scope["project_id"])
-        assert await scope["redis"].llen(buffer_key) == 1
         assert await scope["redis"].llen(dlq_key) == 1
 
-        # A restarted worker retries the source buffer; the deterministic DLQ
-        # identity prevents a second logical DLQ item while the buffer is acked.
-        await worker._drain_buffer(flush_partial=True)
-        assert await scope["redis"].llen(buffer_key) == 0
+        await worker._drain_durable_queue()
         assert await scope["redis"].llen(dlq_key) == 1
+        assert await scope["postgres"].fetch_one(
+            "SELECT ingestion_state FROM messages WHERE session_id = %s",
+            (scope["session_id"],),
+        ) == {"ingestion_state": "blocked"}
         assert (
             await scope["redis"].llen(
                 RedisKeys.dlq_parked(scope["user_name"], scope["project_id"])
@@ -610,18 +616,14 @@ async def test_real_worker_shutdown_drains_active_batch_and_restarts_cleanly(
                 timestamp=datetime(2026, 8, 1, 17, 1, tzinfo=timezone.utc),
             )
         )
+        await asyncio.sleep(1.05)
+        worker.signal()
         await asyncio.wait_for(entered.wait(), timeout=5)
         stopping = asyncio.create_task(worker.stop())
         await asyncio.sleep(0)
         release.set()
         await stopping
 
-        assert (
-            await scope["redis"].llen(
-                RedisKeys.buffer(scope["user_name"], scope["session_id"])
-            )
-            == 0
-        )
         assert (
             await scope["redis"].get(
                 RedisKeys.last_processed(scope["user_name"], scope["session_id"])

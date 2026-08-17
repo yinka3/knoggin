@@ -652,4 +652,4 @@ async def test_concurrent_identical_graph_replays_apply_evidence_once(
     ) == {"count": 2}
     assert await real_postgres_client.fetch_one(
         "SELECT episode_eligible FROM messages WHERE message_id = 308"
-    ) == {"episode_eligible": True}
+    ) == {"episode_eligible": False}

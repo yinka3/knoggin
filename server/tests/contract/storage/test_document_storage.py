@@ -124,11 +124,11 @@ async def test_document_reader_cannot_cross_project_scope(real_postgres_client):
         document_id=document_id,
         session_id=None,
     ) is None
-    assert (await project_two.fetch_documents_by_reference(
+    assert str((await project_two.fetch_documents_by_reference(
         document_id=document_id,
         relative_path=None,
         session_id=None,
-    ))[0]["document_id"] == document_id
+    ))[0]["document_id"]) == document_id
 
 
 @pytest.mark.storage
