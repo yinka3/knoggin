@@ -13,7 +13,7 @@ from common.utils.time_utils import get_now
 from core.health.service import RuntimeHealthService
 from core.project.project_manager import ProjectManager
 from core.session.session_manager import SessionManager
-from infrastructure.resources import ResourceManager
+from runtime.resources import ResourceManager
 
 
 class ShutdownOwner(Protocol):

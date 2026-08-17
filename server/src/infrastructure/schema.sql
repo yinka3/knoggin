@@ -1273,12 +1273,6 @@ ALTER TABLE public.entity_merge_audits
     ADD CONSTRAINT entity_merge_audits_rollback_status_check
         CHECK (rollback_status IN ('unavailable', 'available', 'rolled_back', 'expired', 'failed'));
 
-ALTER TABLE public.agent_tool_audits
-    DROP CONSTRAINT IF EXISTS agent_tool_audits_confirmation_state_check;
-ALTER TABLE public.agent_tool_audits
-    ADD CONSTRAINT agent_tool_audits_confirmation_state_check
-        CHECK (confirmation_state IN ('not_confirmed', 'confirmed'));
-
 ALTER TABLE public.episode_processing_checkpoints
     DROP CONSTRAINT IF EXISTS episode_processing_checkpoints_session_id_fkey;
 
@@ -1531,6 +1525,12 @@ ON public.agent_tool_audits(
 
 CREATE INDEX IF NOT EXISTS agent_tool_audits_run_idx
 ON public.agent_tool_audits(run_id, created_at);
+
+ALTER TABLE public.agent_tool_audits
+    DROP CONSTRAINT IF EXISTS agent_tool_audits_confirmation_state_check;
+ALTER TABLE public.agent_tool_audits
+    ADD CONSTRAINT agent_tool_audits_confirmation_state_check
+        CHECK (confirmation_state IN ('not_confirmed', 'confirmed'));
 
 -- 4. Entity and Message Vector/FTS search (Hybrid storage for the Graph)
 -- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
@@ -1998,6 +1998,11 @@ ALTER TABLE public.project_documents
             AND source_id IS NOT NULL
         )
     );
+ALTER TABLE public.project_documents
+    DROP CONSTRAINT IF EXISTS project_documents_relative_path_size_check;
+ALTER TABLE public.project_documents
+    ADD CONSTRAINT project_documents_relative_path_size_check
+    CHECK (octet_length(relative_path) BETWEEN 1 AND 2048);
 
 CREATE INDEX IF NOT EXISTS project_documents_project_idx
 ON public.project_documents(project_id, created_at DESC);
@@ -2113,16 +2118,41 @@ ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_row INTEGER;
 ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS section_path TEXT[];
 ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS start_paragraph INTEGER;
 ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_paragraph INTEGER;
-ALTER TABLE public.document_chunks DROP COLUMN IF EXISTS search_vector;
-ALTER TABLE public.document_chunks
-    ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
-        to_tsvector(
-            'simple',
-            content || ' ' || relative_path || ' '
-            || COALESCE(symbol_name, '') || ' '
-            || COALESCE(language, '')
-        )
-    ) STORED;
+-- Keep this migration physically idempotent.  Repeatedly dropping and
+-- recreating a PostgreSQL column leaves a dropped attribute behind in the
+-- table descriptor; after enough storage-fixture resets the table reaches
+-- PostgreSQL's 1600-attribute limit even though it has few live columns.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = 'public.document_chunks'::regclass
+          AND attname = 'search_vector'
+          AND NOT attisdropped
+          AND attgenerated <> 's'
+    ) THEN
+        ALTER TABLE public.document_chunks DROP COLUMN search_vector;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute
+        WHERE attrelid = 'public.document_chunks'::regclass
+          AND attname = 'search_vector'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE public.document_chunks
+            ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+                to_tsvector(
+                    'simple',
+                    content || ' ' || relative_path || ' '
+                    || COALESCE(symbol_name, '') || ' '
+                    || COALESCE(language, '')
+                )
+            ) STORED;
+    END IF;
+END $$;
 ALTER TABLE public.document_chunks
     DROP CONSTRAINT IF EXISTS document_chunks_line_range_check;
 ALTER TABLE public.document_chunks

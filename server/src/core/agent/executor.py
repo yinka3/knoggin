@@ -29,19 +29,19 @@ from core.agent.formatters import (
     format_graph_results,
     format_retrieved_messages,
 )
-from core.agent.internals import (
+from core.agent.prompt_context import (
     build_evidence_context,
     build_user_message,
-    execute_tool,
-    localize_agent_tool_result,
-    summarize_result,
 )
 from core.agent.run import AgentRun
-from core.agent.source_adapters import capture_tool_source_candidates
+from core.agent.sources.tool_results import capture_tool_source_candidates
 from core.agent.system_prompt import (
     get_agent_prompt,
     get_fallback_summary_prompt,
 )
+from core.agent.tool_call import ToolCall
+from core.agent.tool_references import localize_agent_tool_result
+from core.agent.tool_runtime import execute_tool, summarize_result
 from core.agent.tools.registry import (
     Tools,
     apply_tool_error_hooks,
@@ -51,7 +51,6 @@ from core.agent.tools.registry import (
     get_runtime_instructions,
     get_tool_schemas,
 )
-from core.agent.types import ToolCall
 from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000

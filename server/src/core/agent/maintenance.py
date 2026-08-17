@@ -1,19 +1,33 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 from common.utils.time_utils import get_now_unix
 from core.agent.tools.registry import (
     get_active_tool_names,
     get_tool_schemas,
 )
-from core.agent.types import MaintenanceCandidate
 from infrastructure.redis_client import RedisKeys
 
 GRAPH_MERGE_SCAN_CANDIDATE = "graph_merge_scan"
 DEFAULT_MAINTENANCE_MAX_ATTEMPTS = 3
 DEFAULT_MAINTENANCE_COOLDOWN_SECONDS = 3600
+
+
+@dataclass(frozen=True)
+class MaintenanceCandidate:
+    """Python-selected autonomous maintenance work offered to an agent run."""
+
+    id: str
+    kind: str
+    reason: str
+    suggested_tool: str
+    priority: str = "normal"
+    metadata: Dict = field(default_factory=dict)
+    attempts: int = 0
+    cooldown_until: Optional[float] = None
 
 
 def active_tool_names(enabled_tools: list[str] | None) -> frozenset[str]:

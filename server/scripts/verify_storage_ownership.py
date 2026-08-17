@@ -18,7 +18,7 @@ if str(SRC) not in sys.path:
 import redis.asyncio as aioredis  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from core.ingestion.dlq_state import (  # noqa: E402
+from core.ingestion.recovery.dlq_state import (  # noqa: E402
     ensure_dlq_id,
     serialize_dlq_entry,
 )

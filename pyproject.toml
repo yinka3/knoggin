@@ -3,6 +3,8 @@ members = ["server", "sdk", "app/backend"]
 
 [dependency-groups]
 dev = [
+    "diff-cover>=9.2.0",
+    "mypy>=1.17.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",

@@ -10,6 +10,7 @@ from loguru import logger
 from pydantic import BaseModel, ValidationError
 
 from common.schema.agent.settings import validate_tool_limit_overrides
+from common.schema.agent.tool_names import get_configurable_tool_names
 from common.schema.settings import RootConfig
 from common.utils.core_utils import safe_update
 
@@ -212,11 +213,9 @@ class ConfigManager:
 
     @staticmethod
     def _validate_runtime_config(config: RootConfig) -> None:
-        """Validate configuration against runtime-owned registries."""
-
-        from core.agent.tools.registry import get_registered_tool_names
+        """Validate configuration against portable tool-name contracts."""
 
         validate_tool_limit_overrides(
             config.developer_settings.limits,
-            get_registered_tool_names(),
+            get_configurable_tool_names(),
         )

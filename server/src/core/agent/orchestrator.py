@@ -21,7 +21,7 @@ from core.agent.executor import AgentExecutor
 from core.agent.maintenance import build_maintenance_candidates
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
-from core.agent.source_adapters import build_pasted_text_candidates
+from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
 
 if TYPE_CHECKING:

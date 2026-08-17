@@ -15,16 +15,16 @@ from common.conf.manager import ConfigManager
 from common.scoping import IDENTITY_ENTITY_ID, build_readable_project_ids
 from common.utils.time_utils import get_now_iso
 from core.community.community_job import AACJob
+from core.ingestion.graph_commit import write_batch_callback
 from core.ingestion.jobs.cleaner_job import EntityCleanupJob
-from core.ingestion.jobs.dlq_job import DLQReplayJob
-from core.ingestion.jobs.episode_job import EpisodeJob
-from core.ingestion.services.pipeline_service import IngestionPipeline
-from core.ingestion.services.processor import TextProcessor
-from core.knowledge.db.write_graph_db import write_batch_callback
+from core.ingestion.pipeline import IngestionPipeline
+from core.ingestion.recovery.replay_job import DLQReplayJob
+from core.ingestion.text_processor import TextProcessor
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
 from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.jobs.audit_retention_cleanup_job import (
     AuditRetentionCleanupJob,
 )
@@ -55,11 +55,12 @@ from core.project.domain_config_store import (
     DomainConfigConflict,
     DomainConfigStore,
 )
-from core.project.state import ProjectState
 from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
 from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
-from infrastructure.resources import ResourceManager
+from runtime.project_factory import ProjectFactory
+from runtime.project_runtime import ProjectRuntime
+from runtime.resources import ResourceManager
 
 
 class ProjectStatus(str, Enum):
@@ -104,9 +105,10 @@ class ProjectManager:
     def __init__(self, resources: ResourceManager, user_name: str):
         self.resources = resources
         self.user_name = user_name
+        self.project_factory = ProjectFactory()
         self.pg = resources.postgres
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
-        self.active_projects: Dict[str, ProjectState] = {}
+        self.active_projects: Dict[str, ProjectRuntime] = {}
         self._identity_initialized = False
         self._maintenance_lock = asyncio.Lock()
         self._closed = False
@@ -316,7 +318,7 @@ class ProjectManager:
         """Validate and optimistically activate a project's domain candidate.
 
         Active runtimes receive the new immutable snapshot through
-        ``ProjectState``.  Projects without a loaded runtime update durable
+        ``ProjectRuntime``.  Projects without a loaded runtime update durable
         storage directly; their next runtime bootstrap reads the new revision.
         """
 
@@ -898,7 +900,7 @@ class ProjectManager:
 
     async def acquire_project_for_session(
         self, project_id: str, session_id: str
-    ) -> ProjectState:
+    ) -> ProjectRuntime:
         """Acquire runtime project state and record durable session membership."""
         async with self._maintenance_lock:
             if self._closed:
@@ -913,7 +915,7 @@ class ProjectManager:
         self,
         project_id: str,
         session_id: str,
-    ) -> AsyncIterator[ProjectState]:
+    ) -> AsyncIterator[ProjectRuntime]:
         """Own one session's lease on a project's in-memory runtime.
 
         A caller that successfully enters this context owns exactly one
@@ -931,7 +933,7 @@ class ProjectManager:
 
     async def _acquire_project_for_session(
         self, project_id: str, session_id: str
-    ) -> ProjectState:
+    ) -> ProjectRuntime:
         if not project_id or not project_id.strip():
             raise ValueError("A persisted project_id is required to acquire a project")
         project = await self.get_project(project_id)
@@ -953,8 +955,8 @@ class ProjectManager:
         )
         return project_state
 
-    async def get_or_start_project(self, project_id: str) -> ProjectState:
-        """Get an existing ProjectState or bootstrap a new one."""
+    async def get_or_start_project(self, project_id: str) -> ProjectRuntime:
+        """Get an existing ProjectRuntime or bootstrap a new one."""
         async with self._maintenance_lock:
             return await self._get_or_start_project(
                 project_id,
@@ -964,7 +966,7 @@ class ProjectManager:
         self,
         project_id: str,
         project_metadata: Optional[dict] = None,
-    ) -> ProjectState:
+    ) -> ProjectRuntime:
         project = project_metadata or await self.get_project(project_id)
         if project is None:
             raise ValueError(
@@ -981,7 +983,7 @@ class ProjectManager:
             self.active_projects[project_id].active_runtime_sessions_count += 1
             return self.active_projects[project_id]
 
-        logger.info(f"Bootstrapping ProjectState for project_id: {project_id}")
+        logger.info(f"Bootstrapping ProjectRuntime for project_id: {project_id}")
         readable_project_ids = await self.get_readable_project_ids(
             project_id,
             project_metadata=project,
@@ -1048,7 +1050,7 @@ class ProjectManager:
         )
         episode_job = self._init_episode_job(project_id)
 
-        project_state = ProjectState(
+        project_state = self.project_factory.create_runtime(
             project_id=project_id,
             entities=entities,
             pipeline=pipeline,
@@ -1318,7 +1320,7 @@ class ProjectManager:
             if state.active_runtime_sessions_count <= 0:
                 await state.shutdown()
                 del self.active_projects[project_id]
-                logger.info(f"Released ProjectState for project_id: {project_id}")
+                logger.info(f"Released ProjectRuntime for project_id: {project_id}")
 
     async def shutdown(self) -> None:
         """Stop every remaining project runtime before shared resources close."""
@@ -1373,7 +1375,7 @@ class ProjectManager:
 
     def _register_background_jobs(
         self,
-        project_state: ProjectState,
+        project_state: ProjectRuntime,
         entities: EntityResolver,
         processor: IngestionPipeline,
         episode_job: Optional[EpisodeJob] = None,

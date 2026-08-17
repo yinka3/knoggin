@@ -5,14 +5,14 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from core.community.community_manager import CommunityManager
 from core.community.policy import CommunityDiscussionAdmissionOutcome
-from core.project.state import ProjectState
 from infrastructure.job.base import BaseJob, JobContext, JobResult
+from runtime.project_runtime import ProjectRuntime
 
 
 class AACJob(BaseJob):
     """Job that periodically triggers the Autonomous Agent Community discussions."""
 
-    def __init__(self, project_state: ProjectState, resources):
+    def __init__(self, project_state: ProjectRuntime, resources):
         self.project_state = project_state
         self.resources = resources
 

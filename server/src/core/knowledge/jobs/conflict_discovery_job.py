@@ -8,9 +8,8 @@ from loguru import logger
 
 from common.schema.settings import ConflictDiscoverySettings
 from core.knowledge.conflicts import LLMConflictDiscoveryResult
+from core.knowledge.store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
-from infrastructure.knowledge_store import KnowledgeStore
-
 
 CONFLICT_DISCOVERY_SYSTEM_PROMPT = """
 You review immutable relationship observations for possible conflicts.

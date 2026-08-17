@@ -23,7 +23,7 @@ from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.services.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:
-    from infrastructure.knowledge_store import KnowledgeStore
+    from core.knowledge.store import KnowledgeStore
 
 
 VECTOR_MERGE_SIM_THRESHOLD = 0.90

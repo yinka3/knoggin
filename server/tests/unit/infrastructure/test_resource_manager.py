@@ -6,7 +6,7 @@ import torch
 
 from common.exceptions import ConfigurationError, DependencyError
 from common.schema.settings import LLMSettings, RootConfig
-from infrastructure import resources as resources_module
+from runtime import resources as resources_module
 
 
 class FakePostgresClient:

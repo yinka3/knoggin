@@ -17,12 +17,10 @@ from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.ingestion.contracts import ExecutionScope
 from common.schema.source.references import SourceReferenceCandidate
+from core.agent.maintenance import MaintenanceCandidate
 from core.agent.tools.registry import (
     get_default_tool_limits,
     get_registered_tool_names,
-)
-from core.agent.types import (
-    MaintenanceCandidate,
 )
 
 
@@ -269,7 +267,7 @@ class AgentRun:
 
         self._require_active()
         # Kept as a local import to avoid the run/internals import cycle.
-        from core.agent.internals import update_accumulators
+        from core.agent.prompt_context import update_accumulators
 
         update_accumulators(self, tool_name, result)
 

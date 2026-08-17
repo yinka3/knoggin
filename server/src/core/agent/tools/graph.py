@@ -8,7 +8,7 @@ from common.utils.events import emit
 if TYPE_CHECKING:
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.services.embedding_service import EmbeddingService
-    from infrastructure.knowledge_store import KnowledgeStore
+    from core.knowledge.store import KnowledgeStore
 
 class GraphTools:
     # Attributes provided by the composed Tools class

@@ -28,8 +28,8 @@ from core.community.policy import (
     CommunityDiscussionAdmissionOutcome,
     CommunityDiscussionPolicy,
 )
-from core.project.state import ProjectState
 from infrastructure.redis_client import RedisKeys
+from runtime.project_runtime import ProjectRuntime
 
 COMMUNITY_ENABLED_TOOLS = [*AAC_READ_TOOL_NAMES, "restore_brain_section"]
 ACTIVE_DISCUSSION_TTL_SECONDS = 2 * 60 * 60
@@ -63,7 +63,7 @@ class CommunityExecutionContext:
     """Minimal project context for AAC agent turns without a session runtime."""
 
     session_id: str
-    project: ProjectState
+    project: ProjectRuntime
     document_service: Optional[object]
 
 
@@ -84,7 +84,7 @@ class CommunityManager:
     return 0
     """
 
-    def __init__(self, project_state: ProjectState, user_name: str, resources):
+    def __init__(self, project_state: ProjectRuntime, user_name: str, resources):
         self.project_state = project_state
         self.user_name = user_name
         self.resources = resources

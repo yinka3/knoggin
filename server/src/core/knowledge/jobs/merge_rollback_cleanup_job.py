@@ -4,8 +4,8 @@ from loguru import logger
 
 from common.schema.settings import MergeRollbackSettings
 from common.utils.time_utils import get_now
+from core.knowledge.store import KnowledgeStore
 from infrastructure.job.base import BaseJob, JobContext, JobResult
-from infrastructure.knowledge_store import KnowledgeStore
 
 
 class MergeCleanupJob(BaseJob):

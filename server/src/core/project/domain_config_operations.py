@@ -1,6 +1,6 @@
 """Pure candidate lifecycle operations for project domain configuration.
 
-The active configuration is stored and installed by :class:`ProjectState` and
+The active configuration is stored and installed by :class:`ProjectRuntime` and
 ``DomainConfigStore``.  This module owns the user-facing workflow around that
 state: turn a complete candidate into a validated value, describe its
 future-facing impact, and only then request an optimistic activation.
@@ -15,7 +15,7 @@ from common.conf.domain_config import DomainConfig, DomainConfigError
 
 if TYPE_CHECKING:
     from core.project.domain_config_store import DomainActivation
-    from core.project.state import ProjectState
+    from runtime.project_runtime import ProjectRuntime
 
 
 DomainCandidate = DomainConfig | Mapping[str, Any]
@@ -382,7 +382,7 @@ class DomainConfigOperations:
 
     @staticmethod
     async def activate(
-        project: "ProjectState",
+        project: "ProjectRuntime",
         candidate: DomainCandidate,
         *,
         expected_version: int,

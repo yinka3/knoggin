@@ -8,6 +8,7 @@ from enum import IntEnum
 from time import perf_counter
 from typing import Awaitable, Callable, Optional, TypeVar
 
+from common.exceptions import KnogginError
 from common.schema.health import sanitize_health_details
 from infrastructure.work_record import WorkRecord
 
@@ -19,6 +20,24 @@ class ModelWorkPriority(IntEnum):
 
     FOREGROUND = 0
     BACKGROUND = 10
+
+
+class ModelWorkRejected(KnogginError):
+    """Raised when a model-work lane reaches its bounded queue limit."""
+
+    def __init__(self, *, priority: ModelWorkPriority, name: str, limit: int, queued: int):
+        lane = priority.name.lower()
+        super().__init__(
+            f"Model work '{name}' was rejected because the {lane} queue is full",
+            code="model_work_rejected",
+            details={
+                "priority": lane,
+                "name": name,
+                "reason": "queue_full",
+                "limit": limit,
+                "queued": queued,
+            },
+        )
 
 
 @dataclass
@@ -47,15 +66,23 @@ class ModelWorkCoordinator:
         *,
         foreground_concurrency: int = 1,
         background_concurrency: int = 1,
+        max_queued_foreground: int = 32,
+        max_queued_background: int = 64,
         foreground_timeout_seconds: float | None = 30.0,
     ):
         if foreground_concurrency < 1 or background_concurrency < 1:
             raise ValueError("each model-work lane must have at least one worker")
+        if max_queued_foreground < 1 or max_queued_background < 1:
+            raise ValueError("each model-work queue limit must be positive")
         if foreground_timeout_seconds is not None and foreground_timeout_seconds <= 0:
             raise ValueError("foreground_timeout_seconds must be positive or None")
         self._executor = executor
         self._foreground_concurrency = foreground_concurrency
         self._background_concurrency = background_concurrency
+        self._max_queued = {
+            ModelWorkPriority.FOREGROUND: max_queued_foreground,
+            ModelWorkPriority.BACKGROUND: max_queued_background,
+        }
         self._foreground_timeout_seconds = foreground_timeout_seconds
         self._queues = {
             ModelWorkPriority.FOREGROUND: asyncio.PriorityQueue(),
@@ -71,6 +98,8 @@ class ModelWorkCoordinator:
         self._completed = 0
         self._failed = 0
         self._timed_out = 0
+        self._cancelled = 0
+        self._rejected = 0
         self._wait_seconds_total = 0.0
         self._run_seconds_total = 0.0
         self._queued_by_priority = {
@@ -140,6 +169,16 @@ class ModelWorkCoordinator:
         future = loop.create_future()
         queued_at = perf_counter()
         priority_name = priority.name.lower()
+        queued = self._queued_by_priority[priority_name]
+        limit = self._max_queued[priority]
+        if queued >= limit:
+            self._rejected += 1
+            raise ModelWorkRejected(
+                priority=priority,
+                name=name,
+                limit=limit,
+                queued=queued,
+            )
         self._submitted += 1
         self._queued_by_priority[priority_name] += 1
         metrics = self._work_by_name.setdefault(
@@ -178,6 +217,11 @@ class ModelWorkCoordinator:
                 task.cancellation_summary = "Foreground deadline exceeded before completion"
                 future.cancel()
                 self._timed_out += 1
+            raise
+        except asyncio.CancelledError:
+            if not future.done():
+                task.cancellation_summary = "Caller cancelled before model work completed"
+                future.cancel()
             raise
 
     async def _worker(self, lane: ModelWorkPriority, index: int) -> None:
@@ -237,6 +281,7 @@ class ModelWorkCoordinator:
             task.parent_work_record.add_model_work_summary(task.work_record)
 
     def _mark_cancelled(self, task: QueuedModelTask, summary: str) -> None:
+        self._cancelled += 1
         if task.work_record is not None:
             task.work_record.mark_cancelled(summary)
             self._attach_child_summary(task)
@@ -252,6 +297,10 @@ class ModelWorkCoordinator:
             "foreground_concurrency": self._foreground_concurrency,
             "background_concurrency": self._background_concurrency,
             "foreground_timeout_seconds": self._foreground_timeout_seconds,
+            "max_queued_by_priority": {
+                priority.name.lower(): limit
+                for priority, limit in self._max_queued.items()
+            },
             "queued": sum(queue.qsize() for queue in self._queues.values()),
             "queued_by_priority": dict(self._queued_by_priority),
             "in_flight": sum(self._in_flight_by_priority.values()),
@@ -260,6 +309,8 @@ class ModelWorkCoordinator:
             "completed": self._completed,
             "failed": self._failed,
             "timed_out": self._timed_out,
+            "cancelled": self._cancelled,
+            "rejected": self._rejected,
             "wait_seconds_total": self._wait_seconds_total,
             "run_seconds_total": self._run_seconds_total,
             "work_by_name": {

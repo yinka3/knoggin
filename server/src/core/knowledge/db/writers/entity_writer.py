@@ -344,6 +344,12 @@ class EntityWriter:
                                     embedding
                                 )
                                 VALUES (%s, %s, %s, %s, %s::vector)
+                                ON CONFLICT (entity_id) DO UPDATE SET
+                                    canonical_name = EXCLUDED.canonical_name,
+                                    user_name = EXCLUDED.user_name,
+                                    project_id = EXCLUDED.project_id,
+                                    embedding = EXCLUDED.embedding
+                                WHERE entity_search.project_id = EXCLUDED.project_id
                             """,
                                 (
                                     entity.entity_id,

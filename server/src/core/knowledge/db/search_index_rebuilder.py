@@ -8,7 +8,7 @@ from common.scoping import IDENTITY_ENTITY_ID
 from core.knowledge.entity.embedding import (
     build_entity_embedding_text,
 )
-from core.knowledge.episode_embedding import build_episode_embedding_text_from_fields
+from core.knowledge.episodes.embedding import build_episode_embedding_text_from_fields
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 

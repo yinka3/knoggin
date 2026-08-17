@@ -15,9 +15,9 @@ from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
-from core.project.state import ProjectState
 from core.session.context import Session
 from infrastructure.redis_client import RedisKeys
+from runtime.project_runtime import ProjectRuntime
 
 
 class SessionManager:
@@ -38,7 +38,7 @@ class SessionManager:
         self._session_deletion_writer = SessionDeletionWriter(self.pg)
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._project_runtime_contexts: Dict[
-            str, AsyncContextManager[ProjectState]
+            str, AsyncContextManager[ProjectRuntime]
         ] = {}
         # A tombstoned session must be unavailable immediately, before the
         # durable status update completes. The database status enforces this
@@ -286,7 +286,7 @@ class SessionManager:
         context: Session,
         session_id: str,
         *,
-        runtime: Optional[AsyncContextManager[ProjectState]] = None,
+        runtime: Optional[AsyncContextManager[ProjectRuntime]] = None,
     ) -> None:
         """Release the non-durable resources owned by one live session."""
         try:

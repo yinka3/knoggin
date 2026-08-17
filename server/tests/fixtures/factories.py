@@ -1,5 +1,5 @@
 from common.conf.domain_config import DomainConfig
-from core.project.state import ProjectState
+from runtime.project_factory import ProjectFactory
 from tests.fixtures.fakes import (
     FakeEmbeddingService,
     FakePipeline,
@@ -43,7 +43,7 @@ def make_project_state(
     scheduler = scheduler or FakeScheduler()
     postgres = postgres or FakePostgresClient()
     embedding = embedding or FakeEmbeddingService()
-    return ProjectState(
+    return ProjectFactory.create_runtime(
         project_id=project_id,
         entities=object(),
         pipeline=FakePipeline(),

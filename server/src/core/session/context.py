@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -21,19 +22,20 @@ from common.utils.events import emit
 from common.utils.tasks import BackgroundTaskGroup
 from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.services.batch_consumer import IngestionWorker
-from core.ingestion.services.pipeline_service import IngestionPipeline
-from core.knowledge.db.write_graph_db import write_batch_callback
+from core.ingestion.graph_commit import write_batch_callback
+from core.ingestion.pipeline import IngestionPipeline
+from core.ingestion.worker import IngestionWorker
 from core.knowledge.documents import DocumentService
-from core.project.state import ProjectState
 from infrastructure.redis_client import (
     SESSION_RUNTIME_TTL_SECONDS,
     SHORT_LIVED_DEDUP_TTL_SECONDS,
     RedisKeys,
 )
-from infrastructure.resources import ResourceManager
+from runtime.project_runtime import ProjectRuntime
+from runtime.resources import ResourceManager
 
 SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS
+MAX_LOCAL_DURABLE_MESSAGE_CLAIMS = 1024
 
 
 class Session:
@@ -58,7 +60,7 @@ class Session:
 
         self.session_id: Optional[str] = None
         self.project_id: Optional[str] = None
-        self.project: Optional[ProjectState] = None
+        self.project: Optional[ProjectRuntime] = None
 
         self._max_conversation_history: int = 10000
 
@@ -76,6 +78,7 @@ class Session:
         self._agent_run_state = "idle"
         self._agent_queue_paused = False
         self._agent_runs_closed = False
+        self._durable_message_claims: OrderedDict[str, int] = OrderedDict()
 
     @property
     def current_config(self) -> RootConfig:
@@ -109,10 +112,10 @@ class Session:
         topics_config: dict = None,
         session_id: str = None,
         model: str = None,
-        project_state: ProjectState = None,
+        project_state: ProjectRuntime = None,
     ) -> "Session":
         """Assembles and launches a new session context."""
-        from core.session.boot import SessionFactory
+        from runtime.session_factory import SessionFactory
 
         assembler = SessionFactory(user_name, resources)
         ctx = await assembler.bootstrap(project_state, session_id, model)
@@ -371,36 +374,41 @@ class Session:
             content_hash,
         )
 
-        existing_id = await self.redis_client.get(dedup_key)
-        if existing_id:
-            status, message_id = self._parse_message_dedup(existing_id)
-            msg.id = message_id
-            if status == "accepted":
-                return msg
-        else:
-            new_id = await self.knowledge_store.allocate_message_id()
-            was_set = await self.redis_client.set(
-                dedup_key,
-                f"pending:{new_id}",
-                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
-                nx=True,
-            )
-
-            if was_set:
-                msg.id = new_id
-            else:
-                existing_id = await self.redis_client.get(dedup_key)
-                if not existing_id:
-                    raise RuntimeError("Message dedup claim disappeared during add")
+        durable = False
+        while True:
+            existing_id = await self.redis_client.get(dedup_key)
+            if existing_id:
                 status, message_id = self._parse_message_dedup(existing_id)
                 msg.id = message_id
                 if status == "accepted":
                     return msg
 
-        durable = False
+                resolution = await self._wait_for_pending_message_claim(
+                    dedup_key,
+                    msg,
+                )
+                if resolution == "accepted":
+                    return msg
+                if resolution == "durable":
+                    durable = True
+                    break
+                continue
+
+            new_id = await self.knowledge_store.allocate_message_id()
+            if await self.redis_client.set(
+                dedup_key,
+                f"pending:{new_id}",
+                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
+                nx=True,
+            ):
+                msg.id = new_id
+                break
+
         try:
-            await self._persist_user_turn(msg)
-            durable = True
+            if not durable:
+                await self._persist_user_turn(msg)
+                self._remember_durable_message(dedup_key, msg.id)
+                durable = True
             await self._record_conversation_message(
                 message_id=msg.id,
                 role="user",
@@ -431,6 +439,85 @@ class Session:
         await self.refresh_session_ttls()
 
         return msg
+
+    async def _wait_for_pending_message_claim(
+        self,
+        dedup_key: str,
+        msg: Message,
+    ) -> str:
+        """Wait for another runtime to finish a shared acceptance claim.
+
+        A pending claim can mean either an active writer or a crashed writer
+        that already committed PostgreSQL.  Let the active writer publish its
+        accepted state first; after a bounded wait, a durable row can safely be
+        completed by this runtime without allocating or inserting a second ID.
+        """
+
+        durable_id: Optional[int] = None
+        for attempt in range(50):
+            local_durable_id = self._durable_message_claims.get(dedup_key)
+            if local_durable_id is not None:
+                msg.id = local_durable_id
+                return "durable"
+
+            current = await self.redis_client.get(dedup_key)
+            if current is None:
+                return "retry"
+
+            status, message_id = self._parse_message_dedup(current)
+            msg.id = message_id
+            if status == "accepted":
+                return "accepted"
+
+            if attempt % 5 == 0:
+                durable_id = await self._find_durable_user_message(msg)
+                if durable_id is not None and attempt >= 20:
+                    msg.id = durable_id
+                    return "durable"
+            await asyncio.sleep(0.01)
+
+        if durable_id is not None:
+            msg.id = durable_id
+            return "durable"
+        raise RuntimeError("Message dedup claim remained pending")
+
+    async def _find_durable_user_message(self, msg: Message) -> Optional[int]:
+        """Find a committed row matching the deterministic acceptance identity."""
+
+        if not self.session_id or not self.project_id:
+            return None
+        row = await self.resources.postgres.fetch_one(
+            """
+            SELECT message_id
+            FROM public.messages
+            WHERE user_name = %s
+              AND session_id = %s
+              AND project_id = %s
+              AND role = 'user'
+              AND content = %s
+              AND timestamp_ms = %s
+            ORDER BY message_id
+            LIMIT 1
+            """,
+            (
+                self.user_name,
+                self.session_id,
+                self.project_id,
+                msg.content.strip(),
+                int(msg.timestamp.timestamp() * 1000),
+            ),
+        )
+        if not row or row.get("message_id") is None:
+            return None
+        return int(row["message_id"])
+
+    def _remember_durable_message(self, dedup_key: str, message_id: int) -> None:
+        """Keep only a bounded local retry hint; PostgreSQL remains canonical."""
+
+        self._durable_message_claims[dedup_key] = message_id
+        self._durable_message_claims.move_to_end(dedup_key)
+        while len(self._durable_message_claims) > MAX_LOCAL_DURABLE_MESSAGE_CLAIMS:
+            self._durable_message_claims.popitem(last=False)
 
     @staticmethod
     def _parse_message_dedup(value: str) -> tuple[str, int]:

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import redis.asyncio as aioredis
 
     from core.knowledge.entity.resolver import EntityResolver
-    from infrastructure.knowledge_store import KnowledgeStore
+    from core.knowledge.store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
 
 

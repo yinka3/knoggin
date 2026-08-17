@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from core.knowledge.documents import DocumentService
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.services.embedding_service import EmbeddingService
-    from infrastructure.knowledge_store import KnowledgeStore
+    from core.knowledge.store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
 
 import httpx
