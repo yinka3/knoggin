@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS public.sessions (
     enabled_tools JSONB,
     document_focus JSONB,
     status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'closed', 'deleted')),
+        CHECK (status IN ('open', 'deleted')),
     -- Participation controls only future project episode windows.  The
     -- message-ID boundary is moved whenever the user changes this setting.
     episode_participation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -142,6 +142,18 @@ ALTER TABLE public.sessions
 ADD COLUMN IF NOT EXISTS episode_participation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
 ADD COLUMN IF NOT EXISTS episode_participation_after_message_id BIGINT NOT NULL DEFAULT 0
     CHECK (episode_participation_after_message_id >= 0);
+
+-- Sessions are either usable or tombstoned.  Older "closed" rows had no
+-- supported recovery behavior, so preserve their history as deleted sessions.
+UPDATE public.sessions
+SET status = 'deleted', deleted_at = COALESCE(deleted_at, now())
+WHERE status = 'closed';
+
+ALTER TABLE public.sessions
+DROP CONSTRAINT IF EXISTS sessions_status_check;
+ALTER TABLE public.sessions
+ADD CONSTRAINT sessions_status_check
+CHECK (status IN ('open', 'deleted'));
 
 -- ==============================================================================
 -- KNOWLEDGE GRAPH
@@ -201,6 +213,7 @@ WHERE role = 'user' AND ingestion_state IN ('waiting_for_seal', 'ready', 'claime
 
 CREATE TABLE IF NOT EXISTS public.message_revisions (
     user_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     message_id BIGINT NOT NULL,
     revision INTEGER NOT NULL,
@@ -211,6 +224,18 @@ CREATE TABLE IF NOT EXISTS public.message_revisions (
         REFERENCES public.messages(user_name, session_id, message_id, project_id)
         ON DELETE CASCADE
 );
+
+ALTER TABLE public.message_revisions
+ADD COLUMN IF NOT EXISTS session_id TEXT;
+UPDATE public.message_revisions AS revision
+SET session_id = message.session_id
+FROM public.messages AS message
+WHERE revision.session_id IS NULL
+  AND message.user_name = revision.user_name
+  AND message.project_id = revision.project_id
+  AND message.message_id = revision.message_id;
+ALTER TABLE public.message_revisions
+ALTER COLUMN session_id SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.entities (
     entity_id BIGINT PRIMARY KEY,
@@ -425,6 +450,152 @@ CREATE INDEX IF NOT EXISTS relationship_advisory_decisions_pattern_idx
 ON public.relationship_advisory_decisions(
     user_name, project_id, pattern_key, created_at
 );
+
+-- Redis remains the operational DLQ queue. Once an item is parked for human
+-- inspection, this row is the durable subject that a review inbox can link to.
+CREATE TABLE IF NOT EXISTS public.parked_dlq_items (
+    dlq_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    session_id TEXT,
+    stage TEXT NOT NULL,
+    attempt INTEGER NOT NULL CHECK (attempt >= 0),
+    error_message TEXT,
+    payload JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'parked'
+        CHECK (status IN ('parked', 'requeued', 'completed')),
+    parked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    requeued_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS parked_dlq_items_inbox_idx
+ON public.parked_dlq_items(user_name, project_id, status, parked_at DESC);
+
+-- A unified inbox points to workflow-owned subjects. It deliberately has no
+-- resolution payload: the subject workflow owns its state and mutations.
+CREATE TABLE IF NOT EXISTS public.human_reviews (
+    review_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    subject_type TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'resolved')),
+    priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK (priority IN ('low', 'normal', 'high')),
+    title TEXT NOT NULL,
+    summary TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    UNIQUE (user_name, project_id, kind, subject_id)
+);
+
+CREATE INDEX IF NOT EXISTS human_reviews_open_inbox_idx
+ON public.human_reviews(user_name, project_id, status, priority, created_at DESC);
+
+-- Conflict groups never replace or rewrite relationship evidence. The group is
+-- a user-visible interpretation workflow over immutable observation snapshots.
+CREATE TABLE IF NOT EXISTS public.conflict_groups (
+    conflict_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'resolved')),
+    origin TEXT NOT NULL
+        CHECK (origin IN (
+            'background_discovery', 'agent_discovery', 'user_created'
+        )),
+    kind TEXT NOT NULL
+        CHECK (kind IN (
+            'possible_contradiction', 'temporal_ambiguity',
+            'possible_state_change', 'identity_or_entity_ambiguity'
+        )),
+    rationale TEXT NOT NULL,
+    confidence DOUBLE PRECISION,
+    evidence_signature TEXT NOT NULL,
+    resolution_kind TEXT
+        CHECK (resolution_kind IS NULL OR resolution_kind IN (
+            'confirmed_conflict', 'normal_temporal_change', 'not_a_conflict',
+            'insufficient_evidence', 'custom'
+        )),
+    resolution_note TEXT,
+    resolved_by TEXT,
+    resolved_at TIMESTAMPTZ,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_name, project_id, evidence_signature)
+);
+
+CREATE INDEX IF NOT EXISTS conflict_groups_open_idx
+ON public.conflict_groups(user_name, project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.conflict_evidence_refs (
+    evidence_ref_id BIGSERIAL PRIMARY KEY,
+    conflict_id TEXT NOT NULL REFERENCES public.conflict_groups(conflict_id)
+        ON DELETE CASCADE,
+    observation_id BIGINT REFERENCES public.relationship_observations(observation_id)
+        ON DELETE SET NULL,
+    observation_snapshot JSONB NOT NULL,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (conflict_id, observation_id)
+);
+
+CREATE INDEX IF NOT EXISTS conflict_evidence_refs_observation_idx
+ON public.conflict_evidence_refs(observation_id)
+WHERE observation_id IS NOT NULL;
+
+-- The cursor is durable; Redis may schedule the job, but it must not determine
+-- which relationship observations have already been examined.
+CREATE TABLE IF NOT EXISTS public.conflict_discovery_checkpoints (
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    cursor_observed_at_ms BIGINT NOT NULL DEFAULT 0,
+    cursor_observation_id BIGINT NOT NULL DEFAULT 0,
+    continuation JSONB NOT NULL DEFAULT '{}'::jsonb,
+    lease_token TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    last_completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_name, project_id)
+);
+
+-- Global provider-budget state survives process restarts. Reservations protect
+-- concurrent requests until provider usage is recorded or their lease expires.
+CREATE TABLE IF NOT EXISTS public.llm_budget_windows (
+    reset_key TEXT PRIMARY KEY,
+    spent_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.llm_budget_reservations (
+    reservation_id UUID PRIMARY KEY,
+    reset_key TEXT NOT NULL REFERENCES public.llm_budget_windows(reset_key)
+        ON DELETE CASCADE,
+    reserved_usd DOUBLE PRECISION NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'recorded', 'expired')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    recorded_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS llm_budget_reservations_expiry_idx
+ON public.llm_budget_reservations(reset_key, expires_at)
+WHERE status = 'active';
+
+ALTER TABLE public.conflict_discovery_checkpoints
+ADD COLUMN IF NOT EXISTS continuation JSONB NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS public.relationship_evidence_refs (
     relationship_id TEXT NOT NULL,
@@ -1729,6 +1900,10 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     size_bytes BIGINT NOT NULL,
     content_hash TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'uploaded',
+    replaces_document_id UUID REFERENCES public.project_documents(document_id)
+        ON DELETE SET NULL,
+    version_number INTEGER NOT NULL DEFAULT 1 CHECK (version_number >= 1),
+    deleted_at TIMESTAMPTZ,
     indexed_at TIMESTAMPTZ,
     error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1738,11 +1913,17 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     CONSTRAINT project_documents_session_visibility_check
         CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
     CONSTRAINT project_documents_status_check
-        CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed')),
+        CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed', 'deleted')),
     CONSTRAINT project_documents_source_kind_check
         CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace')),
     CONSTRAINT project_documents_folder_source_check
         CHECK (
+            (
+                status = 'deleted'
+                AND folder_root_id IS NULL
+                AND source_id IS NULL
+            )
+            OR
             (
                 source_kind = 'manual_upload'
                 AND folder_root_id IS NULL
@@ -1771,6 +1952,14 @@ ALTER TABLE public.project_documents
     ADD COLUMN IF NOT EXISTS source_id UUID
         REFERENCES public.document_workspace_sources(source_id) ON DELETE CASCADE;
 ALTER TABLE public.project_documents
+    ADD COLUMN IF NOT EXISTS replaces_document_id UUID
+        REFERENCES public.project_documents(document_id) ON DELETE SET NULL;
+ALTER TABLE public.project_documents
+    ADD COLUMN IF NOT EXISTS version_number INTEGER NOT NULL DEFAULT 1
+        CHECK (version_number >= 1);
+ALTER TABLE public.project_documents
+    ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_status_check;
 ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_source_kind_check;
@@ -1778,13 +1967,19 @@ ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_folder_source_check;
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_status_check
-    CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed'));
+    CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed', 'deleted'));
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_source_kind_check
     CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace'));
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_folder_source_check
     CHECK (
+        (
+            status = 'deleted'
+            AND folder_root_id IS NULL
+            AND source_id IS NULL
+        )
+        OR
         (
             source_kind = 'manual_upload'
             AND folder_root_id IS NULL
@@ -1818,6 +2013,16 @@ ON public.project_documents(folder_root_id, relative_path);
 
 CREATE INDEX IF NOT EXISTS project_documents_source_idx
 ON public.project_documents(source_id, relative_path);
+
+CREATE INDEX IF NOT EXISTS project_documents_replacement_candidates_idx
+ON public.project_documents(project_id, visibility_scope, session_id, relative_path)
+WHERE status = 'deleted';
+
+-- A document version has at most one direct successor.  Later uploads replace
+-- that successor after it is deleted, creating a linear provenance chain.
+CREATE UNIQUE INDEX IF NOT EXISTS project_documents_one_replacement_per_version_idx
+ON public.project_documents(replaces_document_id)
+WHERE replaces_document_id IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS project_documents_workspace_path_unique
 ON public.project_documents(source_id, relative_path)

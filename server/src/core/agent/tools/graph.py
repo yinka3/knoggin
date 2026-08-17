@@ -31,7 +31,9 @@ class GraphTools:
             entity_name: The entity to find connections for.
 
         Returns:
-            Connections with target entity, strength, and hydrated evidence.
+            Observed relationships with evidence counts, observation dates,
+            and hydrated source messages. These records are not a current-state
+            claim about the relationship.
         """
         canonical = await self._resolve_entity_name(entity_name)
         if not canonical:

@@ -40,8 +40,9 @@ class SessionManager:
         self._project_runtime_contexts: Dict[
             str, AsyncContextManager[ProjectState]
         ] = {}
-        # A durable close must also hide an in-memory context immediately; the
-        # database filter covers this again after an engine restart.
+        # A tombstoned session must be unavailable immediately, before the
+        # durable status update completes. The database status enforces this
+        # again after an engine restart.
         self._closed_session_ids: set[str] = set()
         self._lock = asyncio.Lock()
         self._closed = False
@@ -92,6 +93,7 @@ class SessionManager:
                        document_focus, status, created_at, last_active_at
                 FROM public.sessions
                 WHERE user_name = %(user_name)s
+                  AND status <> 'deleted'
             """
             rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
 
@@ -213,6 +215,7 @@ class SessionManager:
                 SELECT project_id, model
                 FROM public.sessions
                 WHERE user_name = %(user_name)s
+                  AND status <> 'deleted'
                   AND session_id = %(session_id)s
                   AND status = 'open'
             """
@@ -304,7 +307,8 @@ class SessionManager:
         """Unload a live session while retaining its durable session record."""
         async with self._lock:
             context = self.active_sessions.pop(session_id, None)
-            self._session_locks.pop(session_id, None)
+            if session_id not in self._closed_session_ids:
+                self._session_locks.pop(session_id, None)
             runtime = self._project_runtime_contexts.pop(session_id, None)
 
         if context is None:
@@ -331,40 +335,13 @@ class SessionManager:
             ) from failures[0]
 
     async def close_session(self, session_id: str) -> bool:
-        """Durably close a session, then release any live runtime it owns."""
+        """Compatibility alias for session deletion.
 
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("SessionManager is shutting down")
-            lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+        Sessions are not closable containers: removing one tombstones it and
+        retains only its immutable message provenance.
+        """
 
-        async with lock:
-            update_query = """
-                UPDATE public.sessions
-                SET status = 'closed', last_active_at = now()
-                WHERE user_name = %(user_name)s
-                  AND session_id = %(session_id)s
-                  AND status = 'open'
-            """
-            updated = await self.pg.execute(
-                update_query,
-                {"user_name": self.user_name, "session_id": session_id},
-            )
-            if updated != 1:
-                return False
-
-            async with self._lock:
-                self._closed_session_ids.add(session_id)
-
-            await self.deactivate_runtime_session(session_id)
-
-        metadata = await self._read_redis_session_metadata(session_id)
-        if metadata is not None:
-            metadata["last_active"] = get_now_iso()
-            metadata["status"] = "closed"
-            await self._write_redis_session_metadata(session_id, metadata)
-
-        logger.info(f"Closed session: {session_id}")
+        await self.delete_session_data(session_id)
         return True
 
     async def get_session_history_readonly(
@@ -420,69 +397,91 @@ class SessionManager:
 
     async def delete_session_data(self, session_id: str) -> int:
         """
-        Delete Postgres session and all ephemeral Redis keys associated with a session.
+        Tombstone a session, purge its session-owned documents, and clear cache.
+
+        Canonical messages and their graph projections remain as read-only
+        evidence for existing project memories. The durable tombstone excludes
+        them from future runtime, ingestion, and episode work.
+
         Returns count of Redis keys deleted.
         """
         user = self.user_name
         redis = self.resources.redis
-        project_id = None
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("SessionManager is shutting down")
+            lock = self._session_locks.setdefault(session_id, asyncio.Lock())
 
-        query = "SELECT project_id FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
-        rows = await self.pg.fetch_all(query, {"user_name": user, "session_id": session_id})
-        if rows:
-            project_id = rows[0]["project_id"]
-
-        if not project_id and session_id in self.active_sessions:
-            project_id = self.active_sessions[session_id].project_id
-        if not project_id:
-            metadata = await self._read_redis_session_metadata(session_id)
-            if metadata:
-                project_id = metadata.get("project_id")
-
-        await self.deactivate_runtime_session(session_id)
-
-        # Canonical Postgres and AGE deletion must either both commit or both
-        # roll back. Redis is a recoverable cache and follows the durable work.
-        await self._session_deletion_writer.delete_session(
-            user_name=user,
-            session_id=session_id,
-        )
-
-        # Ephemeral Redis cleanup is deliberately best-effort after durable
-        # deletion. A transient cache failure must not report the committed
-        # session deletion as failed.
-        direct_keys = RedisKeys.session_keys(user, session_id)
-        deleted = 0
-        try:
-            for pattern in (
-                RedisKeys.session_memory_pattern(user, session_id),
-                RedisKeys.message_dedup_pattern(user, session_id),
-            ):
-                cursor = 0
-                while True:
-                    cursor, keys = await redis.scan(
-                        cursor,
-                        match=pattern,
-                        count=100,
-                    )
-                    if keys:
-                        deleted += int(await redis.delete(*keys))
-                    if cursor == 0:
-                        break
-
-            if direct_keys:
-                deleted += await redis.delete(*direct_keys)
-            await self._delete_redis_session_metadata(session_id, project_id)
-        except Exception as exc:
-            logger.error(
-                "Durable session deletion committed, but Redis cleanup failed "
-                f"for {session_id}: {exc}"
+        async with lock:
+            project_id = None
+            query = "SELECT project_id FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
+            rows = await self.pg.fetch_all(
+                query, {"user_name": user, "session_id": session_id}
             )
+            if rows:
+                project_id = rows[0]["project_id"]
 
-        logger.info(
-            f"Cleaned up {deleted} Redis keys after deleting session {session_id}"
-        )
-        return deleted
+            if not project_id and session_id in self.active_sessions:
+                project_id = self.active_sessions[session_id].project_id
+            if not project_id:
+                metadata = await self._read_redis_session_metadata(session_id)
+                if metadata:
+                    project_id = metadata.get("project_id")
+
+            async with self._lock:
+                self._closed_session_ids.add(session_id)
+
+            # Session.shutdown closes the agent queue and waits for any active
+            # task it cancels before the durable tombstone is written.
+            try:
+                await self.deactivate_runtime_session(session_id)
+                await self._session_deletion_writer.delete_session(
+                    user_name=user,
+                    session_id=session_id,
+                )
+            except Exception:
+                # The durable session is still open, so do not leave it
+                # permanently inaccessible in this process after a failed
+                # tombstone transaction.
+                async with self._lock:
+                    self._closed_session_ids.discard(session_id)
+                raise
+
+            # Redis is a recoverable cache and follows the durable tombstone.
+            # A transient cache failure must not report the committed deletion
+            # as failed.
+            direct_keys = RedisKeys.session_keys(user, session_id)
+            deleted = 0
+            try:
+                for pattern in (
+                    RedisKeys.session_memory_pattern(user, session_id),
+                    RedisKeys.message_dedup_pattern(user, session_id),
+                ):
+                    cursor = 0
+                    while True:
+                        cursor, keys = await redis.scan(
+                            cursor,
+                            match=pattern,
+                            count=100,
+                        )
+                        if keys:
+                            deleted += int(await redis.delete(*keys))
+                        if cursor == 0:
+                            break
+
+                if direct_keys:
+                    deleted += await redis.delete(*direct_keys)
+                await self._delete_redis_session_metadata(session_id, project_id)
+            except Exception as exc:
+                logger.error(
+                    "Durable session deletion committed, but Redis cleanup failed "
+                    f"for {session_id}: {exc}"
+                )
+
+            logger.info(
+                f"Cleaned up {deleted} Redis keys after deleting session {session_id}"
+            )
+            return deleted
 
     async def update_session_metadata(self, session_id: str, new_data: dict) -> dict:
         """Update explicitly allowed session configuration fields."""
@@ -507,7 +506,7 @@ class SessionManager:
             return {}
 
         stmt = sql.SQL(
-            "UPDATE public.sessions SET {fields} WHERE user_name = %s AND session_id = %s"
+            "UPDATE public.sessions SET {fields} WHERE user_name = %s AND session_id = %s AND status = 'open'"
         ).format(
             fields=sql.SQL(", ").join(
                 sql.SQL("{} = %s").format(sql.Identifier(k)) for k in cols
@@ -569,8 +568,15 @@ class SessionManager:
             )
         )
 
-        query = "UPDATE public.sessions SET document_focus = %(focus)s WHERE session_id = %(session_id)s"
-        await self.pg.execute(query, {"focus": json.dumps(focus), "session_id": session_id})
+        query = "UPDATE public.sessions SET document_focus = %(focus)s WHERE user_name = %(user_name)s AND session_id = %(session_id)s AND status = 'open'"
+        await self.pg.execute(
+            query,
+            {
+                "focus": json.dumps(focus),
+                "user_name": self.user_name,
+                "session_id": session_id,
+            },
+        )
         metadata = await self._read_redis_session_metadata(session_id) or {
             "project_id": getattr(context, "project_id", None),
         }
@@ -586,6 +592,7 @@ class SessionManager:
             SET document_focus = NULL
             WHERE user_name = %(user_name)s
               AND session_id = %(session_id)s
+              AND status = 'open'
             RETURNING session_id
         """
         # We simulate returning by checking row count, but psycopg returns rowcount

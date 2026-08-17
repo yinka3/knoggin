@@ -55,7 +55,8 @@ class SourceReferenceReader:
                 ref.tool_call_id,
                 ref.result_position,
                 ref.idempotency_key,
-                ref.created_at
+                ref.created_at,
+                document.status AS document_status
             FROM public.message_source_refs AS ref
             JOIN public.messages AS message
               ON message.message_id = ref.message_id
@@ -64,6 +65,9 @@ class SourceReferenceReader:
             JOIN public.sessions AS session
               ON session.session_id = message.session_id
              AND session.project_id = message.project_id
+            LEFT JOIN public.project_documents AS document
+              ON document.document_id = ref.document_id
+             AND document.project_id = ref.project_id
             WHERE ref.message_id = %s
               AND ref.project_id = %s
               AND ref.session_id = %s
@@ -72,7 +76,14 @@ class SourceReferenceReader:
             """,
             (message_id, project_id, session_id, user_name),
         )
-        return [self._present_reference(self._reference_from_row(row)) for row in rows]
+        return [
+            self._present_reference(
+                self._reference_from_row(row),
+                document_status=row.get("document_status"),
+                document_status_resolved="document_status" in row,
+            )
+            for row in rows
+        ]
 
     async def get_assistant_message_with_sources(
         self,
@@ -159,7 +170,8 @@ class SourceReferenceReader:
                 ref.tool_call_id,
                 ref.result_position,
                 ref.idempotency_key,
-                ref.created_at
+                ref.created_at,
+                document.status AS document_status
             FROM public.episode_messages AS attachment
             JOIN public.episodes AS episode
               ON episode.episode_id = attachment.episode_id
@@ -172,6 +184,9 @@ class SourceReferenceReader:
               ON ref.message_id = attachment.message_id
              AND ref.project_id = attachment.project_id
              AND ref.session_id = attachment.session_id
+            LEFT JOIN public.project_documents AS document
+              ON document.document_id = ref.document_id
+             AND document.project_id = ref.project_id
             WHERE attachment.episode_id = %s
               AND episode.project_id = %s
               AND episode.session_id = %s
@@ -189,7 +204,13 @@ class SourceReferenceReader:
             if key in seen:
                 continue
             seen.add(key)
-            presented.append(self._present_reference(reference))
+            presented.append(
+                self._present_reference(
+                    reference,
+                    document_status=row.get("document_status"),
+                    document_status_resolved="document_status" in row,
+                )
+            )
         return presented
 
     async def get_project_episode_source_refs(
@@ -197,7 +218,7 @@ class SourceReferenceReader:
     ) -> list[SourceConsulted]:
         rows = await self.client.fetch_all(
             """
-            SELECT ref.*
+            SELECT ref.*, document.status AS document_status
             FROM public.episode_messages attachment
             JOIN public.episodes episode
               ON episode.episode_id = attachment.episode_id
@@ -207,6 +228,9 @@ class SourceReferenceReader:
               ON ref.message_id = attachment.message_id
              AND ref.project_id = attachment.project_id
              AND ref.session_id = attachment.session_id
+            LEFT JOIN public.project_documents AS document
+              ON document.document_id = ref.document_id
+             AND document.project_id = ref.project_id
             WHERE attachment.episode_id = %s AND episode.project_id = %s
               AND project.user_name = %s
             ORDER BY attachment.message_position, ref.created_at,
@@ -220,7 +244,13 @@ class SourceReferenceReader:
             key = self._episode_deduplication_key(reference)
             if key not in seen:
                 seen.add(key)
-                presented.append(self._present_reference(reference))
+                presented.append(
+                    self._present_reference(
+                        reference,
+                        document_status=row.get("document_status"),
+                        document_status_resolved="document_status" in row,
+                    )
+                )
         return presented
 
     @staticmethod
@@ -239,6 +269,7 @@ class SourceReferenceReader:
     @staticmethod
     def _reference_from_row(row: dict[str, Any]) -> SourceReference:
         payload = dict(row)
+        payload.pop("document_status", None)
         for field in ("source_ref_id", "document_id"):
             if payload.get(field) is not None:
                 payload[field] = str(payload[field])
@@ -249,9 +280,19 @@ class SourceReferenceReader:
         return SourceReference.model_validate(payload)
 
     @staticmethod
-    def _present_reference(reference: SourceReference) -> SourceConsulted:
+    def _present_reference(
+        reference: SourceReference,
+        *,
+        document_status: str | None = None,
+        document_status_resolved: bool = False,
+    ) -> SourceConsulted:
         if reference.source_kind in {"pdf_document", "text_document"}:
-            source_status = "available"
+            source_status = (
+                "unavailable"
+                if document_status_resolved
+                and document_status in {None, "deleted"}
+                else "available"
+            )
         elif reference.source_kind == "user_pasted_text":
             source_status = "available"
         else:

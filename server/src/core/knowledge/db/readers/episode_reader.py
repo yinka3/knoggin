@@ -688,6 +688,7 @@ class EpisodeReader:
              AND parent.session_id = m.session_id
             WHERE m.user_name = %s
               AND m.project_id = %s
+              AND s.status <> 'deleted'
               AND s.episode_participation_enabled = TRUE
               AND m.message_id > s.episode_participation_after_message_id
               AND (

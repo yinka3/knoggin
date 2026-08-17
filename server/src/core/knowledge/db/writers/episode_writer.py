@@ -271,6 +271,7 @@ class EpisodeWriter:
               ON parent.message_id = m.user_msg_id
              AND parent.project_id = m.project_id AND parent.session_id = m.session_id
             WHERE m.user_name = %s AND m.project_id = %s AND m.session_id = %s
+              AND s.status <> 'deleted'
               AND ((%s = 0 AND %s::BIGINT IS NULL)
                 OR (%s::BIGINT IS NOT NULL AND (m.timestamp_ms > %s
                     OR (m.timestamp_ms = %s AND m.message_id > %s) OR m.timestamp_ms IS NULL))

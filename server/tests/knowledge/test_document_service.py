@@ -75,6 +75,24 @@ class MemoryPostgres:
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
+        if (
+            "FROM public.project_documents" in query
+            and "status = 'deleted'" in query
+            and "lower(original_name) = lower(%s)" in query
+        ):
+            project_id, visibility_scope, relative_path, original_name, session_id = params
+            return [
+                deepcopy(row)
+                for row in self.rows
+                if row["project_id"] == project_id
+                and row["status"] == "deleted"
+                and row["visibility_scope"] == visibility_scope
+                and self._visible(row, project_id, session_id)
+                and (
+                    row["relative_path"] == relative_path
+                    or row["original_name"].lower() == original_name.lower()
+                )
+            ][:5]
         if "FROM public.document_workspace_sources AS ws" in query:
             source_id, project_id, session_id = params
             source = next(
@@ -669,6 +687,50 @@ class MemoryCursor:
             ]
             return
 
+        if (
+            normalized.startswith("SELECT document_id, version_number")
+            and "FOR UPDATE" in normalized
+        ):
+            document_id, project_id, visibility_scope, session_id = params
+            row = next(
+                (
+                    row
+                    for row in self.postgres.rows
+                    if row["document_id"] == document_id
+                    and row["project_id"] == project_id
+                    and row["visibility_scope"] == visibility_scope
+                    and (
+                        visibility_scope == "project"
+                        or row["session_id"] == session_id
+                    )
+                ),
+                None,
+            )
+            self.result = (
+                None
+                if row is None
+                else {
+                    "document_id": row["document_id"],
+                    "version_number": row.get("version_number", 1),
+                }
+            )
+            return
+
+        if (
+            normalized.startswith("SELECT document_id")
+            and "WHERE replaces_document_id = %s" in normalized
+        ):
+            predecessor_id = params[0]
+            self.result = next(
+                (
+                    {"document_id": row["document_id"]}
+                    for row in self.postgres.rows
+                    if row.get("replaces_document_id") == predecessor_id
+                ),
+                None,
+            )
+            return
+
         if normalized.startswith("SELECT") and "FOR UPDATE" in normalized:
             document_id, project_id, session_id = params
             row = next(
@@ -721,6 +783,39 @@ class MemoryCursor:
                 self.result = dict(row)
             return
 
+        if (
+            normalized.startswith("UPDATE public.project_documents")
+            and "SET status = 'deleted'" in normalized
+        ):
+            if self.postgres.delete_error is not None:
+                raise self.postgres.delete_error
+            document_id, project_id, session_id = params
+            row = next(
+                (
+                    row
+                    for row in self.postgres.rows
+                    if row["document_id"] == document_id
+                    and row["project_id"] == project_id
+                    and row["status"] != "deleted"
+                    and self.postgres._visible(row, project_id, session_id)
+                ),
+                None,
+            )
+            if row is None:
+                self.result = None
+                return
+            row.update(
+                {
+                    "status": "deleted",
+                    "deleted_at": row.get("deleted_at") or "deleted-now",
+                    "indexed_at": None,
+                    "error_message": None,
+                    "updated_at": "deleted-now",
+                }
+            )
+            self.result = dict(row)
+            return
+
         if normalized.startswith("DELETE FROM public.document_chunks"):
             document_ids = params[0]
             if not isinstance(document_ids, list):
@@ -730,6 +825,13 @@ class MemoryCursor:
                 for chunk in self.postgres.chunks
                 if chunk["document_id"] not in document_ids
             ]
+            self.result = None
+            return
+
+        if normalized.startswith("DELETE FROM public.document_content"):
+            document_id = params[0]
+            self.postgres.contents.pop(document_id, None)
+            self.postgres.extracted_text.pop(document_id, None)
             self.result = None
             return
 
@@ -968,6 +1070,8 @@ class MemoryCursor:
                     extension,
                     size_bytes,
                     content_hash,
+                    replaces_document_id,
+                    version_number,
                     created_at,
                     updated_at,
                 ) = params
@@ -985,6 +1089,9 @@ class MemoryCursor:
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
                         "status": "uploaded",
+                        "replaces_document_id": replaces_document_id,
+                        "version_number": version_number,
+                        "deleted_at": None,
                         "indexed_at": None,
                         "error_message": None,
                         "created_at": created_at,
@@ -2133,7 +2240,7 @@ async def test_read_document_validates_ranges_and_character_limit(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
+async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
     monkeypatch, document_harness
 ):
     service, postgres = document_harness
@@ -2163,7 +2270,13 @@ async def test_delete_document_permanently_removes_metadata_chunks_and_bytes(
     assert "storage_key" not in deleted
     assert first["document_id"] not in postgres.contents
     assert postgres.contents.get(second["document_id"]) == b"same content"
-    assert [row["document_id"] for row in postgres.rows] == [second["document_id"]]
+    tombstone = next(
+        row for row in postgres.rows if row["document_id"] == first["document_id"]
+    )
+    assert tombstone["status"] == "deleted"
+    assert tombstone["deleted_at"]
+    assert tombstone["content_hash"] == first["content_hash"]
+    assert second["document_id"] in [row["document_id"] for row in postgres.rows]
     assert all(
         chunk["document_id"] != first["document_id"] for chunk in postgres.chunks
     )
@@ -2200,7 +2313,89 @@ async def test_delete_document_enforces_project_and_session_visibility():
         session_id="session-1",
     )
     assert deleted["deleted"] is True
-    assert postgres.rows == []
+    assert postgres.rows[0]["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reupload_requires_explicit_replacement_or_separate_confirmation(
+    document_harness,
+):
+    service, postgres = document_harness
+    original = await service.add_document(
+        content=b"first version",
+        original_name="notes.txt",
+    )
+    await service.delete_document(document_id=original["document_id"])
+
+    confirmation = await service.add_document(
+        content=b"second version",
+        original_name="notes.txt",
+    )
+    assert confirmation["confirmation_required"] is True
+    assert confirmation["replacement_candidates"][0]["document_id"] == original[
+        "document_id"
+    ]
+    assert len(postgres.rows) == 1
+
+    replacement = await service.add_document(
+        content=b"second version",
+        original_name="notes.txt",
+        replace_document_id=original["document_id"],
+    )
+    assert replacement["replaces_document_id"] == original["document_id"]
+    assert replacement["version_number"] == 2
+
+    separate = await service.add_document(
+        content=b"third version",
+        original_name="notes.txt",
+        confirm_as_separate=True,
+    )
+    assert separate["replaces_document_id"] is None
+    assert separate["version_number"] == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reupload_cannot_fork_a_document_replacement_chain(document_harness):
+    service, _ = document_harness
+    original = await service.add_document(content=b"first", original_name="notes.txt")
+    await service.delete_document(document_id=original["document_id"])
+    await service.add_document(
+        content=b"second",
+        original_name="notes.txt",
+        replace_document_id=original["document_id"],
+    )
+
+    with pytest.raises(ValueError, match="already has a replacement"):
+        await service.add_document(
+            content=b"another second",
+            original_name="notes.txt",
+            replace_document_id=original["document_id"],
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_replacement_candidates_do_not_cross_visibility_scopes(document_harness):
+    service, _ = document_harness
+    original = await service.add_document(
+        content=b"private",
+        original_name="notes.txt",
+        session_id="session-1",
+        visibility_scope="session",
+    )
+    await service.delete_document(
+        document_id=original["document_id"],
+        session_id="session-1",
+    )
+
+    project_upload = await service.add_document(
+        content=b"project version",
+        original_name="notes.txt",
+        visibility_scope="project",
+    )
+    assert project_upload["replaces_document_id"] is None
 
 
 @pytest.mark.storage

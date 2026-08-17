@@ -123,3 +123,5 @@ def test_project_deletion_includes_managed_workspace_tables():
     assert "document_content" in ProjectDeletionWriter._PROJECT_TABLES
     assert "project_documents" in ProjectDeletionWriter._PROJECT_TABLES
     assert "document_workspace_sources" in ProjectDeletionWriter._PROJECT_TABLES
+    assert "conflict_groups" in ProjectDeletionWriter._PROJECT_TABLES
+    assert "conflict_discovery_checkpoints" in ProjectDeletionWriter._PROJECT_TABLES

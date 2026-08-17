@@ -1,7 +1,7 @@
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from pydantic import ConfigDict, Field, ValidationError
+from pydantic import ConfigDict, Field, ValidationError, model_validator
 
 from common.exceptions import ConfigurationError
 from common.schema.agent.settings import AgentLimitSettings
@@ -150,6 +150,13 @@ class AuditRetentionSettings(ConfigModel):
     merge_history_days: int = Field(180, ge=1)
 
 
+class ConflictDiscoverySettings(ConfigModel):
+    enabled: bool = Field(True)
+    interval_hours: int = Field(48, ge=1)
+    max_seed_span_days: int = Field(60, ge=1, le=365)
+    max_package_tokens: int = Field(50_000, ge=1_000, le=200_000)
+
+
 class JobSettings(ConfigModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
@@ -157,6 +164,9 @@ class JobSettings(ConfigModel):
     merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
     audit_retention: AuditRetentionSettings = Field(
         default_factory=AuditRetentionSettings
+    )
+    conflict_discovery: ConflictDiscoverySettings = Field(
+        default_factory=ConflictDiscoverySettings
     )
     document_indexing: DocumentIndexingSettings = Field(
         default_factory=DocumentIndexingSettings
@@ -190,12 +200,46 @@ class EntityResolutionSettings(ConfigModel):
     )
 
 
+class LLMModelPricing(ConfigModel):
+    """User-supplied provider pricing for one model, in USD per million tokens."""
+
+    input_usd_per_million_tokens: float = Field(ge=0.0)
+    output_usd_per_million_tokens: float = Field(ge=0.0)
+
+
+class LLMSpendingBudgetSettings(ConfigModel):
+    """One server-wide external-model spending ceiling, not per subsystem."""
+
+    limit_usd: Optional[float] = Field(None, ge=0.0)
+    model_pricing: Dict[str, LLMModelPricing] = Field(default_factory=dict)
+    fallback_pricing: Optional[LLMModelPricing] = None
+    reservation_output_tokens: int = Field(1_024, ge=0, le=32_768)
+    reset_key: str = Field("")
+
+    @model_validator(mode="after")
+    def require_pricing_for_a_positive_limit(self):
+        if (
+            self.limit_usd is not None
+            and self.limit_usd > 0
+            and not self.model_pricing
+            and self.fallback_pricing is None
+        ):
+            raise ValueError(
+                "llm.spending_budget requires model_pricing or fallback_pricing "
+                "when limit_usd is positive"
+            )
+        return self
+
+
 class LLMSettings(ConfigModel):
     api_key: str = Field("")
     base_url: Optional[str] = None
     agent_model: str = Field("google/gemini-3-flash-preview")
     extraction_model: str = Field("google/gemini-2.5-flash-preview")
     merge_model: str = Field("google/gemini-2.5-pro")
+    spending_budget: LLMSpendingBudgetSettings = Field(
+        default_factory=LLMSpendingBudgetSettings
+    )
 
 
 class SearchAPIKeySettings(ConfigModel):

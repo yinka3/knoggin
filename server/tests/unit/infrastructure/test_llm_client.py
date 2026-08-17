@@ -9,13 +9,17 @@ from pydantic import BaseModel
 
 from common.exceptions import (
     ConfigurationError,
+    LLMBudgetExceededError,
     LLMProviderError,
     LLMResponseError,
 )
-from common.schema.settings import LLMSettings
+from common.schema.settings import (
+    LLMModelPricing,
+    LLMSettings,
+    LLMSpendingBudgetSettings,
+)
 from infrastructure.llm_client import (
     TRANSPORT_RETRIES,
-    VALIDATION_RETRIES,
     LLMService,
 )
 
@@ -92,7 +96,9 @@ async def test_generate_structured_uses_instructor_validation_retries(llm_servic
     assert kwargs["model"] == "extract-v1"
     assert kwargs["temperature"] == 0.5
     assert kwargs["response_model"] is DummyModel
-    assert kwargs["max_retries"] == VALIDATION_RETRIES
+    # The service owns validation retries so every provider attempt can be
+    # budgeted separately.
+    assert kwargs["max_retries"] == 0
     assert len(kwargs["messages"]) == 2
 
 
@@ -133,6 +139,66 @@ async def test_generate_text_uses_raw_client_without_instructor_arguments(llm_se
     assert "max_retries" not in kwargs
     assert "response_model" not in kwargs
     instructor_client.chat.completions.create_with_completion.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_global_spending_budget_records_usage_then_blocks_later_calls(llm_service):
+    service, raw_client, _, _, _ = llm_service
+    await service._spending_ledger.update_settings(
+        LLMSpendingBudgetSettings(
+            limit_usd=0.000001,
+            fallback_pricing=LLMModelPricing(
+                input_usd_per_million_tokens=1.0,
+                output_usd_per_million_tokens=1.0,
+            ),
+        )
+    )
+    raw_client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+    )
+
+    assert await service.generate_text(system="system", user="user") == "ok"
+
+    with pytest.raises(LLMBudgetExceededError, match="budget has been reached"):
+        await service.generate_text(system="system", user="user")
+
+    snapshot = await service.spending_snapshot()
+    assert snapshot["enforced"] is True
+    assert snapshot["request_count"] == 1
+    assert snapshot["spent_usd"] > snapshot["configured_limit_usd"]
+    assert raw_client.chat.completions.create.await_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_budgeted_call_rejects_an_unpriced_model_before_provider_request(
+    llm_service,
+):
+    service, raw_client, _, _, _ = llm_service
+    await service._spending_ledger.update_settings(
+        LLMSpendingBudgetSettings(
+            limit_usd=1.0,
+            model_pricing={
+                "agent-v1": LLMModelPricing(
+                    input_usd_per_million_tokens=1.0,
+                    output_usd_per_million_tokens=1.0,
+                )
+            },
+        )
+    )
+
+    with pytest.raises(ConfigurationError, match="no price for model 'extract-v1'"):
+        await service.generate_text(system="system", user="user")
+
+    raw_client.chat.completions.create.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_positive_spending_limit_requires_user_supplied_pricing():
+    with pytest.raises(ValueError, match="requires model_pricing"):
+        LLMSpendingBudgetSettings(limit_usd=10.0)
 
 
 @pytest.mark.unit

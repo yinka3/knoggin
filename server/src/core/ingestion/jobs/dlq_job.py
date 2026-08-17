@@ -138,18 +138,61 @@ class DLQReplayJob(BaseJob):
         park_key = RedisKeys.dlq_parked(user_name, project_id)
         dlq_key = RedisKeys.dlq(user_name, project_id)
         state_key = RedisKeys.dlq_state(user_name, project_id)
-        if await self.redis.hget(state_key, dlq_id) != DLQ_STATUS_PARKED:
+        entry = None
+        parked_raw_item = None
+        state = await self.redis.hget(state_key, dlq_id)
+        if state is not None and state != DLQ_STATUS_PARKED:
             return False
-
         raw_items = await self.redis.lrange(park_key, 0, -1)
         for raw_item in raw_items:
-            entry = self._decode_entry(raw_item)
-            if not entry or ensure_dlq_id(entry) != dlq_id:
-                continue
-            await self.redis.lrem(park_key, 1, raw_item)
+            candidate = self._decode_entry(raw_item)
+            if candidate and ensure_dlq_id(candidate) == dlq_id:
+                entry = candidate
+                parked_raw_item = raw_item
+                break
+        if entry is None:
+            entry = await self.processor.knowledge_store.get_parked_dlq_item(
+                dlq_id=dlq_id,
+                user_name=user_name,
+                project_id=project_id,
+            )
+        if entry is None:
+            return False
+
+        # Make the user-visible workflow transition durable before touching
+        # Redis. A process failure can then be recovered from Postgres rather
+        # than leaving an apparently parked item that has already been queued.
+        if not await self.processor.knowledge_store.mark_parked_dlq_item_requeued(
+            dlq_id=dlq_id,
+            user_name=user_name,
+            project_id=project_id,
+        ):
+            return False
+
+        if parked_raw_item is not None:
+            await self.redis.lrem(park_key, 1, parked_raw_item)
+
+        queued_raw_item = serialize_dlq_entry(entry)
+        try:
+            await self.redis.rpush(dlq_key, queued_raw_item)
             await self.redis.hset(state_key, dlq_id, DLQ_STATUS_QUEUED)
-            await self.redis.rpush(dlq_key, serialize_dlq_entry(entry))
             return True
+        except Exception as exc:
+            logger.error("DLQ requeue did not reach Redis: {}", exc)
+
+        # Do not strand a queue item whose durable subject is still parked.
+        await self.redis.lrem(dlq_key, 1, queued_raw_item)
+        await self.redis.hset(state_key, dlq_id, DLQ_STATUS_PARKED)
+        # Restore the durable parked state and reopen its review. The payload
+        # is still the source of truth if Redis is unavailable.
+        await self.processor.knowledge_store.park_dlq_item(
+            dlq_id=dlq_id,
+            user_name=user_name,
+            project_id=project_id,
+            entry=entry,
+        )
+        if parked_raw_item is not None:
+            await self.redis.rpush(park_key, parked_raw_item)
         return False
 
     def _decode_entry(self, raw_item: str) -> Optional[dict]:
@@ -194,6 +237,30 @@ class DLQReplayJob(BaseJob):
             )
             requeued += 1
         return requeued
+
+    async def _recover_durable_requeues(self, ctx: JobContext) -> int:
+        """Rebuild Redis queue entries after a crash between durable and Redis work."""
+        recovered = 0
+        state_key = RedisKeys.dlq_state(ctx.user_name, ctx.project_id)
+        dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)
+        for entry in await self.processor.knowledge_store.get_requeued_dlq_items(
+            user_name=ctx.user_name, project_id=ctx.project_id
+        ):
+            dlq_id = ensure_dlq_id(entry)
+            if await self.redis.hget(state_key, dlq_id) is not None:
+                continue
+            queued_entries = await self.redis.lrange(dlq_key, 0, -1)
+            if any(
+                candidate
+                and ensure_dlq_id(candidate) == dlq_id
+                for candidate in (self._decode_entry(raw) for raw in queued_entries)
+            ):
+                await self.redis.hset(state_key, dlq_id, DLQ_STATUS_QUEUED)
+                continue
+            await self.redis.rpush(dlq_key, serialize_dlq_entry(entry))
+            await self.redis.hset(state_key, dlq_id, DLQ_STATUS_QUEUED)
+            recovered += 1
+        return recovered
 
     async def _claim_next(
         self, ctx: JobContext
@@ -245,6 +312,11 @@ class DLQReplayJob(BaseJob):
         await self.redis.zadd(
             RedisKeys.dlq_completed(ctx.user_name, ctx.project_id),
             {dlq_id: get_now_unix()},
+        )
+        await self.processor.knowledge_store.mark_parked_dlq_item_completed_if_requeued(
+            dlq_id=dlq_id,
+            user_name=ctx.user_name,
+            project_id=ctx.project_id,
         )
 
     async def _prune_completed_state(self, ctx: JobContext) -> int:
@@ -298,6 +370,22 @@ class DLQReplayJob(BaseJob):
         state_key = RedisKeys.dlq_state(ctx.user_name, ctx.project_id)
         claims_key = RedisKeys.dlq_claims(ctx.user_name, ctx.project_id)
         already_parked = await self.redis.hget(state_key, dlq_id) == DLQ_STATUS_PARKED
+
+        durable_entry = dict(entry or {})
+        durable_entry.update(
+            {
+                "dlq_id": dlq_id,
+                "user_name": durable_entry.get("user_name") or ctx.user_name,
+                "project_id": durable_entry.get("project_id") or ctx.project_id,
+                "raw_item": raw_item,
+            }
+        )
+        await self.processor.knowledge_store.park_dlq_item(
+            dlq_id=dlq_id,
+            user_name=ctx.user_name,
+            project_id=ctx.project_id,
+            entry=durable_entry,
+        )
 
         await self.redis.lrem(processing_key, 1, raw_item)
         await self.redis.hdel(claims_key, dlq_id)
@@ -773,6 +861,7 @@ class DLQReplayJob(BaseJob):
         dlq_key = RedisKeys.dlq(ctx.user_name, ctx.project_id)
         park_key = RedisKeys.dlq_parked(ctx.user_name, ctx.project_id)
         await self._requeue_abandoned_claims(ctx)
+        recovered_requeues = await self._recover_durable_requeues(ctx)
         pruned_completed = await self._prune_completed_state(ctx)
 
         queue_len = await self.redis.llen(dlq_key)
@@ -780,7 +869,7 @@ class DLQReplayJob(BaseJob):
             return JobResult(
                 success=True,
                 summary=(
-                    "DLQ empty"
+                    ("DLQ empty" if not recovered_requeues else f"Recovered {recovered_requeues} durable requeues")
                     if not pruned_completed
                     else f"DLQ empty; pruned {pruned_completed} completed markers"
                 ),

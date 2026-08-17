@@ -190,7 +190,7 @@ class DocumentService:
         metadata = dict(row)
         if metadata.get("document_id") is not None:
             metadata["document_id"] = str(metadata["document_id"])
-        for key in ("created_at", "updated_at", "indexed_at"):
+        for key in ("created_at", "updated_at", "indexed_at", "deleted_at"):
             value = metadata.get(key)
             if isinstance(value, datetime):
                 metadata[key] = value.isoformat()
@@ -990,7 +990,7 @@ class DocumentService:
         document_id: str,
         session_id: Optional[str] = None,
     ) -> Dict:
-        """Permanently delete a visible document, chunks, and stored bytes."""
+        """Purge document content while retaining a minimal provenance record."""
         if not isinstance(document_id, str) or not document_id.strip():
             raise ValueError("document_id must not be empty")
         row = await self._writer.delete_document(
@@ -1241,8 +1241,10 @@ class DocumentService:
         relative_path: Optional[str] = None,
         session_id: Optional[str] = None,
         visibility_scope: str = "project",
+        replace_document_id: Optional[str] = None,
+        confirm_as_separate: bool = False,
     ) -> Dict:
-        """Store original bytes and persist project document metadata."""
+        """Store a manual upload or return a replacement confirmation request."""
         if not isinstance(content, bytes):
             raise TypeError("content must be bytes")
         if not content:
@@ -1261,8 +1263,32 @@ class DocumentService:
                 f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
         self._validate_visibility(visibility_scope, session_id)
+        if replace_document_id is not None and confirm_as_separate:
+            raise ValueError(
+                "replace_document_id and confirm_as_separate are mutually exclusive"
+            )
 
         normalized_path = normalize_relative_path(relative_path, original_name)
+        candidates = await self._reader.find_deleted_replacement_candidates(
+            original_name=original_name,
+            relative_path=normalized_path,
+            session_id=session_id,
+            visibility_scope=visibility_scope,
+        )
+        candidate_ids = {str(candidate["document_id"]) for candidate in candidates}
+        if replace_document_id is not None:
+            replace_document_id = replace_document_id.strip()
+            if replace_document_id not in candidate_ids:
+                raise ValueError(
+                    "replace_document_id must be one of the offered deleted documents"
+                )
+        elif candidates and not confirm_as_separate:
+            return {
+                "confirmation_required": True,
+                "replacement_candidates": [
+                    self._public_metadata(candidate) for candidate in candidates
+                ],
+            }
         document_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
@@ -1278,6 +1304,7 @@ class DocumentService:
             content_hash=content_hash,
             content=content,
             created_at=created_at,
+            replaces_document_id=replace_document_id,
         )
         return {
             "document_id": document_id,
@@ -1292,6 +1319,18 @@ class DocumentService:
             "size_bytes": len(content),
             "content_hash": content_hash,
             "status": "uploaded",
+            "replaces_document_id": replace_document_id,
+            "version_number": (
+                int(next(
+                    candidate["version_number"]
+                    for candidate in candidates
+                    if str(candidate["document_id"]) == replace_document_id
+                ))
+                + 1
+                if replace_document_id is not None
+                else 1
+            ),
+            "deleted_at": None,
             "indexed_at": None,
             "error_message": None,
             "created_at": created_at,
@@ -1389,6 +1428,8 @@ class DocumentService:
         relative_path: Optional[str] = None,
         session_id: Optional[str] = None,
         visibility_scope: str = "project",
+        replace_document_id: Optional[str] = None,
+        confirm_as_separate: bool = False,
     ) -> Dict:
         """Persist a document, then index inline or admit durable background work."""
         document = await self.add_document(
@@ -1397,7 +1438,11 @@ class DocumentService:
             relative_path=relative_path,
             session_id=session_id,
             visibility_scope=visibility_scope,
+            replace_document_id=replace_document_id,
+            confirm_as_separate=confirm_as_separate,
         )
+        if document.get("confirmation_required"):
+            return document
         return await self.schedule_document_index(
             document_id=document["document_id"],
             session_id=session_id,

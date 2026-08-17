@@ -130,6 +130,7 @@ class DocumentReader:
              AND ws.project_id = pd.project_id
             WHERE pd.project_id = %s
               AND ws.ownership_mode = 'managed_project_workspace'
+              AND pd.status <> 'deleted'
         """
         params: list = [self._project_id]
         if path_prefix is not None:
@@ -174,6 +175,7 @@ class DocumentReader:
             WHERE pd.project_id = %s
               AND ws.ownership_mode = 'managed_project_workspace'
               AND pd.relative_path = %s
+              AND pd.status <> 'deleted'
             LIMIT 1
             """,
             (self._project_id, relative_path),
@@ -219,6 +221,7 @@ class DocumentReader:
             FROM public.document_workspace_sources AS ws
             LEFT JOIN public.project_documents AS pd
                 ON pd.source_id = ws.source_id
+               AND pd.status <> 'deleted'
             WHERE ws.source_id = %s
               AND ws.project_id = %s
               AND (
@@ -286,6 +289,7 @@ class DocumentReader:
             + selector
             + """
               AND pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -297,6 +301,55 @@ class DocumentReader:
             LIMIT 2
             """,
             (selector_value, self._project_id, session_id),
+        )
+
+    async def find_deleted_replacement_candidates(
+        self,
+        *,
+        original_name: str,
+        relative_path: str,
+        session_id: Optional[str],
+        visibility_scope: str,
+    ) -> List[Dict]:
+        """Return deleted visible files that may be explicitly replaced."""
+
+        return await self._client.fetch_all(
+            """
+            SELECT
+                document_id,
+                project_id,
+                session_id,
+                visibility_scope,
+                original_name,
+                relative_path,
+                content_hash,
+                version_number,
+                deleted_at
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND status = 'deleted'
+              AND visibility_scope = %s
+              AND (
+                  relative_path = %s
+                  OR lower(original_name) = lower(%s)
+              )
+              AND (
+                  visibility_scope = 'project'
+                  OR (
+                      visibility_scope = 'session'
+                      AND session_id = %s
+                  )
+              )
+            ORDER BY deleted_at DESC NULLS LAST, document_id DESC
+            LIMIT 5
+            """,
+            (
+                self._project_id,
+                visibility_scope,
+                relative_path,
+                original_name,
+                session_id,
+            ),
         )
 
     async def fetch_document_content(
@@ -314,6 +367,7 @@ class DocumentReader:
                 ON pd.document_id = dc.document_id
             WHERE dc.document_id = %s
               AND pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -347,6 +401,7 @@ class DocumentReader:
               AND dc.extracted_content_hash = pd.content_hash
               AND dc.extracted_text IS NOT NULL
               AND pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -486,6 +541,7 @@ class DocumentReader:
             LEFT JOIN public.document_chunks AS dc
                 ON dc.document_id = pd.document_id
             WHERE pd.project_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (
@@ -627,6 +683,7 @@ class DocumentReader:
                 ON dc.document_id = pd.document_id
             WHERE pd.project_id = %s
               AND pd.folder_root_id = %s
+              AND pd.status <> 'deleted'
               AND (
                   pd.visibility_scope = 'project'
                   OR (

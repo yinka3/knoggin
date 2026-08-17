@@ -28,6 +28,7 @@ from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.jobs.audit_retention_cleanup_job import (
     AuditRetentionCleanupJob,
 )
+from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
 from core.knowledge.jobs.merge_rollback_cleanup_job import (
     MergeCleanupJob,
 )
@@ -203,7 +204,7 @@ class ProjectManager:
         """List all projects and enrich with session counts."""
         query = """
             SELECT p.*,
-                   (SELECT COUNT(*) FROM public.sessions s WHERE s.project_id = p.project_id) as session_count,
+                   (SELECT COUNT(*) FROM public.sessions s WHERE s.project_id = p.project_id AND s.status <> 'deleted') as session_count,
                    (SELECT array_agg(readable_project_id) FROM public.project_read_scopes rs WHERE rs.project_id = p.project_id) as allowed_projects
             FROM public.projects p
             WHERE p.user_name = %(user_name)s
@@ -225,7 +226,7 @@ class ProjectManager:
         """Get project metadata."""
         query = """
             SELECT p.*,
-                   (SELECT COUNT(*) FROM public.sessions s WHERE s.project_id = p.project_id) as session_count,
+                   (SELECT COUNT(*) FROM public.sessions s WHERE s.project_id = p.project_id AND s.status <> 'deleted') as session_count,
                    (SELECT array_agg(readable_project_id) FROM public.project_read_scopes rs WHERE rs.project_id = p.project_id) as allowed_projects
             FROM public.projects p
             WHERE p.user_name = %(user_name)s AND p.project_id = %(project_id)s
@@ -369,6 +370,61 @@ class ProjectManager:
             user_name=self.user_name,
             project_id=project_id,
             thresholds=thresholds,
+        )
+
+    async def get_open_human_reviews(self, project_id: str):
+        """Return workflow-neutral inbox entries for a project."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        return await self.resources.knowledge_store.get_open_human_reviews(
+            user_name=self.user_name,
+            project_id=project_id,
+        )
+
+    async def requeue_parked_dlq_item(self, project_id: str, dlq_id: str) -> bool:
+        """Requeue a human-reviewed DLQ item through its active project runtime."""
+        await self._require_domain_project(project_id, allow_archived=True)
+        state = self.active_projects.get(project_id)
+        if state is None or state.dlq_job is None:
+            raise RuntimeError("Project runtime is not active for DLQ requeue")
+        return await state.dlq_job.requeue_parked_dlq_item(
+            user_name=self.user_name,
+            project_id=project_id,
+            dlq_id=dlq_id,
+        )
+
+    async def get_conflict_group(self, project_id: str, conflict_id: str) -> dict:
+        """Return the conflict workflow subject and immutable evidence snapshots."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        detail = await self.resources.knowledge_store.get_conflict_group(
+            conflict_id=conflict_id,
+            user_name=self.user_name,
+            project_id=project_id,
+        )
+        if detail is None:
+            raise FileNotFoundError("Conflict group not found")
+        return detail
+
+    async def resolve_conflict_group(
+        self,
+        project_id: str,
+        conflict_id: str,
+        *,
+        resolution_kind: str,
+        resolution_note: str | None = None,
+        resolved_by: str | None = None,
+    ):
+        """Apply a user-led classification without rewriting the evidence."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        return await self.resources.knowledge_store.resolve_conflict_group(
+            conflict_id=conflict_id,
+            user_name=self.user_name,
+            project_id=project_id,
+            resolution_kind=resolution_kind,
+            resolved_by=resolved_by or self.user_name,
+            resolution_note=resolution_note,
         )
 
     async def apply_relationship_advisory_action(
@@ -541,9 +597,10 @@ class ProjectManager:
                 %(session_id)s, %(user_name)s, %(project_id)s, 'open'
             )
             ON CONFLICT (session_id) DO UPDATE
-            SET project_id = EXCLUDED.project_id,
-                status = 'open',
-                last_active_at = now()
+            SET last_active_at = now()
+            WHERE public.sessions.user_name = EXCLUDED.user_name
+              AND public.sessions.project_id = EXCLUDED.project_id
+              AND public.sessions.status = 'open'
             """,
             {
                 "session_id": session_id,
@@ -1385,6 +1442,7 @@ class ProjectManager:
             redis_client=self.resources.redis,
             settings=dlq_cfg,
         )
+        project_state.dlq_job = dlq_job
         scheduler.register(dlq_job)
         project_state.add_config_unsubscriber(
             config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
@@ -1424,6 +1482,19 @@ class ProjectManager:
             config_mgr.subscribe(
                 audit_retention_job.update_settings,
                 "developer_settings.jobs.audit_retention",
+            )
+        )
+
+        conflict_discovery_job = ConflictDiscoveryJob(
+            knowledge_store=self.resources.knowledge_store,
+            settings=jobs_cfg.conflict_discovery,
+            llm=self.resources.llm_service,
+        )
+        scheduler.register(conflict_discovery_job)
+        project_state.add_config_unsubscriber(
+            config_mgr.subscribe(
+                conflict_discovery_job.update_settings,
+                "developer_settings.jobs.conflict_discovery",
             )
         )
 

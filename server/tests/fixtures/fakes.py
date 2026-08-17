@@ -451,6 +451,7 @@ class FakeKnowledgeStore:
         self.next_entity_id = 2
         self.next_message_id = 1
         self.search_rebuild_calls = []
+        self.parked_dlq_items = {}
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -507,6 +508,39 @@ class FakeKnowledgeStore:
     async def save_candidate_suggestions(self, scope, suggestions):
         self.saved_candidate_suggestions.append((scope, list(suggestions)))
         return len(suggestions)
+
+    async def park_dlq_item(self, *, dlq_id, user_name, project_id, entry):
+        self.parked_dlq_items[(user_name, project_id, dlq_id)] = {
+            **dict(entry),
+            "dlq_id": dlq_id,
+            "user_name": user_name,
+            "project_id": project_id,
+            "status": "parked",
+        }
+
+    async def get_parked_dlq_item(self, *, dlq_id, user_name, project_id):
+        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "parked":
+            return None
+        return dict(entry)
+
+    async def mark_parked_dlq_item_requeued(
+        self, *, dlq_id, user_name, project_id
+    ):
+        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "parked":
+            return False
+        entry["status"] = "requeued"
+        return True
+
+    async def mark_parked_dlq_item_completed_if_requeued(
+        self, *, dlq_id, user_name, project_id
+    ):
+        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
+        if entry is None or entry["status"] != "requeued":
+            return False
+        entry["status"] = "completed"
+        return True
 
     async def get_recent_project_messages(
         self, user_name, project_id, limit, before_message_id=None
@@ -656,6 +690,7 @@ class FakePostgresClient:
             1
             for session in self.sessions.values()
             if session.get("project_id") == row.get("project_id")
+            and session.get("status") != "deleted"
         )
         result["allowed_projects"] = sorted(self.project_read_scopes.get(key, set()))
         return result
@@ -734,6 +769,8 @@ class FakePostgresClient:
                     for row in rows
                     if row.get("session_id") == params.get("session_id")
                 ]
+            if "status <> 'deleted'" in normalized:
+                rows = [row for row in rows if row.get("status") != "deleted"]
             if "status = 'open'" in normalized:
                 rows = [row for row in rows if row.get("status", "open") == "open"]
             return rows[:1] if "limit 1" in normalized else rows
@@ -848,12 +885,30 @@ class FakePostgresClient:
                 row["last_active_at"] = self._now()
             if "status = 'closed'" in normalized:
                 row["status"] = "closed"
+            if "status = 'deleted'" in normalized:
+                row["status"] = "deleted"
+                row["deleted_at"] = row.get("deleted_at") or self._now()
+                row["model"] = None
+                row["agent_id"] = None
+                row["enabled_tools"] = None
+                row["document_focus"] = None
             for field in ("model", "agent_id", "enabled_tools"):
                 if field in params:
                     value = params[field]
                     if field == "enabled_tools" and isinstance(value, str):
                         value = json.loads(value)
                     row[field] = value
+            return
+
+        if "update public.messages" in normalized and "ingestion_state = 'excluded'" in normalized:
+            for row in self.messages:
+                if (
+                    row.get("user_name") == params.get("user_name")
+                    and row.get("session_id") == params.get("session_id")
+                    and row.get("ingestion_state") != "processed"
+                ):
+                    row["ingestion_state"] = "excluded"
+                    row["episode_eligible"] = False
             return
 
         if "delete from public.messages" in normalized:
@@ -979,6 +1034,14 @@ class _FakePostgresCursor:
         self.client.calls.append(("execute", query, params))
         self.client._execute_against_stores(query, params or {})
         return self.client.write_count
+
+    async def fetchone(self):
+        if not self.client.read_results:
+            return None
+        result = self.client.read_results.pop(0)
+        if isinstance(result, list):
+            return result[0] if result else None
+        return result
 
 
 @dataclass

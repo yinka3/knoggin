@@ -4,16 +4,64 @@ from __future__ import annotations
 
 from common.scoping import require_scope_value
 from core.knowledge.relationship_advisories import (
+    RelationshipAdvisory,
     RelationshipAdvisoryDecision,
     apply_advisory_action,
 )
+from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
 
 
 class RelationshipAdvisoryWriter:
     """Persist current advisory state and an append-only decision audit."""
 
-    def __init__(self, client):
+    def __init__(self, client, reviews: HumanReviewWriter | None = None):
         self.client = client
+        self.reviews = reviews or HumanReviewWriter(client)
+
+    async def materialize_pending(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        advisory: RelationshipAdvisory,
+    ) -> None:
+        """Make an evidence-backed advisory a durable review subject once."""
+
+        if advisory.disposition != "pending":
+            return
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                INSERT INTO relationship_advisories (
+                    user_name, project_id, pattern_key, disposition
+                )
+                VALUES (%s, %s, %s, 'pending')
+                ON CONFLICT (user_name, project_id, pattern_key) DO NOTHING
+                """,
+                (user_name, project_id, advisory.pattern_key),
+            )
+            await self.reviews.open(
+                user_name=user_name,
+                project_id=project_id,
+                kind="relationship_advisory",
+                subject_type="relationship_advisory",
+                subject_id=advisory.pattern_key,
+                priority="normal",
+                title=f"Relationship advisory: {advisory.observed_label}",
+                summary=(
+                    f"{advisory.occurrence_count} observations between "
+                    f"{advisory.source_type or 'unknown'} and "
+                    f"{advisory.target_type or 'unknown'} entities."
+                ),
+                metadata={
+                    "observed_label": advisory.observed_label,
+                    "source_type": advisory.source_type,
+                    "target_type": advisory.target_type,
+                    "occurrence_count": advisory.occurrence_count,
+                    "message_ids": list(advisory.message_ids),
+                },
+                cur=cur,
+            )
 
     async def apply_action(
         self,
@@ -152,4 +200,24 @@ class RelationshipAdvisoryWriter:
                     decision.revision,
                 ),
             )
+            if decision.disposition == "pending":
+                await self.reviews.open(
+                    user_name=user_name,
+                    project_id=project_id,
+                    kind="relationship_advisory",
+                    subject_type="relationship_advisory",
+                    subject_id=pattern_key,
+                    priority="normal",
+                    title=f"Relationship advisory: {pattern_key}",
+                    summary=None,
+                    cur=cur,
+                )
+            else:
+                await self.reviews.resolve(
+                    user_name=user_name,
+                    project_id=project_id,
+                    kind="relationship_advisory",
+                    subject_id=pattern_key,
+                    cur=cur,
+                )
         return decision

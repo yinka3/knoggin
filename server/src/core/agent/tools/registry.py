@@ -315,7 +315,13 @@ TOOL_MODULES = {
     "feature_maintenance": ToolModule(
         name="feature_maintenance",
         layer="feature_maintenance",
-        tools=frozenset({"check_graph_health", "propose_entity_merge"}),
+        tools=frozenset(
+            {
+                "check_graph_health",
+                "propose_entity_merge",
+                "report_relationship_conflict",
+            }
+        ),
         after_tool_result=_maintenance_after_tool_result,
         after_tool_error=_maintenance_after_tool_error,
         runtime_instructions=_maintenance_runtime_instructions,

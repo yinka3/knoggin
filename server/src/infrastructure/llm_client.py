@@ -1,5 +1,9 @@
 import asyncio
+import json
+import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import (
     Any,
     AsyncIterator,
@@ -23,6 +27,7 @@ from openai import (
 
 from common.exceptions import (
     ConfigurationError,
+    LLMBudgetExceededError,
     LLMProviderError,
     LLMResponseError,
 )
@@ -31,7 +36,7 @@ from common.schema.agent.stream import (
     StreamToolCall,
     StreamUsage,
 )
-from common.schema.settings import LLMSettings
+from common.schema.settings import LLMSettings, LLMSpendingBudgetSettings
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 TRANSPORT_RETRIES = 3
@@ -39,6 +44,214 @@ VALIDATION_RETRIES = 3
 TRACE_MAX_CHARS = 20_000
 CLIENT_SHUTDOWN_TIMEOUT = 5.0
 ResponseT = TypeVar("ResponseT")
+
+
+@dataclass(frozen=True, slots=True)
+class LLMUsageRecord:
+    """One provider attempt recorded by the server-wide LLM service."""
+
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float
+    approximate_usage: bool
+    failed: bool
+    recorded_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class _BudgetReservation:
+    token: Any
+    reserved_cost_usd: float
+    price: Any
+    generation: int
+
+
+class _LLMSpendingLedger:
+    """Concurrency-safe in-process accounting for all external model attempts."""
+
+    MAX_RECORDS = 10_000
+
+    def __init__(
+        self, settings: LLMSpendingBudgetSettings | None = None, *, postgres_client=None
+    ) -> None:
+        self._lock = asyncio.Lock()
+        self._settings = settings or LLMSpendingBudgetSettings()
+        self._spent_usd = 0.0
+        self._reserved_usd = 0.0
+        self._records: list[LLMUsageRecord] = []
+        self._next_token = 0
+        self._reset_key = self._settings.reset_key
+        self._generation = 0
+        self._postgres = postgres_client
+
+    async def update_settings(self, settings: LLMSpendingBudgetSettings) -> None:
+        async with self._lock:
+            self._replace_settings_unlocked(settings)
+
+    def replace_settings_without_lock(self, settings: LLMSpendingBudgetSettings) -> None:
+        """Use only before the service enters an event loop."""
+
+        self._replace_settings_unlocked(settings)
+
+    def _replace_settings_unlocked(self, settings: LLMSpendingBudgetSettings) -> None:
+        if settings.reset_key != self._reset_key:
+            self._spent_usd = 0.0
+            self._reserved_usd = 0.0
+            self._records.clear()
+            self._reset_key = settings.reset_key
+            self._generation += 1
+        self._settings = settings
+
+    async def reserve(
+        self,
+        *,
+        model: str,
+        estimated_prompt_tokens: int,
+    ) -> _BudgetReservation:
+        if self._postgres is not None and self._settings.limit_usd is not None:
+            return await self._reserve_durable(
+                model=model, estimated_prompt_tokens=estimated_prompt_tokens
+            )
+        async with self._lock:
+            limit = self._settings.limit_usd
+            if limit is not None and self._spent_usd + self._reserved_usd >= limit:
+                raise LLMBudgetExceededError(
+                    "The configured global LLM spending budget has been reached. "
+                    "Increase the limit or change its reset key before starting "
+                    "new LLM-backed work.",
+                    details=self._snapshot_unlocked(),
+                )
+            price = self._price_for(model)
+            if limit is not None and price is None:
+                raise ConfigurationError(
+                    "The configured LLM spending budget has no price for model "
+                    f"'{model}'. Add model_pricing for it or configure "
+                    "fallback_pricing before starting LLM-backed work."
+                )
+            reserved_cost = self._cost_for(
+                estimated_prompt_tokens,
+                self._settings.reservation_output_tokens,
+                price,
+            )
+            self._next_token += 1
+            self._reserved_usd += reserved_cost
+            return _BudgetReservation(
+                self._next_token,
+                reserved_cost,
+                price,
+                self._generation,
+            )
+
+    async def record(
+        self,
+        reservation: _BudgetReservation,
+        *,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        approximate_usage: bool,
+        failed: bool,
+    ) -> None:
+        if self._postgres is not None and self._settings.limit_usd is not None:
+            await self._record_durable(
+                reservation,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            return
+        async with self._lock:
+            # A reset explicitly starts a new user-controlled accounting period.
+            # Do not let an older in-flight request charge that new period.
+            if reservation.generation != self._generation:
+                return
+            self._reserved_usd = max(
+                0.0,
+                self._reserved_usd - reservation.reserved_cost_usd,
+            )
+            cost = self._cost_for(
+                prompt_tokens,
+                completion_tokens,
+                reservation.price,
+            )
+            self._spent_usd += cost
+            self._records.append(
+                LLMUsageRecord(
+                    model=model,
+                    prompt_tokens=max(prompt_tokens, 0),
+                    completion_tokens=max(completion_tokens, 0),
+                    cost_usd=cost,
+                    approximate_usage=approximate_usage,
+                    failed=failed,
+                    recorded_at=datetime.now(timezone.utc),
+                )
+            )
+            if len(self._records) > self.MAX_RECORDS:
+                del self._records[: len(self._records) - self.MAX_RECORDS]
+
+    async def _reserve_durable(self, *, model: str, estimated_prompt_tokens: int) -> _BudgetReservation:
+        price = self._price_for(model)
+        if price is None:
+            raise ConfigurationError(f"The configured LLM spending budget has no price for model '{model}'.")
+        reserved = self._cost_for(estimated_prompt_tokens, self._settings.reservation_output_tokens, price)
+        reservation_id = str(uuid.uuid4())
+        reset_key = self._settings.reset_key
+        async with self._postgres.transaction() as cur:
+            await cur.execute("INSERT INTO public.llm_budget_windows (reset_key) VALUES (%s) ON CONFLICT DO NOTHING", (reset_key,))
+            await cur.execute("SELECT spent_usd, reserved_usd FROM public.llm_budget_windows WHERE reset_key = %s FOR UPDATE", (reset_key,))
+            window = await cur.fetchone()
+            await cur.execute("""WITH expired AS (UPDATE public.llm_budget_reservations SET status = 'expired' WHERE reset_key = %s AND status = 'active' AND expires_at <= now() RETURNING reserved_usd) UPDATE public.llm_budget_windows SET reserved_usd = GREATEST(0, reserved_usd - COALESCE((SELECT sum(reserved_usd) FROM expired), 0)), updated_at = now() WHERE reset_key = %s""", (reset_key, reset_key))
+            await cur.execute("SELECT spent_usd, reserved_usd FROM public.llm_budget_windows WHERE reset_key = %s", (reset_key,))
+            window = await cur.fetchone()
+            if float(window["spent_usd"]) + float(window["reserved_usd"]) + reserved > float(self._settings.limit_usd):
+                raise LLMBudgetExceededError("The configured global LLM spending budget has been reached.")
+            await cur.execute("INSERT INTO public.llm_budget_reservations (reservation_id, reset_key, reserved_usd, expires_at, status) VALUES (%s, %s, %s, now() + interval '15 minutes', 'active')", (reservation_id, reset_key, reserved))
+            await cur.execute("UPDATE public.llm_budget_windows SET reserved_usd = reserved_usd + %s, updated_at = now() WHERE reset_key = %s", (reserved, reset_key))
+        return _BudgetReservation(reservation_id, reserved, price, self._generation)
+
+    async def _record_durable(self, reservation: _BudgetReservation, *, prompt_tokens: int, completion_tokens: int) -> None:
+        actual = self._cost_for(prompt_tokens, completion_tokens, reservation.price)
+        async with self._postgres.transaction() as cur:
+            await cur.execute("SELECT reset_key, reserved_usd FROM public.llm_budget_reservations WHERE reservation_id = %s AND status = 'active' FOR UPDATE", (reservation.token,))
+            row = await cur.fetchone()
+            if row is None:
+                return
+            await cur.execute("UPDATE public.llm_budget_reservations SET status = 'recorded', recorded_at = now() WHERE reservation_id = %s", (reservation.token,))
+            await cur.execute("UPDATE public.llm_budget_windows SET reserved_usd = GREATEST(0, reserved_usd - %s), spent_usd = spent_usd + %s, updated_at = now() WHERE reset_key = %s", (float(row["reserved_usd"]), actual, row["reset_key"]))
+
+    async def snapshot(self) -> dict[str, Any]:
+        async with self._lock:
+            return self._snapshot_unlocked()
+
+    def _snapshot_unlocked(self) -> dict[str, Any]:
+        limit = self._settings.limit_usd
+        return {
+            "configured_limit_usd": limit,
+            "spent_usd": round(self._spent_usd, 8),
+            "reserved_usd": round(self._reserved_usd, 8),
+            "remaining_usd": (
+                None
+                if limit is None
+                else round(max(limit - self._spent_usd - self._reserved_usd, 0.0), 8)
+            ),
+            "request_count": len(self._records),
+            "enforced": limit is not None,
+        }
+
+    def _price_for(self, model: str):
+        return self._settings.model_pricing.get(
+            model,
+            self._settings.fallback_pricing,
+        )
+
+    @staticmethod
+    def _cost_for(prompt_tokens: int, completion_tokens: int, price) -> float:
+        if price is None:
+            return 0.0
+        return (
+            (max(prompt_tokens, 0) * price.input_usd_per_million_tokens)
+            + (max(completion_tokens, 0) * price.output_usd_per_million_tokens)
+        ) / 1_000_000
 
 
 class LLMService:
@@ -50,6 +263,8 @@ class LLMService:
         agent_model: str = "google/gemini-3-flash-preview",
         extraction_model: str = "google/gemini-2.5-flash",
         merge_model: str = "google/gemini-2.5-pro",
+        spending_budget: LLMSpendingBudgetSettings | None = None,
+        postgres_client=None,
     ):
         self._api_key = (api_key or "").strip()
         self._base_url = base_url or OPENROUTER_BASE_URL
@@ -58,6 +273,7 @@ class LLMService:
         self._agent_model = agent_model
         self._extraction_model = extraction_model
         self._merge_model = merge_model
+        self._spending_ledger = _LLMSpendingLedger(spending_budget, postgres_client=postgres_client)
         self._client = None
         self._raw_client = None
         self._tokenizer = None
@@ -117,6 +333,11 @@ class LLMService:
     @property
     def merge_model(self) -> str:
         return self._merge_model
+
+    async def spending_snapshot(self) -> dict[str, Any]:
+        """Return bounded server-wide LLM spend and reservation state."""
+
+        return await self._spending_ledger.snapshot()
 
     @property
     def is_configured(self) -> bool:
@@ -240,6 +461,24 @@ class LLMService:
             )
             self._merge_model = settings.merge_model
 
+        self._schedule_budget_settings_update(settings.spending_budget)
+
+    def _schedule_budget_settings_update(
+        self,
+        settings: LLMSpendingBudgetSettings,
+    ) -> None:
+        """Apply hot-reloaded budget policy without requiring an async callback."""
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._spending_ledger.replace_settings_without_lock(settings)
+            return
+        loop.create_task(
+            self._spending_ledger.update_settings(settings),
+            name="llm-spending-budget-update",
+        )
+
     @staticmethod
     def _openrouter_extra_body(
         reasoning: Optional[str] = "low",
@@ -264,6 +503,56 @@ class LLMService:
             # Fallback to rough estimation if tokenizer failed to load
             return len(text) // 4
         return len(self._tokenizer.encode(text))
+
+    async def _reserve_external_attempt(
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        additional_prompt_tokens: int = 0,
+    ) -> _BudgetReservation:
+        return await self._spending_ledger.reserve(
+            model=model,
+            estimated_prompt_tokens=(
+                self.count_tokens(f"{system}\n{user}")
+                + max(additional_prompt_tokens, 0)
+            ),
+        )
+
+    async def _record_external_attempt(
+        self,
+        reservation: _BudgetReservation,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        content: str = "",
+        provider_usage: Any = None,
+        failed: bool,
+        additional_prompt_tokens: int = 0,
+    ) -> None:
+        if isinstance(provider_usage, dict):
+            prompt_tokens = provider_usage.get("prompt_tokens")
+            completion_tokens = provider_usage.get("completion_tokens")
+        else:
+            prompt_tokens = getattr(provider_usage, "prompt_tokens", None)
+            completion_tokens = getattr(provider_usage, "completion_tokens", None)
+        approximate = prompt_tokens is None or completion_tokens is None
+        if approximate:
+            prompt_tokens = (
+                self.count_tokens(f"{system}\n{user}")
+                + max(additional_prompt_tokens, 0)
+            )
+            completion_tokens = self.count_tokens(content)
+        await self._spending_ledger.record(
+            reservation,
+            model=model,
+            prompt_tokens=int(prompt_tokens or 0),
+            completion_tokens=int(completion_tokens or 0),
+            approximate_usage=approximate,
+            failed=failed,
+        )
 
     def _trace_exchange(self, model: str, user: str, response: Any) -> None:
         if not self._trace:
@@ -294,6 +583,14 @@ class LLMService:
 
         async with self._client_snapshot() as (raw_client, _):
             for attempt in range(TRANSPORT_RETRIES):
+                reservation = await self._reserve_external_attempt(
+                    model=model,
+                    system=system,
+                    user=user,
+                )
+                recorded = False
+                response = None
+                content = ""
                 try:
                     create_kwargs: Dict[str, Any] = {
                         "model": model,
@@ -323,11 +620,45 @@ class LLMService:
                             details={"model": model},
                         )
 
+                    await self._record_external_attempt(
+                        reservation,
+                        model=model,
+                        system=system,
+                        user=user,
+                        content=content,
+                        provider_usage=getattr(response, "usage", None),
+                        failed=False,
+                    )
+                    recorded = True
                     self._trace_exchange(model, user, content)
                     return content
+                except LLMBudgetExceededError:
+                    raise
                 except LLMResponseError:
+                    if not recorded:
+                        await self._record_external_attempt(
+                            reservation,
+                            model=model,
+                            system=system,
+                            user=user,
+                            content=content or "",
+                            provider_usage=getattr(response, "usage", None),
+                            failed=True,
+                        )
+                        recorded = True
                     raise
                 except Exception as exc:
+                    if not recorded:
+                        await self._record_external_attempt(
+                            reservation,
+                            model=model,
+                            system=system,
+                            user=user,
+                            content=content or "",
+                            provider_usage=getattr(response, "usage", None),
+                            failed=True,
+                        )
+                        recorded = True
                     if attempt < TRANSPORT_RETRIES - 1:
                         logger.warning(
                             f"LLM text call failed: {exc}. Retrying "
@@ -339,6 +670,17 @@ class LLMService:
                             "LLM text generation failed after retries",
                             details={"model": model, "error": str(exc)},
                         ) from exc
+                finally:
+                    if not recorded:
+                        await self._record_external_attempt(
+                            reservation,
+                            model=model,
+                            system=system,
+                            user=user,
+                            content=content or "",
+                            provider_usage=getattr(response, "usage", None),
+                            failed=True,
+                        )
 
         raise AssertionError("unreachable")
 
@@ -365,40 +707,113 @@ class LLMService:
             "temperature": temperature,
             "response_model": response_model,
             "mode": mode or instructor.Mode.JSON,
-            "max_retries": VALIDATION_RETRIES,
+            # Validation retries are controlled below so each provider request
+            # receives its own budget reservation and usage record.
+            "max_retries": 0,
         }
         if is_openrouter:
             create_kwargs["extra_body"] = self._openrouter_extra_body(reasoning)
 
         async with self._client_snapshot() as (_, instructor_client):
-            try:
-                (
-                    response,
-                    _completion,
-                ) = await instructor_client.chat.completions.create_with_completion(
-                    **create_kwargs
+            response = None
+            for attempt in range(VALIDATION_RETRIES + 1):
+                reservation = await self._reserve_external_attempt(
+                    model=model,
+                    system=system,
+                    user=user,
                 )
-            except InstructorRetryException as exc:
-                raise LLMResponseError(
-                    "LLM structured response failed validation",
-                    details=self._structured_validation_error_details(model, exc),
-                ) from exc
-            except (
-                APIConnectionError,
-                APIStatusError,
-                APITimeoutError,
-                RateLimitError,
-            ) as exc:
-                raise LLMProviderError(
-                    "LLM structured provider request failed",
-                    details={"model": model, "error": str(exc)},
-                ) from exc
-            except Exception as exc:
-                raise LLMResponseError(
-                    "LLM structured generation failed",
-                    details={"model": model, "error": str(exc)},
-                ) from exc
+                recorded = False
+                completion = None
+                try:
+                    (
+                        response,
+                        completion,
+                    ) = await instructor_client.chat.completions.create_with_completion(
+                        **create_kwargs
+                    )
+                    await self._record_external_attempt(
+                        reservation,
+                        model=model,
+                        system=system,
+                        user=user,
+                        content=str(response),
+                        provider_usage=getattr(completion, "usage", None),
+                        failed=False,
+                    )
+                    recorded = True
+                    break
+                except InstructorRetryException as exc:
+                    completion = getattr(exc, "last_completion", None)
+                    if not recorded:
+                        await self._record_external_attempt(
+                            reservation,
+                            model=model,
+                            system=system,
+                            user=user,
+                            provider_usage=getattr(completion, "usage", None),
+                            failed=True,
+                        )
+                        recorded = True
+                    if attempt < VALIDATION_RETRIES:
+                        logger.warning(
+                            "LLM structured response failed validation; retrying "
+                            "({}/{})",
+                            attempt + 1,
+                            VALIDATION_RETRIES,
+                        )
+                        continue
+                    raise LLMResponseError(
+                        "LLM structured response failed validation",
+                        details=self._structured_validation_error_details(model, exc),
+                    ) from exc
+                except (
+                    APIConnectionError,
+                    APIStatusError,
+                    APITimeoutError,
+                    RateLimitError,
+                ) as exc:
+                    if not recorded:
+                        await self._record_external_attempt(
+                            reservation,
+                            model=model,
+                            system=system,
+                            user=user,
+                            provider_usage=getattr(completion, "usage", None),
+                            failed=True,
+                        )
+                        recorded = True
+                    raise LLMProviderError(
+                        "LLM structured provider request failed",
+                        details={"model": model, "error": str(exc)},
+                    ) from exc
+                except Exception as exc:
+                    if not recorded:
+                        await self._record_external_attempt(
+                            reservation,
+                            model=model,
+                            system=system,
+                            user=user,
+                            provider_usage=getattr(completion, "usage", None),
+                            failed=True,
+                        )
+                        recorded = True
+                    raise LLMResponseError(
+                        "LLM structured generation failed",
+                        details={"model": model, "error": str(exc)},
+                    ) from exc
+                finally:
+                    if not recorded:
+                        await self._record_external_attempt(
+                            reservation,
+                            model=model,
+                            system=system,
+                            user=user,
+                            provider_usage=getattr(completion, "usage", None),
+                            failed=True,
+                        )
 
+        if response is None:
+            raise AssertionError("structured generation completed without a response")
         self._trace_exchange(model, user, response)
         return response
 
@@ -453,12 +868,35 @@ class LLMService:
         reasoning: Optional[str],
         is_openrouter: bool,
     ) -> AsyncIterator[InternalAgentStreamEvent]:
+        tool_schema_tokens = self.count_tokens(
+            json.dumps(tools, sort_keys=True, default=str, separators=(",", ":"))
+        )
         for attempt in range(TRANSPORT_RETRIES):
             content = ""
             tool_calls_by_index: Dict[int, StreamToolCall] = {}
             tool_calls_detected = False
             emitted_output = False
             usage: Optional[StreamUsage] = None
+            try:
+                reservation = await self._reserve_external_attempt(
+                    model=model,
+                    system=system,
+                    user=user,
+                    additional_prompt_tokens=tool_schema_tokens,
+                )
+            except LLMBudgetExceededError as exc:
+                yield {
+                    "event": "step_error",
+                    "data": {"kind": "budget", "message": str(exc)},
+                }
+                return
+            except ConfigurationError as exc:
+                yield {
+                    "event": "step_error",
+                    "data": {"kind": "configuration", "message": str(exc)},
+                }
+                return
+            recorded = False
 
             try:
                 create_kwargs: Dict[str, Any] = dict(
@@ -530,6 +968,28 @@ class LLMService:
                                     "data": {"content": rd.content},
                                 }
 
+                if not usage:
+                    p_tokens = self.count_tokens(f"{system}\n{user}")
+                    c_tokens = self.count_tokens(content)
+                    usage = {
+                        "prompt_tokens": p_tokens,
+                        "completion_tokens": c_tokens,
+                        "total_tokens": p_tokens + c_tokens,
+                        "approximate": True,
+                    }
+
+                await self._record_external_attempt(
+                    reservation,
+                    model=model,
+                    system=system,
+                    user=user,
+                    content=content,
+                    provider_usage=usage,
+                    failed=False,
+                    additional_prompt_tokens=tool_schema_tokens,
+                )
+                recorded = True
+
                 if tool_calls_by_index:
                     calls = [
                         tool_calls_by_index[i]
@@ -564,16 +1024,6 @@ class LLMService:
                         },
                     }
 
-                if not usage:
-                    p_tokens = self.count_tokens(f"{system}\n{user}")
-                    c_tokens = self.count_tokens(content)
-                    usage = {
-                        "prompt_tokens": p_tokens,
-                        "completion_tokens": c_tokens,
-                        "total_tokens": p_tokens + c_tokens,
-                        "approximate": True,
-                    }
-
                 yield {
                     "event": "step_completed",
                     "data": {
@@ -584,6 +1034,18 @@ class LLMService:
                 return
 
             except Exception as exc:
+                if not recorded:
+                    await self._record_external_attempt(
+                        reservation,
+                        model=model,
+                        system=system,
+                        user=user,
+                        content=content,
+                        provider_usage=usage,
+                        failed=True,
+                        additional_prompt_tokens=tool_schema_tokens,
+                    )
+                    recorded = True
                 if attempt < TRANSPORT_RETRIES - 1:
                     if emitted_output or tool_calls_detected:
                         logger.error(
@@ -614,6 +1076,18 @@ class LLMService:
                     "data": {"kind": "provider", "message": str(exc)},
                 }
                 return
+            finally:
+                if not recorded:
+                    await self._record_external_attempt(
+                        reservation,
+                        model=model,
+                        system=system,
+                        user=user,
+                        content=content,
+                        provider_usage=usage,
+                        failed=True,
+                        additional_prompt_tokens=tool_schema_tokens,
+                    )
 
     async def close(self):
         if self._closed:

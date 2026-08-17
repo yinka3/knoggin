@@ -1089,12 +1089,53 @@ class DocumentWriter:
         content_hash: str,
         content: bytes,
         created_at: str,
+        replaces_document_id: Optional[str] = None,
     ) -> None:
         """
         Insert one manual-upload document row and its raw bytes in a single
         transaction.
         """
         async with self._client.transaction() as cur:
+            version_number = 1
+            if replaces_document_id is not None:
+                await cur.execute(
+                    """
+                    SELECT document_id, version_number
+                    FROM public.project_documents
+                    WHERE document_id = %s
+                      AND project_id = %s
+                      AND status = 'deleted'
+                      AND visibility_scope = %s
+                      AND (visibility_scope = 'project' OR session_id = %s)
+                    FOR UPDATE
+                    """,
+                    (
+                        replaces_document_id,
+                        self._project_id,
+                        visibility_scope,
+                        session_id,
+                    ),
+                )
+                replaced = await cur.fetchone()
+                if replaced is None:
+                    raise ValueError(
+                        "replacement document must be a visible deleted document"
+                    )
+                await cur.execute(
+                    """
+                    SELECT document_id
+                    FROM public.project_documents
+                    WHERE replaces_document_id = %s
+                    LIMIT 1
+                    """,
+                    (replaces_document_id,),
+                )
+                if await cur.fetchone() is not None:
+                    raise ValueError(
+                        "replacement document already has a replacement; "
+                        "choose its latest deleted version instead"
+                    )
+                version_number = int(replaced["version_number"]) + 1
             await cur.execute(
                 """
                 INSERT INTO public.project_documents (
@@ -1110,12 +1151,14 @@ class DocumentWriter:
                     size_bytes,
                     content_hash,
                     status,
+                    replaces_document_id,
+                    version_number,
                     created_at,
                     updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, NULL, 'manual_upload',
-                    %s, %s, %s, %s, %s, 'uploaded', %s, %s
+                    %s, %s, %s, %s, %s, 'uploaded', %s, %s, %s, %s
                 )
                 """,
                 (
@@ -1128,6 +1171,8 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    replaces_document_id,
+                    version_number,
                     created_at,
                     created_at,
                 ),
@@ -1146,15 +1191,19 @@ class DocumentWriter:
         document_id: str,
         session_id: Optional[str],
     ) -> Optional[Dict]:
-        """
-        Delete one visible document row and return it, or None if not found.
-        Cascades automatically delete document_content and document_chunks rows.
-        """
-        rows = await self._client.fetch_all(
-            """
-            DELETE FROM public.project_documents
+        """Purge document content while retaining a provenance tombstone."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+            UPDATE public.project_documents
+            SET status = 'deleted',
+                deleted_at = COALESCE(deleted_at, now()),
+                indexed_at = NULL,
+                error_message = NULL,
+                updated_at = now()
             WHERE document_id = %s
               AND project_id = %s
+              AND status <> 'deleted'
               AND (
                   visibility_scope = 'project'
                   OR (
@@ -1178,11 +1227,31 @@ class DocumentWriter:
                 created_at,
                 updated_at,
                 indexed_at,
-                error_message
-            """,
-            (document_id, self._project_id, session_id),
-        )
-        return rows[0] if rows else None
+                error_message,
+                replaces_document_id,
+                version_number,
+                deleted_at
+                """,
+                (document_id, self._project_id, session_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            await cur.execute(
+                """
+                DELETE FROM public.document_chunks
+                WHERE document_id = %s
+                """,
+                (document_id,),
+            )
+            await cur.execute(
+                """
+                DELETE FROM public.document_content
+                WHERE document_id = %s
+                """,
+                (document_id,),
+            )
+            return dict(row)
 
     async def transition_index_status(
         self,

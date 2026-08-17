@@ -154,14 +154,25 @@ def format_graph_results(results: List[Dict]) -> str:
         if "source" in r and "target" in r:
             source = r.get("source", "?")
             target = r.get("target", "?")
-            strength = r.get("connection_strength", 0)
-            last_seen = _format_timestamp(r.get("last_seen"))
+            label = r.get("observed_relationship_label") or r.get(
+                "relationship_type", "related to"
+            )
+            evidence_messages = r.get("evidence_message_count", 0)
+            observations = r.get("observation_count", 0)
+            first_observed = _format_timestamp(r.get("first_observed"))
+            last_observed = _format_timestamp(
+                r.get("last_observed", r.get("last_seen"))
+            )
 
-            block = f"--- {source} -> {target} ---\n"
+            block = f"--- Observed: {source} --{label}--> {target} ---\n"
             context = r.get("context")
             if context:
                 block += f"Description: {context}\n"
-            block += f"Strength: {strength} | Last talked about: {last_seen}\n"
+            block += (
+                "Evidence only (not a current-state claim) | "
+                f"{evidence_messages} messages, {observations} observations\n"
+                f"First observed: {first_observed} | Last observed: {last_observed}\n"
+            )
 
         elif "entity" in r:
             entity = r.get("entity", "?")

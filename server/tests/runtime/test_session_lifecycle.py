@@ -250,7 +250,7 @@ async def test_resume_session_aborts_when_durable_session_disappears(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_close_session_releases_project_and_shuts_context_down(
+async def test_close_session_alias_tombstones_and_shuts_context_down(
     monkeypatch, session_manager
 ):
     manager, resources, project_manager, active_sessions = session_manager
@@ -287,17 +287,14 @@ async def test_close_session_releases_project_and_shuts_context_down(
     assert ctx.shutdown_count == 1
     assert project_manager.release_calls == ["project-1"]
     assert order == ["shutdown", "release_project"]
-    assert resources.postgres.sessions["session-1"]["status"] == "closed"
-    metadata = json.loads(
-        await resources.redis.hget(RedisKeys.sessions("ada"), "session-1")
-    )
-    assert metadata["last_active"]
-    assert metadata["status"] == "closed"
+    assert resources.postgres.sessions["session-1"]["status"] == "deleted"
+    assert resources.postgres.sessions["session-1"]["deleted_at"] is not None
+    assert await resources.redis.hget(RedisKeys.sessions("ada"), "session-1") is None
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_close_unloaded_session_is_durable_and_prevents_resume(
+async def test_delete_unloaded_session_is_durable_and_prevents_resume(
     monkeypatch, session_manager
 ):
     manager, resources, project_manager, active_sessions = session_manager
@@ -310,12 +307,12 @@ async def test_close_unloaded_session_is_durable_and_prevents_resume(
     }
 
     async def should_not_create(**_kwargs):
-        raise AssertionError("closed sessions must not be resumed")
+        raise AssertionError("deleted sessions must not be resumed")
 
     monkeypatch.setattr(Session, "create", should_not_create)
 
     assert await manager.close_session("session-1") is True
-    assert resources.postgres.sessions["session-1"]["status"] == "closed"
+    assert resources.postgres.sessions["session-1"]["status"] == "deleted"
     assert await manager.get_or_resume_session("session-1") is None
     assert project_manager.acquire_calls == []
     assert active_sessions == {}
@@ -376,6 +373,49 @@ async def test_delete_session_data_does_not_remove_project_documents(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_delete_session_tombstone_preserves_readonly_message_history(
+    session_manager,
+):
+    manager, resources, _, _ = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "status": "open",
+        "model": "test-model",
+    }
+    resources.postgres.messages.append(
+        {
+            "message_id": 101,
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "role": "user",
+            "content": "Keep this as episode evidence.",
+            "timestamp_ms": 1,
+            "ingestion_state": "processed",
+            "episode_eligible": True,
+        }
+    )
+
+    await manager.delete_session_data("session-1")
+
+    assert resources.postgres.sessions["session-1"]["status"] == "deleted"
+    assert resources.postgres.messages[0]["content"] == "Keep this as episode evidence."
+    assert await manager.get_session_history_readonly("session-1") == [
+        {
+            "message_id": 101,
+            "role": "user",
+            "content": "Keep this as episode evidence.",
+            "timestamp": 1,
+        }
+    ]
+    assert await manager.list_sessions() == {}
+    assert await manager.get_or_resume_session("session-1") is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_delete_session_keeps_redis_state_when_durable_deletion_fails(
     monkeypatch,
     session_manager,
@@ -402,6 +442,7 @@ async def test_delete_session_keeps_redis_state_when_durable_deletion_fails(
         await manager.delete_session_data("session-1")
 
     assert await resources.redis.get(memory_key) == "keep until durable delete succeeds"
+    assert "session-1" not in manager._closed_session_ids
 
 
 @pytest.mark.runtime
@@ -425,7 +466,7 @@ async def test_delete_session_treats_redis_cleanup_failure_as_recoverable(
     monkeypatch.setattr(resources.redis, "delete", fail_delete)
 
     assert await manager.delete_session_data("session-1") == 0
-    assert "session-1" not in resources.postgres.sessions
+    assert resources.postgres.sessions["session-1"]["status"] == "deleted"
     assert await resources.redis.get(memory_key) == "stale cache"
 
 

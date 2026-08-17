@@ -11,7 +11,7 @@ from wordfreq import word_frequency
 
 from common.conf.domain_config import CompiledDomain
 from common.conf.relationship_config import normalize_relationship
-from common.exceptions import ConfigurationError, LLMError
+from common.exceptions import ConfigurationError, LLMBudgetExceededError, LLMError
 from common.schema.ingestion.contracts import (
     CandidateSuggestion,
     RelationshipObservation,
@@ -1182,6 +1182,11 @@ class IngestionPipeline:
                 user=user_03,
                 temperature=0.0,
             )
+        except LLMBudgetExceededError:
+            # Budget exhaustion is a recoverable admission pause, not an empty
+            # extraction result.  Let the durable worker leave this batch ready
+            # for retry after the user resets or increases the budget.
+            raise
         except (ConfigurationError, LLMError) as e:
             if trace is not None:
                 trace.fallbacks.append(

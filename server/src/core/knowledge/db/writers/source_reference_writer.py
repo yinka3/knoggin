@@ -149,6 +149,7 @@ class SourceReferenceWriter:
           AND message.session_id = %s
           AND message.role = 'assistant'
           AND session.user_name = %s
+          AND session.status = 'open'
           AND (
               %s::uuid IS NULL
               OR EXISTS (

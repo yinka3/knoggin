@@ -77,6 +77,13 @@ class LLMResponseError(LLMError):
         super().__init__(message, code="llm_response_error", details=details)
 
 
+class LLMBudgetExceededError(LLMError):
+    """Raised before an external LLM attempt after the shared budget is spent."""
+
+    def __init__(self, message: str, details: Optional[Dict] = None):
+        super().__init__(message, code="llm_budget_exhausted", details=details)
+
+
 class ToolExecutionError(KnogginError):
     """Raised when a tool fails to execute correctly."""
 

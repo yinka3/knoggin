@@ -204,7 +204,7 @@ class SourceReference(SourceReferenceCandidate):
         return value
 
 
-SourceStatus = Literal["available", "search_result_snippet"]
+SourceStatus = Literal["available", "unavailable", "search_result_snippet"]
 
 
 class SourceConsulted(BaseModel):

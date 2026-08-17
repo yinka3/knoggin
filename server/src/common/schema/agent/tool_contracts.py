@@ -885,6 +885,61 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "report_relationship_conflict",
+            "description": (
+                "Report a possible contradiction or ambiguity among relationship "
+                "observations returned by graph tools. This creates a human-review "
+                "item only: it never changes evidence, marks a relationship current, "
+                "or resolves the conflict."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "evidence_observation_ids": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 1},
+                        "minItems": 2,
+                        "maxItems": 32,
+                        "description": (
+                            "At least two observation IDs returned by graph tools "
+                            "that ground this possible conflict."
+                        ),
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "possible_contradiction",
+                            "temporal_ambiguity",
+                            "possible_state_change",
+                            "identity_or_entity_ambiguity",
+                        ],
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000,
+                        "description": "Grounded explanation of the ambiguity.",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                    },
+                },
+                "required": [
+                    "evidence_observation_ids",
+                    "kind",
+                    "reasoning",
+                    "confidence",
+                ],
+                "additionalProperties": False,
+            },
+            "tags": ["graph", "maintenance", "reversible-write"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_workspace_files",
             "description": (
                 "List bounded metadata for files in the current project's "
@@ -1091,6 +1146,7 @@ _TOOL_CAPABILITIES = {
     "edit_brain": IDENTITY_WRITE_CAPABILITY,
     "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
+    "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
     "create_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
     "update_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
     "append_workspace_file": REVERSIBLE_WRITE_CAPABILITY,

@@ -6,6 +6,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from common.schema.settings import IngestionSettings
+from common.exceptions import LLMBudgetExceededError
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit, emit_sync
 from common.utils.json_utils import safe_json_loads
@@ -439,6 +440,24 @@ class IngestionWorker:
                     blocked=False,
                 )
                 raise
+            except LLMBudgetExceededError as exc:
+                # Keep the FIFO batch eligible for a later drain once the user
+                # changes the global budget.  Blocking it would require a
+                # separate manual replay even though no data was invalid.
+                await self.knowledge_store.release_ingestion_claim(
+                    user_name=self.user_name,
+                    project_id=self.processor.project_id,
+                    session_id=self.session_id,
+                    batch_id=claim.batch_id,
+                    blocked=False,
+                )
+                logger.info(
+                    "Durable ingestion paused by the global LLM budget for "
+                    "batch {}: {}",
+                    claim.batch_id,
+                    exc,
+                )
+                break
             except Exception as exc:
                 self._record_health_failure("durable_batch")
                 self._mark_batch_work_failed(batch, exc)

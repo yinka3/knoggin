@@ -48,6 +48,20 @@ class MessageLifecycleWriter:
             "episode_eligible": False,
         }
         async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT 1
+                FROM public.sessions
+                WHERE user_name = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                  AND status = 'open'
+                FOR KEY SHARE
+                """,
+                (row["user_name"], row["project_id"], row["session_id"]),
+            )
+            if await cur.fetchone() is None:
+                raise ValueError("Cannot create a message in a deleted session")
             await self.graph_writer.save_message_logs([row], cur=cur)
             await cur.execute(
                 """
@@ -82,7 +96,7 @@ class MessageLifecycleWriter:
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
-                UPDATE public.messages
+                UPDATE public.messages AS message
                 SET content = %s,
                     selected_revision = selected_revision + 1
                 WHERE user_name = %s
@@ -92,6 +106,14 @@ class MessageLifecycleWriter:
                   AND role = 'user'
                   AND lifecycle_state = 'editable'
                   AND editable_until_ms > %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.sessions AS session
+                      WHERE session.user_name = message.user_name
+                        AND session.project_id = message.project_id
+                        AND session.session_id = message.session_id
+                        AND session.status = 'open'
+                  )
                 RETURNING selected_revision
                 """,
                 (
@@ -157,6 +179,14 @@ class MessageLifecycleWriter:
                   AND revision_row.project_id = message.project_id
                   AND revision_row.message_id = message.message_id
                   AND revision_row.revision = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.sessions AS session
+                      WHERE session.user_name = message.user_name
+                        AND session.project_id = message.project_id
+                        AND session.session_id = message.session_id
+                        AND session.status = 'open'
+                  )
                 RETURNING message.content
                 """,
                 (
@@ -188,7 +218,7 @@ class MessageLifecycleWriter:
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
-                UPDATE public.messages
+                UPDATE public.messages AS message
                 SET lifecycle_state = 'sealed',
                     sealed_at_ms = %s,
                     editable_until_ms = NULL,
@@ -201,6 +231,14 @@ class MessageLifecycleWriter:
                   AND role = 'user'
                   AND lifecycle_state = 'editable'
                   AND editable_until_ms <= %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.sessions AS session
+                      WHERE session.user_name = message.user_name
+                        AND session.project_id = message.project_id
+                        AND session.session_id = message.session_id
+                        AND session.status = 'open'
+                  )
                 RETURNING message_id
                 """,
                 (
@@ -238,7 +276,7 @@ class MessageLifecycleWriter:
             # batch is not released automatically, so FIFO remains intact.
             await cur.execute(
                 """
-                UPDATE public.messages
+                UPDATE public.messages AS message
                 SET ingestion_state = 'ready',
                     ingestion_claim_id = NULL,
                     ingestion_claimed_at_ms = NULL
@@ -247,6 +285,14 @@ class MessageLifecycleWriter:
                   AND session_id = %s
                   AND ingestion_state = 'claimed'
                   AND ingestion_claimed_at_ms < %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.sessions AS session
+                      WHERE session.user_name = message.user_name
+                        AND session.project_id = message.project_id
+                        AND session.session_id = message.session_id
+                        AND session.status = 'open'
+                  )
                 """,
                 (user_name, project_id, session_id, lease_cutoff_ms),
             )
@@ -254,15 +300,20 @@ class MessageLifecycleWriter:
                 """
                 SELECT message_id, content, timestamp_ms, role, ingestion_state,
                        ingestion_not_before_ms
-                FROM public.messages
-                WHERE user_name = %s
-                  AND project_id = %s
-                  AND session_id = %s
-                  AND role = 'user'
-                  AND ingestion_state <> 'excluded'
-                  AND lifecycle_state <> 'superseded'
-                  AND ingestion_state <> 'processed'
-                ORDER BY message_id
+                FROM public.messages AS message
+                JOIN public.sessions AS session
+                  ON session.user_name = message.user_name
+                 AND session.project_id = message.project_id
+                 AND session.session_id = message.session_id
+                WHERE message.user_name = %s
+                  AND message.project_id = %s
+                  AND message.session_id = %s
+                  AND session.status = 'open'
+                  AND message.role = 'user'
+                  AND message.ingestion_state <> 'excluded'
+                  AND message.lifecycle_state <> 'superseded'
+                  AND message.ingestion_state <> 'processed'
+                ORDER BY message.message_id
                 LIMIT %s
                 FOR UPDATE
                 """,
@@ -283,7 +334,7 @@ class MessageLifecycleWriter:
             message_ids = [int(row["message_id"]) for row in rows]
             await cur.execute(
                 """
-                UPDATE public.messages
+                UPDATE public.messages AS message
                 SET ingestion_state = 'claimed',
                     ingestion_claim_id = %s,
                     ingestion_claimed_at_ms = %s
@@ -366,6 +417,14 @@ class MessageLifecycleWriter:
                   AND session_id = %s
                   AND ingestion_state = 'claimed'
                   AND ingestion_claim_id = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.sessions AS session
+                      WHERE session.user_name = message.user_name
+                        AND session.project_id = message.project_id
+                        AND session.session_id = message.session_id
+                        AND session.status = 'open'
+                  )
                 """,
                 (state, user_name, project_id, session_id, batch_id),
             )

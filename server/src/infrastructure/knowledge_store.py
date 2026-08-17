@@ -1,4 +1,5 @@
 from datetime import datetime
+from collections.abc import Callable
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
@@ -29,6 +30,10 @@ from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.readers.relationship_observation_reader import (
     RelationshipObservationReader,
 )
+from core.knowledge.db.readers.conflict_discovery_reader import (
+    ConflictDiscoveryReader,
+)
+from core.knowledge.db.readers.conflict_reader import ConflictReader
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.search_index_rebuilder import SearchIndexer
 from core.knowledge.db.tool_queries import ToolQueries
@@ -47,6 +52,9 @@ from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
     MessageLifecycleWriter,
 )
+from core.knowledge.db.writers.parked_dlq_writer import ParkedDLQWriter
+from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
+from core.knowledge.db.writers.conflict_writer import ConflictWriter
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
 )
@@ -60,6 +68,17 @@ from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
     RelationshipAdvisoryDecision,
+)
+from core.knowledge.human_reviews import HumanReview
+from core.knowledge.conflict_discovery import ConflictPacketBuilder
+from core.knowledge.conflict_service import ConflictService
+from core.knowledge.conflicts import (
+    ConflictDiscoveryLease,
+    ConflictDiscoveryPackage,
+    ConflictGroup,
+    ConflictOrigin,
+    ConflictResolutionKind,
+    ConflictWriteResult,
 )
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
@@ -96,10 +115,25 @@ class KnowledgeStore:
         self._message_lifecycle_writer = MessageLifecycleWriter(
             self._postgres_client, self._graph_writer
         )
+        self._human_review_writer = HumanReviewWriter(self._postgres_client)
+        self._conflict_writer = ConflictWriter(
+            self._postgres_client,
+            reviews=self._human_review_writer,
+        )
+        self._conflict_service = ConflictService(self._conflict_writer)
+        self._conflict_discovery_reader = ConflictDiscoveryReader(
+            self._postgres_client
+        )
+        self._conflict_reader = ConflictReader(self._postgres_client)
+        self._parked_dlq_writer = ParkedDLQWriter(
+            self._postgres_client,
+            reviews=self._human_review_writer,
+        )
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._retention_writer = RetentionWriter(self._postgres_client)
         self._relationship_advisory_writer = RelationshipAdvisoryWriter(
-            self._postgres_client
+            self._postgres_client,
+            reviews=self._human_review_writer,
         )
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
@@ -914,10 +948,181 @@ class KnowledgeStore:
     ) -> list[RelationshipAdvisory]:
         """Derive actionable unknown-relationship suggestions from evidence."""
 
-        return await self._relationship_observation_reader.get_advisories(
+        advisories = await self._relationship_observation_reader.get_advisories(
             user_name=user_name,
             project_id=project_id,
             thresholds=thresholds,
+        )
+        for advisory in advisories:
+            await self._relationship_advisory_writer.materialize_pending(
+                user_name=user_name,
+                project_id=project_id,
+                advisory=advisory,
+            )
+        return advisories
+
+    async def park_dlq_item(
+        self,
+        *,
+        dlq_id: str,
+        user_name: str,
+        project_id: str,
+        entry: Dict,
+    ) -> None:
+        """Persist a human-actionable DLQ item before Redis parks it."""
+
+        await self._parked_dlq_writer.park(
+            dlq_id=dlq_id,
+            user_name=user_name,
+            project_id=project_id,
+            entry=entry,
+        )
+
+    async def get_parked_dlq_item(
+        self, *, dlq_id: str, user_name: str, project_id: str
+    ) -> Optional[Dict]:
+        return await self._parked_dlq_writer.get_parked(
+            dlq_id=dlq_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def mark_parked_dlq_item_requeued(
+        self, *, dlq_id: str, user_name: str, project_id: str
+    ) -> bool:
+        return await self._parked_dlq_writer.mark_requeued(
+            dlq_id=dlq_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_requeued_dlq_items(
+        self, *, user_name: str, project_id: str
+    ) -> list[Dict]:
+        return await self._parked_dlq_writer.list_requeued(
+            user_name=user_name, project_id=project_id
+        )
+
+    async def mark_parked_dlq_item_completed_if_requeued(
+        self, *, dlq_id: str, user_name: str, project_id: str
+    ) -> bool:
+        return await self._parked_dlq_writer.mark_completed_if_requeued(
+            dlq_id=dlq_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_open_human_reviews(
+        self, *, user_name: str, project_id: str
+    ) -> list[HumanReview]:
+        return await self._human_review_writer.list_open(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def claim_conflict_discovery(
+        self, *, user_name: str, project_id: str, lease_seconds: int = 900
+    ) -> ConflictDiscoveryLease | None:
+        return await self._conflict_discovery_reader.claim(
+            user_name=user_name,
+            project_id=project_id,
+            lease_seconds=lease_seconds,
+        )
+
+    async def build_conflict_discovery_package(
+        self,
+        lease: ConflictDiscoveryLease,
+        *,
+        max_seed_span_days: int,
+        max_package_tokens: int,
+        token_counter: Callable[[str], int] | None = None,
+    ) -> ConflictDiscoveryPackage | None:
+        return await ConflictPacketBuilder(
+            self._conflict_discovery_reader,
+            token_counter=token_counter,
+        ).build(
+            lease,
+            max_span_days=max_seed_span_days,
+            max_tokens=max_package_tokens,
+        )
+
+    async def complete_conflict_discovery(
+        self,
+        package: ConflictDiscoveryPackage,
+    ) -> bool:
+        return await self._conflict_discovery_reader.complete(
+            package.lease,
+            cursor_observed_at_ms=package.next_observed_at_ms,
+            cursor_observation_id=package.next_observation_id,
+            continuation=package.continuation,
+        )
+
+    async def release_conflict_discovery(self, lease: ConflictDiscoveryLease) -> None:
+        await self._conflict_discovery_reader.release(lease)
+
+    async def has_conflict_discovery_continuation(
+        self, *, user_name: str, project_id: str
+    ) -> bool:
+        return await self._conflict_discovery_reader.has_continuation(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def record_conflict_detection(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        origin: ConflictOrigin,
+        kind: str,
+        rationale: str,
+        confidence: float | None,
+        evidence_ids: List[int],
+        metadata: Dict | None = None,
+        existing_conflict_id: str | None = None,
+    ) -> ConflictWriteResult:
+        return await self._conflict_service.record_detection(
+            user_name=user_name,
+            project_id=project_id,
+            origin=origin,
+            kind=kind,
+            rationale=rationale,
+            confidence=confidence,
+            evidence_ids=evidence_ids,
+            metadata=metadata,
+            existing_conflict_id=existing_conflict_id,
+        )
+
+    async def get_conflict_group(
+        self,
+        *,
+        conflict_id: str,
+        user_name: str,
+        project_id: str,
+    ) -> Dict | None:
+        return await self._conflict_reader.get_detail(
+            conflict_id=conflict_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def resolve_conflict_group(
+        self,
+        *,
+        conflict_id: str,
+        user_name: str,
+        project_id: str,
+        resolution_kind: ConflictResolutionKind,
+        resolved_by: str,
+        resolution_note: str | None = None,
+    ) -> ConflictGroup:
+        return await self._conflict_service.resolve(
+            conflict_id=conflict_id,
+            user_name=user_name,
+            project_id=project_id,
+            resolution_kind=resolution_kind,
+            resolved_by=resolved_by,
+            resolution_note=resolution_note,
         )
 
     async def apply_relationship_advisory_action(

@@ -122,6 +122,7 @@ class ResourceManager:
                 redis_settings = RedisConnectionSettings.from_env()
                 instance.redis_manager = AsyncRedisClient(redis_settings)
                 instance.redis = await instance.redis_manager.connect()
+                instance.postgres = PostgresClient(dsn=dsn)
 
                 config = ConfigManager.get().config
                 configure_coordination_log(config.developer_settings.coordination_log)
@@ -142,8 +143,10 @@ class ResourceManager:
                     agent_model=llm_config.agent_model,
                     extraction_model=llm_config.extraction_model,
                     merge_model=llm_config.merge_model,
+                    spending_budget=llm_config.spending_budget,
                     base_url=llm_config.base_url,
                     trace_logger=trace_logger,
+                    postgres_client=instance.postgres,
                 )
                 instance.config_unsubscribers.append(
                     ConfigManager.get().subscribe(
@@ -169,7 +172,6 @@ class ResourceManager:
                 )
                 if hasattr(instance.embedding, "set_model_work_coordinator"):
                     instance.embedding.set_model_work_coordinator(instance.model_work)
-                instance.postgres = PostgresClient(dsn=dsn)
                 instance.knowledge_store = KnowledgeStore(
                     postgres_client=instance.postgres,
                     embedding_service=instance.embedding,

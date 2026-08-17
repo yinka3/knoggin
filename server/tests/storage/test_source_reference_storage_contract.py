@@ -5,6 +5,7 @@ from psycopg.errors import CheckViolation, ForeignKeyViolation
 
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
+from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -256,6 +257,25 @@ async def test_reader_returns_only_message_scope_references_in_stable_order():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_reader_marks_a_deleted_document_source_unavailable():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(
+        fetch_all_results=[[persisted_row(candidate, document_status="deleted")]]
+    )
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].source_status == "unavailable"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_reader_marks_web_results_as_search_result_snippets():
     candidate = web_candidate()
     client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
@@ -412,7 +432,7 @@ async def _seed_scope(real_postgres_client):
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_real_postgres_persists_retries_and_cascades_document_and_message_refs(
+async def test_real_postgres_document_tombstone_preserves_message_provenance(
     real_postgres_client,
 ):
     await _seed_scope(real_postgres_client)
@@ -448,13 +468,22 @@ async def test_real_postgres_persists_retries_and_cascades_document_and_message_
         == 1
     )
 
-    await real_postgres_client.execute(
-        "DELETE FROM public.project_documents WHERE document_id = %s",
-        (DOCUMENT_ID,),
+    deleted = await DocumentWriter(real_postgres_client, "project-1").delete_document(
+        document_id=DOCUMENT_ID,
+        session_id=None,
     )
+    assert deleted is not None
+    assert deleted["status"] == "deleted"
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.message_source_refs"
-    ) == {"count": 0}
+    ) == {"count": 1}
+    sources = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    assert sources[0].source_status == "unavailable"
 
 
 @pytest.mark.storage

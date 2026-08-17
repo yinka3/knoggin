@@ -6,7 +6,7 @@ import spacy
 from gliner import GLiNER
 from spacy.matcher import PhraseMatcher
 
-from common.exceptions import ConfigurationError, LLMError
+from common.exceptions import ConfigurationError, LLMBudgetExceededError, LLMError
 from common.schema.ingestion.contracts import (
     ValidationIssue,
 )
@@ -420,6 +420,10 @@ class TextProcessor:
                 user=user_content,
                 temperature=0.0,
             )
+        except LLMBudgetExceededError:
+            # Do not turn an explicit spending pause into permanently empty
+            # durable knowledge.  The worker will retry this batch after reset.
+            raise
         except (ConfigurationError, LLMError) as e:
             trace.fallbacks.append(
                 {

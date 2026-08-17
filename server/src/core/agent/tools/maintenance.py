@@ -128,3 +128,40 @@ class MaintenanceTools:
         except Exception as e:
             logger.error(f"Error proposing entity merge: {e}")
             return {"error": str(e)}
+
+    async def report_relationship_conflict(
+        self,
+        evidence_observation_ids: List[int],
+        kind: str,
+        reasoning: str,
+        confidence: float,
+    ) -> Dict:
+        """Create a reviewable conflict group from retrieved relationship evidence.
+
+        This preserves the cited observations exactly as they were. It neither
+        changes relationship evidence nor decides which observation is current.
+        """
+        try:
+            result = await self.knowledge_store.record_conflict_detection(
+                user_name=self.user_name,
+                project_id=self.project_id,
+                origin="agent_discovery",
+                kind=kind,
+                rationale=reasoning,
+                confidence=confidence,
+                evidence_ids=evidence_observation_ids,
+                metadata={"reported_by": "agent"},
+            )
+            return {
+                "conflict_id": result.group.conflict_id,
+                "created": result.created,
+                "evidence_added": result.evidence_added,
+                "status": result.group.status,
+                "message": (
+                    "Recorded a possible conflict for human review. "
+                    "The relationship evidence was not changed."
+                ),
+            }
+        except Exception as exc:
+            logger.error("Error reporting relationship conflict: {}", exc)
+            return {"error": str(exc)}

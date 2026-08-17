@@ -1,5 +1,6 @@
 import pytest
 
+from core.agent.formatters import format_graph_results
 from core.agent.tools.graph import GraphTools
 
 
@@ -228,3 +229,24 @@ async def test_hot_topic_context_hydrates_messages_and_removes_raw_refs():
             "messages": [{"id": 7, "message": "evidence"}],
         }
     }
+
+
+@pytest.mark.no_network
+def test_graph_result_format_states_that_relationships_are_observed_evidence():
+    result = format_graph_results(
+        [
+            {
+                "source": "Ade",
+                "target": "Acme",
+                "observed_relationship_label": "works at",
+                "evidence_message_count": 2,
+                "observation_count": 3,
+                "first_observed": 100,
+                "last_observed": 200,
+            }
+        ]
+    )
+
+    assert "Observed: Ade --works at--> Acme" in result
+    assert "not a current-state claim" in result
+    assert "2 messages, 3 observations" in result

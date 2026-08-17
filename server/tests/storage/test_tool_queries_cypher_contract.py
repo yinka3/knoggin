@@ -56,3 +56,86 @@ async def test_find_path_uses_a_validated_fixed_depth_in_its_cypher_query():
 
     cypher_query = client.calls[0][1]
     assert "RELATED_TO*1..4" in cypher_query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_related_entities_exposes_observed_evidence_metadata():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "source": "Ade",
+                    "target": "Acme",
+                    "relationship_id": "project-1:1:2:works_at",
+                    "relationship_type": "works_at",
+                    "canonical_relationship_type": "works_at",
+                    "observed_relationship_label": "works at",
+                    "domain_status": "recognized",
+                    "symmetric": False,
+                    "connection_strength": 2,
+                    "evidence_refs": [{"message_id": 101}],
+                    "observation_refs": [
+                        {
+                            "observation_id": 12,
+                            "observed_relationship_label": "works at",
+                            "canonical_relationship_type": "works_at",
+                            "observed_at_ms": 200,
+                            "confidence": 0.9,
+                            "context": "Ade joined Acme.",
+                        }
+                    ],
+                    "evidence_message_count": 1,
+                    "observation_count": 2,
+                    "first_observed": 100,
+                    "last_observed": 200,
+                    "confidence": 0.9,
+                    "last_seen": 200,
+                    "context": "Ade joined Acme.",
+                }
+            ]
+        ]
+    )
+    queries = ToolQueries(client)
+
+    result = await queries.get_related_entities(
+        ["Ade"],
+        visible_project_ids=["project-1"],
+    )
+
+    assert result == [
+        {
+            "source": "Ade",
+            "target": "Acme",
+            "relationship_id": "project-1:1:2:works_at",
+            "relationship_type": "works_at",
+            "canonical_relationship_type": "works_at",
+            "observed_relationship_label": "works at",
+            "domain_status": "recognized",
+            "symmetric": False,
+            "relationship_semantics": "observed_evidence",
+            "connection_strength": 2.0,
+            "evidence_refs": [{"message_id": 101}],
+            "observation_refs": [
+                {
+                    "observation_id": 12,
+                    "observed_relationship_label": "works at",
+                    "canonical_relationship_type": "works_at",
+                    "observed_at_ms": 200,
+                    "confidence": 0.9,
+                    "context": "Ade joined Acme.",
+                }
+            ],
+            "evidence_message_count": 1,
+            "observation_count": 2,
+            "first_observed": 100,
+            "last_observed": 200,
+            "confidence": 0.9,
+            "last_seen": 200,
+            "context": "Ade joined Acme.",
+        }
+    ]
+    query = client.calls[0][1]
+    assert "relationship_observations" in query
+    assert "observation_refs" in query
+    assert "evidence_message_count" in query

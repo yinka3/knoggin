@@ -451,6 +451,12 @@ class ToolQueries:
         SELECT
             source.canonical_name as source,
             target.canonical_name as target,
+            r.relationship_id,
+            r.relationship_type,
+            r.canonical_relationship_type,
+            r.observed_relationship_label,
+            r.domain_status,
+            r.symmetric,
             r.weight as connection_strength,
             COALESCE(
                 (
@@ -467,6 +473,57 @@ class ToolQueries:
                 ),
                 '[]'::jsonb
             ) as evidence_refs,
+            COALESCE(
+                (
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'observation_id', observation.observation_id,
+                            'observed_relationship_label', observation.observed_relationship_label,
+                            'canonical_relationship_type', observation.canonical_relationship_type,
+                            'observed_at_ms', observation.observed_at_ms,
+                            'confidence', observation.confidence,
+                            'context', left(COALESCE(observation.context, ''), 600)
+                        )
+                    )
+                    FROM (
+                        SELECT *
+                        FROM relationship_observations observation
+                        WHERE observation.relationship_id = r.relationship_id
+                          AND observation.project_id = r.project_id
+                        ORDER BY observation.observed_at_ms DESC,
+                                 observation.observation_id DESC
+                        LIMIT 20
+                    ) observation
+                ),
+                '[]'::jsonb
+            ) AS observation_refs,
+            (
+                SELECT COUNT(*)::INTEGER
+                FROM relationship_evidence_refs rer
+                WHERE rer.relationship_id = r.relationship_id
+                  AND rer.project_id = r.project_id
+            ) AS evidence_message_count,
+            (
+                SELECT COUNT(*)::INTEGER
+                FROM relationship_observations observation
+                WHERE observation.relationship_id = r.relationship_id
+                  AND observation.project_id = r.project_id
+            ) AS observation_count,
+            (
+                SELECT MIN(observation.observed_at_ms)
+                FROM relationship_observations observation
+                WHERE observation.relationship_id = r.relationship_id
+                  AND observation.project_id = r.project_id
+            ) AS first_observed,
+            COALESCE(
+                (
+                    SELECT MAX(observation.observed_at_ms)
+                    FROM relationship_observations observation
+                    WHERE observation.relationship_id = r.relationship_id
+                      AND observation.project_id = r.project_id
+                ),
+                r.last_seen_ms
+            ) AS last_observed,
             r.confidence as confidence,
             r.last_seen_ms as last_seen,
             r.context as context
@@ -511,8 +568,26 @@ class ToolQueries:
                 {
                     "source": r["source"],
                     "target": r["target"],
+                    "relationship_id": r["relationship_id"],
+                    "relationship_type": r["relationship_type"],
+                    "canonical_relationship_type": r.get(
+                        "canonical_relationship_type"
+                    ),
+                    "observed_relationship_label": r[
+                        "observed_relationship_label"
+                    ],
+                    "domain_status": r["domain_status"],
+                    "symmetric": bool(r["symmetric"]),
+                    "relationship_semantics": "observed_evidence",
                     "connection_strength": float(r["connection_strength"] or 1.0),
                     "evidence_refs": r["evidence_refs"] or [],
+                    "observation_refs": r["observation_refs"] or [],
+                    "evidence_message_count": int(
+                        r["evidence_message_count"] or 0
+                    ),
+                    "observation_count": int(r["observation_count"] or 0),
+                    "first_observed": r["first_observed"],
+                    "last_observed": r["last_observed"],
                     "confidence": float(r["confidence"] or 1.0),
                     "last_seen": r["last_seen"],
                     "context": r["context"],

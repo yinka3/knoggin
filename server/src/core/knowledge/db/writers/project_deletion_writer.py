@@ -11,6 +11,13 @@ class ProjectDeletionWriter:
     _PROJECT_TABLES = (
         "entity_merge_audits",
         "entity_merge_proposals",
+        "relationship_advisory_decisions",
+        "relationship_advisories",
+        "human_reviews",
+        "conflict_evidence_refs",
+        "conflict_groups",
+        "conflict_discovery_checkpoints",
+        "parked_dlq_items",
         "episode_processing_checkpoints",
         "episodes",
         "episode_entities",
@@ -123,6 +130,17 @@ class ProjectDeletionWriter:
                 DELETE FROM public.relationship_evidence_refs
                 WHERE relationship_id IN (
                     SELECT relationship_id FROM public.relationships
+                    WHERE project_id = %s
+                )
+                """,
+                (project_id,),
+            )
+        if table == "conflict_evidence_refs":
+            return (
+                """
+                DELETE FROM public.conflict_evidence_refs
+                WHERE conflict_id IN (
+                    SELECT conflict_id FROM public.conflict_groups
                     WHERE project_id = %s
                 )
                 """,

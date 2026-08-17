@@ -105,11 +105,8 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     assert active_sessions == {}
     assert project["id"] not in project_manager.active_projects
 
-    metadata = json.loads(
-        await resources.redis.hget(RedisKeys.sessions("ada"), ctx.session_id)
-    )
-    assert metadata["project_id"] == project["id"]
-    assert metadata["last_active"]
+    assert resources.postgres.sessions[ctx.session_id]["status"] == "deleted"
+    assert await resources.redis.hget(RedisKeys.sessions("ada"), ctx.session_id) is None
 
 
 @pytest.mark.integration
