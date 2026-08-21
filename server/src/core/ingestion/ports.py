@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+from common.schema.episode.models import Episode, EpisodeCheckpoint
 from common.schema.ingestion.contracts import (
     CandidateSuggestion,
     EntityWrite,
@@ -16,7 +17,6 @@ from common.schema.ingestion.contracts import (
     MessageEntityRef,
     RelationshipWrite,
 )
-from common.schema.episode.models import Episode, EpisodeCheckpoint
 
 ResponseT = TypeVar("ResponseT")
 
@@ -158,16 +158,6 @@ class EpisodeStore(Protocol):
         project_id: str,
         session_id: str,
     ) -> list[dict[str, Any]]: ...
-
-    async def write_episode_window(
-        self,
-        episode: Episode | None,
-        window_message_ids: list[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> bool: ...
 
 
 @runtime_checkable

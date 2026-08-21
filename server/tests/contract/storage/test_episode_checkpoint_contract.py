@@ -9,7 +9,7 @@ from core.knowledge.db.writers.episode_writer import EpisodeWriter
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_episode_checkpoint_does_not_skip_backdated_message_ids(
+async def test_project_episode_checkpoint_does_not_skip_backdated_message_ids(
     real_postgres_client,
 ):
     """The cursor must use the reader's chronological sort, not max(message_id)."""
@@ -27,14 +27,15 @@ async def test_episode_checkpoint_does_not_skip_backdated_message_ids(
         )
         VALUES
             ('ada', 'session-1', 101, 'project-1', 'user', 'Late ID.', 3000),
-            ('ada', 'session-1', 102, 'project-1', 'assistant', 'First.', 1000),
+            ('ada', 'session-1', 102, 'project-1', 'user', 'First.', 1000),
             ('ada', 'session-1', 103, 'project-1', 'user', 'Second.', 2000)
         """
     )
     await real_postgres_client.execute(
         """
         UPDATE messages
-        SET episode_eligible = TRUE
+        SET episode_eligible = TRUE,
+            ingestion_state = 'processed'
         WHERE message_id = ANY(ARRAY[101, 102, 103])
         """
     )
@@ -49,17 +50,18 @@ async def test_episode_checkpoint_does_not_skip_backdated_message_ids(
 
     initial_checkpoint = await reader.get_episode_checkpoint(**scope)
     assert initial_checkpoint == EpisodeCheckpoint()
-    first_window = await reader.get_next_episode_window(
-        **scope,
-        checkpoint=initial_checkpoint,
+    first_window = await reader.get_next_project_episode_window(
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
         message_count=2,
     )
     assert [message["message_id"] for message in first_window] == [102, 103]
 
-    assert await writer.write_episode_window(
-        None,
-        [102, 103],
-        **scope,
+    assert await writer.write_project_episode_window(
+        [],
+        first_window,
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
     )
     second_checkpoint = await reader.get_episode_checkpoint(**scope)
     assert second_checkpoint == EpisodeCheckpoint(
@@ -67,9 +69,9 @@ async def test_episode_checkpoint_does_not_skip_backdated_message_ids(
         last_evaluated_timestamp_ms=2000,
     )
 
-    second_window = await reader.get_next_episode_window(
-        **scope,
-        checkpoint=second_checkpoint,
+    second_window = await reader.get_next_project_episode_window(
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
         message_count=1,
     )
     assert [message["message_id"] for message in second_window] == [101]

@@ -1,4 +1,5 @@
 import pytest
+from psycopg import OperationalError
 
 from common.exceptions import StorageReadError, StorageWriteError
 from core.knowledge.db.readers.graph_reader import GraphReader
@@ -6,6 +7,9 @@ from core.knowledge.db.readers.message_reader import MessageReader
 from core.knowledge.db.writers.entity_merge_writer import (
     EntityMergeWriter as GraphWriter,
 )
+from core.knowledge.db.writers.episode_writer import EpisodeWriter
+from core.knowledge.db.writers.graph_writer import GraphWriter as IngestionGraphWriter
+from core.knowledge.db.writers.message_writer import MessageWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -77,3 +81,68 @@ async def test_graph_write_failure_is_not_reported_as_false_result():
 
     assert error.value.code == "storage_write_error"
     assert error.value.details["operation"] == "delete_relationship"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_ingestion_graph_write_failure_is_standardized():
+    writer = IngestionGraphWriter(
+        RecordingPostgresClient(
+            cursor_execute_exceptions=[OperationalError("database down")]
+        )
+    )
+
+    with pytest.raises(StorageWriteError) as error:
+        await writer.update_entity_embedding(
+            2,
+            [0.0] * 1024,
+            project_id="project-1",
+        )
+
+    assert error.value.details["operation"] == "update_entity_embedding"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_message_write_failure_is_standardized():
+    writer = MessageWriter(
+        RecordingPostgresClient(
+            cursor_execute_exceptions=[OperationalError("database down")]
+        )
+    )
+
+    with pytest.raises(StorageWriteError) as error:
+        await writer.save_message_logs(
+            [
+                {
+                    "id": 7,
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "project_id": "project-1",
+                    "role": "user",
+                    "content": "Hello",
+                }
+            ]
+        )
+
+    assert error.value.details["operation"] == "save_message_logs"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_episode_write_failure_is_standardized():
+    writer = EpisodeWriter(
+        RecordingPostgresClient(
+            cursor_execute_exceptions=[OperationalError("database down")]
+        )
+    )
+
+    with pytest.raises(StorageWriteError) as error:
+        await writer.write_project_episode_window(
+            [],
+            [{"message_id": 7, "session_id": "session-1"}],
+            user_name="ada",
+            project_id="project-1",
+        )
+
+    assert error.value.details["operation"] == "write_project_episode_window"

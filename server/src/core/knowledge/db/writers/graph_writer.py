@@ -1,8 +1,11 @@
 import json
+from functools import wraps
 from typing import Dict, List, Optional, Sequence
 
 from loguru import logger
+from psycopg import Error as PsycopgError
 
+from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
     EntityWrite,
     EpisodeEligibility,
@@ -23,6 +26,24 @@ from core.knowledge.db.writers.age_projection_writer import (
 from infrastructure.postgres_client import PostgresClient
 
 
+def _storage_write(operation: str):
+    """Translate infrastructure failures without hiding contract violations."""
+
+    def decorate(method):
+        @wraps(method)
+        async def wrapped(self, *args, **kwargs):
+            try:
+                return await method(self, *args, **kwargs)
+            except (StorageWriteError, TypeError, ValueError):
+                raise
+            except PsycopgError as exc:
+                self._raise_storage_write(operation, exc)
+
+        return wrapped
+
+    return decorate
+
+
 class GraphWriter:
     def __init__(self, client: PostgresClient, graph_name: str = "knoggin_graph"):
         self.client = client
@@ -33,6 +54,14 @@ class GraphWriter:
         return get_now_ms()
 
     @staticmethod
+    def _raise_storage_write(operation: str, exc: Exception) -> None:
+        logger.error("Storage write failed for {}: {}", operation, exc)
+        raise StorageWriteError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
+
+    @staticmethod
     def _require_project_id(project_id: str, operation: str) -> str:
         return require_scope_value(project_id, "project_id", operation)
 
@@ -40,6 +69,7 @@ class GraphWriter:
     def _normalized_identity_value(value: object) -> str:
         return str(value or "").strip().strip('"').casefold()
 
+    @_storage_write("ensure_identity_entity")
     async def ensure_identity_entity(
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
@@ -144,6 +174,7 @@ class GraphWriter:
 
         return identity
 
+    @_storage_write("write_batch")
     async def write_batch(
         self,
         entities: Sequence[EntityWrite],
@@ -620,6 +651,7 @@ class GraphWriter:
                 ),
             )
 
+    @_storage_write("update_entity_canonical_name")
     async def update_entity_canonical_name(
         self, entity_id: int, canonical_name: str, *, project_id: str
     ) -> None:
@@ -663,6 +695,7 @@ class GraphWriter:
                 ),
             )
 
+    @_storage_write("update_entity_embedding")
     async def update_entity_embedding(
         self, entity_id: int, embedding: List[float], *, project_id: str
     ) -> None:
@@ -677,6 +710,7 @@ class GraphWriter:
                 """,
                 (json.dumps(embedding), entity_id, project_id, IDENTITY_ENTITY_ID),
             )
+    @_storage_write("update_entity_aliases")
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], *, project_id: str
     ) -> None:
@@ -800,6 +834,7 @@ class GraphWriter:
         )
         return deleted_ids
 
+    @_storage_write("cleanup_null_entities")
     async def cleanup_null_entities(self, *, project_id: str) -> List[int]:
         project_id = self._require_project_id(project_id, "cleanup_null_entities")
         async with self.client.transaction() as cur:
@@ -820,6 +855,7 @@ class GraphWriter:
                 project_id,
             )
 
+    @_storage_write("delete_entity")
     async def delete_entity(
         self,
         entity_id: int,
@@ -834,6 +870,7 @@ class GraphWriter:
         deleted_ids = await self._delete_entity_aggregate([entity_id], project_id)
         return entity_id in deleted_ids
 
+    @_storage_write("bulk_delete_entities")
     async def bulk_delete_entities(
         self, entity_ids: List[int], *, project_id: str
     ) -> List[int]:

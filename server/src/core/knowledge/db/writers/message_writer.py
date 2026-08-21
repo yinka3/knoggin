@@ -5,10 +5,33 @@ from __future__ import annotations
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Dict, List
 
+from loguru import logger
+from psycopg import Error as PsycopgError
+
+from common.exceptions import StorageWriteError
 from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
+
+
+def _storage_write(operation: str):
+    """Translate infrastructure failures without hiding contract violations."""
+
+    def decorate(method):
+        @wraps(method)
+        async def wrapped(self, *args, **kwargs):
+            try:
+                return await method(self, *args, **kwargs)
+            except (StorageWriteError, TypeError, ValueError):
+                raise
+            except PsycopgError as exc:
+                self._raise_storage_write(operation, exc)
+
+        return wrapped
+
+    return decorate
 
 
 class MessageWriter:
@@ -16,6 +39,14 @@ class MessageWriter:
 
     def __init__(self, client: PostgresClient):
         self.client = client
+
+    @staticmethod
+    def _raise_storage_write(operation: str, exc: Exception) -> None:
+        logger.error("Storage write failed for {}: {}", operation, exc)
+        raise StorageWriteError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
 
     @staticmethod
     def _timestamp_ms(value) -> int:
@@ -38,6 +69,7 @@ class MessageWriter:
         async with self.client.transaction() as transaction_cursor:
             yield transaction_cursor
 
+    @_storage_write("save_message_logs")
     async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
         if not messages:
             return True

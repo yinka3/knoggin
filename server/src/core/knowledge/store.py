@@ -379,26 +379,6 @@ class KnowledgeStore:
             scope=scope,
         )
 
-    async def create_episode(self, episode: Episode, *, user_name: str) -> None:
-        await self._episode_writer.create_episode(episode, user_name=user_name)
-
-    async def write_episode_window(
-        self,
-        episode: Optional[Episode],
-        window_message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> bool:
-        return await self._episode_writer.write_episode_window(
-            episode,
-            window_message_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
     async def get_project_episode_source_refs(
         self, episode_id: str, *, user_name: str, project_id: str
     ) -> List[SourceConsulted]:
