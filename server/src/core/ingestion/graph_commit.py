@@ -56,7 +56,6 @@ async def prepare_ingestion_batch_graph_writes(
     alias_update_ids = set(batch.alias_updates)
 
     valid_existing_ids = set()
-    zombie_entity_ids = set()
     existing_candidates = list(
         (set(entity_ids) | alias_updated_ids | alias_update_ids) - new_entity_ids
     )
@@ -75,14 +74,12 @@ async def prepare_ingestion_batch_graph_writes(
             valid_existing_ids = set(existing_candidates)
         else:
             valid_existing_ids = validation_result
-            zombie_entity_ids = set(existing_candidates) - valid_existing_ids
-            if zombie_entity_ids:
-                logger.critical(
-                    f"SPLIT BRAIN DETECTED: Resolver thinks IDs {zombie_entity_ids} "
-                    "exist, but Graph does not. Dropping writes to prevent Zombie "
-                    "Resurrection."
+            missing_existing_ids = set(existing_candidates) - valid_existing_ids
+            if missing_existing_ids:
+                logger.warning(
+                    "Skipping {} resolver entries missing from durable graph state",
+                    len(missing_existing_ids),
                 )
-                entities.remove_entities(list(zombie_entity_ids))
 
     safe_entity_ids = valid_existing_ids.union(new_entity_ids)
     alias_updates = [
@@ -95,6 +92,10 @@ async def prepare_ingestion_batch_graph_writes(
     async def build_entity_write(entity_id: int) -> Optional[EntityWrite]:
         if entity_id == IDENTITY_ENTITY_ID:
             return None
+
+        pending = batch.pending_entity_writes.get(entity_id)
+        if pending is not None:
+            return pending
 
         profile = entities.get_cached_profile(entity_id)
         if not profile:
@@ -128,20 +129,27 @@ async def prepare_ingestion_batch_graph_writes(
 
     entity_lookup = {}
     for entity_id in safe_entity_ids:
-        profile = entities.get_cached_profile(entity_id)
-        if not profile:
-            continue
-        canonical = profile.canonical_name
+        pending = batch.pending_entity_writes.get(entity_id)
+        if pending is not None:
+            canonical = pending.canonical_name
+            entity_type = pending.entity_type
+            mentions = pending.aliases
+        else:
+            profile = entities.get_cached_profile(entity_id)
+            if not profile:
+                continue
+            canonical = profile.canonical_name
+            entity_type = profile.entity_type
+            mentions = entities.get_mentions_for_id(entity_id)
         if not canonical:
             continue
         entry = {
             "id": entity_id,
             "canonical_name": canonical,
-            "type": profile.entity_type,
-            "topic": profile.topic,
+            "type": entity_type,
         }
         entity_lookup[canonical.lower()] = entry
-        for mention in entities.get_mentions_for_id(entity_id):
+        for mention in mentions:
             if mention:
                 entity_lookup[mention.lower()] = entry
 
@@ -215,7 +223,7 @@ async def prepare_ingestion_batch_graph_writes(
         # side-effect of whether entity extraction happened to run.
         eligible_messages=(),
         skipped_relationships=skipped_relationships,
-        zombie_entity_ids=zombie_entity_ids,
+        zombie_entity_ids=(),
         dirty_entity_ids=set(safe_entity_ids),
     )
 
@@ -436,13 +444,25 @@ async def _write_ingestion_batch_to_graph(
         graph_work.mark_failed(str(exc))
         raise
 
-    if summary.entities_written or summary.relationships_written or summary.aliases_updated:
+    if (
+        summary.entities_written
+        or summary.relationships_written
+        or summary.aliases_updated
+    ):
         graph_work.mark_succeeded(
             f"{summary.entities_written} entities, "
             f"{summary.relationships_written} relationships"
         )
     else:
         graph_work.mark_skipped("No graph writes")
+    try:
+        entities.apply_committed_entity_writes(batch.entity_writes)
+    except Exception as exc:
+        logger.warning(
+            "Ingestion commit {} succeeded but resolver entity refresh failed: {}",
+            batch.batch_id,
+            exc,
+        )
     for alias_update in batch.graph_alias_updates:
         try:
             entities.commit_new_aliases(
@@ -484,16 +504,4 @@ async def write_batch_callback(
         return True, None
     except Exception as e:
         logger.error(f"Graph write callback failed: {e}")
-        postgres_graph_committed = bool(
-            batch.work_unit.metadata.get("postgres_graph_committed")
-        )
-        if batch.new_entity_ids and not postgres_graph_committed:
-            # We must aggressively purge these newly created entities from the cache.
-            # If we leave them, the live pipeline might resolve future mentions to these
-            # "phantom" IDs before the DLQ can retry. This would cause the live pipeline
-            # to trip the zombie check against an ID missing from the DB.
-            entities.remove_entities(list(batch.new_entity_ids))
-            logger.info(
-                f"Cleaned {len(batch.new_entity_ids)} phantom entities from entities"
-            )
         return False, str(e)

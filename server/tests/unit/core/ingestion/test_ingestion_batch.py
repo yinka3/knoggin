@@ -313,9 +313,16 @@ async def test_resolution_handoff_uses_the_batch_contract_keyword():
     class Resolver:
         def __init__(self):
             self.resolution_lock = asyncio.Lock()
-            self.registered = []
+            self.prepared = []
 
-        async def register_entity(
+        async def candidate_entries_for_mentions(self, _mentions, **_kwargs):
+            return [("candidates", [])]
+
+        @staticmethod
+        def mention_dedupe_key(name, entity_type, topic, _policy):
+            return name, entity_type, topic
+
+        async def prepare_pending_entity(
             self,
             entity_id,
             name,
@@ -324,7 +331,16 @@ async def test_resolution_handoff_uses_the_batch_contract_keyword():
             topic,
             **_,
         ):
-            self.registered.append((entity_id, name, aliases, entity_type, topic))
+            self.prepared.append((entity_id, name, aliases, entity_type, topic))
+            return EntityWrite(
+                entity_id=entity_id,
+                is_new=True,
+                canonical_name=name,
+                entity_type=entity_type,
+                topic=topic,
+                embedding=None,
+                aliases=tuple(aliases),
+            )
 
     async def next_entity_id():
         return 2
@@ -333,10 +349,6 @@ async def test_resolution_handoff_uses_the_batch_contract_keyword():
     pipeline.entities = Resolver()
     pipeline._get_next_ent_id = next_entity_id
 
-    async def candidate_entries(_batch, _mentions):
-        return [("candidates", [])]
-
-    pipeline._candidate_entries_for_mentions = candidate_entries
     batch = open_batch()
     batch.validate_input()
     batch.mark_extracted()
@@ -346,6 +358,7 @@ async def test_resolution_handoff_uses_the_batch_contract_keyword():
     assert batch.entity_ids == [2]
     assert batch.new_entity_ids == {2}
     assert batch.entity_message_map == {2: [7]}
+    assert batch.pending_entity_writes[2].canonical_name == "Ada"
 
 
 @pytest.mark.ingestion
@@ -364,6 +377,30 @@ async def test_resolution_stages_existing_alias_until_graph_commit():
                 project_id="project-1",
             )
 
+        async def candidate_entries_for_mentions(self, _mentions, **_kwargs):
+            return [
+                (
+                    "candidates",
+                    [EntityCandidate(entity_id=101, score=1.0, signals={"exact"})],
+                )
+            ]
+
+        @staticmethod
+        def mention_dedupe_key(name, entity_type, topic, _policy):
+            return name, entity_type, topic
+
+        @staticmethod
+        def schema_compatibility(*_args):
+            return "compatible"
+
+        @staticmethod
+        def is_profile_visible(_profile):
+            return True
+
+        @staticmethod
+        def should_accept_candidate(*_args, **_kwargs):
+            return True
+
         def validate_existing(self, _canonical_name, _mentions):
             return 101, True, ["Bobby"]
 
@@ -373,21 +410,6 @@ async def test_resolution_stages_existing_alias_until_graph_commit():
     resolver = Resolver()
     pipeline = object.__new__(IngestionPipeline)
     pipeline.entities = resolver
-    pipeline.project_id = "project-1"
-    pipeline.user_name = "ada"
-    pipeline.resolution_threshold = 0.8
-    pipeline._is_profile_visible = lambda _profile: True
-    pipeline._should_accept_candidate = lambda *_args, **_kwargs: True
-
-    async def candidate_entries(_batch, _mentions):
-        return [
-            (
-                "candidates",
-                [EntityCandidate(entity_id=101, score=1.0, signals={"exact"})],
-            )
-        ]
-
-    pipeline._candidate_entries_for_mentions = candidate_entries
     batch = open_batch()
     batch.validate_input()
     batch.mark_extracted()

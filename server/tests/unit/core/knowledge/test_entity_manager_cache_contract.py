@@ -498,7 +498,6 @@ async def test_register_entity_updates_profile_aliases_and_embedding(
         entity_type="tool",
         topic="General",
         project_id="project-1",
-        session_id="session-1",
         embedding=vector,
     )
     assert entities.get_known_aliases()["notion"] == 404

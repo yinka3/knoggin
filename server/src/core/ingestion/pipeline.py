@@ -89,9 +89,7 @@ class IngestionPipeline:
         self.executor = cpu_executor
         self.user_name = user_name
         if not isinstance(compiled_domain, CompiledDomain):
-            raise TypeError(
-                "IngestionPipeline requires an active CompiledDomain"
-            )
+            raise TypeError("IngestionPipeline requires an active CompiledDomain")
         self.compiled_domain = compiled_domain
         self._get_next_ent_id = get_next_ent_id
         er_defaults = EntityResolutionSettings()
@@ -472,7 +470,6 @@ class IngestionPipeline:
         """Resolve mentions and apply the resulting state to one aggregate."""
 
         messages = batch.messages
-        session_id = batch.scope.session_id
         policy = batch.policy
         async with self.entities.resolution_lock:
             msg_text_map = {m["id"]: m["message"] for m in messages}
@@ -483,11 +480,12 @@ class IngestionPipeline:
             entity_msg_map: Dict[int, List[int]] = {}
             created_in_batch: Dict[Tuple[str, str, str], int] = {}
             alias_updates: Dict[int, List[str]] = {}
-            candidate_suggestions: List[CandidateSuggestion] = []
+            pending_entity_writes = {}
 
-            mention_candidates = await self._candidate_entries_for_mentions(
-                batch,
+            mention_candidates = await self.entities.candidate_entries_for_mentions(
                 mentions,
+                policy=policy,
+                parent_work_record=batch.work_unit,
             )
 
             for i, (msg_id, name, typ, topic) in enumerate(mentions):
@@ -498,20 +496,18 @@ class IngestionPipeline:
                 if entry is None:
                     continue
 
-                dedupe_key = self._mention_dedupe_key(name, typ, topic, policy)
+                dedupe_key = self.entities.mention_dedupe_key(name, typ, topic, policy)
                 ent_id = None
 
                 # Candidate match
                 if entry[0] == "candidates":
                     message_text = msg_text_map.get(msg_id, "")
-                    rejected_candidates = []
-
                     for candidate in entry[1]:
                         candidate_id = candidate.entity_id
                         base_score = candidate.score
                         profile = await self.entities.get_profile(candidate_id)
                         compatibility = (
-                            self._is_schema_compatible(
+                            self.entities.schema_compatibility(
                                 typ,
                                 topic,
                                 profile,
@@ -523,10 +519,10 @@ class IngestionPipeline:
                         can_consider = (
                             base_score >= policy.resolution_threshold
                             and profile
-                            and self._is_profile_visible(profile)
+                            and self.entities.is_profile_visible(profile)
                         )
 
-                        if can_consider and self._should_accept_candidate(
+                        if can_consider and self.entities.should_accept_candidate(
                             name,
                             typ,
                             topic,
@@ -551,38 +547,6 @@ class IngestionPipeline:
                                 alias_updates[existing_id].extend(new_aliases)
                             break
 
-                        if profile:
-                            rejected_candidates.append(
-                                (
-                                    candidate_id,
-                                    profile,
-                                    base_score,
-                                    compatibility,
-                                )
-                            )
-
-                    if ent_id is None:
-                        for (
-                            candidate_id,
-                            profile,
-                            base_score,
-                            compatibility,
-                        ) in rejected_candidates:
-                            candidate_suggestions.append(
-                                self._build_candidate_suggestion(
-                                    msg_id=msg_id,
-                                    mention=name,
-                                    mention_type=typ,
-                                    mention_topic=topic,
-                                    candidate_id=candidate_id,
-                                    profile=profile,
-                                    base_score=base_score,
-                                    compatibility=compatibility,
-                                    message_text=message_text,
-                                    policy=policy,
-                                )
-                            )
-
                 if ent_id is None:
                     if dedupe_key in created_in_batch:
                         ent_id = created_in_batch[dedupe_key]
@@ -590,23 +554,17 @@ class IngestionPipeline:
                         try:
                             ent_id = await self.get_next_ent_id()
 
-                            await self.entities.register_entity(
+                            pending_entity_writes[
+                                ent_id
+                            ] = await self.entities.prepare_pending_entity(
                                 ent_id,
                                 name.strip(),
                                 [name.strip()],
                                 typ,
                                 topic,
-                                session_id=session_id,
                             )
                             new_ids.add(ent_id)
                             created_in_batch[dedupe_key] = ent_id
-                            for suggestion in candidate_suggestions:
-                                if (
-                                    suggestion.msg_id == msg_id
-                                    and suggestion.mention == name
-                                    and suggestion.created_entity_id is None
-                                ):
-                                    suggestion.created_entity_id = ent_id
                         except Exception as e:
                             self._record_issue(
                                 batch.issues,
@@ -635,57 +593,9 @@ class IngestionPipeline:
                 alias_updated_ids=alias_ids,
                 entity_message_map=entity_msg_map,
                 alias_updates=alias_updates,
-                candidate_suggestions=candidate_suggestions,
+                candidate_suggestions=(),
+                pending_entity_writes=pending_entity_writes,
             )
-
-    async def _candidate_entries_for_mentions(
-        self,
-        batch: IngestionBatch,
-        mentions: List[Tuple[int, str, str, str]],
-    ) -> List[Optional[Tuple[str, object]]]:
-        policy = batch.policy
-        unique_names = list({name for _, name, _, _ in mentions if name})
-        embedding_map = {}
-        if unique_names:
-            embedding_service = self.entities.embedding_service
-            if getattr(
-                embedding_service,
-                "supports_model_work_records",
-                False,
-            ):
-                embeddings_array = await embedding_service.encode(
-                    unique_names,
-                    parent_work_record=batch.work_unit,
-                )
-            else:
-                embeddings_array = await embedding_service.encode(unique_names)
-            embedding_map = {
-                name: emb for name, emb in zip(unique_names, embeddings_array)
-            }
-
-        entries = []
-        seen_by_dedupe_key = {}
-        for _, name, typ, topic in mentions:
-            if not name:
-                entries.append(None)
-                continue
-
-            dedupe_key = self._mention_dedupe_key(name, typ, topic, policy)
-            if dedupe_key in seen_by_dedupe_key:
-                entries.append(seen_by_dedupe_key[dedupe_key])
-                continue
-
-            candidates = await self.entities.get_candidate_ids(
-                name,
-                precomputed_embedding=embedding_map.get(name),
-                candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
-                candidate_vector_threshold=policy.candidate_vector_threshold,
-            )
-            entry = ("candidates", candidates) if candidates else ("new", None)
-            seen_by_dedupe_key[dedupe_key] = entry
-            entries.append(entry)
-
-        return entries
 
     def _should_accept_candidate(
         self,
@@ -1086,9 +996,12 @@ class IngestionPipeline:
         entity_type_by_name: Dict[str, str] = {}
 
         for ent_id in batch.entity_ids:
-            profile = await self.entities.get_profile(ent_id)
             source_msgs = set(batch.entity_message_map.get(ent_id, []))
-            if not profile:
+            pending = batch.pending_entity_writes.get(ent_id)
+            profile = (
+                None if pending is not None else await self.entities.get_profile(ent_id)
+            )
+            if pending is None and not profile:
                 self._record_issue(
                     batch.issues,
                     stage="connections",
@@ -1102,8 +1015,19 @@ class IngestionPipeline:
                 )
                 continue
 
-            canonical_name = profile.canonical_name
-            mentions = self.entities.get_mentions_for_id(ent_id)
+            canonical_name = (
+                pending.canonical_name
+                if pending is not None
+                else profile.canonical_name
+            )
+            entity_type = (
+                pending.entity_type if pending is not None else profile.entity_type
+            )
+            mentions = (
+                list(pending.aliases)
+                if pending is not None
+                else self.entities.get_mentions_for_id(ent_id)
+            )
             for name in [canonical_name, *mentions]:
                 normalized = self._normalize_name(name)
                 if not normalized:
@@ -1111,12 +1035,12 @@ class IngestionPipeline:
                 valid_entity_names.add(normalized)
                 entity_source_msgs_by_name[normalized] = source_msgs
                 canonical_name_by_name[normalized] = canonical_name
-                entity_type_by_name[normalized] = profile.entity_type
+                entity_type_by_name[normalized] = entity_type
 
             candidates.append(
                 {
                     "canonical_name": canonical_name,
-                    "type": profile.entity_type,
+                    "type": entity_type,
                     "mentions": mentions,
                     "source_msgs": sorted(source_msgs),
                 }

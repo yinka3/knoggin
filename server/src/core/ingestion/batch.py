@@ -137,6 +137,10 @@ class IngestionBatch:
     alias_updated_ids: Set[int] = field(default_factory=set)
     entity_message_map: Dict[int, List[int]] = field(default_factory=dict)
     alias_updates: Dict[int, List[str]] = field(default_factory=dict)
+    # Newly discovered entities are private to this batch until its atomic
+    # ingestion commit succeeds. They must never be inserted into the shared
+    # resolver cache during processing.
+    pending_entity_writes: Dict[int, EntityWrite] = field(default_factory=dict)
     candidate_suggestions: List[CandidateSuggestion] = field(default_factory=list)
     relationship_observations: List[RelationshipObservation] = field(
         default_factory=list
@@ -263,6 +267,7 @@ class IngestionBatch:
         entity_message_map: Dict[int, List[int]],
         alias_updates: Dict[int, List[str]],
         candidate_suggestions: Iterable[CandidateSuggestion],
+        pending_entity_writes: Optional[Dict[int, EntityWrite]] = None,
     ) -> None:
         """Apply resolved entity state directly to this batch exactly once."""
 
@@ -279,6 +284,7 @@ class IngestionBatch:
         self.alias_updates = {
             entity_id: list(aliases) for entity_id, aliases in alias_updates.items()
         }
+        self.pending_entity_writes = dict(pending_entity_writes or {})
         self.candidate_suggestions = list(candidate_suggestions)
         self.advance_to(IngestionStage.RESOLVED)
 

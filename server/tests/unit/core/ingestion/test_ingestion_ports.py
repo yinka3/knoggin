@@ -1,6 +1,11 @@
 from typing import Any
 
-from common.schema.ingestion.contracts import CandidateSuggestion, ExecutionScope
+from common.schema.ingestion.contracts import (
+    CandidateSuggestion,
+    ExecutionScope,
+    GraphWriteSummary,
+    IngestionCommit,
+)
 from core.ingestion.ports import IngestionGraphPersistence, IngestionPersistence
 
 
@@ -24,6 +29,9 @@ class _GraphStore(_IngestionStore):
         visible_project_ids: list[str],
     ) -> set[int] | None:
         return set(visible_project_ids and _ids)
+
+    async def commit_ingestion(self, _commit: IngestionCommit) -> GraphWriteSummary:
+        return GraphWriteSummary()
 
     async def update_entity_aliases(
         self,

@@ -30,9 +30,10 @@ async def test_candidate_lookup_uses_the_threshold_captured_by_the_batch_policy(
         policy=policy,
     )
 
-    await pipeline._candidate_entries_for_mentions(
-        batch,
+    await entities.candidate_entries_for_mentions(
         [(1, "Alice", "person", "Identity")],
+        policy=batch.policy,
+        parent_work_record=batch.work_unit,
     )
 
     assert knowledge_store.vector_searches[-1]["score_threshold"] == 0.23

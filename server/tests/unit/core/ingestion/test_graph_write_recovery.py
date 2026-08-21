@@ -23,6 +23,9 @@ class _Resolver:
     def remove_entities(self, entity_ids):
         self.removed_entities.append(list(entity_ids))
 
+    def apply_committed_entity_writes(self, _entity_writes):
+        return None
+
 
 class _Store:
     def __init__(self, *, fail_alias=False, fail_graph=False):
@@ -183,7 +186,9 @@ async def test_graph_callback_keeps_durable_success_when_redis_signaling_fails(
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_graph_callback_removes_phantom_cache_after_graph_failure(monkeypatch):
+async def test_graph_callback_discards_pending_entities_after_graph_failure(
+    monkeypatch,
+):
     async def prepare(_batch, _store, _entities):
         return None
 
@@ -199,7 +204,7 @@ async def test_graph_callback_removes_phantom_cache_after_graph_failure(monkeypa
     )
 
     assert (success, error) == (False, "graph persistence unavailable")
-    assert resolver.removed_entities == [[101]]
+    assert resolver.removed_entities == []
 
 
 @pytest.mark.ingestion
