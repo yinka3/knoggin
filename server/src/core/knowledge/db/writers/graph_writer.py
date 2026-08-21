@@ -526,10 +526,8 @@ class GraphWriter:
                     SELECT
                         p.canonical_name AS p_name,
                         p.topic AS p_topic,
-                        p.confidence AS p_conf,
                         p.last_mentioned_ms AS p_last,
                         s.canonical_name AS s_name,
-                        s.confidence AS s_conf,
                         s.last_mentioned_ms AS s_last,
                         COALESCE(
                             array_agg(DISTINCT p_alias.alias)
@@ -555,11 +553,9 @@ class GraphWriter:
                         p.entity_id,
                         p.canonical_name,
                         p.topic,
-                        p.confidence,
                         p.last_mentioned_ms,
                         s.entity_id,
                         s.canonical_name,
-                        s.confidence,
                         s.last_mentioned_ms
                     """,
                     (
@@ -643,8 +639,6 @@ class GraphWriter:
                 s_name_raw = self._clean_string(check["s_name"])
                 primary_topic = self._clean_string(check["p_topic"]) or "General"
                 final_topic = self._clean_string(final_topic) or primary_topic
-                p_conf = float(check["p_conf"] or 0)
-                s_conf = float(check["s_conf"] or 0)
                 p_last = int(check["p_last"] or 0)
                 s_last = int(check["s_last"] or 0)
 
@@ -653,24 +647,18 @@ class GraphWriter:
                     check.get("s_aliases"),
                     [s_name_raw],
                 )
-                new_conf = s_conf if s_conf > p_conf else p_conf
                 new_last = s_last if s_last > p_last else p_last
-                now_ms = self._current_time_ms()
                 await cur.execute(
                     """
                     UPDATE entities
-                    SET confidence = %s,
-                        topic = %s,
-                        last_mentioned_ms = %s,
-                        last_updated_ms = %s
+                    SET topic = %s,
+                        last_mentioned_ms = %s
                     WHERE entity_id = %s
                       AND project_id = %s
                     """,
                     (
-                        new_conf,
                         final_topic,
                         new_last,
-                        now_ms,
                         primary_id,
                         project_id,
                     ),
@@ -1354,9 +1342,7 @@ class GraphWriter:
                     primary_id,
                     project_id,
                     combined_aliases,
-                    new_conf,
                     new_last,
-                    now_ms,
                 )
                 await self.projection.project_entity_topics(
                     cur,

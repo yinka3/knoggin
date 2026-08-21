@@ -308,40 +308,28 @@ class MergeAuditWriter:
                         entity_id,
                         user_name,
                         project_id,
-                        session_id,
                         canonical_name,
                         type,
                         topic,
-                        confidence,
-                        last_mentioned_ms,
-                        last_updated_ms,
-                        last_profiled_msg_id
+                        last_mentioned_ms
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (entity_id) DO UPDATE SET
                         user_name = EXCLUDED.user_name,
                         project_id = EXCLUDED.project_id,
-                        session_id = EXCLUDED.session_id,
                         canonical_name = EXCLUDED.canonical_name,
                         type = EXCLUDED.type,
                         topic = EXCLUDED.topic,
-                        confidence = EXCLUDED.confidence,
-                        last_mentioned_ms = EXCLUDED.last_mentioned_ms,
-                        last_updated_ms = EXCLUDED.last_updated_ms,
-                        last_profiled_msg_id = EXCLUDED.last_profiled_msg_id
+                        last_mentioned_ms = EXCLUDED.last_mentioned_ms
                     """,
                     (
                         int(entity["entity_id"]),
                         entity["user_name"],
                         entity["project_id"],
-                        entity.get("session_id"),
                         entity["canonical_name"],
                         entity.get("type"),
                         entity.get("topic") or "General",
-                        float(entity.get("confidence") or 1.0),
                         entity.get("last_mentioned_ms"),
-                        entity.get("last_updated_ms"),
-                        entity.get("last_profiled_msg_id"),
                     ),
                 )
                 for alias in entity.get("aliases") or []:

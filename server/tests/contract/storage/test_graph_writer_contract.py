@@ -587,7 +587,7 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         for call in client.calls
         if call[0] == "execute" and "UPDATE entities" in call[1]
     )
-    assert update_primary_call[2] == (0.9, "Projects", 200, 123456, 2, "project-1")
+    assert update_primary_call[2] == ("Projects", 200, 2, "project-1")
 
     projection_update_call = next(
         call for call in client.calls if "SET p.aliases = $aliases" in call[1]
@@ -597,16 +597,13 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         "primary_id",
         "project_id",
         "aliases",
-        "confidence",
         "last_mentioned",
-        "now",
     }
     assert set(update_primary_params["aliases"]) == {
         "Ada",
         "Augusta",
         "Countess Lovelace",
     }
-    assert update_primary_params["confidence"] == 0.9
     assert update_primary_params["last_mentioned"] == 200
 
     relationship_projection_call = next(

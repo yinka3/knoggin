@@ -73,7 +73,6 @@ async def _reset_storage_db(client: PostgresClient):
             entity_aliases,
             entities,
             messages,
-            entity_search,
             message_search,
             project_search_revisions,
             identity_search_revisions,

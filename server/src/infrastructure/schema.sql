@@ -241,14 +241,11 @@ CREATE TABLE IF NOT EXISTS public.entities (
     entity_id BIGINT PRIMARY KEY,
     user_name TEXT NOT NULL,
     project_id TEXT NOT NULL,
-    session_id TEXT,
     canonical_name TEXT NOT NULL,
     type TEXT,
     topic TEXT NOT NULL DEFAULT 'General',
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     last_mentioned_ms BIGINT,
-    last_updated_ms BIGINT,
-    last_profiled_msg_id BIGINT,
+    embedding vector(1024),
     CONSTRAINT entities_id_project_key UNIQUE (entity_id, project_id),
     CONSTRAINT entities_id_user_project_key
         UNIQUE (entity_id, user_name, project_id)
@@ -259,6 +256,17 @@ ON public.entities(user_name, project_id);
 
 CREATE INDEX IF NOT EXISTS entities_topic_idx
 ON public.entities(project_id, topic);
+
+ALTER TABLE public.entities
+    DROP COLUMN IF EXISTS session_id,
+    DROP COLUMN IF EXISTS confidence,
+    DROP COLUMN IF EXISTS last_updated_ms,
+    DROP COLUMN IF EXISTS last_profiled_msg_id;
+ALTER TABLE public.entities
+    ADD COLUMN IF NOT EXISTS embedding vector(1024);
+
+CREATE INDEX IF NOT EXISTS entities_embedding_idx
+ON public.entities USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS public.entity_aliases (
     entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
@@ -1532,28 +1540,12 @@ ALTER TABLE public.agent_tool_audits
     ADD CONSTRAINT agent_tool_audits_confirmation_state_check
         CHECK (confirmation_state IN ('not_confirmed', 'confirmed'));
 
--- 4. Entity and Message Vector/FTS search (Hybrid storage for the Graph)
+-- 4. Message full-text search projection.
 -- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
 -- we store the heavy vectors and tsvectors in standard relational tables
 -- and join them against the graph using the integer `id` property.
 
-CREATE TABLE IF NOT EXISTS public.entity_search (
-    entity_id BIGINT PRIMARY KEY REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    canonical_name TEXT NOT NULL,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    embedding vector(1024),
-    CONSTRAINT entity_search_entity_scope_fk
-        FOREIGN KEY (entity_id, user_name, project_id)
-        REFERENCES public.entities(entity_id, user_name, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED
-);
-
-CREATE INDEX IF NOT EXISTS entity_search_embedding_idx 
-ON public.entity_search USING hnsw (embedding vector_cosine_ops);
+DROP TABLE IF EXISTS public.entity_search;
 
 CREATE TABLE IF NOT EXISTS public.message_search (
     message_id BIGINT PRIMARY KEY REFERENCES public.messages(message_id)
@@ -1573,9 +1565,6 @@ CREATE TABLE IF NOT EXISTS public.message_search (
 -- Index for Full-Text Search on messages
 CREATE INDEX IF NOT EXISTS message_search_fts_idx 
 ON public.message_search USING gin (content_tsvector);
-
-CREATE INDEX IF NOT EXISTS entity_search_project_idx
-ON public.entity_search(user_name, project_id);
 
 CREATE INDEX IF NOT EXISTS message_search_session_idx
 ON public.message_search(user_name, session_id);
@@ -1597,20 +1586,6 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'entity_search_entity_scope_fk'
-          AND conrelid = 'public.entity_search'::regclass
-    ) THEN
-        ALTER TABLE public.entity_search
-        ADD CONSTRAINT entity_search_entity_scope_fk
-        FOREIGN KEY (entity_id, user_name, project_id)
-        REFERENCES public.entities(entity_id, user_name, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
         WHERE conname = 'message_search_message_scope_fk'
           AND conrelid = 'public.message_search'::regclass
     ) THEN
@@ -1623,61 +1598,6 @@ BEGIN
         DEFERRABLE INITIALLY DEFERRED;
     END IF;
 END $$;
-
-CREATE OR REPLACE FUNCTION public.enforce_entity_search_canonical_name()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    canonical_entity_name TEXT;
-BEGIN
-    -- A canonical scope change cascades into this projection before the
-    -- canonical entity's AFTER trigger synchronizes its copied name.
-    IF TG_OP = 'UPDATE'
-       AND NEW.canonical_name IS NOT DISTINCT FROM OLD.canonical_name THEN
-        RETURN NEW;
-    END IF;
-
-    SELECT canonical_name
-    INTO canonical_entity_name
-    FROM public.entities
-    WHERE entity_id = NEW.entity_id;
-
-    IF NOT FOUND OR NEW.canonical_name IS DISTINCT FROM canonical_entity_name THEN
-        RAISE EXCEPTION
-            'entity search canonical name must match its canonical entity'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS entity_search_canonical_name_trigger
-    ON public.entity_search;
-CREATE TRIGGER entity_search_canonical_name_trigger
-BEFORE INSERT OR UPDATE OF entity_id, canonical_name, user_name, project_id
-ON public.entity_search
-FOR EACH ROW EXECUTE FUNCTION public.enforce_entity_search_canonical_name();
-
-CREATE OR REPLACE FUNCTION public.sync_entity_search_canonical_name()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    UPDATE public.entity_search
-    SET canonical_name = NEW.canonical_name
-    WHERE entity_id = NEW.entity_id
-      AND canonical_name IS DISTINCT FROM NEW.canonical_name;
-    RETURN NULL;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS entities_search_projection_sync_trigger
-    ON public.entities;
-CREATE TRIGGER entities_search_projection_sync_trigger
-AFTER UPDATE OF canonical_name
-ON public.entities
-FOR EACH ROW EXECUTE FUNCTION public.sync_entity_search_canonical_name();
 
 -- Search rebuilds generate embeddings outside a transaction.  These revisions
 -- let the publisher reject a snapshot when its canonical inputs changed while

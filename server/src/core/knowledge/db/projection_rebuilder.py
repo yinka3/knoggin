@@ -222,15 +222,11 @@ class GraphBuilder:
             SELECT
                 e.entity_id AS id,
                 e.user_name,
-                e.session_id,
                 e.project_id,
                 e.canonical_name,
                 e.type,
                 e.topic,
-                e.confidence,
-                e.last_updated_ms AS last_updated,
                 e.last_mentioned_ms AS last_mentioned,
-                e.last_profiled_msg_id,
                 COALESCE(
                     array_agg(DISTINCT a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),

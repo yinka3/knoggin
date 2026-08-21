@@ -584,10 +584,8 @@ class GraphReader:
         query = """
         SELECT
             p.topic AS p_topic,
-            p.confidence AS p_conf,
             p.last_mentioned_ms AS p_last,
             s.topic AS s_topic,
-            s.confidence AS s_conf,
             s.last_mentioned_ms AS s_last,
             (
                 SELECT count(*)
@@ -756,7 +754,7 @@ class GraphReader:
             emb_res = await self.client.fetch_all(
                 """
                 SELECT entity_id, embedding
-                FROM entity_search
+                FROM entities
                 WHERE entity_id = ANY(%s)
                   AND project_id = %s
                 """,

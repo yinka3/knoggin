@@ -31,7 +31,6 @@ class ProjectDeletionWriter:
         "project_document_scan_settings",
         "relationship_evidence_refs",
         "message_entity_refs",
-        "entity_search",
         "message_search",
         "hierarchy_edges",
         "relationships",

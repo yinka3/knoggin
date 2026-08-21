@@ -290,12 +290,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         )
         await cur.execute(
             """
-            INSERT INTO entity_search (entity_id, canonical_name, user_name, project_id)
-            VALUES (42, 'Project One', 'ada', 'project-1'), (52, 'Project Two', 'ada', 'project-2')
-            """
-        )
-        await cur.execute(
-            """
             INSERT INTO message_search (
                 message_id, user_name, session_id, project_id, content_tsvector
             ) VALUES
@@ -388,7 +382,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-1'",
         "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-1'",
-        "entity_search": "SELECT count(*) AS count FROM entity_search WHERE project_id = 'project-1'",
         "message_search": "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-1'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-1'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-1'",
@@ -426,7 +419,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-2'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-2'",
         "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-2'",
-        "entity_search": "SELECT count(*) AS count FROM entity_search WHERE project_id = 'project-2'",
         "message_search": "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-2'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-2'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-2'",

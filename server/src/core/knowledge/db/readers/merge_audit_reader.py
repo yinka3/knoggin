@@ -45,14 +45,10 @@ class MergeAuditReader:
                 e.entity_id,
                 e.user_name,
                 e.project_id,
-                e.session_id,
                 e.canonical_name,
                 e.type,
                 e.topic,
-                e.confidence,
                 e.last_mentioned_ms,
-                e.last_updated_ms,
-                e.last_profiled_msg_id,
                 COALESCE(
                     array_agg(DISTINCT a.alias ORDER BY a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),

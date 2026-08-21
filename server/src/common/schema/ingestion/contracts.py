@@ -185,7 +185,6 @@ class EntityWrite:
     is_new: bool
     canonical_name: str
     entity_type: str
-    confidence: float
     topic: str
     embedding: Optional[tuple[float, ...]]
     aliases: tuple[str, ...] = ()
@@ -207,8 +206,6 @@ class EntityWrite:
         object.__setattr__(
             self, "topic", _require_nonblank_text(self.topic, "EntityWrite.topic")
         )
-        object.__setattr__(self, "confidence", _require_confidence(self.confidence))
-
         if self.embedding is not None:
             if not isinstance(self.embedding, (list, tuple)):
                 raise ValueError("EntityWrite.embedding must be a sequence of numbers")

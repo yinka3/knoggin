@@ -51,14 +51,10 @@ class AgeProjectionWriter:
         UNWIND $batch AS data
         MERGE (e:Entity {id: data.id})
         SET e.user_name = data.user_name,
-            e.session_id = data.session_id,
             e.project_id = data.project_id,
             e.canonical_name = data.canonical_name,
             e.type = coalesce(e.type, data.type),
-            e.confidence = data.confidence,
-            e.last_updated = coalesce(data.last_updated, data.now),
-            e.last_mentioned = coalesce(data.last_mentioned, data.now),
-            e.last_profiled_msg_id = data.last_profiled_msg_id
+            e.last_mentioned = data.now
 
         WITH e, data,
             coalesce(e.aliases, []) + coalesce(data.aliases, []) AS all_aliases
@@ -84,15 +80,11 @@ class AgeProjectionWriter:
         cypher = """
         MERGE (e:Entity {id: $id})
         SET e.user_name = $user_name,
-            e.session_id = null,
             e.project_id = $project_id,
             e.canonical_name = $canonical_name,
             e.aliases = $aliases,
             e.type = $type,
-            e.confidence = $confidence,
-            e.last_updated = $now,
-            e.last_mentioned = $now,
-            e.last_profiled_msg_id = null
+            e.last_mentioned = $now
         WITH e
         OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)
         DELETE old
@@ -203,7 +195,6 @@ class AgeProjectionWriter:
                     "id": entity_id,
                     "project_id": project_id,
                     "type": entity_type,
-                    "last_updated": int(entity["last_updated"]),
                 }
             )
 
@@ -211,8 +202,7 @@ class AgeProjectionWriter:
         UNWIND $batch AS data
         MATCH (e:Entity {id: data.id})
         WHERE e.project_id = data.project_id
-        SET e.type = data.type,
-            e.last_updated = data.last_updated
+        SET e.type = data.type
         RETURN count(e)
         """
         await cur.execute(
@@ -348,16 +338,12 @@ class AgeProjectionWriter:
         primary_id: int,
         project_id: str,
         aliases: List[str],
-        confidence: float,
         last_mentioned_ms: int,
-        now_ms: int,
     ) -> None:
         cypher = """
         MATCH (p:Entity {id: $primary_id})
         WHERE p.project_id = $project_id
         SET p.aliases = $aliases,
-            p.last_updated = $now,
-            p.confidence = $confidence,
             p.last_mentioned = $last_mentioned
         RETURN p.id
         """
@@ -369,9 +355,7 @@ class AgeProjectionWriter:
                         "primary_id": primary_id,
                         "project_id": project_id,
                         "aliases": aliases,
-                        "confidence": confidence,
                         "last_mentioned": last_mentioned_ms,
-                        "now": now_ms,
                     }
                 ),
             ),

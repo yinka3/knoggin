@@ -660,19 +660,6 @@ class KnowledgeStore:
     ) -> Dict:
         return await self._entity_writer.ensure_identity_entity(user_name, aliases)
 
-    async def update_entity_profile(
-        self,
-        entity_id: int,
-        canonical_name: str,
-        embedding: List[float],
-        last_msg_id: int,
-        *,
-        project_id: str,
-    ):
-        return await self._entity_writer.update_entity_profile(
-            entity_id, canonical_name, embedding, last_msg_id, project_id=project_id
-        )
-
     async def update_entity_canonical_name(
         self, entity_id: int, canonical_name: str, *, project_id: str
     ) -> None:
@@ -685,13 +672,6 @@ class KnowledgeStore:
     ):
         return await self._entity_writer.update_entity_embedding(
             entity_id, embedding, project_id=project_id
-        )
-
-    async def update_entity_checkpoint(
-        self, entity_id: int, last_msg_id: int, *, project_id: str
-    ):
-        return await self._entity_writer.update_entity_checkpoint(
-            entity_id, last_msg_id, project_id=project_id
         )
 
     async def update_entity_aliases(

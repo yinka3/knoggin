@@ -269,7 +269,8 @@ class SearchIndexer:
             )
             await cur.execute(
                 """
-                DELETE FROM entity_search
+                UPDATE entities
+                SET embedding = NULL
                 WHERE project_id = %s
                   AND user_name = %s
                   AND entity_id <> %s
@@ -304,46 +305,33 @@ class SearchIndexer:
             for entity, embedding in zip(entities, entity_vectors):
                 await cur.execute(
                     """
-                    INSERT INTO entity_search (
-                        entity_id,
-                        canonical_name,
-                        user_name,
-                        project_id,
-                        embedding
-                    )
-                    VALUES (%s, %s, %s, %s, %s::vector)
+                    UPDATE entities
+                    SET embedding = %s::vector
+                    WHERE entity_id = %s
+                      AND user_name = %s
+                      AND project_id = %s
                     """,
                     (
+                        json.dumps(embedding),
                         entity["entity_id"],
-                        entity["canonical_name"],
                         entity["user_name"],
                         entity["project_id"],
-                        json.dumps(embedding),
                     ),
                 )
 
             await cur.execute(
                 """
-                INSERT INTO entity_search (
-                    entity_id,
-                    canonical_name,
-                    user_name,
-                    project_id,
-                    embedding
-                )
-                VALUES (%s, %s, %s, %s, %s::vector)
-                ON CONFLICT (entity_id) DO UPDATE SET
-                    canonical_name = EXCLUDED.canonical_name,
-                    user_name = EXCLUDED.user_name,
-                    project_id = EXCLUDED.project_id,
-                    embedding = EXCLUDED.embedding
+                UPDATE entities
+                SET embedding = %s::vector
+                WHERE entity_id = %s
+                  AND user_name = %s
+                  AND project_id = %s
                 """,
                 (
+                    json.dumps(identity_vector),
                     identity["entity_id"],
-                    identity["canonical_name"],
                     identity["user_name"],
                     identity["project_id"],
-                    json.dumps(identity_vector),
                 ),
             )
 

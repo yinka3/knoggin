@@ -110,7 +110,7 @@ class EntityReader:
             return {}
         emb_query = """
         SELECT entity_id, embedding
-        FROM entity_search
+        FROM entities
         WHERE entity_id = ANY(%s)
           AND (project_id = ANY(%s) OR entity_id = %s)
         """
@@ -131,14 +131,11 @@ class EntityReader:
     ) -> Dict:
         entity = {
             "id": int(row["id"]) if row["id"] else None,
-            "session_id": self._clean_string(row["session_id"]),
             "canonical_name": self._clean_string(row["canonical_name"]),
             "aliases": self._parse_aliases(row.get("aliases")),
             "type": self._clean_string(row["type"]),
             "topic": self._clean_string(row["topic"]),
             "last_mentioned": self._ms_to_seconds(row.get("last_mentioned")),
-            "last_updated": self._ms_to_seconds(row.get("last_updated")),
-            "last_profiled_msg_id": row.get("last_profiled_msg_id"),
             "embedding": embedding or [],
         }
         if include_project_id:
@@ -174,7 +171,7 @@ class EntityReader:
         )
         query = """
         SELECT embedding
-        FROM entity_search
+        FROM entities
         WHERE entity_id = %s
           AND (project_id = ANY(%s) OR entity_id = %s)
         """
@@ -228,7 +225,6 @@ class EntityReader:
         data_query = f"""
         SELECT
             e.entity_id AS id,
-            e.session_id,
             e.canonical_name,
             e.type,
             e.topic,
@@ -263,7 +259,6 @@ class EntityReader:
                 entities.append(
                     {
                         "id": int(row["id"]),
-                        "session_id": row["session_id"],
                         "canonical_name": row["canonical_name"],
                         "type": row["type"],
                         "topic": row["topic"],
@@ -292,7 +287,6 @@ class EntityReader:
         query = """
         SELECT
             e.entity_id AS id,
-            e.session_id,
             e.project_id,
             e.canonical_name,
             COALESCE(
@@ -302,9 +296,7 @@ class EntityReader:
             ) AS aliases,
             e.type,
             e.topic,
-            e.last_mentioned_ms AS last_mentioned,
-            e.last_updated_ms AS last_updated,
-            e.last_profiled_msg_id
+            e.last_mentioned_ms AS last_mentioned
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE e.entity_id = %s
@@ -339,7 +331,6 @@ class EntityReader:
         query = """
         SELECT
             e.entity_id AS id,
-            e.session_id,
             e.project_id,
             e.canonical_name,
             COALESCE(
@@ -349,9 +340,7 @@ class EntityReader:
             ) AS aliases,
             e.type,
             e.topic,
-            e.last_mentioned_ms AS last_mentioned,
-            e.last_updated_ms AS last_updated,
-            e.last_profiled_msg_id
+            e.last_mentioned_ms AS last_mentioned
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE e.entity_id = ANY(%s)
@@ -531,7 +520,7 @@ class EntityReader:
         ]
         query = """
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
-        FROM entity_search
+        FROM entities
         WHERE entity_id != %s
           AND (project_id = ANY(%s) OR entity_id = %s)
         ORDER BY embedding <=> %s::vector
@@ -569,7 +558,7 @@ class EntityReader:
         ]
         query = """
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
-        FROM entity_search
+        FROM entities
         WHERE 1 - (embedding <=> %s::vector) >= %s
           AND (project_id = ANY(%s) OR entity_id = %s)
         ORDER BY embedding <=> %s::vector

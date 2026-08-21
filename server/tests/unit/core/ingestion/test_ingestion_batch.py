@@ -433,7 +433,6 @@ def test_sealing_snapshots_graph_buffers_into_immutable_commands():
             is_new=True,
             canonical_name="Ada",
             entity_type="person",
-            confidence=1.0,
             topic="people",
             embedding=embedding,
         )

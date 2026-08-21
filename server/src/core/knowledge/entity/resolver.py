@@ -447,7 +447,6 @@ class EntityResolver:
                 topic=topic,
                 project_id=project_id,
                 embedding=embedding,
-                session_id=session_id,
             )
 
             safe_mentions = []

@@ -255,7 +255,7 @@ class ToolQueries:
         # 1. Search Postgres for top entity IDs
         # We can just use ILIKE on canonical_name
         search_sql = """
-        SELECT entity_id FROM entity_search
+        SELECT entity_id FROM entities
         WHERE canonical_name ILIKE %s
           AND (project_id = ANY(%s) OR entity_id = %s)
         LIMIT %s
@@ -282,7 +282,6 @@ class ToolQueries:
                 e.type,
                 e.topic,
                 e.last_mentioned_ms as last_mentioned,
-                e.last_updated_ms as last_updated,
                 COALESCE(
                     (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = e.entity_id),
                     '{}'::text[]
@@ -336,7 +335,6 @@ class ToolQueries:
                     "type": row["type"],
                     "topic": row["topic"],
                     "last_mentioned": row["last_mentioned"],
-                    "last_updated": row["last_updated"],
                     "hierarchy": {
                         "parent": row["parent_name"],
                         "children_count": row["children_count"],
