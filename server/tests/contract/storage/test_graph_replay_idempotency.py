@@ -13,7 +13,7 @@ from common.schema.ingestion.contracts import (
 )
 from common.schema.settings import RedisConnectionSettings
 from core.ingestion import graph_commit as write_graph_db
-from core.knowledge.db.writers.entity_writer import EntityWriter
+from core.knowledge.db.writers.graph_writer import GraphWriter as EntityWriter
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 
 

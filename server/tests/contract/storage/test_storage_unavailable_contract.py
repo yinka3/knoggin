@@ -3,7 +3,9 @@ import pytest
 from common.exceptions import StorageReadError, StorageWriteError
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
-from core.knowledge.db.writers.graph_writer import GraphWriter
+from core.knowledge.db.writers.entity_merge_writer import (
+    EntityMergeWriter as GraphWriter,
+)
 from tests.fixtures.fakes import RecordingPostgresClient
 
 

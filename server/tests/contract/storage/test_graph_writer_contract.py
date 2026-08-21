@@ -4,7 +4,9 @@ import pytest
 
 from common.exceptions import StorageWriteError
 from common.scoping import IDENTITY_ENTITY_ID
-from core.knowledge.db.writers.graph_writer import GraphWriter
+from core.knowledge.db.writers.entity_merge_writer import (
+    EntityMergeWriter as GraphWriter,
+)
 from core.knowledge.db.writers.message_writer import MessageWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 

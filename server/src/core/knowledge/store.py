@@ -52,11 +52,11 @@ from core.knowledge.db.writers.candidate_suggestion_writer import (
     CandidateSuggestionWriter,
 )
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
+from core.knowledge.db.writers.entity_merge_writer import EntityMergeWriter
 from core.knowledge.db.writers.entity_reclassification_writer import (
     EntityReclassificationWriter,
     HistoricalReclassificationResult,
 )
-from core.knowledge.db.writers.entity_writer import EntityWriter
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
@@ -102,7 +102,7 @@ class KnowledgeStore:
     ):
         self._postgres_client = postgres_client
         self._id_allocator = IdAllocator(self._postgres_client)
-        self._entity_writer = EntityWriter(self._postgres_client)
+        self._graph_writer = GraphWriter(self._postgres_client)
         self._entity_reclassification_writer = EntityReclassificationWriter(
             self._postgres_client
         )
@@ -113,7 +113,7 @@ class KnowledgeStore:
         self._candidate_suggestion_writer = CandidateSuggestionWriter(
             self._postgres_client
         )
-        self._graph_writer = GraphWriter(self._postgres_client)
+        self._entity_merge_writer = EntityMergeWriter(self._postgres_client)
         self._message_writer = MessageWriter(self._postgres_client)
         self._message_lifecycle_writer = MessageLifecycleWriter(
             self._postgres_client, self._message_writer
@@ -371,7 +371,7 @@ class KnowledgeStore:
         eligible_messages: Optional[List[EpisodeEligibility]] = None,
         scope: ExecutionScope,
     ) -> bool:
-        return await self._entity_writer.write_batch(
+        return await self._graph_writer.write_batch(
             entities,
             relationships,
             message_entity_refs=message_entity_refs or (),
@@ -662,26 +662,26 @@ class KnowledgeStore:
     async def ensure_identity_entity(
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
-        return await self._entity_writer.ensure_identity_entity(user_name, aliases)
+        return await self._graph_writer.ensure_identity_entity(user_name, aliases)
 
     async def update_entity_canonical_name(
         self, entity_id: int, canonical_name: str, *, project_id: str
     ) -> None:
-        return await self._entity_writer.update_entity_canonical_name(
+        return await self._graph_writer.update_entity_canonical_name(
             entity_id, canonical_name, project_id=project_id
         )
 
     async def update_entity_embedding(
         self, entity_id: int, embedding: List[float], *, project_id: str
     ):
-        return await self._entity_writer.update_entity_embedding(
+        return await self._graph_writer.update_entity_embedding(
             entity_id, embedding, project_id=project_id
         )
 
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], *, project_id: str
     ) -> None:
-        return await self._entity_writer.update_entity_aliases(
+        return await self._graph_writer.update_entity_aliases(
             alias_updates, project_id=project_id
         )
 
@@ -694,7 +694,7 @@ class KnowledgeStore:
         final_topic: Optional[str] = None,
         cur=None,
     ) -> bool:
-        return await self._graph_writer.merge_entities(
+        return await self._entity_merge_writer.merge_entities(
             primary_id,
             secondary_id,
             project_id=project_id,
@@ -703,7 +703,7 @@ class KnowledgeStore:
         )
 
     async def cleanup_null_entities(self, *, project_id: str) -> List[int]:
-        return await self._entity_writer.cleanup_null_entities(project_id=project_id)
+        return await self._graph_writer.cleanup_null_entities(project_id=project_id)
 
     async def preview_historical_reclassification(
         self,
@@ -772,12 +772,12 @@ class KnowledgeStore:
         )
 
     async def delete_entity(self, entity_id: int, *, project_id: str) -> bool:
-        return await self._entity_writer.delete_entity(entity_id, project_id=project_id)
+        return await self._graph_writer.delete_entity(entity_id, project_id=project_id)
 
     async def bulk_delete_entities(
         self, entity_ids: List[int], *, project_id: str
     ) -> List[int]:
-        return await self._entity_writer.bulk_delete_entities(
+        return await self._graph_writer.bulk_delete_entities(
             entity_ids, project_id=project_id
         )
 
@@ -819,7 +819,7 @@ class KnowledgeStore:
         relationship_type: str,
         project_id: str,
     ) -> bool:
-        return await self._graph_writer.delete_relationship(
+        return await self._entity_merge_writer.delete_relationship(
             entity_a_id,
             entity_b_id,
             relationship_type=relationship_type,
