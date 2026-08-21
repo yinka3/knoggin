@@ -215,21 +215,32 @@ class KnowledgeStore:
             settle_delay_seconds=settle_delay_seconds,
         )
 
-    async def claim_next_full_ingestion_batch(
+    async def reset_claimed_ingestion(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> List[int]:
+        return await self._message_lifecycle_writer.reset_claimed_ingestion(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def claim_next_ingestion_batch(
         self,
         *,
         user_name: str,
         project_id: str,
         session_id: str,
         batch_size: int,
-        claim_lease_seconds: float,
     ) -> IngestionClaim | None:
-        return await self._message_lifecycle_writer.claim_next_full_batch(
+        return await self._message_lifecycle_writer.claim_next_batch(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
             batch_size=batch_size,
-            claim_lease_seconds=claim_lease_seconds,
         )
 
     async def finish_ingestion_claim(
@@ -257,6 +268,46 @@ class KnowledgeStore:
             session_id=session_id,
             batch_id=batch_id,
             blocked=blocked,
+        )
+
+    async def fail_ingestion_claim(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_id: str,
+        failure_stage: str,
+        failure_code: str,
+        error_summary: str,
+        retryable: bool,
+        max_attempts: int,
+    ) -> bool:
+        return await self._message_lifecycle_writer.fail_ingestion_claim(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            batch_id=batch_id,
+            failure_stage=failure_stage,
+            failure_code=failure_code,
+            error_summary=error_summary,
+            retryable=retryable,
+            max_attempts=max_attempts,
+        )
+
+    async def retry_blocked_ingestion(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        message_ids: List[int],
+    ) -> List[int]:
+        return await self._message_lifecycle_writer.retry_blocked_ingestion(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            message_ids=message_ids,
         )
 
     async def save_assistant_message_with_source_refs(

@@ -13,7 +13,7 @@ from infrastructure.postgres_client import PostgresClient
 
 @dataclass(frozen=True, slots=True)
 class IngestionClaim:
-    """One FIFO, full-size batch claimed from canonical message storage."""
+    """One settled FIFO batch claimed from canonical message storage."""
 
     batch_id: str
     messages: List[Dict[str, Any]]
@@ -252,28 +252,16 @@ class MessageLifecycleWriter:
             )
             return [int(row["message_id"]) for row in await cur.fetchall()]
 
-    async def claim_next_full_batch(
+    async def reset_claimed_ingestion(
         self,
         *,
         user_name: str,
         project_id: str,
         session_id: str,
-        batch_size: int,
-        claim_lease_seconds: float,
-    ) -> IngestionClaim | None:
-        """Claim the earliest contiguous, settled full batch, or nothing.
+    ) -> List[int]:
+        """Release claims left by an earlier runtime for this session only."""
 
-        A preceding editable, blocked, or live claim deliberately prevents later
-        messages from overtaking it. This preserves the meaning of a session.
-        """
-
-        if batch_size < 1:
-            raise ValueError("batch_size must be positive")
-        now_ms = self._now_ms()
-        lease_cutoff_ms = now_ms - int(claim_lease_seconds * 1000)
         async with self.client.transaction() as cur:
-            # A crashed worker never owns work forever. A deliberately blocked
-            # batch is not released automatically, so FIFO remains intact.
             await cur.execute(
                 """
                 UPDATE public.messages AS message
@@ -283,8 +271,8 @@ class MessageLifecycleWriter:
                 WHERE user_name = %s
                   AND project_id = %s
                   AND session_id = %s
+                  AND role = 'user'
                   AND ingestion_state = 'claimed'
-                  AND ingestion_claimed_at_ms < %s
                   AND EXISTS (
                       SELECT 1
                       FROM public.sessions AS session
@@ -293,9 +281,30 @@ class MessageLifecycleWriter:
                         AND session.session_id = message.session_id
                         AND session.status = 'open'
                   )
+                RETURNING message_id
                 """,
-                (user_name, project_id, session_id, lease_cutoff_ms),
+                (user_name, project_id, session_id),
             )
+            return [int(row["message_id"]) for row in await cur.fetchall()]
+
+    async def claim_next_batch(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_size: int,
+    ) -> IngestionClaim | None:
+        """Claim the earliest contiguous, settled FIFO batch, or nothing.
+
+        A preceding editable, blocked, or live claim deliberately prevents later
+        messages from overtaking it. This preserves the meaning of a session.
+        """
+
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        now_ms = self._now_ms()
+        async with self.client.transaction() as cur:
             await cur.execute(
                 """
                 SELECT message_id, content, timestamp_ms, role, ingestion_state,
@@ -320,7 +329,7 @@ class MessageLifecycleWriter:
                 (user_name, project_id, session_id, batch_size),
             )
             rows = await cur.fetchall()
-            if len(rows) != batch_size:
+            if not rows:
                 return None
             if any(
                 row["ingestion_state"] != "ready"
@@ -354,7 +363,7 @@ class MessageLifecycleWriter:
                 ),
             )
             if cur.rowcount != len(message_ids):
-                raise RuntimeError("Ingestion batch claim lost its message lease")
+                raise RuntimeError("Ingestion batch claim was lost")
 
         return IngestionClaim(
             batch_id=batch_id,
@@ -368,6 +377,138 @@ class MessageLifecycleWriter:
                 for row in rows
             ],
         )
+
+    async def fail_ingestion_claim(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_id: str,
+        failure_stage: str,
+        failure_code: str,
+        error_summary: str,
+        retryable: bool,
+        max_attempts: int,
+    ) -> bool:
+        """Record one bounded failure and return whether the batch is blocked."""
+
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        stage = str(failure_stage or "ingestion").strip()[:100]
+        code = str(failure_code or "ingestion_failure").strip()[:100]
+        summary = " ".join(str(error_summary or "").split())[:1_000]
+        if not stage or not code or not summary:
+            raise ValueError("Ingestion failure metadata must be non-blank")
+
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT message_id, ingestion_attempt_count
+                FROM public.messages AS message
+                WHERE user_name = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                  AND role = 'user'
+                  AND ingestion_state = 'claimed'
+                  AND ingestion_claim_id = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.sessions AS session
+                      WHERE session.user_name = message.user_name
+                        AND session.project_id = message.project_id
+                        AND session.session_id = message.session_id
+                        AND session.status = 'open'
+                  )
+                FOR UPDATE
+                """,
+                (user_name, project_id, session_id, batch_id),
+            )
+            rows = await cur.fetchall()
+            if not rows:
+                raise RuntimeError("Ingestion claim no longer belongs to this worker")
+
+            blocked = (not retryable) or any(
+                int(row["ingestion_attempt_count"]) + 1 >= max_attempts
+                for row in rows
+            )
+            state = "blocked" if blocked else "ready"
+            message_ids = [int(row["message_id"]) for row in rows]
+            await cur.execute(
+                """
+                UPDATE public.messages
+                SET ingestion_state = %s,
+                    ingestion_claim_id = NULL,
+                    ingestion_claimed_at_ms = NULL,
+                    ingestion_attempt_count = ingestion_attempt_count + 1,
+                    ingestion_last_failure_stage = %s,
+                    ingestion_last_failure_code = %s,
+                    ingestion_last_failure_at_ms = %s,
+                    ingestion_last_error_summary = %s
+                WHERE user_name = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                  AND message_id = ANY(%s)
+                  AND ingestion_state = 'claimed'
+                  AND ingestion_claim_id = %s
+                """,
+                (
+                    state,
+                    stage,
+                    code,
+                    self._now_ms(),
+                    summary,
+                    user_name,
+                    project_id,
+                    session_id,
+                    message_ids,
+                    batch_id,
+                ),
+            )
+            if cur.rowcount != len(message_ids):
+                raise RuntimeError("Ingestion claim no longer belongs to this worker")
+            return blocked
+
+    async def retry_blocked_ingestion(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        message_ids: List[int],
+    ) -> List[int]:
+        """Explicitly make selected blocked messages eligible for a fresh run."""
+
+        ids = sorted({int(message_id) for message_id in message_ids})
+        if not ids or any(message_id <= 0 for message_id in ids):
+            raise ValueError("message_ids must contain positive message IDs")
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE public.messages AS message
+                SET ingestion_state = 'ready',
+                    ingestion_claim_id = NULL,
+                    ingestion_claimed_at_ms = NULL,
+                    ingestion_not_before_ms = %s
+                WHERE user_name = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                  AND role = 'user'
+                  AND message_id = ANY(%s)
+                  AND ingestion_state = 'blocked'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.sessions AS session
+                      WHERE session.user_name = message.user_name
+                        AND session.project_id = message.project_id
+                        AND session.session_id = message.session_id
+                        AND session.status = 'open'
+                  )
+                RETURNING message_id
+                """,
+                (self._now_ms(), user_name, project_id, session_id, ids),
+            )
+            return [int(row["message_id"]) for row in await cur.fetchall()]
 
     async def finish_ingestion_claim(
         self,
@@ -425,22 +566,29 @@ class MessageLifecycleWriter:
                         AND session.session_id = message.session_id
                         AND session.status = 'open'
                   )
+                RETURNING message_id
                 """,
                 (state, user_name, project_id, session_id, batch_id),
             )
-            if cur.rowcount == 0:
+            message_ids = [int(row["message_id"]) for row in await cur.fetchall()]
+            if not message_ids:
                 raise RuntimeError("Ingestion claim no longer belongs to this worker")
             if state == "processed":
                 await cur.execute(
                     """
                     UPDATE public.messages
-                    SET episode_eligible = TRUE
+                    SET episode_eligible = TRUE,
+                        ingestion_last_failure_stage = NULL,
+                        ingestion_last_failure_code = NULL,
+                        ingestion_last_failure_at_ms = NULL,
+                        ingestion_last_error_summary = NULL
                     WHERE user_name = %s
                       AND project_id = %s
                       AND session_id = %s
+                      AND message_id = ANY(%s)
                       AND role = 'user'
                       AND lifecycle_state = 'sealed'
                       AND ingestion_state = 'processed'
                     """,
-                    (user_name, project_id, session_id),
+                    (user_name, project_id, session_id, message_ids),
                 )

@@ -222,12 +222,13 @@ class _DurableQueueStore:
         ]
         self.finished = []
         self.released = []
+        self.failures = []
 
     async def seal_due_user_messages(self, **kwargs):
         self.seal_calls.append(kwargs)
         return [7]
 
-    async def claim_next_full_ingestion_batch(self, **_kwargs):
+    async def claim_next_ingestion_batch(self, **_kwargs):
         return self.claims.pop(0) if self.claims else None
 
     async def finish_ingestion_claim(self, **kwargs):
@@ -236,13 +237,17 @@ class _DurableQueueStore:
     async def release_ingestion_claim(self, **kwargs):
         self.released.append(kwargs)
 
+    async def fail_ingestion_claim(self, **kwargs):
+        self.failures.append(kwargs)
+        return True
+
     async def save_candidate_suggestions(self, _scope, _suggestions):
         return 0
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_consumer_uses_durable_full_batch_claim_and_never_rewrites_messages(
+async def test_consumer_uses_durable_fifo_claim_and_never_rewrites_messages(
     monkeypatch,
 ):
     async def emit_nothing(*_args, **_kwargs):
@@ -263,6 +268,39 @@ async def test_consumer_uses_durable_full_batch_claim_and_never_rewrites_message
     assert processor.batch.batch_id == "claim-1"
     assert IngestionMilestone.MESSAGE_LOGS_HANDLED in processor.batch.milestones
     assert IngestionMilestone.CHECKPOINT_COMMITTED in processor.batch.milestones
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_consumer_records_a_retryable_durable_failure_on_the_claim(
+    monkeypatch,
+):
+    async def emit_nothing(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(worker_module, "emit", emit_nothing)
+    processor = _DrainProcessor("failed")
+    worker = _checkpoint_worker(FakeRedis(), processor)
+    store = _DurableQueueStore()
+    worker.knowledge_store = store
+
+    await worker._drain_durable_queue()
+
+    assert store.finished == []
+    assert store.released == []
+    assert store.failures == [
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "batch_id": "claim-1",
+            "failure_stage": "runtime",
+            "failure_code": "RuntimeError",
+            "error_summary": "semantic processing failed",
+            "retryable": True,
+            "max_attempts": 3,
+        }
+    ]
 
 
 def _completed_batch(*, policy=None) -> IngestionBatch:

@@ -214,6 +214,13 @@ async def test_session_assembler_launch_starts_consumer_only(
     assert harness.project_state.scheduler.running is False
     assert harness.project_state.scheduler.started == 0
     assert ctx.consumer.started == 1
+    assert harness.resources.knowledge_store.reset_claimed_ingestion_calls == [
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+        }
+    ]
 
 
 @pytest.mark.runtime

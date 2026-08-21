@@ -452,6 +452,7 @@ class FakeKnowledgeStore:
         self.next_message_id = 1
         self.embedding_rebuild_calls = []
         self.parked_dlq_items = {}
+        self.reset_claimed_ingestion_calls = []
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -494,6 +495,16 @@ class FakeKnowledgeStore:
             "edit_window_seconds": edit_window_seconds,
         }
         self.saved_message_logs.append([row])
+
+    async def reset_claimed_ingestion(self, *, user_name, project_id, session_id):
+        self.reset_claimed_ingestion_calls.append(
+            {
+                "user_name": user_name,
+                "project_id": project_id,
+                "session_id": session_id,
+            }
+        )
+        return []
 
     async def save_assistant_message_with_source_refs(self, message, candidates):
         self.saved_message_logs.append([message])

@@ -5,7 +5,13 @@ from typing import Awaitable, Callable, Dict, List, Optional, assert_never
 import redis.asyncio as aioredis
 from loguru import logger
 
-from common.exceptions import LLMBudgetExceededError
+from common.exceptions import (
+    DependencyError,
+    LLMBudgetExceededError,
+    LLMProviderError,
+    LLMResponseError,
+    StorageError,
+)
 from common.schema.settings import IngestionSettings
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit, emit_sync
@@ -255,7 +261,7 @@ class IngestionWorker:
         self.ingestion_batch_settle_delay_seconds = (
             config.ingestion_batch_settle_delay_seconds
         )
-        self.ingestion_claim_lease_seconds = config.ingestion_claim_lease_seconds
+        self.ingestion_max_attempts = config.ingestion_max_attempts
 
         logger.info(
             "Consumer ingestion settings updated: "
@@ -271,8 +277,23 @@ class IngestionWorker:
         """
 
         return callable(
-            getattr(self.knowledge_store, "claim_next_full_ingestion_batch", None)
+            getattr(self.knowledge_store, "claim_next_ingestion_batch", None)
         )
+
+    @staticmethod
+    def _classify_durable_failure(exc: Exception) -> tuple[bool, str, str]:
+        """Return retryability plus bounded durable failure labels."""
+
+        code = str(getattr(exc, "code", "") or type(exc).__name__).strip()
+        if isinstance(exc, StorageError):
+            return True, "storage", code
+        if isinstance(exc, LLMProviderError):
+            return True, "model", code
+        if isinstance(exc, DependencyError | ConnectionError | TimeoutError | OSError):
+            return True, "runtime", code
+        if isinstance(exc, LLMResponseError | ValueError | TypeError):
+            return False, "pipeline", code
+        return True, "runtime", code
 
     async def _wait_for_batch(self) -> bool:
         """Wait briefly for a full batch. Returns whether partial work is due."""
@@ -368,7 +389,7 @@ class IngestionWorker:
             logger.error(f"IngestionWorker shutdown sequence failed: {e}")
 
     async def _drain_durable_queue(self) -> None:
-        """Process only sealed, settled, full FIFO batches from Postgres."""
+        """Process sealed, settled FIFO batches from PostgreSQL."""
 
         await self.knowledge_store.seal_due_user_messages(
             user_name=self.user_name,
@@ -379,12 +400,11 @@ class IngestionWorker:
         processed = 0
         message_ids: list[int] = []
         while not self._shutdown_requested:
-            claim = await self.knowledge_store.claim_next_full_ingestion_batch(
+            claim = await self.knowledge_store.claim_next_ingestion_batch(
                 user_name=self.user_name,
                 project_id=self.processor.project_id,
                 session_id=self.session_id,
                 batch_size=self.batch_size,
-                claim_lease_seconds=self.ingestion_claim_lease_seconds,
             )
             if claim is None:
                 break
@@ -489,16 +509,28 @@ class IngestionWorker:
             except Exception as exc:
                 self._record_health_failure("durable_batch")
                 self._mark_batch_work_failed(batch, exc)
-                # A failure remains ahead of subsequent messages. Operators can
-                # inspect/replay it without silently changing the session order.
-                await self.knowledge_store.release_ingestion_claim(
+                retryable, failure_stage, failure_code = self._classify_durable_failure(
+                    exc
+                )
+                blocked = await self.knowledge_store.fail_ingestion_claim(
                     user_name=self.user_name,
                     project_id=self.processor.project_id,
                     session_id=self.session_id,
                     batch_id=claim.batch_id,
-                    blocked=True,
+                    failure_stage=failure_stage,
+                    failure_code=failure_code,
+                    error_summary=str(exc),
+                    retryable=retryable,
+                    max_attempts=self.ingestion_max_attempts,
                 )
-                logger.error("Durable ingestion batch {} blocked: {}", claim.batch_id, exc)
+                outcome = "blocked" if blocked else "returned to ready"
+                logger.error(
+                    "Durable ingestion batch {} {} after {}: {}",
+                    claim.batch_id,
+                    outcome,
+                    failure_code,
+                    exc,
+                )
                 break
             finally:
                 batch.release()

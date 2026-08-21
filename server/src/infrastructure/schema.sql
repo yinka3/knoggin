@@ -194,6 +194,12 @@ CREATE TABLE IF NOT EXISTS public.messages (
     ingestion_not_before_ms BIGINT,
     ingestion_claim_id TEXT,
     ingestion_claimed_at_ms BIGINT,
+    ingestion_attempt_count INTEGER NOT NULL DEFAULT 0
+        CHECK (ingestion_attempt_count >= 0),
+    ingestion_last_failure_stage TEXT,
+    ingestion_last_failure_code TEXT,
+    ingestion_last_failure_at_ms BIGINT,
+    ingestion_last_error_summary TEXT,
     episode_eligible BOOLEAN NOT NULL DEFAULT FALSE,
     episode_type TEXT,
     PRIMARY KEY (user_name, session_id, message_id),
@@ -211,6 +217,13 @@ ALTER TABLE public.messages
     ADD COLUMN IF NOT EXISTS search_tsvector TSVECTOR GENERATED ALWAYS AS (
         to_tsvector('english', content)
     ) STORED;
+
+ALTER TABLE public.messages
+    ADD COLUMN IF NOT EXISTS ingestion_attempt_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS ingestion_last_failure_stage TEXT,
+    ADD COLUMN IF NOT EXISTS ingestion_last_failure_code TEXT,
+    ADD COLUMN IF NOT EXISTS ingestion_last_failure_at_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS ingestion_last_error_summary TEXT;
 
 CREATE INDEX IF NOT EXISTS messages_project_idx
 ON public.messages(user_name, project_id, message_id);

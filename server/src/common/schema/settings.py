@@ -95,7 +95,7 @@ class IngestionSettings(ConfigModel):
     message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
     ingestion_batch_settle_delay_seconds: float = Field(120.0, ge=0.0, le=3_600.0)
     message_lifecycle_poll_seconds: float = Field(15.0, ge=1.0, le=300.0)
-    ingestion_claim_lease_seconds: float = Field(300.0, ge=10.0, le=3_600.0)
+    ingestion_max_attempts: int = Field(3, ge=1, le=20)
     checkpoint_interval: int = Field(32, ge=1)
     session_window: int = Field(24, ge=1)
 

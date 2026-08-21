@@ -132,6 +132,17 @@ class SessionRuntimeFactory:
                 raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
 
         if ctx.consumer:
+            reset_message_ids = await self.resources.knowledge_store.reset_claimed_ingestion(
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                session_id=ctx.session_id,
+            )
+            if reset_message_ids:
+                logger.info(
+                    "Released {} stale ingestion claims for session {}",
+                    len(reset_message_ids),
+                    ctx.session_id,
+                )
             ctx.consumer.start()
 
         logger.info(f"System launched successfully for session {ctx.session_id}")
