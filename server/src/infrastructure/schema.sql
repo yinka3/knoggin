@@ -171,6 +171,7 @@ MINVALUE 1;
 
 CREATE TABLE IF NOT EXISTS public.messages (
     user_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     message_id BIGINT NOT NULL UNIQUE,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
     role TEXT NOT NULL,
@@ -1171,12 +1172,6 @@ ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
 -- ==============================================================================
 -- DOMAIN INVARIANTS
 -- ==============================================================================
-
-ALTER TABLE public.entities
-    DROP CONSTRAINT IF EXISTS entities_confidence_range_check;
-ALTER TABLE public.entities
-    ADD CONSTRAINT entities_confidence_range_check
-    CHECK (confidence >= 0.0 AND confidence <= 1.0);
 
 ALTER TABLE public.relationships
     DROP CONSTRAINT IF EXISTS relationships_weight_positive_check,
