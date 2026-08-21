@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -108,7 +109,7 @@ async def test_pipeline_process_mutates_the_supplied_ingestion_batch(monkeypatch
 
     pipeline._extract_mentions = extract_mentions
     pipeline._resolve_mentions = resolve_mentions
-    pipeline._extract_connections = extract_connections
+    pipeline.relationships = SimpleNamespace(extract=extract_connections)
     monkeypatch.setattr(pipeline_service, "emit", emit_nothing)
     batch = open_batch()
 

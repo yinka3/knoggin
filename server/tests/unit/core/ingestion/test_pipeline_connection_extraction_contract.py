@@ -11,7 +11,7 @@ from common.schema.ingestion.extraction import (
     RelationshipMention,
 )
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.pipeline import IngestionPipeline
+from core.ingestion.relationship_extractor import RelationshipExtractor
 from tests.fixtures.ingestion import ingestion_policy
 from tests.unit.core.ingestion.test_pipeline_entity_resolution_contract import (
     MESSAGES,
@@ -36,9 +36,15 @@ class FakeConnectionLLM:
 
 
 def make_processor(response=None, *, raise_error=False):
-    processor, entities, _, _ = make_harness()
-    processor.llm = FakeConnectionLLM(response, raise_error=raise_error)
-    return processor, entities
+    _, entities, _, _ = make_harness()
+    return (
+        RelationshipExtractor(
+            user_name="ada",
+            llm=FakeConnectionLLM(response, raise_error=raise_error),
+            entities=entities,
+        ),
+        entities,
+    )
 
 
 async def seed_connection_entities(entities, *, include_user_entity=False):
@@ -83,7 +89,7 @@ def user_relationship(*, msg_id="m1", entity_name="Knoggin", name="works_on"):
 
 
 async def extract(
-    processor: IngestionPipeline,
+    processor: RelationshipExtractor,
     *,
     entity_ids=None,
     entity_msg_map=None,
@@ -111,7 +117,7 @@ async def extract(
         batch.trace = trace
     if issues is not None:
         batch.issues = issues
-    return await processor._extract_connections(batch)
+    return await processor.extract(batch)
 
 
 @pytest.mark.ingestion

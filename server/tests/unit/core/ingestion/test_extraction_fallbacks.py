@@ -9,9 +9,8 @@ from common.schema.ingestion.extraction import (
     RelationshipMention,
 )
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.pipeline import IngestionPipeline
+from core.ingestion.relationship_extractor import RelationshipExtractor
 from core.knowledge.entity.profile import EntityProfile
-from tests.fixtures.factories import make_domain_config
 from tests.fixtures.ingestion import ingestion_policy
 
 
@@ -36,16 +35,10 @@ class FakeEntities:
 
 
 def make_processor(llm_response):
-    return IngestionPipeline(
-        project_id="project-1",
-        redis_client=None,
+    return RelationshipExtractor(
         llm=FakeLLM(llm_response),
         entities=FakeEntities(),
-        processor=None,
-        cpu_executor=None,
         user_name="Ada",
-        compiled_domain=make_domain_config().compile(),
-        get_next_ent_id=None,
     )
 
 
@@ -106,7 +99,7 @@ async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
     batch.entity_ids = [1, 2]
     batch.entity_message_map = {1: [7], 2: [7]}
 
-    result = await processor._extract_connections(batch)
+    result = await processor.extract(batch)
 
     assert result == []
 
@@ -140,7 +133,7 @@ async def test_connection_extraction_keeps_valid_connections():
     batch.entity_ids = [1, 2]
     batch.entity_message_map = {1: [7], 2: [7]}
 
-    result = await processor._extract_connections(batch)
+    result = await processor.extract(batch)
 
     assert result == [
         RelationshipObservation(
