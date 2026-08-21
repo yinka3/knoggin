@@ -61,13 +61,11 @@ class EntityWriter:
         identity = {
             "id": IDENTITY_ENTITY_ID,
             "user_name": user_name,
-            "session_id": None,
             "project_id": IDENTITY_SCOPE,
             "canonical_name": user_name,
             "aliases": clean_aliases,
             "type": "person",
             "topic": "Identity",
-            "confidence": 1.0,
             "now": now_ms,
         }
 
@@ -104,25 +102,20 @@ class EntityWriter:
                     entity_id,
                     user_name,
                     project_id,
-                    session_id,
                     canonical_name,
                     type,
                     topic,
-                    confidence,
                     last_mentioned_ms,
-                    last_updated_ms,
-                    last_profiled_msg_id
+                    embedding
                 )
-                VALUES (%s, %s, %s, NULL, %s, %s, %s, %s, %s, %s, NULL)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NULL)
                 ON CONFLICT (entity_id) DO UPDATE SET
                     user_name = EXCLUDED.user_name,
                     project_id = EXCLUDED.project_id,
-                    session_id = NULL,
                     canonical_name = EXCLUDED.canonical_name,
                     type = EXCLUDED.type,
                     topic = EXCLUDED.topic,
-                    confidence = EXCLUDED.confidence,
-                    last_updated_ms = EXCLUDED.last_updated_ms
+                    last_mentioned_ms = EXCLUDED.last_mentioned_ms
                 """,
                 (
                     IDENTITY_ENTITY_ID,
@@ -131,8 +124,6 @@ class EntityWriter:
                     user_name,
                     "person",
                     "Identity",
-                    1.0,
-                    now_ms,
                     now_ms,
                 ),
             )
@@ -149,24 +140,6 @@ class EntityWriter:
                     """,
                     (IDENTITY_ENTITY_ID, alias),
                 )
-            await cur.execute(
-                """
-                INSERT INTO entity_search (
-                    entity_id, canonical_name, user_name, project_id, embedding
-                )
-                VALUES (%s, %s, %s, %s, NULL)
-                ON CONFLICT (entity_id) DO UPDATE SET
-                    canonical_name = EXCLUDED.canonical_name,
-                    user_name = EXCLUDED.user_name,
-                    project_id = EXCLUDED.project_id
-                """,
-                (
-                    IDENTITY_ENTITY_ID,
-                    user_name,
-                    user_name,
-                    IDENTITY_SCOPE,
-                ),
-            )
             await self.projection.project_identity(cur, identity)
 
         return identity
@@ -204,13 +177,11 @@ class EntityWriter:
                         {
                             "id": entity.entity_id,
                             "user_name": user_name,
-                            "session_id": session_id,
                             "project_id": project_id,
                             "canonical_name": entity.canonical_name,
                             "aliases": list(entity.aliases),
                             "type": entity.entity_type,
                             "topic": entity.topic,
-                            "confidence": entity.confidence,
                             "embedding": entity.embedding,
                             "now": now_ms,
                         }
@@ -223,27 +194,21 @@ class EntityWriter:
                                 entity_id,
                                 user_name,
                                 project_id,
-                                session_id,
                                 canonical_name,
                                 type,
                                 topic,
-                                confidence,
                                 last_mentioned_ms,
-                                last_updated_ms,
-                                last_profiled_msg_id
+                                embedding
                             )
                             VALUES (
-                                %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s
+                                %s, %s, %s, %s, %s, %s, %s, %s::vector
                             )
                             ON CONFLICT (entity_id) DO UPDATE SET
-                                session_id = EXCLUDED.session_id,
                                 canonical_name = EXCLUDED.canonical_name,
                                 type = EXCLUDED.type,
                                 topic = EXCLUDED.topic,
-                                confidence = EXCLUDED.confidence,
                                 last_mentioned_ms = EXCLUDED.last_mentioned_ms,
-                                last_updated_ms = EXCLUDED.last_updated_ms
+                                embedding = EXCLUDED.embedding
                             WHERE entities.project_id = EXCLUDED.project_id
                             RETURNING entity_id
                             """,
@@ -251,14 +216,11 @@ class EntityWriter:
                                 entity.entity_id,
                                 user_name,
                                 project_id,
-                                session_id,
                                 entity.canonical_name,
                                 entity.entity_type,
                                 entity.topic,
-                                entity.confidence,
                                 now_ms,
-                                now_ms,
-                                None,
+                                json.dumps(entity.embedding) if entity.embedding else None,
                             ),
                         )
                         if await cur.fetchone() is None:
@@ -270,17 +232,11 @@ class EntityWriter:
                         await cur.execute(
                             """
                             UPDATE entities
-                            SET session_id = %s,
-                                canonical_name = %s,
+                            SET canonical_name = %s,
                                 type = COALESCE(type, %s),
                                 topic = %s,
-                                confidence = %s,
                                 last_mentioned_ms = %s,
-                                last_updated_ms = %s,
-                                last_profiled_msg_id = COALESCE(
-                                    last_profiled_msg_id,
-                                    %s
-                                )
+                                embedding = COALESCE(%s::vector, embedding)
                             WHERE entity_id = %s
                               AND (
                                   project_id = %s
@@ -289,14 +245,11 @@ class EntityWriter:
                             RETURNING entity_id
                             """,
                             (
-                                session_id,
                                 entity.canonical_name,
                                 entity.entity_type,
                                 entity.topic,
-                                entity.confidence,
                                 now_ms,
-                                now_ms,
-                                None,
+                                json.dumps(entity.embedding) if entity.embedding else None,
                                 entity.entity_id,
                                 project_id,
                                 IDENTITY_ENTITY_ID,
@@ -323,67 +276,6 @@ class EntityWriter:
                         )
 
                 await self.projection.project_entities(cur, entity_params)
-
-                topic_params = [
-                    {"id": e["id"], "topic": e["topic"]}
-                    for e in entity_params
-                    if e.get("topic")
-                ]
-                await self.projection.project_entity_topics(cur, topic_params)
-
-                for entity in entities:
-                    if entity.embedding:
-                        if entity.is_new:
-                            await cur.execute(
-                                """
-                                INSERT INTO entity_search (
-                                    entity_id,
-                                    canonical_name,
-                                    user_name,
-                                    project_id,
-                                    embedding
-                                )
-                                VALUES (%s, %s, %s, %s, %s::vector)
-                                ON CONFLICT (entity_id) DO UPDATE SET
-                                    canonical_name = EXCLUDED.canonical_name,
-                                    user_name = EXCLUDED.user_name,
-                                    project_id = EXCLUDED.project_id,
-                                    embedding = EXCLUDED.embedding
-                                WHERE entity_search.project_id = EXCLUDED.project_id
-                            """,
-                                (
-                                    entity.entity_id,
-                                    entity.canonical_name,
-                                    user_name,
-                                    project_id,
-                                    json.dumps(entity.embedding),
-                                ),
-                            )
-                        else:
-                            await cur.execute(
-                                """
-                                INSERT INTO entity_search (
-                                    entity_id,
-                                    canonical_name,
-                                    user_name,
-                                    project_id,
-                                    embedding
-                                )
-                                VALUES (%s, %s, %s, %s, %s::vector)
-                                ON CONFLICT (entity_id) DO UPDATE SET
-                                    canonical_name = EXCLUDED.canonical_name,
-                                    user_name = EXCLUDED.user_name,
-                                    project_id = EXCLUDED.project_id,
-                                    embedding = EXCLUDED.embedding
-                            """,
-                                (
-                                    entity.entity_id,
-                                    entity.canonical_name,
-                                    user_name,
-                                    project_id,
-                                    json.dumps(entity.embedding),
-                                ),
-                            )
 
             if message_entity_refs:
                 await self._write_message_entity_refs(
@@ -475,10 +367,8 @@ class EntityWriter:
                             weight = relationships.weight + CASE
                                 WHEN EXISTS (
                                     SELECT 1
-                                    FROM relationship_evidence_refs
-                                        AS existing_evidence
-                                    WHERE existing_evidence.relationship_id =
-                                        relationships.relationship_id
+                                    FROM relationship_observations AS existing_evidence
+                                    WHERE existing_evidence.relationship_id = relationships.relationship_id
                                       AND existing_evidence.project_id = %s
                                       AND existing_evidence.user_name = %s
                                       AND existing_evidence.session_id = %s
@@ -556,32 +446,6 @@ class EntityWriter:
 
                     await cur.execute(
                         """
-                        INSERT INTO relationship_evidence_refs (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        )
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (
-                            relationship_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        ) DO NOTHING
-                        """,
-                        (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            evidence_ref["message_id"],
-                        ),
-                    )
-
-                    await cur.execute(
-                        """
                         INSERT INTO relationship_observations (
                             relationship_id,
                             project_id,
@@ -595,13 +459,15 @@ class EntityWriter:
                             observed_relationship_label,
                             canonical_relationship_type,
                             domain_status,
+                            domain_version,
+                            "symmetric",
                             confidence,
                             context,
                             observed_at_ms
                         )
                         VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s
                         )
                         ON CONFLICT (
                             project_id,
@@ -617,6 +483,8 @@ class EntityWriter:
                                 relationship_observations.canonical_relationship_type
                             ),
                             domain_status = EXCLUDED.domain_status,
+                            domain_version = EXCLUDED.domain_version,
+                            "symmetric" = EXCLUDED."symmetric",
                             confidence = GREATEST(
                                 relationship_observations.confidence,
                                 EXCLUDED.confidence
@@ -643,6 +511,8 @@ class EntityWriter:
                             relationship.observed_label,
                             relationship.canonical_type,
                             relationship.domain_status,
+                            relationship.domain_version,
+                            relationship.symmetric,
                             relationship.confidence,
                             relationship.context,
                             now_ms,
@@ -660,7 +530,6 @@ class EntityWriter:
                             "observed_relationship_label": relationship.observed_label,
                             "domain_status": relationship.domain_status,
                             "symmetric": relationship.symmetric,
-                            "evidence_ref": json.dumps(evidence_ref),
                             "confidence": relationship.confidence,
                             "context": relationship.context,
                             "now": now_ms,
@@ -812,79 +681,6 @@ class EntityWriter:
                 ),
             )
 
-    async def update_entity_profile(
-        self,
-        entity_id: int,
-        canonical_name: str,
-        embedding: List[float],
-        last_msg_id: int,
-        *,
-        project_id: str,
-    ):
-        project_id = self._require_project_id(project_id, "update_entity_profile")
-        now_ms = self._current_time_ms()
-        async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                UPDATE entities
-                SET canonical_name = %s,
-                    last_updated_ms = %s,
-                    last_profiled_msg_id = %s
-                WHERE entity_id = %s
-                  AND (project_id = %s OR entity_id = %s)
-                """,
-                (
-                    canonical_name,
-                    now_ms,
-                    last_msg_id,
-                    entity_id,
-                    project_id,
-                    IDENTITY_ENTITY_ID,
-                ),
-            )
-
-            cypher = """
-            MATCH (e:Entity {id: $id})
-            WHERE e.project_id = $project_id OR e.id = $identity_entity_id
-            SET e.canonical_name = $canonical_name,
-                e.last_updated = $now,
-                e.last_profiled_msg_id = $last_msg_id
-            RETURN e.id
-            """
-            await cur.execute(
-                self.client.build_cypher(cypher),
-                (
-                    json.dumps(
-                        {
-                            "id": entity_id,
-                            "canonical_name": canonical_name,
-                            "now": now_ms,
-                            "last_msg_id": last_msg_id,
-                            "project_id": project_id,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
-                        }
-                    ),
-                ),
-            )
-
-            # Update Vector Table
-            await cur.execute(
-                """
-                UPDATE entity_search
-                SET canonical_name = %s, embedding = %s::vector
-                WHERE entity_id = %s
-                  AND (project_id = %s OR entity_id = %s)
-                """,
-                (
-                    canonical_name,
-                    json.dumps(embedding),
-                    entity_id,
-                    project_id,
-                    IDENTITY_ENTITY_ID,
-                ),
-            )
-        logger.info(f"Updated entity {entity_id} (checkpoint: msg_{last_msg_id})")
-
     async def update_entity_canonical_name(
         self, entity_id: int, canonical_name: str, *, project_id: str
     ) -> None:
@@ -892,19 +688,16 @@ class EntityWriter:
             project_id,
             "update_entity_canonical_name",
         )
-        now_ms = self._current_time_ms()
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
                 UPDATE entities
-                SET canonical_name = %s,
-                    last_updated_ms = %s
+                SET canonical_name = %s
                 WHERE entity_id = %s
                   AND (project_id = %s OR entity_id = %s)
                 """,
                 (
                     canonical_name,
-                    now_ms,
                     entity_id,
                     project_id,
                     IDENTITY_ENTITY_ID,
@@ -914,7 +707,7 @@ class EntityWriter:
             cypher = """
             MATCH (e:Entity {id: $id})
             WHERE e.project_id = $project_id OR e.id = $identity_entity_id
-            SET e.canonical_name = $canonical_name, e.last_updated = $now
+            SET e.canonical_name = $canonical_name
             RETURN e.id
             """
             await cur.execute(
@@ -924,111 +717,27 @@ class EntityWriter:
                         {
                             "id": entity_id,
                             "canonical_name": canonical_name,
-                            "now": now_ms,
                             "project_id": project_id,
                             "identity_entity_id": IDENTITY_ENTITY_ID,
                         }
                     ),
                 ),
-            )
-
-            # Update Vector Table
-            await cur.execute(
-                """
-                UPDATE entity_search
-                SET canonical_name = %s
-                WHERE entity_id = %s
-                  AND (project_id = %s OR entity_id = %s)
-                """,
-                (canonical_name, entity_id, project_id, IDENTITY_ENTITY_ID),
             )
 
     async def update_entity_embedding(
         self, entity_id: int, embedding: List[float], *, project_id: str
     ) -> None:
         project_id = self._require_project_id(project_id, "update_entity_embedding")
-        now_ms = self._current_time_ms()
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
                 UPDATE entities
-                SET last_updated_ms = %s
-                WHERE entity_id = %s
-                  AND (project_id = %s OR entity_id = %s)
-                """,
-                (now_ms, entity_id, project_id, IDENTITY_ENTITY_ID),
-            )
-
-            cypher = """
-            MATCH (e:Entity {id: $id})
-            WHERE e.project_id = $project_id OR e.id = $identity_entity_id
-            SET e.last_updated = $now
-            RETURN e.id
-            """
-            await cur.execute(
-                self.client.build_cypher(cypher),
-                (
-                    json.dumps(
-                        {
-                            "id": entity_id,
-                            "now": now_ms,
-                            "project_id": project_id,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
-                        }
-                    ),
-                ),
-            )
-
-            # Update Vector Table
-            await cur.execute(
-                """
-                UPDATE entity_search
                 SET embedding = %s::vector
                 WHERE entity_id = %s
                   AND (project_id = %s OR entity_id = %s)
                 """,
-                (
-                    json.dumps(embedding),
-                    entity_id,
-                    project_id,
-                    IDENTITY_ENTITY_ID,
-                ),
+                (json.dumps(embedding), entity_id, project_id, IDENTITY_ENTITY_ID),
             )
-
-    async def update_entity_checkpoint(
-        self, entity_id: int, last_msg_id: int, *, project_id: str
-    ) -> None:
-        project_id = self._require_project_id(project_id, "update_entity_checkpoint")
-        async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                UPDATE entities
-                SET last_profiled_msg_id = %s
-                WHERE entity_id = %s
-                  AND (project_id = %s OR entity_id = %s)
-                """,
-                (last_msg_id, entity_id, project_id, IDENTITY_ENTITY_ID),
-            )
-            cypher = """
-            MATCH (e:Entity {id: $id})
-            WHERE e.project_id = $project_id OR e.id = $identity_entity_id
-            SET e.last_profiled_msg_id = $last_msg_id
-            RETURN e.id
-            """
-            await cur.execute(
-                self.client.build_cypher(cypher),
-                (
-                    json.dumps(
-                        {
-                            "id": entity_id,
-                            "last_msg_id": last_msg_id,
-                            "project_id": project_id,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
-                        }
-                    ),
-                ),
-            )
-
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], *, project_id: str
     ) -> None:
@@ -1044,23 +753,8 @@ class EntityWriter:
         if not params:
             return
 
-        now_ms = self._current_time_ms()
         async with self.client.transaction() as cur:
             for item in params:
-                await cur.execute(
-                    """
-                    UPDATE entities
-                    SET last_updated_ms = %s
-                    WHERE entity_id = %s
-                      AND (project_id = %s OR entity_id = %s)
-                    """,
-                    (
-                        now_ms,
-                        item["id"],
-                        project_id,
-                        IDENTITY_ENTITY_ID,
-                    ),
-                )
                 for alias in item["aliases"]:
                     await cur.execute(
                         """
@@ -1102,8 +796,7 @@ class EntityWriter:
             WITH e, collect(DISTINCT alias) AS merged_aliases
             WITH e,
                 [x IN merged_aliases WHERE x IS NOT NULL] AS final_aliases
-            SET e.aliases = final_aliases,
-                e.last_updated = $now
+            SET e.aliases = final_aliases
             RETURN count(e)
             """
             await cur.execute(
@@ -1114,7 +807,6 @@ class EntityWriter:
                             "batch": params,
                             "project_id": project_id,
                             "identity_entity_id": IDENTITY_ENTITY_ID,
-                            "now": now_ms,
                         }
                     ),
                 ),

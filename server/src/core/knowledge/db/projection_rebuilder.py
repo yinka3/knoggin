@@ -1,10 +1,10 @@
-import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Dict, List
 
 from loguru import logger
 
+from common.exceptions import StorageWriteError
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.knowledge.db.writers.age_projection_writer import (
     AgeProjectionWriter,
@@ -33,23 +33,10 @@ class GraphBuilder:
             return value.isoformat()
         return value
 
-    @staticmethod
-    def _normalize_evidence_refs(value) -> List[Dict]:
-        if not value:
-            return []
-        refs = json.loads(value) if isinstance(value, str) else value
-        if isinstance(refs, dict):
-            refs = [refs]
-        return [ref for ref in refs if ref]
-
     @classmethod
     def _relationship_projection_params(cls, rows: List[Dict]) -> List[Dict]:
         params = []
         for row in rows:
-            evidence_refs = [
-                json.dumps(ref, sort_keys=True)
-                for ref in cls._normalize_evidence_refs(row.get("evidence_refs"))
-            ]
             params.append(
                 {
                     "relationship_id": row["relationship_id"],
@@ -57,48 +44,10 @@ class GraphBuilder:
                     "entity_a_id": int(row["entity_a_id"]),
                     "entity_b_id": int(row["entity_b_id"]),
                     "relationship_type": row["relationship_type"],
-                    "weight": int(row.get("weight") or 1),
-                    "confidence": float(row.get("confidence") or 0),
-                    "context": row.get("context"),
-                    "last_seen": int(row.get("last_seen_ms") or 0),
-                    "message_ids": evidence_refs,
                 }
             )
-            if any(
-                key in row
-                for key in (
-                    "canonical_relationship_type",
-                    "observed_relationship_label",
-                    "domain_status",
-                    "symmetric",
-                )
-            ):
-                params[-1].update(
-                    {
-                        "canonical_relationship_type": row.get(
-                            "canonical_relationship_type"
-                        ),
-                        "observed_relationship_label": row.get(
-                            "observed_relationship_label"
-                        )
-                        or row["relationship_type"],
-                        "domain_status": row.get("domain_status") or "unrecognized",
-                        "symmetric": bool(row.get("symmetric", False)),
-                    }
-                )
+            params[-1]["symmetric"] = bool(row.get("symmetric", False))
         return params
-
-    @staticmethod
-    def _hierarchy_projection_params(rows: List[Dict]) -> List[Dict]:
-        return [
-            {
-                "project_id": row["project_id"],
-                "parent_id": int(row["parent_id"]),
-                "child_id": int(row["child_id"]),
-                "created_at": int(row.get("created_at_ms") or 0),
-            }
-            for row in rows
-        ]
 
     async def rebuild_project_projection(
         self,
@@ -122,11 +71,6 @@ class GraphBuilder:
             async with self._projection_cursor(cur) as cur:
                 await self.projection.clear_project_projection(cur, project_id)
 
-                messages = await self._fetch_messages(
-                    cur,
-                    project_id,
-                    user_name,
-                )
                 entities = await self._fetch_entities(
                     cur,
                     project_id,
@@ -137,21 +81,7 @@ class GraphBuilder:
                     project_id,
                     user_name,
                 )
-                hierarchy_edges = await self._fetch_hierarchy_edges(
-                    cur,
-                    project_id,
-                )
-
-                await self.projection.project_messages(cur, messages)
                 await self.projection.project_entities(cur, entities)
-                await self.projection.project_entity_topics(
-                    cur,
-                    [
-                        {"id": entity["id"], "topic": entity["topic"]}
-                        for entity in entities
-                        if entity.get("topic")
-                    ],
-                )
                 await self.projection.replace_relationships_for_entities(
                     cur,
                     project_id,
@@ -159,60 +89,22 @@ class GraphBuilder:
                     self._relationship_projection_params(relationships),
                 )
 
-                await self.projection.replace_hierarchy_edges_for_entities(
-                    cur,
-                    project_id,
-                    [entity["id"] for entity in entities],
-                    self._hierarchy_projection_params(hierarchy_edges),
-                )
-
                 summary = {
-                    "messages": len(messages),
                     "entities": len(entities),
                     "relationships": len(relationships),
-                    "hierarchy_edges": len(hierarchy_edges),
                 }
                 logger.info(
                     f"Rebuilt AGE projection for project {project_id}: {summary}"
                 )
                 return summary
         except Exception as e:
-            logger.error(
-                f"Failed to rebuild AGE projection for project {project_id}: {e}"
-            )
             if using_existing_cursor:
                 raise
-            return {
-                "messages": 0,
-                "entities": 0,
-                "relationships": 0,
-                "hierarchy_edges": 0,
-            }
-
-    async def _fetch_messages(
-        self,
-        cur,
-        project_id: str,
-        user_name: str,
-    ) -> List[Dict]:
-        await cur.execute(
-            """
-            SELECT
-                message_id AS id,
-                content,
-                role,
-                user_name,
-                session_id,
-                project_id,
-                timestamp_ms AS timestamp
-            FROM messages
-            WHERE project_id = %s
-              AND user_name = %s
-            ORDER BY user_name, session_id, message_id
-            """,
-            (project_id, user_name),
-        )
-        return list(await cur.fetchall())
+            logger.error("AGE projection rebuild failed for {}: {}", project_id, e)
+            raise StorageWriteError(
+                "rebuild_project_projection",
+                details={"error_type": type(e).__name__},
+            ) from e
 
     async def _fetch_entities(
         self,
@@ -225,15 +117,11 @@ class GraphBuilder:
             SELECT
                 e.entity_id AS id,
                 e.user_name,
-                e.session_id,
                 e.project_id,
                 e.canonical_name,
                 e.type,
                 e.topic,
-                e.confidence,
-                e.last_updated_ms AS last_updated,
                 e.last_mentioned_ms AS last_mentioned,
-                e.last_profiled_msg_id,
                 COALESCE(
                     array_agg(DISTINCT a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
@@ -270,43 +158,11 @@ class GraphBuilder:
                 rel.observed_relationship_label,
                 rel.domain_status,
                 rel.symmetric,
-                rel.weight,
-                rel.confidence,
-                rel.context,
-                rel.last_seen_ms,
-                COALESCE(
-                    json_agg(
-                        json_build_object(
-                            'project_id', ref.project_id,
-                            'user_name', ref.user_name,
-                            'session_id', ref.session_id,
-                            'message_id', ref.message_id
-                        )
-                    )
-                    FILTER (WHERE ref.relationship_id IS NOT NULL),
-                    '[]'
-                ) AS evidence_refs
             FROM relationships rel
-            LEFT JOIN relationship_evidence_refs ref
-              ON ref.relationship_id = rel.relationship_id
-             AND ref.project_id = rel.project_id
             WHERE rel.project_id = %s
               AND rel.user_name = %s
-            GROUP BY rel.relationship_id
             ORDER BY rel.relationship_id
             """,
             (project_id, user_name),
-        )
-        return list(await cur.fetchall())
-
-    async def _fetch_hierarchy_edges(self, cur, project_id: str) -> List[Dict]:
-        await cur.execute(
-            """
-            SELECT project_id, parent_id, child_id, created_at_ms
-            FROM hierarchy_edges
-            WHERE project_id = %s
-            ORDER BY parent_id, child_id
-            """,
-            (project_id,),
         )
         return list(await cur.fetchall())

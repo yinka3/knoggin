@@ -253,29 +253,9 @@ class MergeAuditWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM relationship_evidence_refs
-                WHERE relationship_id IN (
-                    SELECT relationship_id
-                    FROM relationships
-                    WHERE project_id = %s
-                      AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
-                )
-                """,
-                (project_id, ids, ids),
-            )
-            await cur.execute(
-                """
                 DELETE FROM relationships
                 WHERE project_id = %s
                   AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
-                """,
-                (project_id, ids, ids),
-            )
-            await cur.execute(
-                """
-                DELETE FROM hierarchy_edges
-                WHERE project_id = %s
-                  AND (parent_id = ANY(%s) OR child_id = ANY(%s))
                 """,
                 (project_id, ids, ids),
             )
@@ -308,40 +288,28 @@ class MergeAuditWriter:
                         entity_id,
                         user_name,
                         project_id,
-                        session_id,
                         canonical_name,
                         type,
                         topic,
-                        confidence,
-                        last_mentioned_ms,
-                        last_updated_ms,
-                        last_profiled_msg_id
+                        last_mentioned_ms
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (entity_id) DO UPDATE SET
                         user_name = EXCLUDED.user_name,
                         project_id = EXCLUDED.project_id,
-                        session_id = EXCLUDED.session_id,
                         canonical_name = EXCLUDED.canonical_name,
                         type = EXCLUDED.type,
                         topic = EXCLUDED.topic,
-                        confidence = EXCLUDED.confidence,
-                        last_mentioned_ms = EXCLUDED.last_mentioned_ms,
-                        last_updated_ms = EXCLUDED.last_updated_ms,
-                        last_profiled_msg_id = EXCLUDED.last_profiled_msg_id
+                        last_mentioned_ms = EXCLUDED.last_mentioned_ms
                     """,
                     (
                         int(entity["entity_id"]),
                         entity["user_name"],
                         entity["project_id"],
-                        entity.get("session_id"),
                         entity["canonical_name"],
                         entity.get("type"),
                         entity.get("topic") or "General",
-                        float(entity.get("confidence") or 1.0),
                         entity.get("last_mentioned_ms"),
-                        entity.get("last_updated_ms"),
-                        entity.get("last_profiled_msg_id"),
                     ),
                 )
                 for alias in entity.get("aliases") or []:
@@ -445,33 +413,6 @@ class MergeAuditWriter:
                         relationship.get("last_seen_ms"),
                     ),
                 )
-                for ref in self._json_value(relationship.get("evidence_refs") or []):
-                    await cur.execute(
-                        """
-                        INSERT INTO relationship_evidence_refs (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        )
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (
-                            relationship_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        ) DO NOTHING
-                        """,
-                        (
-                            relationship["relationship_id"],
-                            relationship["project_id"],
-                            ref["user_name"],
-                            ref["session_id"],
-                            int(ref["message_id"]),
-                        ),
-                    )
-
             for observation in before_state.get("relationship_observations", []):
                 await cur.execute(
                     """
@@ -555,27 +496,6 @@ class MergeAuditWriter:
                         float(episode_relationship.get("prominence_weight") or 0.0),
                         bool(episode_relationship.get("is_central_relationship")),
                         int(episode_relationship.get("source_message_count") or 0),
-                    ),
-                )
-
-            for edge in before_state["hierarchy"]:
-                await cur.execute(
-                    """
-                    INSERT INTO hierarchy_edges (
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    )
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (project_id, parent_id, child_id)
-                    DO UPDATE SET created_at_ms = EXCLUDED.created_at_ms
-                    """,
-                    (
-                        edge["project_id"],
-                        int(edge["parent_id"]),
-                        int(edge["child_id"]),
-                        edge.get("created_at_ms"),
                     ),
                 )
 

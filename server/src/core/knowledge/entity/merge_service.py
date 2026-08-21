@@ -495,9 +495,6 @@ class EntityMergeService:
                 return False
             if relationship.get("project_id") != project_id:
                 return False
-        for edge in snapshot["hierarchy"]:
-            if edge.get("project_id") != project_id:
-                return False
         return True
 
     @staticmethod

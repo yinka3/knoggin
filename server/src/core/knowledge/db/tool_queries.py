@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from common.exceptions import StorageUnavailableError
+from common.exceptions import StorageReadError
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -22,15 +22,15 @@ class ToolQueries:
         self.graph_name = graph_name
 
     @staticmethod
-    def _raise_storage_unavailable(operation: str, exc: Exception) -> None:
+    def _raise_storage_read(operation: str, exc: Exception) -> None:
         logger.error(f"Storage query failed for {operation}: {exc}")
-        raise StorageUnavailableError(
+        raise StorageReadError(
             operation,
             details={"error_type": type(exc).__name__},
         ) from exc
 
     def _build_path_data(
-        self, names: List[str], topics: List[str], evidence: List[List[str]]
+        self, names: List[str], topics: List[str], evidence: List[List[Dict]]
     ) -> List[Dict]:
         return [
             {
@@ -107,7 +107,7 @@ class ToolQueries:
                           AND r.project_id = ANY(%s)
                         LIMIT 10
                     ) rels
-                    JOIN relationship_evidence_refs rer
+                    JOIN relationship_observations rer
                       ON rer.relationship_id = rels.relationship_id
                      AND rer.project_id = rels.project_id
                 ),
@@ -172,7 +172,7 @@ class ToolQueries:
                 }
             return result
         except Exception as e:
-            self._raise_storage_unavailable("get_hot_topic_context_with_messages", e)
+            self._raise_storage_read("get_hot_topic_context_with_messages", e)
 
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:
@@ -207,9 +207,9 @@ class ToolQueries:
             return []
 
         sql = """
-        SELECT message_id, session_id, ts_rank(content_tsvector, to_tsquery('english', %s)) as score
-        FROM message_search
-        WHERE content_tsvector @@ to_tsquery('english', %s)
+        SELECT message_id, session_id, ts_rank(search_tsvector, to_tsquery('english', %s)) as score
+        FROM messages
+        WHERE search_tsvector @@ to_tsquery('english', %s)
           AND user_name = %s
           AND session_id = ANY(%s)
           AND project_id = ANY(%s)
@@ -232,7 +232,7 @@ class ToolQueries:
                 for row in res
             ]
         except Exception as e:
-            self._raise_storage_unavailable("search_messages_fts", e)
+            self._raise_storage_read("search_messages_fts", e)
 
     async def search_entity(
         self,
@@ -255,7 +255,7 @@ class ToolQueries:
         # 1. Search Postgres for top entity IDs
         # We can just use ILIKE on canonical_name
         search_sql = """
-        SELECT entity_id FROM entity_search
+        SELECT entity_id FROM entities
         WHERE canonical_name ILIKE %s
           AND (project_id = ANY(%s) OR entity_id = %s)
         LIMIT %s
@@ -282,25 +282,10 @@ class ToolQueries:
                 e.type,
                 e.topic,
                 e.last_mentioned_ms as last_mentioned,
-                e.last_updated_ms as last_updated,
                 COALESCE(
                     (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = e.entity_id),
                     '{}'::text[]
-                ) as aliases,
-                (
-                    SELECT canonical_name
-                    FROM entities p
-                    JOIN hierarchy_edges he ON he.parent_id = p.entity_id
-                    WHERE he.child_id = e.entity_id
-                      AND he.project_id = ANY(%s)
-                    LIMIT 1
-                ) as parent_name,
-                (
-                    SELECT count(*)
-                    FROM hierarchy_edges
-                    WHERE parent_id = e.entity_id
-                      AND project_id = ANY(%s)
-                ) as children_count
+                ) as aliases
             FROM entities e
             WHERE e.entity_id = ANY(%s)
               AND (e.project_id = ANY(%s) OR e.entity_id = %s)
@@ -308,8 +293,6 @@ class ToolQueries:
             if active_topics:
                 entity_sql += " AND e.topic = ANY(%s)"
                 params = (
-                    visible_project_ids,
-                    visible_project_ids,
                     entity_ids,
                     visible_project_ids,
                     IDENTITY_ENTITY_ID,
@@ -317,8 +300,6 @@ class ToolQueries:
                 )
             else:
                 params = (
-                    visible_project_ids,
-                    visible_project_ids,
                     entity_ids,
                     visible_project_ids,
                     IDENTITY_ENTITY_ID,
@@ -336,11 +317,6 @@ class ToolQueries:
                     "type": row["type"],
                     "topic": row["topic"],
                     "last_mentioned": row["last_mentioned"],
-                    "last_updated": row["last_updated"],
-                    "hierarchy": {
-                        "parent": row["parent_name"],
-                        "children_count": row["children_count"],
-                    },
                     "top_connections": [],
                     "_conn_names": set(),
                 }
@@ -368,7 +344,7 @@ class ToolQueries:
                                 'message_id', rer.message_id
                             )
                         )
-                        FROM relationship_evidence_refs rer
+                        FROM relationship_observations rer
                         WHERE rer.relationship_id = r.relationship_id
                           AND rer.project_id = r.project_id
                     ),
@@ -430,7 +406,7 @@ class ToolQueries:
             return result[:limit]
 
         except Exception as e:
-            self._raise_storage_unavailable("search_entity", e)
+            self._raise_storage_read("search_entity", e)
 
     async def get_related_entities(
         self,
@@ -467,7 +443,7 @@ class ToolQueries:
                             'message_id', rer.message_id
                         )
                     )
-                    FROM relationship_evidence_refs rer
+                    FROM relationship_observations rer
                     WHERE rer.relationship_id = r.relationship_id
                       AND rer.project_id = r.project_id
                 ),
@@ -499,7 +475,7 @@ class ToolQueries:
             ) AS observation_refs,
             (
                 SELECT COUNT(*)::INTEGER
-                FROM relationship_evidence_refs rer
+                FROM relationship_observations rer
                 WHERE rer.relationship_id = r.relationship_id
                   AND rer.project_id = r.project_id
             ) AS evidence_message_count,
@@ -595,7 +571,7 @@ class ToolQueries:
                 for r in data
             ]
         except Exception as e:
-            self._raise_storage_unavailable("get_related_entities", e)
+            self._raise_storage_read("get_related_entities", e)
 
     async def get_recent_activity(
         self,
@@ -625,7 +601,7 @@ class ToolQueries:
                             'message_id', rer.message_id
                         )
                     )
-                    FROM relationship_evidence_refs rer
+                    FROM relationship_observations rer
                     WHERE rer.relationship_id = r.relationship_id
                       AND rer.project_id = r.project_id
                 ),
@@ -678,7 +654,39 @@ class ToolQueries:
                 for r in data
             ]
         except Exception as e:
-            self._raise_storage_unavailable("get_recent_activity", e)
+            self._raise_storage_read("get_recent_activity", e)
+
+    async def _relationship_evidence_refs(
+        self,
+        relationship_ids: List[str],
+        visible_project_ids: List[str],
+    ) -> List[List[Dict]]:
+        if not relationship_ids:
+            return []
+        rows = await self.client.fetch_all(
+            """
+            SELECT
+                relationship_id,
+                json_agg(
+                    json_build_object(
+                        'project_id', project_id,
+                        'user_name', user_name,
+                        'session_id', session_id,
+                        'message_id', message_id
+                    )
+                    ORDER BY observed_at_ms, observation_id
+                ) AS evidence_refs
+            FROM relationship_observations
+            WHERE relationship_id = ANY(%s)
+              AND project_id = ANY(%s)
+            GROUP BY relationship_id
+            """,
+            (relationship_ids, visible_project_ids),
+        )
+        by_relationship = {
+            row["relationship_id"]: row.get("evidence_refs") or [] for row in rows
+        }
+        return [by_relationship.get(relationship_id, []) for relationship_id in relationship_ids]
 
     async def _find_shortest_path(
         self,
@@ -710,22 +718,19 @@ class ToolQueries:
           AND ALL(r IN path_rels WHERE r.project_id IN $visible_project_ids)
         ORDER BY length(p) ASC LIMIT 1
 
-        UNWIND path_nodes AS n
-        OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
-
-        WITH p, path_nodes, path_rels, collect(COALESCE(t.name, 'General')) AS node_topics
-        WITH p, path_nodes, path_rels, node_topics,
+        WITH p, path_nodes, path_rels,
+             [node IN path_nodes | coalesce(node.topic, 'General')] AS node_topics,
              [node IN path_nodes | node.canonical_name] AS names,
-             [r IN path_rels | r.message_ids] AS evidence_refs
+             [r IN path_rels | r.relationship_id] AS relationship_ids
 
-        WITH names, node_topics, evidence_refs,
+        WITH names, node_topics, relationship_ids,
              ANY(topic IN node_topics WHERE NOT ($filter_topics = false OR topic IN $active_topics)) as has_inactive
 
-        RETURN names, node_topics, evidence_refs, has_inactive
+        RETURN names, node_topics, relationship_ids, has_inactive
         """
         q = self.client.build_cypher(
             cypher,
-            "names agtype, node_topics agtype, evidence_refs agtype, has_inactive agtype",
+            "names agtype, node_topics agtype, relationship_ids agtype, has_inactive agtype",
         )
         try:
             data = await self.client.fetch_all(
@@ -750,11 +755,14 @@ class ToolQueries:
             return (
                 row["names"],
                 row["node_topics"],
-                row["evidence_refs"],
+                await self._relationship_evidence_refs(
+                    row["relationship_ids"],
+                    visible_project_ids,
+                ),
                 bool(row["has_inactive"]),
             )
         except Exception as e:
-            self._raise_storage_unavailable("find_shortest_path", e)
+            self._raise_storage_read("find_shortest_path", e)
 
     async def _find_active_only_path(
         self,
@@ -783,24 +791,18 @@ class ToolQueries:
         WITH p, nodes(p) as path_nodes, relationships(p) as path_rels
         WHERE ALL(n IN path_nodes WHERE $filter_projects = false OR n.project_id IN $visible_project_ids OR n.id = $identity_entity_id)
           AND ALL(r IN path_rels WHERE r.project_id IN $visible_project_ids)
-          AND ALL(n IN path_nodes WHERE
-            EXISTS {{ MATCH (n)-[:BELONGS_TO]->(t:Topic) WHERE t.name IN $active_topics }} OR
-            NOT EXISTS {{ MATCH (n)-[:BELONGS_TO]->(:Topic) }}
-        )
+          AND ALL(n IN path_nodes WHERE n.topic IN $active_topics OR n.topic IS NULL)
         ORDER BY length(p) ASC
 
         WITH p, path_nodes, path_rels LIMIT 1
 
-        UNWIND path_nodes AS n
-        OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
-
-        WITH p, collect(COALESCE(t.name, 'General')) AS node_topics, path_nodes, path_rels
+        WITH p, [n IN path_nodes | coalesce(n.topic, 'General')] AS node_topics, path_nodes, path_rels
         RETURN [n IN path_nodes | n.canonical_name] AS names,
                node_topics,
-               [r IN path_rels | r.message_ids] AS evidence_refs
+               [r IN path_rels | r.relationship_id] AS relationship_ids
         """
         q = self.client.build_cypher(
-            cypher, "names agtype, node_topics agtype, evidence_refs agtype"
+            cypher, "names agtype, node_topics agtype, relationship_ids agtype"
         )
         try:
             data = await self.client.fetch_all(
@@ -821,9 +823,16 @@ class ToolQueries:
             if not data:
                 return None
             row = data[0]
-            return (row["names"], row["node_topics"], row["evidence_refs"])
+            return (
+                row["names"],
+                row["node_topics"],
+                await self._relationship_evidence_refs(
+                    row["relationship_ids"],
+                    visible_project_ids,
+                ),
+            )
         except Exception as e:
-            self._raise_storage_unavailable("find_active_only_path", e)
+            self._raise_storage_read("find_active_only_path", e)
 
     async def find_path_filtered(
         self,

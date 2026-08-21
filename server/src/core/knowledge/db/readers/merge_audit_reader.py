@@ -45,14 +45,10 @@ class MergeAuditReader:
                 e.entity_id,
                 e.user_name,
                 e.project_id,
-                e.session_id,
                 e.canonical_name,
                 e.type,
                 e.topic,
-                e.confidence,
                 e.last_mentioned_ms,
-                e.last_updated_ms,
-                e.last_profiled_msg_id,
                 COALESCE(
                     array_agg(DISTINCT a.alias ORDER BY a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
@@ -122,7 +118,7 @@ class MergeAuditReader:
                     '[]'
                 ) AS evidence_refs
             FROM relationships r
-            LEFT JOIN relationship_evidence_refs ref
+            LEFT JOIN relationship_observations ref
               ON ref.relationship_id = r.relationship_id
              AND ref.project_id = r.project_id
              AND ref.user_name = %s
@@ -175,25 +171,6 @@ class MergeAuditReader:
             """,
             (project_id, project_id, list(ids), list(ids)),
         )
-        hierarchy = await self._fetch_all(
-            cur,
-            """
-            SELECT h.*
-            FROM hierarchy_edges h
-            JOIN entities parent_entity
-              ON parent_entity.entity_id = h.parent_id
-             AND parent_entity.user_name = %s
-             AND parent_entity.project_id = h.project_id
-            JOIN entities child_entity
-              ON child_entity.entity_id = h.child_id
-             AND child_entity.user_name = %s
-             AND child_entity.project_id = h.project_id
-            WHERE h.project_id = %s
-              AND (h.parent_id = ANY(%s) OR h.child_id = ANY(%s))
-            ORDER BY h.parent_id, h.child_id
-            """,
-            (user_name, user_name, project_id, list(ids), list(ids)),
-        )
         return {
             "entities": entities,
             "message_refs": message_refs,
@@ -201,7 +178,6 @@ class MergeAuditReader:
             "relationships": relationships,
             "relationship_observations": relationship_observations,
             "episode_relationships": episode_relationships,
-            "hierarchy": hierarchy,
         }
 
     async def get_proposal(self, proposal_id: str) -> Optional[Dict[str, Any]]:

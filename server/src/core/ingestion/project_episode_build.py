@@ -211,7 +211,6 @@ class ProjectEpisodeBuild:
             episodes.append(Episode(
                 episode_id=episode_id,
                 project_id=self.project_id,
-                session_id=current[0].session_id,
                 summary=decision.summary,
                 new_developments=decision.new_developments,
                 updates=decision.updates,

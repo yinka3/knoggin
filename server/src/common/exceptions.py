@@ -27,15 +27,35 @@ class DependencyError(KnogginError):
         super().__init__(message, code="dependency_error", details=details)
 
 
-class StorageUnavailableError(KnogginError):
-    """Raised when a durable storage read cannot distinguish absence from failure."""
+class StorageError(KnogginError):
+    """Base class for failures at a durable persistence boundary."""
 
-    def __init__(self, operation: str, details: Optional[Dict] = None):
+    def __init__(
+        self,
+        operation: str,
+        *,
+        code: str,
+        details: Optional[Dict] = None,
+    ):
         super().__init__(
-            f"Storage query unavailable: {operation}",
-            code="storage_unavailable",
+            f"Storage operation failed: {operation}",
+            code=code,
             details={"operation": operation, **(details or {})},
         )
+
+
+class StorageReadError(StorageError):
+    """Raised when a durable read fails rather than returning normal absence."""
+
+    def __init__(self, operation: str, details: Optional[Dict] = None):
+        super().__init__(operation, code="storage_read_error", details=details)
+
+
+class StorageWriteError(StorageError):
+    """Raised when a durable mutation or transaction cannot commit."""
+
+    def __init__(self, operation: str, details: Optional[Dict] = None):
+        super().__init__(operation, code="storage_write_error", details=details)
 
 
 class WorkspaceConflictError(KnogginError, ValueError):

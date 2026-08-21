@@ -171,11 +171,13 @@ MINVALUE 1;
 
 CREATE TABLE IF NOT EXISTS public.messages (
     user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
     message_id BIGINT NOT NULL UNIQUE,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    search_tsvector TSVECTOR GENERATED ALWAYS AS (
+        to_tsvector('english', content)
+    ) STORED,
     user_msg_id BIGINT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     timestamp_ms BIGINT,
@@ -204,8 +206,16 @@ CREATE TABLE IF NOT EXISTS public.messages (
         ON DELETE CASCADE
 );
 
+ALTER TABLE public.messages
+    ADD COLUMN IF NOT EXISTS search_tsvector TSVECTOR GENERATED ALWAYS AS (
+        to_tsvector('english', content)
+    ) STORED;
+
 CREATE INDEX IF NOT EXISTS messages_project_idx
 ON public.messages(user_name, project_id, message_id);
+
+CREATE INDEX IF NOT EXISTS messages_search_tsvector_idx
+ON public.messages USING gin (search_tsvector);
 
 CREATE INDEX IF NOT EXISTS messages_ingestion_queue_idx
 ON public.messages(user_name, session_id, message_id)
@@ -241,14 +251,11 @@ CREATE TABLE IF NOT EXISTS public.entities (
     entity_id BIGINT PRIMARY KEY,
     user_name TEXT NOT NULL,
     project_id TEXT NOT NULL,
-    session_id TEXT,
     canonical_name TEXT NOT NULL,
     type TEXT,
     topic TEXT NOT NULL DEFAULT 'General',
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     last_mentioned_ms BIGINT,
-    last_updated_ms BIGINT,
-    last_profiled_msg_id BIGINT,
+    embedding vector(1024),
     CONSTRAINT entities_id_project_key UNIQUE (entity_id, project_id),
     CONSTRAINT entities_id_user_project_key
         UNIQUE (entity_id, user_name, project_id)
@@ -259,6 +266,17 @@ ON public.entities(user_name, project_id);
 
 CREATE INDEX IF NOT EXISTS entities_topic_idx
 ON public.entities(project_id, topic);
+
+ALTER TABLE public.entities
+    DROP COLUMN IF EXISTS session_id,
+    DROP COLUMN IF EXISTS confidence,
+    DROP COLUMN IF EXISTS last_updated_ms,
+    DROP COLUMN IF EXISTS last_profiled_msg_id;
+ALTER TABLE public.entities
+    ADD COLUMN IF NOT EXISTS embedding vector(1024);
+
+CREATE INDEX IF NOT EXISTS entities_embedding_idx
+ON public.entities USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS public.entity_aliases (
     entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
@@ -335,8 +353,7 @@ ON public.relationships(entity_b_id);
 
 -- One row per extracted relationship phrase and message. This preserves
 -- source wording and endpoint types without turning advisories into graph
--- authority; relationship_evidence_refs remains the aggregate edge's compact
--- message-reference index.
+-- authority. This is the only canonical relationship-evidence record.
 CREATE TABLE IF NOT EXISTS public.relationship_observations (
     observation_id BIGSERIAL PRIMARY KEY,
     relationship_id TEXT NOT NULL,
@@ -355,6 +372,8 @@ CREATE TABLE IF NOT EXISTS public.relationship_observations (
     canonical_relationship_type TEXT,
     domain_status TEXT NOT NULL DEFAULT 'unrecognized'
         CHECK (domain_status IN ('recognized', 'unrecognized')),
+    domain_version INTEGER NOT NULL DEFAULT 0 CHECK (domain_version >= 0),
+    "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     context TEXT,
     observed_at_ms BIGINT NOT NULL,
@@ -397,6 +416,9 @@ ON public.relationship_observations(
 
 CREATE INDEX IF NOT EXISTS relationship_observations_relationship_idx
 ON public.relationship_observations(relationship_id, project_id);
+
+CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
+ON public.relationship_observations(project_id, user_name, session_id, message_id);
 
 -- Durable advisory disposition. Evidence remains in relationship_observations;
 -- this table stores only the current user decision for each pattern.
@@ -597,41 +619,7 @@ WHERE status = 'active';
 ALTER TABLE public.conflict_discovery_checkpoints
 ADD COLUMN IF NOT EXISTS continuation JSONB NOT NULL DEFAULT '{}'::jsonb;
 
-CREATE TABLE IF NOT EXISTS public.relationship_evidence_refs (
-    relationship_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id BIGINT NOT NULL,
-    PRIMARY KEY (relationship_id, user_name, session_id, message_id),
-    CONSTRAINT relationship_evidence_refs_relationship_project_fk
-        FOREIGN KEY (relationship_id, project_id)
-        REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT relationship_evidence_refs_message_scope_project_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS relationship_evidence_refs_message_idx
-ON public.relationship_evidence_refs(user_name, session_id, message_id);
-
-ALTER TABLE public.relationship_evidence_refs
-ADD COLUMN IF NOT EXISTS project_id TEXT;
-
-UPDATE public.relationship_evidence_refs ref
-SET project_id = relationship.project_id
-FROM public.relationships relationship
-WHERE relationship.relationship_id = ref.relationship_id
-  AND ref.project_id IS NULL;
-
-ALTER TABLE public.relationship_evidence_refs
-ALTER COLUMN project_id SET NOT NULL;
-
-ALTER TABLE public.relationship_evidence_refs
-DROP CONSTRAINT IF EXISTS relationship_evidence_refs_relationship_id_fkey,
-DROP CONSTRAINT IF EXISTS relationship_evidence_refs_message_scope_fk;
+DROP TABLE IF EXISTS public.relationship_evidence_refs;
 
 DO $$
 BEGIN
@@ -655,30 +643,11 @@ BEGIN
         UNIQUE (relationship_id, project_id);
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationship_evidence_refs_relationship_project_fk'
-          AND conrelid = 'public.relationship_evidence_refs'::regclass
-    ) THEN
-        ALTER TABLE public.relationship_evidence_refs
-        ADD CONSTRAINT relationship_evidence_refs_relationship_project_fk
-        FOREIGN KEY (relationship_id, project_id)
-        REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationship_evidence_refs_message_scope_project_fk'
-          AND conrelid = 'public.relationship_evidence_refs'::regclass
-    ) THEN
-        ALTER TABLE public.relationship_evidence_refs
-        ADD CONSTRAINT relationship_evidence_refs_message_scope_project_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
 END $$;
+
+ALTER TABLE public.relationship_observations
+    ADD COLUMN IF NOT EXISTS domain_version INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS "symmetric" BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS public.episodes (
     episode_id TEXT PRIMARY KEY,
@@ -846,14 +815,11 @@ ADD COLUMN IF NOT EXISTS project_id TEXT,
 ADD COLUMN IF NOT EXISTS session_id TEXT;
 
 UPDATE public.episode_messages episode_message
-SET project_id = episode.project_id,
-    session_id = episode.session_id
-FROM public.episodes episode
-WHERE episode.episode_id = episode_message.episode_id
-  AND (
-      episode_message.project_id IS NULL
-      OR episode_message.session_id IS NULL
-  );
+SET project_id = message.project_id,
+    session_id = message.session_id
+FROM public.messages message
+WHERE message.message_id = episode_message.message_id
+  AND (episode_message.project_id IS NULL OR episode_message.session_id IS NULL);
 
 ALTER TABLE public.episode_messages
 ALTER COLUMN project_id SET NOT NULL,
@@ -902,16 +868,6 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'episodes_scope_key'
-          AND conrelid = 'public.episodes'::regclass
-    ) THEN
-        ALTER TABLE public.episodes
-        ADD CONSTRAINT episodes_scope_key
-        UNIQUE (episode_id, project_id, session_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
         WHERE conname = 'episodes_id_project_key'
           AND conrelid = 'public.episodes'::regclass
     ) THEN
@@ -932,25 +888,13 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'episodes_session_project_fk'
-          AND conrelid = 'public.episodes'::regclass
-    ) THEN
-        ALTER TABLE public.episodes
-        ADD CONSTRAINT episodes_session_project_fk
-        FOREIGN KEY (session_id, project_id)
-        REFERENCES public.sessions(session_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
         WHERE conname = 'episode_messages_episode_scope_fk'
           AND conrelid = 'public.episode_messages'::regclass
     ) THEN
         ALTER TABLE public.episode_messages
         ADD CONSTRAINT episode_messages_episode_scope_fk
-        FOREIGN KEY (episode_id, project_id, session_id)
-        REFERENCES public.episodes(episode_id, project_id, session_id)
+        FOREIGN KEY (episode_id, project_id)
+        REFERENCES public.episodes(episode_id, project_id)
         ON DELETE CASCADE;
     END IF;
 
@@ -966,6 +910,8 @@ BEGIN
         ON DELETE CASCADE;
     END IF;
 END $$;
+
+ALTER TABLE public.episodes DROP COLUMN IF EXISTS session_id;
 
 CREATE TABLE IF NOT EXISTS public.episode_entities (
     episode_id TEXT NOT NULL,
@@ -1123,30 +1069,6 @@ CREATE TABLE IF NOT EXISTS public.episode_processing_checkpoints (
 
 ALTER TABLE public.episode_processing_checkpoints
 ADD COLUMN IF NOT EXISTS last_evaluated_timestamp_ms BIGINT;
-
-CREATE TABLE IF NOT EXISTS public.hierarchy_edges (
-    project_id TEXT NOT NULL,
-    parent_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    child_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    created_at_ms BIGINT,
-    PRIMARY KEY (project_id, parent_id, child_id),
-    CONSTRAINT hierarchy_edges_distinct_entities
-        CHECK (parent_id <> child_id)
-);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_child_idx
-ON public.hierarchy_edges(project_id, child_id);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_parent_idx
-ON public.hierarchy_edges(project_id, parent_id);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_parent_entity_idx
-ON public.hierarchy_edges(parent_id);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_child_entity_idx
-ON public.hierarchy_edges(child_id);
 
 -- Durable review boundary for destructive entity merges. Proposal records do
 -- not use entity foreign keys because the duplicate entity is deleted after a
@@ -1376,90 +1298,6 @@ BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id
 ON public.relationships
 FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
 
-CREATE OR REPLACE FUNCTION public.enforce_hierarchy_edge_invariants()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    creates_cycle BOOLEAN;
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM public.entities entity
-        JOIN public.projects project ON project.project_id = NEW.project_id
-        WHERE entity.entity_id = NEW.parent_id
-          AND entity.project_id = NEW.project_id
-          AND entity.user_name = project.user_name
-    ) OR NOT EXISTS (
-        SELECT 1
-        FROM public.entities entity
-        JOIN public.projects project ON project.project_id = NEW.project_id
-        WHERE entity.entity_id = NEW.child_id
-          AND entity.project_id = NEW.project_id
-          AND entity.user_name = project.user_name
-    ) THEN
-        RAISE EXCEPTION
-            'hierarchy endpoints must belong to the hierarchy project scope'
-            USING ERRCODE = '23514';
-    END IF;
-
-    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.project_id, 0));
-
-    IF TG_OP = 'UPDATE' THEN
-        WITH RECURSIVE descendants(entity_id) AS (
-            SELECT edge.child_id
-            FROM public.hierarchy_edges edge
-            WHERE edge.project_id = NEW.project_id
-              AND edge.parent_id = NEW.child_id
-              AND (edge.project_id, edge.parent_id, edge.child_id)
-                  IS DISTINCT FROM (OLD.project_id, OLD.parent_id, OLD.child_id)
-
-            UNION
-
-            SELECT edge.child_id
-            FROM public.hierarchy_edges edge
-            JOIN descendants ON edge.parent_id = descendants.entity_id
-            WHERE edge.project_id = NEW.project_id
-              AND (edge.project_id, edge.parent_id, edge.child_id)
-                  IS DISTINCT FROM (OLD.project_id, OLD.parent_id, OLD.child_id)
-        )
-        SELECT EXISTS (
-            SELECT 1 FROM descendants WHERE entity_id = NEW.parent_id
-        ) INTO creates_cycle;
-    ELSE
-        WITH RECURSIVE descendants(entity_id) AS (
-            SELECT child_id
-            FROM public.hierarchy_edges
-            WHERE project_id = NEW.project_id
-              AND parent_id = NEW.child_id
-
-            UNION
-
-            SELECT edge.child_id
-            FROM public.hierarchy_edges edge
-            JOIN descendants ON edge.parent_id = descendants.entity_id
-            WHERE edge.project_id = NEW.project_id
-        )
-        SELECT EXISTS (
-            SELECT 1 FROM descendants WHERE entity_id = NEW.parent_id
-        ) INTO creates_cycle;
-    END IF;
-
-    IF creates_cycle THEN
-        RAISE EXCEPTION 'hierarchy edge would create a cycle'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS hierarchy_edges_invariants_trigger
-    ON public.hierarchy_edges;
-CREATE TRIGGER hierarchy_edges_invariants_trigger
-BEFORE INSERT OR UPDATE OF project_id, parent_id, child_id
-ON public.hierarchy_edges
-FOR EACH ROW EXECUTE FUNCTION public.enforce_hierarchy_edge_invariants();
-
 CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
     suggestion_id TEXT PRIMARY KEY,
     user_name TEXT NOT NULL,
@@ -1532,56 +1370,15 @@ ALTER TABLE public.agent_tool_audits
     ADD CONSTRAINT agent_tool_audits_confirmation_state_check
         CHECK (confirmation_state IN ('not_confirmed', 'confirmed'));
 
--- 4. Entity and Message Vector/FTS search (Hybrid storage for the Graph)
+-- 4. Message full-text search projection.
 -- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
 -- we store the heavy vectors and tsvectors in standard relational tables
 -- and join them against the graph using the integer `id` property.
 
-CREATE TABLE IF NOT EXISTS public.entity_search (
-    entity_id BIGINT PRIMARY KEY REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    canonical_name TEXT NOT NULL,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    embedding vector(1024),
-    CONSTRAINT entity_search_entity_scope_fk
-        FOREIGN KEY (entity_id, user_name, project_id)
-        REFERENCES public.entities(entity_id, user_name, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED
-);
-
-CREATE INDEX IF NOT EXISTS entity_search_embedding_idx 
-ON public.entity_search USING hnsw (embedding vector_cosine_ops);
-
-CREATE TABLE IF NOT EXISTS public.message_search (
-    message_id BIGINT PRIMARY KEY REFERENCES public.messages(message_id)
-        ON DELETE CASCADE,
-    user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    content_tsvector tsvector,
-    CONSTRAINT message_search_message_scope_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED
-);
-
--- Index for Full-Text Search on messages
-CREATE INDEX IF NOT EXISTS message_search_fts_idx 
-ON public.message_search USING gin (content_tsvector);
-
-CREATE INDEX IF NOT EXISTS entity_search_project_idx
-ON public.entity_search(user_name, project_id);
-
-CREATE INDEX IF NOT EXISTS message_search_session_idx
-ON public.message_search(user_name, session_id);
-
-CREATE INDEX IF NOT EXISTS message_search_project_idx
-ON public.message_search(user_name, project_id);
+DROP TABLE IF EXISTS public.entity_search;
+DROP TABLE IF EXISTS public.message_search;
+DROP TABLE IF EXISTS public.hierarchy_edges;
+DROP FUNCTION IF EXISTS public.enforce_hierarchy_edge_invariants();
 
 DO $$
 BEGIN
@@ -1595,89 +1392,7 @@ BEGIN
         UNIQUE (entity_id, user_name, project_id);
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entity_search_entity_scope_fk'
-          AND conrelid = 'public.entity_search'::regclass
-    ) THEN
-        ALTER TABLE public.entity_search
-        ADD CONSTRAINT entity_search_entity_scope_fk
-        FOREIGN KEY (entity_id, user_name, project_id)
-        REFERENCES public.entities(entity_id, user_name, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'message_search_message_scope_fk'
-          AND conrelid = 'public.message_search'::regclass
-    ) THEN
-        ALTER TABLE public.message_search
-        ADD CONSTRAINT message_search_message_scope_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED;
-    END IF;
 END $$;
-
-CREATE OR REPLACE FUNCTION public.enforce_entity_search_canonical_name()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    canonical_entity_name TEXT;
-BEGIN
-    -- A canonical scope change cascades into this projection before the
-    -- canonical entity's AFTER trigger synchronizes its copied name.
-    IF TG_OP = 'UPDATE'
-       AND NEW.canonical_name IS NOT DISTINCT FROM OLD.canonical_name THEN
-        RETURN NEW;
-    END IF;
-
-    SELECT canonical_name
-    INTO canonical_entity_name
-    FROM public.entities
-    WHERE entity_id = NEW.entity_id;
-
-    IF NOT FOUND OR NEW.canonical_name IS DISTINCT FROM canonical_entity_name THEN
-        RAISE EXCEPTION
-            'entity search canonical name must match its canonical entity'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS entity_search_canonical_name_trigger
-    ON public.entity_search;
-CREATE TRIGGER entity_search_canonical_name_trigger
-BEFORE INSERT OR UPDATE OF entity_id, canonical_name, user_name, project_id
-ON public.entity_search
-FOR EACH ROW EXECUTE FUNCTION public.enforce_entity_search_canonical_name();
-
-CREATE OR REPLACE FUNCTION public.sync_entity_search_canonical_name()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    UPDATE public.entity_search
-    SET canonical_name = NEW.canonical_name
-    WHERE entity_id = NEW.entity_id
-      AND canonical_name IS DISTINCT FROM NEW.canonical_name;
-    RETURN NULL;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS entities_search_projection_sync_trigger
-    ON public.entities;
-CREATE TRIGGER entities_search_projection_sync_trigger
-AFTER UPDATE OF canonical_name
-ON public.entities
-FOR EACH ROW EXECUTE FUNCTION public.sync_entity_search_canonical_name();
 
 -- Search rebuilds generate embeddings outside a transaction.  These revisions
 -- let the publisher reject a snapshot when its canonical inputs changed while
@@ -1731,11 +1446,6 @@ BEGIN
     RETURN NULL;
 END;
 $$;
-
-DROP TRIGGER IF EXISTS messages_search_revision_trigger ON public.messages;
-CREATE TRIGGER messages_search_revision_trigger
-AFTER INSERT OR DELETE OR UPDATE OF content ON public.messages
-FOR EACH ROW EXECUTE FUNCTION public.bump_search_index_revision();
 
 DROP TRIGGER IF EXISTS entities_search_revision_trigger ON public.entities;
 CREATE TRIGGER entities_search_revision_trigger

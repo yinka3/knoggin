@@ -447,7 +447,6 @@ class EntityResolver:
                 topic=topic,
                 project_id=project_id,
                 embedding=embedding,
-                session_id=session_id,
             )
 
             safe_mentions = []
@@ -751,7 +750,7 @@ class EntityResolver:
         evidence_by_entity: Dict[int, List[dict]],
     ) -> Optional[dict]:
         """
-        Evaluate one pair for merge or hierarchy relationship.
+        Evaluate one pair for merge candidacy.
         Returns candidate dict or None to skip.
         """
         direct_edge = await self.knowledge_store.has_direct_edge(
@@ -761,14 +760,6 @@ class EntityResolver:
         )
         if direct_edge:
             return None
-        hierarchy_edge = await self.knowledge_store.has_hierarchy_edge(
-            id_a,
-            id_b,
-            visible_project_ids=self.readable_project_ids,
-        )
-        if hierarchy_edge:
-            return None
-
         profile_a = await self.get_profile(id_a)
         profile_b = await self.get_profile(id_b)
 

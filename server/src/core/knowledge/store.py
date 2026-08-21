@@ -64,6 +64,7 @@ from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
     MessageLifecycleWriter,
 )
+from core.knowledge.db.writers.message_writer import MessageWriter
 from core.knowledge.db.writers.parked_dlq_writer import ParkedDLQWriter
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
@@ -112,8 +113,9 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._graph_writer = GraphWriter(self._postgres_client)
+        self._message_writer = MessageWriter(self._postgres_client)
         self._message_lifecycle_writer = MessageLifecycleWriter(
-            self._postgres_client, self._graph_writer
+            self._postgres_client, self._message_writer
         )
         self._human_review_writer = HumanReviewWriter(self._postgres_client)
         self._conflict_writer = ConflictWriter(
@@ -158,7 +160,7 @@ class KnowledgeStore:
         return self._community
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
-        return await self._graph_writer.save_message_logs(messages)
+        return await self._message_writer.save_message_logs(messages)
 
     async def create_editable_user_message(
         self, message: Dict, *, edit_window_seconds: int
@@ -271,7 +273,7 @@ class KnowledgeStore:
             return []
 
         async with self._postgres_client.transaction() as cur:
-            await self._graph_writer.save_message_logs([message], cur=cur)
+            await self._message_writer.save_message_logs([message], cur=cur)
             return await self._source_reference_writer.write_for_assistant_message(
                 message["id"],
                 candidates,
@@ -660,19 +662,6 @@ class KnowledgeStore:
     ) -> Dict:
         return await self._entity_writer.ensure_identity_entity(user_name, aliases)
 
-    async def update_entity_profile(
-        self,
-        entity_id: int,
-        canonical_name: str,
-        embedding: List[float],
-        last_msg_id: int,
-        *,
-        project_id: str,
-    ):
-        return await self._entity_writer.update_entity_profile(
-            entity_id, canonical_name, embedding, last_msg_id, project_id=project_id
-        )
-
     async def update_entity_canonical_name(
         self, entity_id: int, canonical_name: str, *, project_id: str
     ) -> None:
@@ -687,25 +676,11 @@ class KnowledgeStore:
             entity_id, embedding, project_id=project_id
         )
 
-    async def update_entity_checkpoint(
-        self, entity_id: int, last_msg_id: int, *, project_id: str
-    ):
-        return await self._entity_writer.update_entity_checkpoint(
-            entity_id, last_msg_id, project_id=project_id
-        )
-
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], *, project_id: str
     ) -> None:
         return await self._entity_writer.update_entity_aliases(
             alias_updates, project_id=project_id
-        )
-
-    async def create_hierarchy_edge(
-        self, parent_id: int, child_id: int, *, project_id: str
-    ) -> bool:
-        return await self._graph_writer.create_hierarchy_edge(
-            parent_id, child_id, project_id=project_id
         )
 
     async def merge_entities(
@@ -1217,14 +1192,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_parent_entities(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._graph_reader.get_parent_entities(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
     async def get_neighbor_entities(
         self,
         entity_id: int,
@@ -1236,26 +1203,6 @@ class KnowledgeStore:
             entity_id,
             visible_project_ids=visible_project_ids,
             limit=limit,
-        )
-
-    async def get_child_entities(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._graph_reader.get_child_entities(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_hierarchy_candidates(
-        self,
-        project_id: str,
-        topic: str,
-        parent_type: str,
-        child_types: List[str],
-        min_weight: int = 2,
-    ) -> List[Dict]:
-        return await self._graph_reader.get_hierarchy_candidates(
-            project_id, topic, parent_type, child_types, min_weight
         )
 
     async def get_merge_topic_strength(
@@ -1274,15 +1221,6 @@ class KnowledgeStore:
         self, id_a: int, id_b: int, *, visible_project_ids: List[str]
     ) -> bool:
         return await self._graph_reader.has_direct_edge(
-            id_a,
-            id_b,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def has_hierarchy_edge(
-        self, id_a: int, id_b: int, *, visible_project_ids: List[str]
-    ) -> bool:
-        return await self._graph_reader.has_hierarchy_edge(
             id_a,
             id_b,
             visible_project_ids=visible_project_ids,

@@ -189,8 +189,6 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         "find_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
-    update_accumulators(ctx, "get_hierarchy", {"data": {"entity": "Knoggin"}})
-    update_accumulators(ctx, "get_hierarchy", {"data": {"entity": "Knoggin"}})
     update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
     update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
     update_accumulators(
@@ -245,7 +243,6 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         {"source": "Ada", "target": "Testing"},
     ]
     assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
-    assert ctx.hierarchy == [{"entity": "Knoggin"}]
     assert ctx.episodes == [{"resolution": "exact"}]
     assert [
         (msg["id"], msg["source_type"], msg["message"])
@@ -273,7 +270,6 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
             max_accumulated_profiles=2,
             max_accumulated_graph=2,
             max_accumulated_paths=1,
-            max_accumulated_hierarchy=1,
             max_accumulated_episodes=1,
             max_accumulated_sources=1,
         )
@@ -310,11 +306,6 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
                 {"entity_a": "Ada", "entity_b": "Beta"},
             ]
         },
-    )
-    update_accumulators(
-        ctx,
-        "get_hierarchy",
-        {"data": [{"entity": "Alpha"}, {"entity": "Beta"}]},
     )
     update_accumulators(
         ctx,
@@ -361,7 +352,6 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
         ("Ada", "Gamma"),
     ]
     assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
-    assert ctx.hierarchy == [{"entity": "Beta"}]
     assert ctx.episodes == [{"id": "episode-2"}]
     assert ctx.sources == [{"url": "https://example.test/new"}]
     assert [message["chunk_index"] for message in ctx.messages] == [2, 3]

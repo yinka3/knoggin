@@ -29,9 +29,6 @@ class EpisodeWriter:
         project_id = require_scope_value(
             episode.project_id, "project_id", "create_episode"
         )
-        session_id = require_scope_value(
-            episode.session_id, "session_id", "create_episode"
-        )
         if not episode.messages:
             raise ValueError("create_episode requires at least one source message")
 
@@ -40,6 +37,9 @@ class EpisodeWriter:
             key=lambda message: message.message_position,
         )
         source_message_ids = [message.message_id for message in source_messages]
+        source_sessions = {message.session_id for message in source_messages}
+        if len(source_sessions) != 1:
+            raise ValueError("create_episode requires one source session; use project window")
 
         async with self.client.transaction() as cur:
             await self._write_episode(
@@ -48,7 +48,7 @@ class EpisodeWriter:
                 source_message_ids,
                 user_name=user_name,
                 project_id=project_id,
-                session_id=session_id,
+                session_id=source_sessions.pop(),
             )
 
     async def write_episode_window(
@@ -80,9 +80,7 @@ class EpisodeWriter:
             raise ValueError("Episode window requires positive source message IDs")
         if len(normalized_window_ids) != len(set(normalized_window_ids)):
             raise ValueError("Episode window must not contain duplicate message IDs")
-        if episode and (
-            episode.project_id != project_id or episode.session_id != session_id
-        ):
+        if episode and episode.project_id != project_id:
             raise ValueError("Episode scope must match its checkpoint scope")
         if episode:
             episode_message_ids = {message.message_id for message in episode.messages}
@@ -250,7 +248,6 @@ class EpisodeWriter:
             cur,
             episode,
             timestamps,
-            session_id=episode.session_id,
         )
         await self._upsert_messages(cur, episode)
         await self._upsert_entities(cur, episode, entities, timestamps)
@@ -315,7 +312,7 @@ class EpisodeWriter:
         await cur.execute(
             """
             SELECT rer.message_id, rer.relationship_id
-            FROM relationship_evidence_refs rer
+            FROM relationship_observations rer
             JOIN relationships r ON r.relationship_id = rer.relationship_id AND r.project_id = rer.project_id
             WHERE rer.message_id = ANY(%s) AND rer.project_id = %s
             """,
@@ -365,7 +362,6 @@ class EpisodeWriter:
             cur,
             episode,
             source_message_timestamps,
-            session_id=session_id,
         )
         await self._upsert_messages(cur, episode)
         await self._upsert_entities(
@@ -622,7 +618,7 @@ class EpisodeWriter:
         await cur.execute(
             """
             SELECT rer.message_id, rer.relationship_id
-            FROM relationship_evidence_refs rer
+            FROM relationship_observations rer
             JOIN relationships r
               ON r.relationship_id = rer.relationship_id
              AND r.project_id = rer.project_id
@@ -666,8 +662,6 @@ class EpisodeWriter:
         cur,
         episode: Episode,
         source_message_timestamps: Dict[int, int | None],
-        *,
-        session_id: str,
     ) -> None:
         timestamps = [
             timestamp
@@ -697,7 +691,6 @@ class EpisodeWriter:
             INSERT INTO episodes (
                 episode_id,
                 project_id,
-                session_id,
                 summary,
                 new_developments,
                 updates,
@@ -714,7 +707,7 @@ class EpisodeWriter:
                 updated_at
             )
             VALUES (
-                %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+                %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
                 %s, %s, %s, %s, %s::vector, %s::jsonb, %s::jsonb, %s, %s, %s
             )
             ON CONFLICT (episode_id) DO UPDATE
@@ -741,7 +734,6 @@ class EpisodeWriter:
             (
                 episode.episode_id,
                 episode.project_id,
-                session_id,
                 episode.summary,
                 json.dumps(episode.new_developments),
                 json.dumps(episode.updates),

@@ -104,7 +104,6 @@ class Episode(EpisodeNarrative):
 
     episode_id: str = Field(..., min_length=1)
     project_id: str = Field(..., min_length=1)
-    session_id: str = Field(..., min_length=1)
     summary: str = Field(..., min_length=1)
     source_message_count: int = Field(0, ge=0)
     first_message_at: Optional[datetime] = None

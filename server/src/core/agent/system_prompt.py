@@ -116,8 +116,7 @@ returns contextual summaries with source evidence.
 episode_check when exact wording, verification, or the complete source context \
 matters.
 3. search_entity — use for entity profiles, relationships, and discovering connections.
-4. get_connections / get_hierarchy — use when you need full relationship \
-networks or parent-child structures.
+4. get_connections — use when you need full relationship networks.
 5. get_recent_activity — use for temporal questions ("lately", "this week").
 6. search_messages — use only as a last resort when structured tools above \
 return nothing relevant. This is raw text search, not summarized knowledge.

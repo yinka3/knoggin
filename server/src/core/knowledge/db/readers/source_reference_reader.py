@@ -176,10 +176,9 @@ class SourceReferenceReader:
             JOIN public.episodes AS episode
               ON episode.episode_id = attachment.episode_id
              AND episode.project_id = attachment.project_id
-             AND episode.session_id = attachment.session_id
             JOIN public.sessions AS session
-              ON session.session_id = episode.session_id
-             AND session.project_id = episode.project_id
+              ON session.session_id = attachment.session_id
+             AND session.project_id = attachment.project_id
             JOIN public.message_source_refs AS ref
               ON ref.message_id = attachment.message_id
              AND ref.project_id = attachment.project_id
@@ -189,7 +188,7 @@ class SourceReferenceReader:
              AND document.project_id = ref.project_id
             WHERE attachment.episode_id = %s
               AND episode.project_id = %s
-              AND episode.session_id = %s
+              AND attachment.session_id = %s
               AND session.user_name = %s
             ORDER BY attachment.message_position ASC, ref.created_at ASC,
                 ref.result_position ASC, ref.source_ref_id ASC

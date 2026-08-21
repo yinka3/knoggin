@@ -17,7 +17,7 @@ class TransactionClient:
         yield self.cursor
 
 
-class GraphWriter:
+class MessageWriter:
     def __init__(self):
         self.calls = []
 
@@ -54,11 +54,11 @@ def _candidate():
 @pytest.mark.no_network
 async def test_assistant_message_and_source_refs_share_one_transaction():
     client = TransactionClient()
-    graph_writer = GraphWriter()
+    message_writer = MessageWriter()
     source_writer = SourceReferenceWriter()
     store = object.__new__(KnowledgeStore)
     store._postgres_client = client
-    store._graph_writer = graph_writer
+    store._message_writer = message_writer
     store._source_reference_writer = source_writer
     message = {
         "id": 9,
@@ -75,7 +75,7 @@ async def test_assistant_message_and_source_refs_share_one_transaction():
 
     assert references == ["reference"]
     assert client.transaction_count == 1
-    assert graph_writer.calls == [([message], client.cursor)]
+    assert message_writer.calls == [([message], client.cursor)]
     assert source_writer.calls == [
         (
             9,

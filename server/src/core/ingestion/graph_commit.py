@@ -105,7 +105,6 @@ async def prepare_ingestion_batch_graph_writes(
             is_new=entity_id in new_entity_ids,
             canonical_name=profile.canonical_name,
             entity_type=profile.entity_type,
-            confidence=1.0,
             topic=profile.topic,
             embedding=_normalize_embedding(embedding),
             aliases=tuple(entities.get_mentions_for_id(entity_id)),
@@ -193,6 +192,7 @@ async def prepare_ingestion_batch_graph_writes(
                 source_type=observation.source_type,
                 target_type=observation.target_type,
                 symmetric=observation.symmetric,
+                domain_version=observation.domain_version,
             )
         )
 

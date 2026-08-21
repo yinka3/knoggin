@@ -7,7 +7,7 @@ from time import time
 from typing import Any, Dict, List
 from uuid import uuid4
 
-from core.knowledge.db.writers.graph_writer import GraphWriter
+from core.knowledge.db.writers.message_writer import MessageWriter
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -25,9 +25,9 @@ class MessageLifecycleWriter:
     Redis may wake a worker, but never decides which message version is ingested.
     """
 
-    def __init__(self, client: PostgresClient, graph_writer: GraphWriter):
+    def __init__(self, client: PostgresClient, message_writer: MessageWriter):
         self.client = client
-        self.graph_writer = graph_writer
+        self.message_writer = message_writer
 
     @staticmethod
     def _now_ms() -> int:
@@ -62,7 +62,7 @@ class MessageLifecycleWriter:
             )
             if await cur.fetchone() is None:
                 raise ValueError("Cannot create a message in a deleted session")
-            await self.graph_writer.save_message_logs([row], cur=cur)
+            await self.message_writer.save_message_logs([row], cur=cur)
             await cur.execute(
                 """
                 INSERT INTO public.message_revisions (

@@ -89,7 +89,7 @@ class SearchIndexer:
         await self._ensure_revision_rows(project_id, user_name)
 
         for attempt in range(1, self._MAX_PUBLICATION_ATTEMPTS + 1):
-            messages, entities, episodes, identity, revision = await self._snapshot(
+            entities, episodes, identity, revision = await self._snapshot(
                 project_id,
                 user_name,
             )
@@ -134,7 +134,6 @@ class SearchIndexer:
                 project_id,
                 user_name,
                 revision,
-                messages,
                 entities,
                 identity,
                 episodes,
@@ -153,7 +152,6 @@ class SearchIndexer:
                 continue
 
             summary = {
-                "messages": len(messages),
                 "entities": len(entities),
                 "identity": 1,
                 "episodes": len(episodes),
@@ -193,18 +191,17 @@ class SearchIndexer:
         self,
         project_id: str,
         user_name: str,
-    ) -> tuple[List[Dict], List[Dict], List[Dict], Dict, SearchIndexRevision]:
+    ) -> tuple[List[Dict], List[Dict], Dict, SearchIndexRevision]:
         """Read canonical rows and their versions from one stable snapshot."""
         async with self.client.transaction() as cur:
             await cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
             )
-            messages = await self._fetch_messages(cur, project_id, user_name)
             entities = await self._fetch_entities(cur, project_id, user_name)
             episodes = await self._fetch_episodes(cur, project_id, user_name)
             identity = await self._fetch_identity(cur, user_name)
             revision = await self._fetch_revision(cur, project_id, user_name)
-        return messages, entities, episodes, identity, revision
+        return entities, episodes, identity, revision
 
     async def _fetch_revision(
         self,
@@ -240,7 +237,6 @@ class SearchIndexer:
         project_id: str,
         user_name: str,
         expected_revision: SearchIndexRevision,
-        messages: List[Dict],
         entities: List[Dict],
         identity: Dict,
         episodes: List[Dict],
@@ -261,15 +257,8 @@ class SearchIndexer:
 
             await cur.execute(
                 """
-                DELETE FROM message_search
-                WHERE project_id = %s
-                  AND user_name = %s
-                """,
-                (project_id, user_name),
-            )
-            await cur.execute(
-                """
-                DELETE FROM entity_search
+                UPDATE entities
+                SET embedding = NULL
                 WHERE project_id = %s
                   AND user_name = %s
                   AND entity_id <> %s
@@ -277,73 +266,36 @@ class SearchIndexer:
                 (project_id, user_name, IDENTITY_ENTITY_ID),
             )
 
-            for message in messages:
-                await cur.execute(
-                    """
-                    INSERT INTO message_search (
-                        message_id,
-                        user_name,
-                        session_id,
-                        project_id,
-                        content_tsvector
-                    )
-                    VALUES (
-                        %s, %s, %s, %s,
-                        to_tsvector('english', %s)
-                    )
-                    """,
-                    (
-                        message["message_id"],
-                        message["user_name"],
-                        message["session_id"],
-                        message["project_id"],
-                        message["content"],
-                    ),
-                )
-
             for entity, embedding in zip(entities, entity_vectors):
                 await cur.execute(
                     """
-                    INSERT INTO entity_search (
-                        entity_id,
-                        canonical_name,
-                        user_name,
-                        project_id,
-                        embedding
-                    )
-                    VALUES (%s, %s, %s, %s, %s::vector)
+                    UPDATE entities
+                    SET embedding = %s::vector
+                    WHERE entity_id = %s
+                      AND user_name = %s
+                      AND project_id = %s
                     """,
                     (
+                        json.dumps(embedding),
                         entity["entity_id"],
-                        entity["canonical_name"],
                         entity["user_name"],
                         entity["project_id"],
-                        json.dumps(embedding),
                     ),
                 )
 
             await cur.execute(
                 """
-                INSERT INTO entity_search (
-                    entity_id,
-                    canonical_name,
-                    user_name,
-                    project_id,
-                    embedding
-                )
-                VALUES (%s, %s, %s, %s, %s::vector)
-                ON CONFLICT (entity_id) DO UPDATE SET
-                    canonical_name = EXCLUDED.canonical_name,
-                    user_name = EXCLUDED.user_name,
-                    project_id = EXCLUDED.project_id,
-                    embedding = EXCLUDED.embedding
+                UPDATE entities
+                SET embedding = %s::vector
+                WHERE entity_id = %s
+                  AND user_name = %s
+                  AND project_id = %s
                 """,
                 (
+                    json.dumps(identity_vector),
                     identity["entity_id"],
-                    identity["canonical_name"],
                     identity["user_name"],
                     identity["project_id"],
-                    json.dumps(identity_vector),
                 ),
             )
 
@@ -393,24 +345,6 @@ class SearchIndexer:
             project=int((project_row or {}).get("revision", 0)),
             identity=int((identity_row or {}).get("revision", 0)),
         )
-
-    async def _fetch_messages(
-        self,
-        cur,
-        project_id: str,
-        user_name: str,
-    ) -> List[Dict]:
-        await cur.execute(
-            """
-            SELECT message_id, user_name, session_id, project_id, content
-            FROM messages
-            WHERE project_id = %s
-              AND user_name = %s
-            ORDER BY message_id
-            """,
-            (project_id, user_name),
-        )
-        return list(await cur.fetchall())
 
     async def _fetch_entities(
         self,

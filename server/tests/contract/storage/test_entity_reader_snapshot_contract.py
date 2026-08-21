@@ -1,6 +1,6 @@
 import pytest
 
-from common.exceptions import StorageUnavailableError
+from common.exceptions import StorageReadError
 from core.knowledge.db.readers.entity_reader import EntityReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -139,11 +139,11 @@ async def test_entity_name_lookup_does_not_report_storage_failure_as_absence():
         RecordingPostgresClient(fetch_all_exceptions=[RuntimeError("database down")])
     )
 
-    with pytest.raises(StorageUnavailableError) as error:
+    with pytest.raises(StorageReadError) as error:
         await reader.get_entities_by_names(
             ["Widget"],
             visible_project_ids=["project-1"],
         )
 
-    assert error.value.code == "storage_unavailable"
+    assert error.value.code == "storage_read_error"
     assert error.value.details["operation"] == "get_entities_by_names"

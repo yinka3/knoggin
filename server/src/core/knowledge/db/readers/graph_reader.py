@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from common.exceptions import StorageUnavailableError
+from common.exceptions import StorageReadError
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -18,9 +18,9 @@ class GraphReader:
         self.graph_name = graph_name
 
     @staticmethod
-    def _raise_storage_unavailable(operation: str, exc: Exception) -> None:
+    def _raise_storage_read(operation: str, exc: Exception) -> None:
         logger.error(f"Storage query failed for {operation}: {exc}")
-        raise StorageUnavailableError(
+        raise StorageReadError(
             operation,
             details={"error_type": type(exc).__name__},
         ) from exc
@@ -103,7 +103,7 @@ class GraphReader:
             return self._clean_string(content)
         except Exception as e:
             logger.error(f"Failed to get message text for {message_id}: {e}")
-            self._raise_storage_unavailable("get_message_text", e)
+            self._raise_storage_read("get_message_text", e)
 
     async def get_messages_by_ids(
         self,
@@ -157,7 +157,7 @@ class GraphReader:
             return [self._parse_message_row(row) for row in res]
         except Exception as e:
             logger.error(f"Failed to fetch messages by ids: {e}")
-            self._raise_storage_unavailable("get_messages_by_ids", e)
+            self._raise_storage_read("get_messages_by_ids", e)
 
     async def get_recent_project_messages(
         self,
@@ -216,7 +216,7 @@ class GraphReader:
             return [self._parse_message_row(row) for row in reversed(rows)]
         except Exception as e:
             logger.error(f"Failed to fetch recent project messages: {e}")
-            self._raise_storage_unavailable("get_recent_project_messages", e)
+            self._raise_storage_read("get_recent_project_messages", e)
 
     async def get_surrounding_messages(
         self,
@@ -346,7 +346,7 @@ class GraphReader:
             return prev_msgs + [target] + next_msgs
         except Exception as e:
             logger.error(f"Failed to fetch surrounding messages for {message_id}: {e}")
-            self._raise_storage_unavailable("get_surrounding_messages", e)
+            self._raise_storage_read("get_surrounding_messages", e)
 
     async def get_neighbor_ids(
         self, entity_id: int, *, visible_project_ids: List[str]
@@ -379,49 +379,7 @@ class GraphReader:
             return {int(row["neighbor_id"]) for row in res}
         except Exception as e:
             logger.error(f"Failed to get neighbor IDs for {entity_id}: {e}")
-            self._raise_storage_unavailable("get_neighbor_ids", e)
-
-    async def get_parent_entities(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_parent_entities",
-        )
-        query = """
-        SELECT
-            parent.entity_id AS id,
-            parent.canonical_name,
-            parent.type
-        FROM hierarchy_edges edge
-        JOIN entities parent ON parent.entity_id = edge.parent_id
-        WHERE edge.child_id = %s
-          AND edge.project_id = ANY(%s)
-          AND (parent.project_id = ANY(%s) OR parent.entity_id = %s)
-        GROUP BY parent.entity_id, parent.canonical_name, parent.type
-        ORDER BY parent.canonical_name
-        """
-        try:
-            res = await self.client.fetch_all(
-                query,
-                (
-                    entity_id,
-                    visible_project_ids,
-                    visible_project_ids,
-                    IDENTITY_ENTITY_ID,
-                ),
-            )
-            return [
-                {
-                    "id": int(r["id"]),
-                    "canonical_name": self._clean_string(r["canonical_name"]),
-                    "type": self._clean_string(r["type"]),
-                }
-                for r in res
-            ]
-        except Exception as e:
-            logger.error(f"Failed to get parents for entity {entity_id}: {e}")
-            self._raise_storage_unavailable("get_parent_entities", e)
+            self._raise_storage_read("get_neighbor_ids", e)
 
     async def get_neighbor_entities(
         self,
@@ -461,49 +419,7 @@ class GraphReader:
             return [{"id": int(r["id"]), "name": r["name"]} for r in res]
         except Exception as e:
             logger.error(f"Failed to get neighbor entities for {entity_id}: {e}")
-            self._raise_storage_unavailable("get_neighbor_entities", e)
-
-    async def get_child_entities(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_child_entities",
-        )
-        query = """
-        SELECT
-            child.entity_id AS id,
-            child.canonical_name,
-            child.type
-        FROM hierarchy_edges edge
-        JOIN entities child ON child.entity_id = edge.child_id
-        WHERE edge.parent_id = %s
-          AND edge.project_id = ANY(%s)
-          AND (child.project_id = ANY(%s) OR child.entity_id = %s)
-        GROUP BY child.entity_id, child.canonical_name, child.type
-        ORDER BY child.canonical_name
-        """
-        try:
-            res = await self.client.fetch_all(
-                query,
-                (
-                    entity_id,
-                    visible_project_ids,
-                    visible_project_ids,
-                    IDENTITY_ENTITY_ID,
-                ),
-            )
-            return [
-                {
-                    "id": int(r["id"]),
-                    "canonical_name": self._clean_string(r["canonical_name"]),
-                    "type": self._clean_string(r["type"]),
-                }
-                for r in res
-            ]
-        except Exception as e:
-            logger.error(f"Failed to get children for entity {entity_id}: {e}")
-            self._raise_storage_unavailable("get_child_entities", e)
+            self._raise_storage_read("get_neighbor_entities", e)
 
     async def has_direct_edge(
         self, id_a: int, id_b: int, *, visible_project_ids: List[str]
@@ -537,37 +453,7 @@ class GraphReader:
             return self._parse_boolean(row["connected"]) if row else False
         except Exception as e:
             logger.error(f"Failed to check direct edge between {id_a} and {id_b}: {e}")
-            self._raise_storage_unavailable("has_direct_edge", e)
-
-    async def has_hierarchy_edge(
-        self, id_a: int, id_b: int, *, visible_project_ids: List[str]
-    ) -> bool:
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "has_hierarchy_edge",
-        )
-        query = """
-        SELECT EXISTS (
-            SELECT 1
-            FROM hierarchy_edges
-            WHERE project_id = ANY(%s)
-              AND (
-                  (parent_id = %s AND child_id = %s)
-                  OR (parent_id = %s AND child_id = %s)
-              )
-        ) AS exists
-        """
-        try:
-            row = await self.client.fetch_one(
-                query,
-                (visible_project_ids, id_a, id_b, id_b, id_a),
-            )
-            return bool(row["exists"]) if row else False
-        except Exception as e:
-            logger.error(
-                f"Failed to check hierarchy edge between {id_a} and {id_b}: {e}"
-            )
-            self._raise_storage_unavailable("has_hierarchy_edge", e)
+            self._raise_storage_read("has_direct_edge", e)
 
     async def get_merge_topic_strength(
         self,
@@ -584,10 +470,8 @@ class GraphReader:
         query = """
         SELECT
             p.topic AS p_topic,
-            p.confidence AS p_conf,
             p.last_mentioned_ms AS p_last,
             s.topic AS s_topic,
-            s.confidence AS s_conf,
             s.last_mentioned_ms AS s_last,
             (
                 SELECT count(*)
@@ -682,109 +566,7 @@ class GraphReader:
                 "Failed to get merge topic strength for "
                 f"{primary_id}<-{secondary_id}: {e}"
             )
-            self._raise_storage_unavailable("get_merge_topic_strength", e)
-
-    async def get_hierarchy_candidates(
-        self,
-        project_id: str,
-        topic: str,
-        parent_type: str,
-        child_types: List[str],
-        min_weight: int = 2,
-    ) -> List[Dict]:
-        project_id = require_scope_value(
-            project_id,
-            "project_id",
-            "get_hierarchy_candidates",
-        )
-
-        query = """
-        SELECT
-            parent.entity_id AS parent_id,
-            parent.canonical_name AS parent_name,
-            parent.type AS parent_type,
-            child.entity_id AS child_id,
-            child.canonical_name AS child_name,
-            child.type AS child_type,
-            rel.weight
-        FROM relationships rel
-        JOIN entities parent
-          ON parent.entity_id IN (rel.entity_a_id, rel.entity_b_id)
-         AND parent.project_id = rel.project_id
-        JOIN entities child
-          ON child.entity_id = CASE
-              WHEN parent.entity_id = rel.entity_a_id THEN rel.entity_b_id
-              ELSE rel.entity_a_id
-           END
-         AND child.project_id = rel.project_id
-        WHERE rel.project_id = %s
-          AND parent.topic = %s
-          AND child.topic = %s
-          AND parent.type = %s
-          AND child.type = ANY(%s)
-          AND rel.weight >= %s
-          AND NOT EXISTS (
-              SELECT 1
-              FROM hierarchy_edges edge
-              WHERE edge.project_id = rel.project_id
-                AND edge.parent_id = parent.entity_id
-                AND edge.child_id = child.entity_id
-          )
-        ORDER BY rel.weight DESC, parent.canonical_name, child.canonical_name
-        """
-        try:
-            graph_res = await self.client.fetch_all(
-                query,
-                (
-                    project_id,
-                    topic,
-                    topic,
-                    parent_type,
-                    child_types,
-                    min_weight,
-                ),
-            )
-
-            if not graph_res:
-                return []
-
-            # 2. Fetch embeddings from relational table for those candidates
-            entity_ids = list(
-                {int(r["parent_id"]) for r in graph_res}
-                | {int(r["child_id"]) for r in graph_res}
-            )
-            emb_res = await self.client.fetch_all(
-                """
-                SELECT entity_id, embedding
-                FROM entity_search
-                WHERE entity_id = ANY(%s)
-                  AND project_id = %s
-                """,
-                (entity_ids, project_id),
-            )
-            embs = {
-                r["entity_id"]: self._parse_vector(r["embedding"])
-                for r in emb_res
-            }
-
-            return [
-                {
-                    "parent_id": int(r["parent_id"]),
-                    "parent_name": self._clean_string(r["parent_name"]),
-                    "parent_type": self._clean_string(r["parent_type"]),
-                    "parent_embedding": embs.get(int(r["parent_id"]), []),
-                    "child_id": int(r["child_id"]),
-                    "child_name": self._clean_string(r["child_name"]),
-                    "child_type": self._clean_string(r["child_type"]),
-                    "child_embedding": embs.get(int(r["child_id"]), []),
-                    "weight": r["weight"],
-                }
-                for r in graph_res
-            ]
-
-        except Exception as e:
-            logger.error(f"Hierarchy candidate query failed: {e}")
-            self._raise_storage_unavailable("get_hierarchy_candidates", e)
+            self._raise_storage_read("get_merge_topic_strength", e)
 
     async def get_graph_stats(
         self, *, visible_project_ids: List[str]
@@ -830,7 +612,7 @@ class GraphReader:
             }
         except Exception as e:
             logger.error(f"Failed to get graph stats: {e}")
-            self._raise_storage_unavailable("get_graph_stats", e)
+            self._raise_storage_read("get_graph_stats", e)
 
     async def get_neighbor_ids_batch(
         self,
@@ -877,4 +659,4 @@ class GraphReader:
             return result_map
         except Exception as e:
             logger.error(f"Failed to batch fetch neighbor IDs: {e}")
-            self._raise_storage_unavailable("get_neighbor_ids_batch", e)
+            self._raise_storage_read("get_neighbor_ids_batch", e)

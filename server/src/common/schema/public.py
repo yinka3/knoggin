@@ -20,7 +20,7 @@ from common.exceptions import (
     DependencyError,
     LLMProviderError,
     LLMResponseError,
-    StorageUnavailableError,
+    StorageError,
     ToolExecutionError,
 )
 from common.schema.source.references import SourceConsulted
@@ -200,7 +200,7 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "A required service is temporarily unavailable.",
         True,
     ),
-    StorageUnavailableError: (
+    StorageError: (
         "storage_unavailable",
         "Storage is temporarily unavailable.",
         True,

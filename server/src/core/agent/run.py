@@ -53,7 +53,6 @@ class AgentRunLimits:
     max_accumulated_profiles: int = 20
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
-    max_accumulated_hierarchy: int = 8
     max_accumulated_episodes: int = 8
     max_accumulated_sources: int = 12
     max_consecutive_errors: int = 3
@@ -119,7 +118,6 @@ class AgentRun:
     profiles: List[Dict] = field(default_factory=list)
     graph: List[Dict] = field(default_factory=list)
     paths: List[Dict] = field(default_factory=list)
-    hierarchy: List[Dict] = field(default_factory=list)
     episodes: List[Dict] = field(default_factory=list)
     sources: List[Dict] = field(default_factory=list)
     evidence_summary: Optional[str] = None
@@ -293,7 +291,6 @@ class AgentRun:
             or self.messages
             or self.graph
             or self.paths
-            or self.hierarchy
             or self.episodes
             or self.sources
             or self.evidence_summary
@@ -329,7 +326,6 @@ class AgentRun:
         self.graph = self.graph[-15:]
         self.episodes = []
         self.paths = []
-        self.hierarchy = []
 
     def finalize(self, content: str) -> None:
         self._require_active()
@@ -358,7 +354,6 @@ class AgentRun:
         self.profiles.clear()
         self.graph.clear()
         self.paths.clear()
-        self.hierarchy.clear()
         self.episodes.clear()
         self.sources.clear()
         self.source_candidates.clear()

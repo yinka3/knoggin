@@ -169,7 +169,6 @@ class DLQPayload(BaseModel):
                 is_new=item["is_new"],
                 canonical_name=item["canonical_name"],
                 entity_type=item["entity_type"],
-                confidence=item["confidence"],
                 topic=item["topic"],
                 embedding=(
                     tuple(item["embedding"])

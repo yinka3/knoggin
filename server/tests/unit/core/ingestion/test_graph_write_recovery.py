@@ -212,7 +212,6 @@ async def test_graph_write_replay_retries_alias_and_graph_boundaries(monkeypatch
                 is_new=False,
                 canonical_name="Robert Chen",
                 entity_type="person",
-                confidence=1.0,
                 topic="Identity",
                 embedding=None,
             )
@@ -300,7 +299,6 @@ async def test_graph_write_replay_retries_dirty_marking_after_postgres_success(
                 is_new=False,
                 canonical_name="Robert Chen",
                 entity_type="person",
-                confidence=1.0,
                 topic="Identity",
                 embedding=None,
             )

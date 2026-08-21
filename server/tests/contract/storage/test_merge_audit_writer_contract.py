@@ -188,14 +188,6 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
                 "source_message_count": 1,
             }
         ],
-        "hierarchy": [
-            {
-                "project_id": "project-1",
-                "parent_id": 9,
-                "child_id": 2,
-                "created_at_ms": 100,
-            }
-        ],
     }
 
     await writer.restore_before_state(
@@ -208,16 +200,13 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
     )
 
     executed_sql = "\n".join(call[1] for call in client.calls)
-    assert "DELETE FROM relationship_evidence_refs" in executed_sql
     assert "INSERT INTO entities" in executed_sql
     assert "INSERT INTO entity_aliases" in executed_sql
     assert "INSERT INTO message_entity_refs" in executed_sql
     assert "INSERT INTO episode_entities" in executed_sql
     assert "INSERT INTO relationships" in executed_sql
-    assert "INSERT INTO relationship_evidence_refs" in executed_sql
     assert "INSERT INTO relationship_observations" in executed_sql
     assert "INSERT INTO episode_relationships" in executed_sql
-    assert "INSERT INTO hierarchy_edges" in executed_sql
     assert "rollback_status = 'rolled_back'" in executed_sql
 
 

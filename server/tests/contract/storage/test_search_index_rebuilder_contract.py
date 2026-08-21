@@ -34,15 +34,6 @@ def make_client():
         fetch_all_results=[
             [
                 {
-                    "message_id": 7,
-                    "user_name": "ada",
-                    "session_id": "session-1",
-                    "project_id": "project-1",
-                    "content": "hello",
-                }
-            ],
-            [
-                {
                     "entity_id": 2,
                     "canonical_name": "Widget",
                     "type": "concept",
@@ -77,7 +68,6 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
     )
 
     assert summary == {
-        "messages": 1,
         "entities": 1,
         "identity": 1,
         "episodes": 1,
@@ -92,31 +82,14 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
             "New developments:\n- Episode vectors are enabled."
         ],
     ]
-    assert any(
-        call[0] == "execute"
-        and "DELETE FROM message_search" in call[1]
-        and call[2] == ("project-1", "ada")
-        for call in client.calls
-    )
-    message_insert = next(
+    entity_updates = [
         call
         for call in client.calls
-        if call[0] == "execute" and "INSERT INTO message_search" in call[1]
-    )
-    assert message_insert[2] == (
-        7,
-        "ada",
-        "session-1",
-        "project-1",
-        "hello",
-    )
-    entity_inserts = [
-        call
-        for call in client.calls
-        if call[0] == "execute" and "INSERT INTO entity_search" in call[1]
+        if call[0] == "execute" and "UPDATE entities" in call[1]
+        and "SET embedding = %s::vector" in call[1]
     ]
-    assert len(entity_inserts) == 2
-    assert len(json.loads(entity_inserts[0][2][4])) == 1024
+    assert len(entity_updates) == 2
+    assert len(json.loads(entity_updates[0][2][0])) == 1024
     episode_update = next(
         call
         for call in client.calls
@@ -266,29 +239,10 @@ async def test_search_index_rebuild_is_idempotent_and_preserves_sibling_project(
         )
         """
     )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO message_search (
-            message_id, user_name, session_id, project_id, content_tsvector
-        ) VALUES
-            (101, 'ada', 'session-1', 'project-1', to_tsvector('english', 'stale project one')),
-            (201, 'ada', 'session-2', 'project-2', to_tsvector('english', 'Keep project two content'))
-        """
-    )
-    await real_postgres_client.execute(
-        """
-            INSERT INTO entity_search (entity_id, canonical_name, user_name, project_id)
-            VALUES
-                (2, 'Project One', 'ada', 'project-1'),
-                (3, 'Project Two', 'ada', 'project-2')
-        """
-    )
-
     embedding = RecordingEmbeddingService()
     rebuilder = SearchIndexer(real_postgres_client, embedding)
 
     expected_summary = {
-        "messages": 1,
         "entities": 1,
         "identity": 1,
         "episodes": 1,
@@ -301,35 +255,35 @@ async def test_search_index_rebuild_is_idempotent_and_preserves_sibling_project(
     ) == expected_summary
 
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-1'"
+        "SELECT count(*) AS count FROM messages WHERE project_id = 'project-1'"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM entity_search WHERE project_id = 'project-1'"
+        "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM entity_search WHERE entity_id = 2 AND embedding IS NOT NULL"
+        "SELECT count(*) AS count FROM entities WHERE entity_id = 2 AND embedding IS NOT NULL"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM entity_search WHERE project_id = '__identity__'"
+        "SELECT count(*) AS count FROM entities WHERE project_id = '__identity__' AND embedding IS NOT NULL"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM episodes WHERE project_id = 'project-1' AND embedding IS NOT NULL"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         """
-        SELECT content_tsvector @@ plainto_tsquery('english', %s) AS matches
-        FROM message_search
+        SELECT search_tsvector @@ plainto_tsquery('english', %s) AS matches
+        FROM messages
         WHERE message_id = 101
         """,
         ("fresh",),
     ) == {"matches": True}
     assert await real_postgres_client.fetch_one(
-        "SELECT canonical_name FROM entity_search WHERE entity_id = 2"
+        "SELECT canonical_name FROM entities WHERE entity_id = 2"
     ) == {"canonical_name": "Project One"}
 
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-2'"
+        "SELECT count(*) AS count FROM messages WHERE project_id = 'project-2'"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT canonical_name FROM entity_search WHERE entity_id = 3"
+        "SELECT canonical_name FROM entities WHERE entity_id = 3"
     ) == {"canonical_name": "Project Two"}

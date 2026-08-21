@@ -1,10 +1,10 @@
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
     normalize_relationship_type,
     relationship_identity,
@@ -26,6 +26,14 @@ class GraphWriter:
     def _current_time_ms(self) -> int:
         return get_now_ms()
 
+    @staticmethod
+    def _raise_storage_write(operation: str, exc: Exception) -> None:
+        logger.error("Storage write failed for {}: {}", operation, exc)
+        raise StorageWriteError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
+
     @asynccontextmanager
     async def _merge_cursor(self, cur):
         if cur is not None:
@@ -33,19 +41,6 @@ class GraphWriter:
             return
         async with self.client.transaction() as transaction_cursor:
             yield transaction_cursor
-
-    def _normalize_timestamp_ms(self, value) -> int:
-        if value is None or value == "":
-            return self._current_time_ms()
-        if isinstance(value, datetime):
-            return int(value.timestamp() * 1000)
-        if isinstance(value, str):
-            normalized = value.replace("Z", "+00:00")
-            parsed = datetime.fromisoformat(normalized)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return int(parsed.timestamp() * 1000)
-        return int(value)
 
     @staticmethod
     def _require_project_id(project_id: str, operation: str) -> str:
@@ -115,10 +110,6 @@ class GraphWriter:
     def _relationship_projection_params(cls, rows: List[Dict]) -> List[Dict]:
         params = []
         for row in rows:
-            evidence_refs = [
-                json.dumps(ref, sort_keys=True)
-                for ref in cls._normalize_evidence_refs(row.get("evidence_refs"))
-            ]
             params.append(
                 {
                     "relationship_id": row["relationship_id"],
@@ -128,320 +119,10 @@ class GraphWriter:
                     "relationship_type": normalize_relationship_type(
                         row["relationship_type"]
                     ),
-                    "weight": int(row.get("weight") or 1),
-                    "confidence": float(row.get("confidence") or 0),
-                    "context": row.get("context"),
-                    "last_seen": int(row.get("last_seen_ms") or 0),
-                    "message_ids": evidence_refs,
                 }
             )
-            if any(
-                key in row
-                for key in (
-                    "canonical_relationship_type",
-                    "observed_relationship_label",
-                    "domain_status",
-                    "symmetric",
-                )
-            ):
-                params[-1].update(
-                    {
-                        "canonical_relationship_type": row.get(
-                            "canonical_relationship_type"
-                        ),
-                        "observed_relationship_label": row.get(
-                            "observed_relationship_label"
-                        )
-                        or normalize_relationship_type(row["relationship_type"]),
-                        "domain_status": row.get("domain_status") or "unrecognized",
-                        "symmetric": bool(row.get("symmetric", False)),
-                    }
-                )
+            params[-1]["symmetric"] = bool(row.get("symmetric", False))
         return params
-
-    @staticmethod
-    def _hierarchy_projection_params(rows: List[Dict]) -> List[Dict]:
-        return [
-            {
-                "project_id": row["project_id"],
-                "parent_id": int(row["parent_id"]),
-                "child_id": int(row["child_id"]),
-                "created_at": int(row.get("created_at_ms") or 0),
-            }
-            for row in rows
-        ]
-
-    async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
-        if not messages:
-            return True
-
-        async with self._merge_cursor(cur) as cur:
-            batch_params = []
-            for msg in messages:
-                missing = [
-                    key
-                    for key in ("user_name", "session_id", "project_id")
-                    if not msg.get(key)
-                ]
-                if missing:
-                    raise ValueError(
-                        f"Message {msg.get('id')} missing required scope "
-                        f"fields: {missing}"
-                    )
-
-                batch_params.append(
-                    {
-                        "id": msg["id"],
-                        "content": msg["content"],
-                        "role": msg["role"],
-                        "user_name": msg["user_name"],
-                        "session_id": msg["session_id"],
-                        "project_id": msg["project_id"],
-                        "user_msg_id": (
-                            msg.get("user_msg_id")
-                            or (msg["id"] if msg["role"] == "user" else None)
-                        ),
-                        "metadata": json.dumps(msg.get("metadata") or {}),
-                        "timestamp": self._normalize_timestamp_ms(msg.get("timestamp")),
-                        "lifecycle_state": msg.get("lifecycle_state", "sealed"),
-                        "editable_until_ms": msg.get("editable_until_ms"),
-                        "sealed_at_ms": msg.get("sealed_at_ms"),
-                        "selected_revision": int(msg.get("selected_revision", 1)),
-                        "replaces_message_id": msg.get("replaces_message_id"),
-                        "superseded_at_ms": msg.get("superseded_at_ms"),
-                        "ingestion_state": msg.get("ingestion_state", "excluded"),
-                        "ingestion_not_before_ms": msg.get("ingestion_not_before_ms"),
-                        "ingestion_claim_id": msg.get("ingestion_claim_id"),
-                        "ingestion_claimed_at_ms": msg.get("ingestion_claimed_at_ms"),
-                        "episode_eligible": bool(msg.get("episode_eligible", False)),
-                        "episode_type": msg.get("episode_type"),
-                    }
-                )
-
-            # Write canonical messages first.
-            for msg in batch_params:
-                await cur.execute(
-                    """
-                    INSERT INTO messages (
-                        user_name,
-                        session_id,
-                        message_id,
-                        project_id,
-                        role,
-                        content,
-                        user_msg_id,
-                        metadata,
-                        timestamp_ms,
-                        lifecycle_state,
-                        editable_until_ms,
-                        sealed_at_ms,
-                        selected_revision,
-                        replaces_message_id,
-                        superseded_at_ms,
-                        ingestion_state,
-                        ingestion_not_before_ms,
-                        ingestion_claim_id,
-                        ingestion_claimed_at_ms,
-                        episode_eligible,
-                        episode_type
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                    )
-                    ON CONFLICT (user_name, session_id, message_id)
-                    DO UPDATE SET
-                        message_id = EXCLUDED.message_id,
-                        user_msg_id = EXCLUDED.user_msg_id,
-                        metadata = EXCLUDED.metadata
-                    WHERE messages.project_id = EXCLUDED.project_id
-                      AND messages.role = EXCLUDED.role
-                      AND messages.content = EXCLUDED.content
-                      AND messages.timestamp_ms = EXCLUDED.timestamp_ms
-                    RETURNING message_id
-                    """,
-                    (
-                        msg["user_name"],
-                        msg["session_id"],
-                        msg["id"],
-                        msg["project_id"],
-                        msg["role"],
-                        msg["content"],
-                        msg["user_msg_id"],
-                        msg["metadata"],
-                        msg["timestamp"],
-                        msg["lifecycle_state"],
-                        msg["editable_until_ms"],
-                        msg["sealed_at_ms"],
-                        msg["selected_revision"],
-                        msg["replaces_message_id"],
-                        msg["superseded_at_ms"],
-                        msg["ingestion_state"],
-                        msg["ingestion_not_before_ms"],
-                        msg["ingestion_claim_id"],
-                        msg["ingestion_claimed_at_ms"],
-                        msg["episode_eligible"],
-                        msg["episode_type"],
-                    ),
-                )
-                persisted = await cur.fetchone()
-                if not persisted:
-                    raise RuntimeError(
-                        "Canonical message ID collision for "
-                        f"{msg['user_name']}/{msg['session_id']}/"
-                        f"{msg['id']}"
-                    )
-
-            # Lifecycle and ingestion fields are relational authority. AGE is
-            # a derived traversal projection and intentionally receives only
-            # the message fields it exposes to graph queries.
-            await self.projection.project_messages(
-                cur,
-                [
-                    {
-                        key: msg[key]
-                        for key in (
-                            "id",
-                            "content",
-                            "role",
-                            "user_name",
-                            "session_id",
-                            "project_id",
-                            "user_msg_id",
-                            "metadata",
-                            "timestamp",
-                        )
-                    }
-                    for msg in batch_params
-                ],
-            )
-
-            # Write to Hybrid Full Text Search Table
-            for msg in batch_params:
-                await cur.execute(
-                    """
-                    INSERT INTO message_search (
-                        message_id,
-                        user_name,
-                        session_id,
-                        project_id,
-                        content_tsvector
-                    )
-                    VALUES (%s, %s, %s, %s, to_tsvector('english', %s))
-                    ON CONFLICT (message_id)
-                    DO UPDATE SET
-                        user_name = EXCLUDED.user_name,
-                        session_id = EXCLUDED.session_id,
-                        project_id = EXCLUDED.project_id,
-                        content_tsvector = EXCLUDED.content_tsvector
-                    """,
-                    (
-                        msg["id"],
-                        msg["user_name"],
-                        msg["session_id"],
-                        msg["project_id"],
-                        msg["content"],
-                    ),
-                )
-
-        logger.info(f"Saved {len(messages)} message logs to Postgres/AGE.")
-        return True
-
-    async def create_hierarchy_edge(
-        self, parent_id: int, child_id: int, *, project_id: str
-    ) -> bool:
-        project_id = self._require_project_id(project_id, "create_hierarchy_edge")
-        if parent_id == child_id:
-            logger.warning(f"Self hierarchy edge rejected: {parent_id}")
-            return False
-        try:
-            now_ms = self._current_time_ms()
-            async with self.client.transaction() as cur:
-                await cur.execute(
-                    """
-                    SELECT pg_advisory_xact_lock(
-                        hashtextextended(%s, 0)
-                    )
-                    """,
-                    (project_id,),
-                )
-                await cur.execute(
-                    """
-                    WITH RECURSIVE ancestors(entity_id) AS (
-                        SELECT parent_id
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND child_id = %s
-
-                        UNION
-
-                        SELECT edge.parent_id
-                        FROM hierarchy_edges edge
-                        JOIN ancestors
-                          ON edge.child_id = ancestors.entity_id
-                        WHERE edge.project_id = %s
-                    )
-                    INSERT INTO hierarchy_edges (
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    )
-                    SELECT %s, %s, %s, %s
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM entities
-                        WHERE entity_id = %s
-                          AND project_id = %s
-                    )
-                    AND EXISTS (
-                        SELECT 1
-                        FROM entities
-                        WHERE entity_id = %s
-                          AND project_id = %s
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM ancestors
-                        WHERE entity_id = %s
-                    )
-                    ON CONFLICT (project_id, parent_id, child_id)
-                    DO NOTHING
-                    RETURNING parent_id
-                    """,
-                    (
-                        project_id,
-                        parent_id,
-                        project_id,
-                        project_id,
-                        parent_id,
-                        child_id,
-                        now_ms,
-                        parent_id,
-                        project_id,
-                        child_id,
-                        project_id,
-                        child_id,
-                    ),
-                )
-                canonical_record = await cur.fetchone()
-                if not canonical_record:
-                    return False
-
-                projected = await self.projection.create_hierarchy_edge(
-                    cur,
-                    parent_id,
-                    child_id,
-                    project_id,
-                    now_ms,
-                )
-                return projected
-        except Exception as e:
-            logger.error(
-                "Failed to create hierarchy edge "
-                f"({child_id})-[:PART_OF]->({parent_id}): {e}"
-            )
-            return False
 
     async def delete_relationship(
         self,
@@ -452,21 +133,14 @@ class GraphWriter:
         project_id: str,
     ) -> bool:
         project_id = self._require_project_id(project_id, "delete_relationship")
+        relationship_id = self._relationship_id(
+            project_id,
+            entity_a_id,
+            entity_b_id,
+            relationship_type,
+        )
         try:
-            relationship_id = self._relationship_id(
-                project_id,
-                entity_a_id,
-                entity_b_id,
-                relationship_type,
-            )
             async with self.client.transaction() as cur:
-                await cur.execute(
-                    """
-                    DELETE FROM relationship_evidence_refs
-                    WHERE relationship_id = %s
-                    """,
-                    (relationship_id,),
-                )
                 await cur.execute(
                     """
                     DELETE FROM relationships
@@ -484,11 +158,7 @@ class GraphWriter:
 
             return bool(canonical_record or projected_deleted)
         except Exception as e:
-            logger.error(
-                "Failed to delete relationship "
-                f"({entity_a_id}, {entity_b_id}, {relationship_type}): {e}"
-            )
-            return False
+            self._raise_storage_write("delete_relationship", e)
 
     async def merge_entities(
         self,
@@ -525,10 +195,8 @@ class GraphWriter:
                     SELECT
                         p.canonical_name AS p_name,
                         p.topic AS p_topic,
-                        p.confidence AS p_conf,
                         p.last_mentioned_ms AS p_last,
                         s.canonical_name AS s_name,
-                        s.confidence AS s_conf,
                         s.last_mentioned_ms AS s_last,
                         COALESCE(
                             array_agg(DISTINCT p_alias.alias)
@@ -554,11 +222,9 @@ class GraphWriter:
                         p.entity_id,
                         p.canonical_name,
                         p.topic,
-                        p.confidence,
                         p.last_mentioned_ms,
                         s.entity_id,
                         s.canonical_name,
-                        s.confidence,
                         s.last_mentioned_ms
                     """,
                     (
@@ -577,73 +243,9 @@ class GraphWriter:
                     )
                     return False
 
-                await cur.execute(
-                    """
-                    WITH RECURSIVE
-                    primary_ancestors(entity_id) AS (
-                        SELECT parent_id
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND child_id = %s
-
-                        UNION
-
-                        SELECT edge.parent_id
-                        FROM hierarchy_edges edge
-                        JOIN primary_ancestors ancestor
-                          ON edge.child_id = ancestor.entity_id
-                        WHERE edge.project_id = %s
-                    ),
-                    secondary_ancestors(entity_id) AS (
-                        SELECT parent_id
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND child_id = %s
-
-                        UNION
-
-                        SELECT edge.parent_id
-                        FROM hierarchy_edges edge
-                        JOIN secondary_ancestors ancestor
-                          ON edge.child_id = ancestor.entity_id
-                        WHERE edge.project_id = %s
-                    )
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM primary_ancestors
-                        WHERE entity_id = %s
-
-                        UNION ALL
-
-                        SELECT 1
-                        FROM secondary_ancestors
-                        WHERE entity_id = %s
-                    ) AS creates_cycle
-                    """,
-                    (
-                        project_id,
-                        primary_id,
-                        project_id,
-                        project_id,
-                        secondary_id,
-                        project_id,
-                        secondary_id,
-                        primary_id,
-                    ),
-                )
-                cycle_check = await cur.fetchone() or {}
-                if cycle_check.get("creates_cycle"):
-                    logger.warning(
-                        "Merge rejected because hierarchy connects "
-                        f"{primary_id} and {secondary_id}"
-                    )
-                    return False
-
                 s_name_raw = self._clean_string(check["s_name"])
                 primary_topic = self._clean_string(check["p_topic"]) or "General"
                 final_topic = self._clean_string(final_topic) or primary_topic
-                p_conf = float(check["p_conf"] or 0)
-                s_conf = float(check["s_conf"] or 0)
                 p_last = int(check["p_last"] or 0)
                 s_last = int(check["s_last"] or 0)
 
@@ -652,24 +254,18 @@ class GraphWriter:
                     check.get("s_aliases"),
                     [s_name_raw],
                 )
-                new_conf = s_conf if s_conf > p_conf else p_conf
                 new_last = s_last if s_last > p_last else p_last
-                now_ms = self._current_time_ms()
                 await cur.execute(
                     """
                     UPDATE entities
-                    SET confidence = %s,
-                        topic = %s,
-                        last_mentioned_ms = %s,
-                        last_updated_ms = %s
+                    SET topic = %s,
+                        last_mentioned_ms = %s
                     WHERE entity_id = %s
                       AND project_id = %s
                     """,
                     (
-                        new_conf,
                         final_topic,
                         new_last,
-                        now_ms,
                         primary_id,
                         project_id,
                     ),
@@ -837,13 +433,6 @@ class GraphWriter:
                     if target_id == primary_id:
                         await cur.execute(
                             """
-                            DELETE FROM relationship_evidence_refs
-                            WHERE relationship_id = %s
-                            """,
-                            (old_relationship_id,),
-                        )
-                        await cur.execute(
-                            """
                             DELETE FROM relationship_observations
                             WHERE relationship_id = %s
                               AND project_id = %s
@@ -941,27 +530,6 @@ class GraphWriter:
                             rel["context"],
                             rel["last_seen_ms"],
                         ),
-                    )
-                    await cur.execute(
-                        """
-                        INSERT INTO relationship_evidence_refs (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        )
-                        SELECT %s, %s, user_name, session_id, message_id
-                        FROM relationship_evidence_refs
-                        WHERE relationship_id = %s
-                        ON CONFLICT (
-                            relationship_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        ) DO NOTHING
-                        """,
-                        (new_relationship_id, project_id, old_relationship_id),
                     )
                     await cur.execute(
                         """
@@ -1118,7 +686,7 @@ class GraphWriter:
                                     0.0
                                 ) AS prominence_weight
                             FROM episode_messages em
-                            JOIN relationship_evidence_refs rer
+                            JOIN relationship_observations rer
                               ON rer.message_id = em.message_id
                              AND rer.project_id = em.project_id
                              AND rer.session_id = em.session_id
@@ -1142,13 +710,6 @@ class GraphWriter:
                     if new_relationship_id != old_relationship_id:
                         await cur.execute(
                             """
-                            DELETE FROM relationship_evidence_refs
-                            WHERE relationship_id = %s
-                            """,
-                            (old_relationship_id,),
-                        )
-                        await cur.execute(
-                            """
                             DELETE FROM relationship_observations
                             WHERE relationship_id = %s
                               AND project_id = %s
@@ -1162,75 +723,6 @@ class GraphWriter:
                             """,
                             (old_relationship_id,),
                         )
-
-                await cur.execute(
-                    """
-                    WITH rewritten AS (
-                        SELECT
-                            project_id,
-                            CASE
-                                WHEN parent_id = %s THEN %s
-                                ELSE parent_id
-                            END AS parent_id,
-                            CASE
-                                WHEN child_id = %s THEN %s
-                                ELSE child_id
-                            END AS child_id,
-                            created_at_ms
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND (
-                              parent_id = %s
-                              OR child_id = %s
-                          )
-                    ),
-                    deduplicated AS (
-                        SELECT
-                            project_id,
-                            parent_id,
-                            child_id,
-                            MIN(created_at_ms) AS created_at_ms
-                        FROM rewritten
-                        WHERE parent_id <> child_id
-                        GROUP BY project_id, parent_id, child_id
-                    )
-                    INSERT INTO hierarchy_edges (
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    )
-                    SELECT
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    FROM deduplicated
-                    ON CONFLICT (project_id, parent_id, child_id)
-                    DO NOTHING
-                    """,
-                    (
-                        secondary_id,
-                        primary_id,
-                        secondary_id,
-                        primary_id,
-                        project_id,
-                        secondary_id,
-                        secondary_id,
-                    ),
-                )
-
-                await cur.execute(
-                    """
-                    DELETE FROM hierarchy_edges
-                    WHERE project_id = %s
-                      AND (
-                          parent_id = %s
-                          OR child_id = %s
-                      )
-                    """,
-                    (project_id, secondary_id, secondary_id),
-                )
 
                 await cur.execute(
                     """
@@ -1264,7 +756,7 @@ class GraphWriter:
                             '[]'
                         ) AS evidence_refs
                     FROM relationships rel
-                    LEFT JOIN relationship_evidence_refs ref
+                    LEFT JOIN relationship_observations ref
                       ON ref.relationship_id = rel.relationship_id
                      AND ref.project_id = rel.project_id
                     WHERE rel.project_id = %s
@@ -1279,23 +771,6 @@ class GraphWriter:
                 relationship_projection_rows = await cur.fetchall()
                 relationship_projection = self._relationship_projection_params(
                     relationship_projection_rows
-                )
-
-                await cur.execute(
-                    """
-                    SELECT project_id, parent_id, child_id, created_at_ms
-                    FROM hierarchy_edges
-                    WHERE project_id = %s
-                      AND (
-                          parent_id = %s
-                          OR child_id = %s
-                      )
-                    """,
-                    (project_id, primary_id, primary_id),
-                )
-                hierarchy_projection_rows = await cur.fetchall()
-                hierarchy_projection = self._hierarchy_projection_params(
-                    hierarchy_projection_rows
                 )
 
                 await cur.execute(
@@ -1316,17 +791,9 @@ class GraphWriter:
                             FROM relationships
                             WHERE entity_a_id = %s
                                OR entity_b_id = %s
-                        ) AS relationship_count,
-                        (
-                            SELECT count(*)
-                            FROM hierarchy_edges
-                            WHERE parent_id = %s
-                               OR child_id = %s
-                        ) AS hierarchy_count
+                        ) AS relationship_count
                     """,
                     (
-                        secondary_id,
-                        secondary_id,
                         secondary_id,
                         secondary_id,
                         secondary_id,
@@ -1340,7 +807,6 @@ class GraphWriter:
                         "message_ref_count",
                         "episode_entity_count",
                         "relationship_count",
-                        "hierarchy_count",
                     )
                 ):
                     raise RuntimeError(
@@ -1353,25 +819,13 @@ class GraphWriter:
                     primary_id,
                     project_id,
                     combined_aliases,
-                    new_conf,
                     new_last,
-                    now_ms,
-                )
-                await self.projection.project_entity_topics(
-                    cur,
-                    [{"id": primary_id, "topic": final_topic}],
                 )
                 await self.projection.replace_relationships_for_entities(
                     cur,
                     project_id,
                     [primary_id, secondary_id],
                     relationship_projection,
-                )
-                await self.projection.replace_hierarchy_edges_for_entities(
-                    cur,
-                    project_id,
-                    [primary_id, secondary_id],
-                    hierarchy_projection,
                 )
                 await self.projection.delete_entity_projection(
                     cur,
@@ -1398,7 +852,6 @@ class GraphWriter:
                 logger.info(f"Merged entity {secondary_id} into {primary_id}")
                 return True
         except Exception as e:
-            logger.error(f"Merge transaction failed: {e}")
             if using_existing_cursor:
                 raise
-            return False
+            self._raise_storage_write("merge_entities", e)

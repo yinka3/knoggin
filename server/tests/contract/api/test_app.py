@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from api.app import create_app
-from common.exceptions import StorageUnavailableError
+from common.exceptions import StorageReadError
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
@@ -25,7 +25,7 @@ class FakeApplication:
     async def create_project(self, *, user_name, request: CreateProjectRequest):
         self.calls.append(("project", user_name, request))
         if self.fail_projects:
-            raise StorageUnavailableError("postgres://secret should never leak")
+            raise StorageReadError("postgres://secret should never leak")
         return ProjectResponse(
             id="project-1",
             name=request.name,

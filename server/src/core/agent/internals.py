@@ -22,7 +22,6 @@ from core.agent.formatters import (
     format_entity_results,
     format_episode_results,
     format_graph_results,
-    format_hierarchy_results,
     format_hot_topic_context,
     format_path_results,
     format_retrieved_messages,
@@ -377,7 +376,6 @@ def build_user_message(
                 "get_recent_activity",
                 "find_path",
                 "read_episode",
-                "get_hierarchy",
                 "search_documents",
                 "read_document",
                 "web_search",
@@ -501,12 +499,6 @@ def _format_evidence(
                 f"\n**New message results:**\n{format_retrieved_messages(new_msgs)}\n"
             )
 
-    if evidence.hierarchy:
-        msg += (
-            "\n**Hierarchy results:**\n"
-            f"{format_hierarchy_results(evidence.hierarchy)}\n"
-        )
-
     if evidence.episodes:
         msg += (
             "\n**Episode check results:**\n"
@@ -578,12 +570,6 @@ def _path_evidence_key(item: Dict) -> Tuple:
         entity_b = item.get("entity_b")
         if entity_a is not None and entity_b is not None:
             return ("path", entity_a, entity_b)
-    return _stable_evidence_key(item)
-
-
-def _hierarchy_evidence_key(item: Dict) -> Tuple:
-    if isinstance(item, dict) and item.get("entity") is not None:
-        return ("hierarchy", item.get("entity"))
     return _stable_evidence_key(item)
 
 
@@ -700,12 +686,6 @@ def update_accumulators(ctx: AgentRun, tool_name: str, result: Dict):
             d,
             _path_evidence_key,
             cfg.max_accumulated_paths,
-        ),
-        "get_hierarchy": lambda ev, d, cfg: _acc_unique_extend_or_append(
-            ev.hierarchy,
-            d,
-            _hierarchy_evidence_key,
-            cfg.max_accumulated_hierarchy,
         ),
         "episode_check": lambda ev, d, cfg: _acc_unique_extend_or_append(
             ev.episodes,

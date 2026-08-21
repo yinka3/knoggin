@@ -1,10 +1,8 @@
-import json
 from contextlib import asynccontextmanager
 
 import pytest
 from psycopg.errors import RaiseException
 
-from core.knowledge.db.writers.age_projection_writer import AgeProjectionWriter
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from infrastructure.postgres_client import PostgresClient
 
@@ -89,7 +87,7 @@ async def test_session_deletion_rolls_back_when_document_cleanup_fails():
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_session_deletion_preserves_canonical_and_age_message_projection(
+async def test_session_deletion_preserves_canonical_messages(
     real_postgres_client,
 ):
     writer = SessionDeletionWriter(real_postgres_client)
@@ -107,22 +105,6 @@ async def test_session_deletion_preserves_canonical_and_age_message_projection(
         VALUES ('ada', 'session-1', 101, 'project-1', 'user', 'Delete me.')
         """
     )
-    async with real_postgres_client.transaction() as cur:
-        await AgeProjectionWriter(real_postgres_client).project_messages(
-            cur,
-            [
-                {
-                    "id": 101,
-                    "user_name": "ada",
-                    "session_id": "session-1",
-                    "project_id": "project-1",
-                    "role": "user",
-                    "content": "Delete me.",
-                    "timestamp": 1,
-                }
-            ],
-        )
-
     await writer.delete_session(user_name="ada", session_id="session-1")
 
     assert await real_postgres_client.fetch_one(
@@ -134,19 +116,6 @@ async def test_session_deletion_preserves_canonical_and_age_message_projection(
     assert await real_postgres_client.fetch_one(
         "SELECT status FROM sessions WHERE session_id = 'session-1'"
     ) == {"status": "deleted"}
-    assert await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            MATCH (m:Message)
-            WHERE m.user_name = $user_name
-              AND m.session_id = $session_id
-            RETURN count(m)
-            """,
-            "count agtype",
-        ),
-        (json.dumps({"user_name": "ada", "session_id": "session-1"}),),
-    ) == {"count": 1}
-
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres

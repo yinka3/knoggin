@@ -70,7 +70,6 @@ class FakeEntityKnowledgeStore:
         self.neighbor_ids_by_entity = {}
         self.neighbor_id_calls = []
         self.direct_edges = set()
-        self.hierarchy_edges = set()
 
     def add_entity(
         self,
@@ -196,9 +195,6 @@ class FakeEntityKnowledgeStore:
 
     async def has_direct_edge(self, id_a, id_b, *, visible_project_ids):
         return tuple(sorted((id_a, id_b))) in self.direct_edges
-
-    async def has_hierarchy_edge(self, id_a, id_b, *, visible_project_ids):
-        return tuple(sorted((id_a, id_b))) in self.hierarchy_edges
 
     def _is_visible(self, entity, visible_project_ids):
         if visible_project_ids is None:

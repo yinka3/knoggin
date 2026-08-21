@@ -7,7 +7,6 @@ from typing import Any, Iterable
 
 from common.conf.domain_config import CompiledDomain
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
-from common.utils.time_utils import get_now_ms
 from core.knowledge.db.writers.age_projection_writer import AgeProjectionWriter
 from core.knowledge.entity.reclassification import (
     EntityReclassification,
@@ -162,7 +161,6 @@ class EntityReclassificationWriter:
         if len(set(entity_ids)) != len(entity_ids):
             raise ValueError("Reclassification entity IDs must be unique")
 
-        now_ms = get_now_ms()
         updated_entities: list[dict[str, Any]] = []
         conflicts = 0
         async with self.client.transaction() as cur:
@@ -206,8 +204,7 @@ class EntityReclassificationWriter:
                     """
                     UPDATE public.entities
                     SET type = %s,
-                        topic = %s,
-                        last_updated_ms = %s
+                        topic = %s
                     WHERE user_name = %s
                       AND project_id = %s
                       AND entity_id = %s
@@ -218,7 +215,6 @@ class EntityReclassificationWriter:
                     (
                         change.new_type,
                         change.new_topic,
-                        now_ms,
                         user_name,
                         project_id,
                         change.entity_id,
@@ -236,13 +232,11 @@ class EntityReclassificationWriter:
                         "project_id": project_id,
                         "type": change.new_type,
                         "topic": change.new_topic,
-                        "last_updated": now_ms,
                     }
                 )
 
             if updated_entities:
                 await self.projection.project_entity_domain(cur, updated_entities)
-                await self.projection.project_entity_topics(cur, updated_entities)
 
         return ReclassificationBatchResult(
             scanned=len(planned),
