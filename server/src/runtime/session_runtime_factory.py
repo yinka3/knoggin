@@ -160,7 +160,6 @@ class SessionRuntimeFactory:
             user_name=self.user_name,
             session_id=session_id,
             knowledge_store=self.resources.knowledge_store,
-            redis=self.resources.redis,
             processor=processor,
             get_session_context=get_session_context,
             write_to_graph=write_to_graph,

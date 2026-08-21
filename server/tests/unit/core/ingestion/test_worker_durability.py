@@ -61,7 +61,6 @@ def _worker(store, processor, write):
         "session-1",
         store,
         processor,
-        None,
         _context,
         write,
         IngestionSettings(),

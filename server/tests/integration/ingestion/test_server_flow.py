@@ -293,7 +293,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         session_id=scope["session_id"],
         knowledge_store=store,
         processor=processor,
-        redis=redis,
         get_session_context=context.get_conversation_context,
         write_to_graph=_prepared_graph_callback(store),
         settings=IngestionSettings(
@@ -553,7 +552,6 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
         session_id=scope["session_id"],
         knowledge_store=real_store,
         processor=processor,
-        redis=scope["redis"],
         get_session_context=context.get_conversation_context,
         write_to_graph=_prepared_graph_callback(real_store),
         settings=IngestionSettings(

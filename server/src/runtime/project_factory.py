@@ -102,7 +102,6 @@ class ProjectRuntimeFactory:
         )
         project_processor = IngestionPipeline(
             project_id=project_id,
-            redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,
             processor=pipeline,

@@ -4,7 +4,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
-import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
@@ -40,7 +39,6 @@ class IngestionPipeline:
     def __init__(
         self,
         project_id: str,
-        redis_client: aioredis.Redis,
         llm: LLMService,
         entities: EntityResolver,
         processor: TextProcessor,
@@ -57,7 +55,6 @@ class IngestionPipeline:
             raise ValueError("IngestionPipeline requires project_id")
         self.project_id = project_id
         self.knowledge_store = knowledge_store
-        self.redis = redis_client
         self.entities = entities
         self.processor = processor
         self.executor = cpu_executor

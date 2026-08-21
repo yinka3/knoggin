@@ -3,7 +3,6 @@
 import asyncio
 from typing import Awaitable, Callable, Dict, List, Optional
 
-import redis.asyncio as aioredis
 from loguru import logger
 
 from common.exceptions import (
@@ -31,17 +30,12 @@ class IngestionWorker:
         session_id: str,
         knowledge_store: IngestionPersistence,
         processor: IngestionPipeline,
-        redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
         write_to_graph: Callable[[IngestionBatch], Awaitable[object]],
         settings: IngestionSettings,
     ):
         self.user_name, self.session_id = user_name, session_id
-        self.knowledge_store, self.processor, self.redis = (
-            knowledge_store,
-            processor,
-            redis,
-        )
+        self.knowledge_store, self.processor = knowledge_store, processor
         self.get_session_context, self.write_to_graph = (
             get_session_context,
             write_to_graph,
