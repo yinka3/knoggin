@@ -138,7 +138,9 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
     ).model_dump(mode="json")
 
     assert payload["details"]["queue"]["pending_count"] == 2
-    assert payload["details"]["redis_available"] is True
+    assert payload["details"]["queue"]["claimed_count"] == 1
+    assert payload["details"]["queue"]["available"] is True
+    assert "redis_available" not in payload["details"]
 
 
 class FakeWorker:
@@ -253,17 +255,20 @@ async def test_resource_health_projects_current_queue_without_other_project_ids(
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_ingestion_health_reads_fixed_keys_and_classifies_pending_work():
-    from infrastructure.redis_client import RedisKeys
+async def test_ingestion_health_reports_durable_queue_delay_without_redis_reads():
+    class Store:
+        async def get_ingestion_queue_health(self, **_kwargs):
+            return {
+                "pending_count": 1,
+                "claimed_count": 0,
+                "blocked_count": 0,
+                "oldest_pending_ms": 1,
+                "last_processed_ms": None,
+            }
 
     redis = FakeRedis()
-    redis.lists[RedisKeys.buffer("ada", "session-a")] = [
-        '{"id": 1, "message": "hidden", "timestamp": "2020-01-01T00:00:00+00:00"}'
-    ]
-    redis.strings[RedisKeys.last_processed("ada", "session-a")] = "0"
-    redis.strings[RedisKeys.project_last_processed("ada", "project-a")] = "0"
-    redis.strings[RedisKeys.checkpoint("ada", "session-a")] = "4"
     resource_set = resources(redis=redis)
+    resource_set.knowledge_store = Store()
     service = RuntimeHealthService(
         resources=resource_set,
         projects=SimpleNamespace(active_projects={}),
@@ -287,27 +292,22 @@ async def test_ingestion_health_reads_fixed_keys_and_classifies_pending_work():
     assert payload["details"]["queue"]["pending_count"] == 1
     assert payload["details"]["queue"]["delay_state"] == "delayed"
     assert payload["details"]["progress"]["message_state"] == "pending"
-    assert payload["details"]["progress"]["checkpoint_count"] == 4
-    serialized = json.dumps(payload)
-    assert "hidden" not in serialized
-    assert '"id"' not in serialized
+    assert redis.ping_calls == 0
+    assert "redis_available" not in payload["details"]
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_ingestion_health_degrades_without_failing_when_redis_reads_fail():
-    class FailingRedis(FakeRedis):
-        async def llen(self, _key):
-            raise RuntimeError("redis://secret")
+async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
+    class FailingStore:
+        async def get_ingestion_queue_health(self, **_kwargs):
+            raise RuntimeError("postgresql://secret")
 
-        async def lrange(self, _key, _start, _end):
-            raise RuntimeError("redis://secret")
-
-        async def get(self, _key):
-            raise RuntimeError("redis://secret")
-
+    redis = FakeRedis()
+    resource_set = resources(redis=redis)
+    resource_set.knowledge_store = FailingStore()
     service = RuntimeHealthService(
-        resources=resources(redis=FailingRedis()),
+        resources=resource_set,
         projects=SimpleNamespace(active_projects={}),
         sessions=SessionRuntimeReader(
             {
@@ -325,9 +325,10 @@ async def test_ingestion_health_degrades_without_failing_when_redis_reads_fail()
     ).model_dump(mode="json")
 
     assert payload["status"] == "degraded"
-    assert payload["details"]["redis_available"] is False
+    assert payload["details"]["queue"]["available"] is False
     assert payload["details"]["queue"]["pending_count"] == 0
-    assert "redis://" not in json.dumps(payload)
+    assert redis.ping_calls == 0
+    assert "postgresql://" not in json.dumps(payload)
 
 
 @pytest.mark.unit

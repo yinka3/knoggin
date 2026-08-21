@@ -225,7 +225,7 @@ async def real_server_scope():
 
 
 def _session(resources, *, user_name, project_id, session_id):
-    context = Session(user_name, [], resources)
+    context = Session(user_name, resources)
     context.session_id = session_id
     context.project_id = project_id
     context.project = SimpleNamespace(
@@ -326,15 +326,8 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         accepted = accepted_messages[-1]
         await worker.flush()
 
-        assert (
-            await redis.llen(RedisKeys.buffer(scope["user_name"], scope["session_id"]))
-            == 0
-        )
-        assert await redis.get(
-            RedisKeys.last_processed(scope["user_name"], scope["session_id"])
-        ) == str(accepted.id)
         message = await postgres.fetch_one(
-            "SELECT role, content, episode_eligible FROM messages "
+            "SELECT role, content, episode_eligible, ingestion_state FROM messages "
             "WHERE message_id = %s",
             (accepted.id,),
         )
@@ -342,6 +335,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             "role": "user",
             "content": "The complete server path must remain grounded.",
             "episode_eligible": True,
+            "ingestion_state": "processed",
         }
 
         episode_job = EpisodeJob(
@@ -585,8 +579,5 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
             "SELECT ingestion_state FROM messages WHERE message_id = %s",
             (accepted.id,),
         ) == {"ingestion_state": "processed"}
-        assert await scope["redis"].get(
-            RedisKeys.last_processed(scope["user_name"], scope["session_id"])
-        ) == str(accepted.id)
     finally:
         await worker.stop()

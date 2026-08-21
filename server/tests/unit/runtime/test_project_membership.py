@@ -407,7 +407,6 @@ async def test_delete_project_clears_project_session_and_agent_redis_state():
         RedisKeys.last_profile_update("ada", "project-1", 2),
         "done",
     )
-    await redis.set(RedisKeys.buffer("ada", "session-1"), "buffered")
     await redis.set(
         RedisKeys.message_dedup("ada", "session-1", "digest"),
         "accepted:1",
@@ -429,7 +428,6 @@ async def test_delete_project_clears_project_session_and_agent_redis_state():
     assert writer.calls == [("ada", "project-1")]
     assert await redis.get(RedisKeys.dirty_entities("ada", "project-1")) is None
     assert await redis.get(RedisKeys.last_profile_update("ada", "project-1", 2)) is None
-    assert await redis.get(RedisKeys.buffer("ada", "session-1")) is None
     assert (
         await redis.get(RedisKeys.message_dedup("ada", "session-1", "digest")) is None
     )

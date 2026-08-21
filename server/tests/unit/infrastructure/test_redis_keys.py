@@ -9,7 +9,6 @@ from tests.fixtures.fakes import FakeRedis
 def test_session_scoped_keys_include_runtime_cleanup_targets():
     keys = RedisKeys.session_keys("ada", "session-1")
 
-    assert RedisKeys.buffer("ada", "session-1") in keys
     assert RedisKeys.message_content("ada", "session-1") in keys
     assert RedisKeys.recent_conversation("ada", "session-1") in keys
     assert RedisKeys.conversation("ada", "session-1") in keys

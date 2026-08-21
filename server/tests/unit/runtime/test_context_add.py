@@ -157,7 +157,6 @@ async def test_context_add_persists_editable_turn_maps_and_signals_consumer(cont
         "role": "user",
     }
 
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
     assert await resources.redis.get(project_heartbeat_key) == "1"
     assert resources.redis.expirations
 
@@ -249,9 +248,6 @@ async def test_context_add_releases_dedup_claim_after_failure(context, monkeypat
 
     assert retried.id == 2
     assert ctx.consumer.signaled == 1
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
-
-
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_context_add_keeps_durable_pending_claim_and_recovers_signal_failure(
@@ -287,7 +283,6 @@ async def test_context_add_keeps_durable_pending_claim_and_recovers_signal_failu
 
     assert retried.id == 1
     assert await resources.redis.get(dedup_key) == "accepted:1"
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
     assert ctx.consumer.signaled == 1
     assert [
         batch[0]["id"] for batch in resources.knowledge_store.saved_message_logs
@@ -321,9 +316,6 @@ async def test_context_add_keeps_claim_after_message_is_queued(context):
     accepted = await ctx.add(Message(content="hello", timestamp=timestamp))
 
     assert accepted.id == 1
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
-
-
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_context_assistant_turn_uses_canonical_message_sequence(context):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Mapping
 from datetime import datetime
 from inspect import isawaitable
@@ -13,7 +12,6 @@ from typing import Any, Callable
 
 from common.schema.health import HealthActivity, HealthSnapshot, HealthStatus
 from common.utils.time_utils import get_now, parse_iso_time
-from infrastructure.redis_client import RedisKeys
 
 _ProbeResult = dict[str, bool | float | str]
 
@@ -215,11 +213,10 @@ class RuntimeHealthService:
         project_id: str,
         session_id: str,
     ) -> HealthSnapshot:
-        """Return bounded worker and canonical ingestion-queue health.
+        """Return bounded worker and PostgreSQL ingestion-queue health.
 
-        This method only reads a fixed set of Redis keys.  It never drains a
-        queue, claims work, wakes a worker, or returns message identifiers
-        or payloads.
+        This reads only the durable queue aggregate. It never claims work,
+        wakes a worker, or returns message identifiers or payloads.
         """
 
         warnings: list[str] = []
@@ -229,21 +226,22 @@ class RuntimeHealthService:
             "health_snapshot",
             warnings,
         )
-        redis_details = await self._read_ingestion_redis_health(
+        queue_details = await self._read_ingestion_queue_health(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
         )
-        warnings.extend(redis_details.pop("warnings", []))
+        warnings.extend(queue_details.pop("warnings", []))
 
-        worker_state = worker_snapshot.get("state")
-        redis_available = redis_details.get("redis_available") is True
-        pending_count = self._nonnegative_int(redis_details.get("pending_count"))
+        queue_available = queue_details.get("queue_available") is True
+        pending_count = self._nonnegative_int(queue_details.get("pending_count"))
+        claimed_count = self._nonnegative_int(queue_details.get("claimed_count"))
+        blocked_count = self._nonnegative_int(queue_details.get("blocked_count"))
         consecutive_failures = self._nonnegative_int(
             worker_snapshot.get("consecutive_failures")
         )
 
-        oldest_age = redis_details.get("oldest_pending_age_seconds")
+        oldest_age = queue_details.get("oldest_pending_age_seconds")
         timeout = worker_snapshot.get("batch_timeout_seconds")
         timeout_seconds = (
             float(timeout)
@@ -255,7 +253,10 @@ class RuntimeHealthService:
         current_batch_age = self._age_seconds(
             worker_snapshot.get("current_batch_started_at")
         )
-        if worker_state == "failed" or (
+        worker_state = worker_snapshot.get("state")
+        if worker_state == "failed":
+            delay_state = "stalled"
+        elif (
             self._nonnegative_int(worker_snapshot.get("current_batch_size"))
             and current_batch_age is not None
             and timeout_seconds is not None
@@ -277,6 +278,8 @@ class RuntimeHealthService:
             warnings.append("pending ingestion work is stalled")
         elif delay_state == "delayed":
             warnings.append("pending ingestion work is delayed")
+        if blocked_count:
+            warnings.append("ingestion queue has blocked work")
         if consecutive_failures:
             warnings.append("ingestion worker has consecutive failures")
         if worker_state in {"not_started", "stopped"}:
@@ -288,9 +291,10 @@ class RuntimeHealthService:
             status = HealthStatus.FAILED
             summary = "Ingestion worker has failed"
         elif (
-            not redis_available
+            not queue_available
             or worker_state != "running"
             or delay_state in {"delayed", "stalled"}
+            or blocked_count
             or consecutive_failures
         ):
             status = HealthStatus.DEGRADED
@@ -299,10 +303,11 @@ class RuntimeHealthService:
             status = HealthStatus.HEALTHY
             summary = "Ingestion is healthy"
 
-        if not redis_available or delay_state in {"delayed", "stalled"}:
+        if delay_state in {"delayed", "stalled"} or not queue_available:
             activity = HealthActivity.DELAYED
         elif (
             pending_count
+            or claimed_count
             or self._nonnegative_int(worker_snapshot.get("current_batch_size"))
             or worker_state == "draining"
         ):
@@ -310,12 +315,14 @@ class RuntimeHealthService:
         else:
             activity = HealthActivity.IDLE
 
-        if pending_count:
+        if blocked_count:
+            message_state = "blocked"
+        elif claimed_count:
+            message_state = "claimed"
+        elif pending_count:
             message_state = "pending"
-        elif redis_details.get("last_processed_available"):
+        elif queue_details.get("last_processed_available"):
             message_state = "processed"
-        elif redis_details.get("checkpoint_available"):
-            message_state = "durable"
         else:
             message_state = "unknown"
 
@@ -326,27 +333,22 @@ class RuntimeHealthService:
             details={
                 "worker": worker_snapshot,
                 "queue": {
+                    "available": queue_available,
                     "pending_count": pending_count,
+                    "claimed_count": claimed_count,
+                    "blocked_count": blocked_count,
                     "oldest_pending_available": (
-                        redis_details.get("oldest_pending_available") is True
+                        queue_details.get("oldest_pending_available") is True
                     ),
                     "oldest_pending_age_seconds": oldest_age,
                     "delay_state": delay_state,
                 },
                 "progress": {
-                    "checkpoint_available": (
-                        redis_details.get("checkpoint_available") is True
-                    ),
-                    "checkpoint_count": redis_details.get("checkpoint_count"),
                     "last_processed_available": (
-                        redis_details.get("last_processed_available") is True
-                    ),
-                    "project_last_processed_available": (
-                        redis_details.get("project_last_processed_available") is True
+                        queue_details.get("last_processed_available") is True
                     ),
                     "message_state": message_state,
                 },
-                "redis_available": redis_available,
             },
             warnings=warnings,
         )
@@ -505,122 +507,63 @@ class RuntimeHealthService:
             return None, error
         return self._nonnegative_int_or_none(value), None
 
-    async def _read_ingestion_redis_health(
+    async def _read_ingestion_queue_health(
         self,
         *,
         user_name: str,
         project_id: str,
         session_id: str,
     ) -> dict[str, Any]:
+        """Read the canonical PostgreSQL queue aggregate without message payloads."""
+
         store = getattr(self.resources, "knowledge_store", None)
         read_queue_health = getattr(store, "get_ingestion_queue_health", None)
-        if callable(read_queue_health):
-            queue, error = await self._bounded_read(
-                lambda: read_queue_health(
-                    user_name=user_name,
-                    project_id=project_id,
-                    session_id=session_id,
-                )
-            )
-            if error is None and isinstance(queue, Mapping):
-                pending_count = self._nonnegative_int(queue.get("pending_count"))
-                oldest_ms = self._nonnegative_int_or_none(
-                    queue.get("oldest_pending_ms")
-                )
-                oldest_age = None
-                if oldest_ms is not None:
-                    oldest_age = max(get_now().timestamp() - oldest_ms / 1000, 0.0)
-                return {
-                    "redis_available": True,
-                    "warnings": [],
-                    "pending_count": pending_count,
-                    "oldest_pending_available": oldest_ms is not None,
-                    "oldest_pending_age_seconds": oldest_age,
-                    "last_processed_available": queue.get("last_processed_ms")
-                    is not None,
-                    "project_last_processed_available": queue.get("last_processed_ms")
-                    is not None,
-                    "checkpoint_available": False,
-                    "checkpoint_count": None,
-                }
+        if not callable(read_queue_health):
             return {
-                "redis_available": False,
+                "queue_available": False,
                 "warnings": ["PostgreSQL ingestion metrics are unavailable"],
                 "pending_count": 0,
+                "claimed_count": 0,
+                "blocked_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "last_processed_available": False,
-                "project_last_processed_available": False,
-                "checkpoint_available": False,
-                "checkpoint_count": None,
-            }
-        redis = getattr(self.resources, "redis", None)
-        if redis is None:
-            manager = getattr(self.resources, "redis_manager", None)
-            try:
-                redis = getattr(manager, "client", None)
-            except Exception:
-                redis = None
-        if redis is None:
-            return {
-                "redis_available": False,
-                "warnings": ["Redis ingestion metrics are unavailable"],
-                "pending_count": 0,
-                "oldest_pending_available": False,
-                "oldest_pending_age_seconds": None,
-                "last_processed_available": False,
-                "project_last_processed_available": False,
-                "checkpoint_available": False,
-                "checkpoint_count": None,
             }
 
-        buffer_key = RedisKeys.buffer(user_name, session_id)
-        operations = {
-            "pending_count": lambda: redis.llen(buffer_key),
-            "oldest_pending": lambda: redis.lrange(buffer_key, 0, 0),
-            "last_processed": lambda: redis.get(
-                RedisKeys.last_processed(user_name, session_id)
-            ),
-            "project_last_processed": lambda: redis.get(
-                RedisKeys.project_last_processed(user_name, project_id)
-            ),
-            "checkpoint": lambda: redis.get(
-                RedisKeys.checkpoint(user_name, session_id)
-            ),
-        }
-        results = await asyncio.gather(
-            *(self._bounded_read(operation) for operation in operations.values())
+        queue, error = await self._bounded_read(
+            lambda: read_queue_health(
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+            )
         )
-        values = dict(zip(operations, results, strict=True))
-        warnings = [
-            f"Redis ingestion metric unavailable: {name}"
-            for name, result in values.items()
-            if result[1] is not None
-        ]
-        redis_available = not warnings
+        if error is not None or not isinstance(queue, Mapping):
+            return {
+                "queue_available": False,
+                "warnings": ["PostgreSQL ingestion metrics are unavailable"],
+                "pending_count": 0,
+                "claimed_count": 0,
+                "blocked_count": 0,
+                "oldest_pending_available": False,
+                "oldest_pending_age_seconds": None,
+                "last_processed_available": False,
+            }
 
-        pending_result = values["pending_count"][0]
-        pending_count = self._nonnegative_int(pending_result)
-        oldest_raw = values["oldest_pending"][0]
-        oldest_timestamp = self._oldest_pending_timestamp(oldest_raw)
-        oldest_age = None
-        if oldest_timestamp is not None:
-            oldest_age = max((get_now() - oldest_timestamp).total_seconds(), 0.0)
-
-        checkpoint_raw = values["checkpoint"][0]
-        checkpoint_count = self._nonnegative_int_or_none(checkpoint_raw)
+        oldest_ms = self._nonnegative_int_or_none(queue.get("oldest_pending_ms"))
+        oldest_age = (
+            max(get_now().timestamp() - oldest_ms / 1000, 0.0)
+            if oldest_ms is not None
+            else None
+        )
         return {
-            "redis_available": redis_available,
-            "warnings": warnings,
-            "pending_count": pending_count,
-            "oldest_pending_available": oldest_timestamp is not None,
+            "queue_available": True,
+            "warnings": [],
+            "pending_count": self._nonnegative_int(queue.get("pending_count")),
+            "claimed_count": self._nonnegative_int(queue.get("claimed_count")),
+            "blocked_count": self._nonnegative_int(queue.get("blocked_count")),
+            "oldest_pending_available": oldest_ms is not None,
             "oldest_pending_age_seconds": oldest_age,
-            "last_processed_available": bool(values["last_processed"][0]),
-            "project_last_processed_available": bool(
-                values["project_last_processed"][0]
-            ),
-            "checkpoint_available": checkpoint_count is not None,
-            "checkpoint_count": checkpoint_count,
+            "last_processed_available": queue.get("last_processed_ms") is not None,
         }
 
     async def _bounded_read(
@@ -637,33 +580,6 @@ class RuntimeHealthService:
             return None, "timeout"
         except Exception:
             return None, "read_failed"
-
-    @staticmethod
-    def _oldest_pending_timestamp(raw: Any) -> datetime | None:
-        if not isinstance(raw, (list, tuple)) or not raw:
-            return None
-        item = raw[0]
-        if isinstance(item, bytes):
-            try:
-                item = item.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-        if not isinstance(item, str):
-            return None
-        if len(item) > 8192:
-            return None
-        try:
-            payload = json.loads(item)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None
-        if not isinstance(payload, Mapping):
-            return None
-        timestamp = parse_iso_time(payload.get("timestamp"))
-        if timestamp is None:
-            return None
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=get_now().tzinfo)
-        return timestamp
 
     @staticmethod
     def _age_seconds(value: Any) -> float | None:

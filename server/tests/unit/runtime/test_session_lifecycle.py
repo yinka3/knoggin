@@ -256,7 +256,6 @@ async def test_failed_durable_delete_keeps_cache_and_clears_deleting_marker(
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_history_is_postgres_only(session_manager):
-    manager, resources, _, _ = session_manager
-    await resources.redis.rpush(RedisKeys.buffer("ada", "session-1"), "ignored")
+    manager, _, _, _ = session_manager
 
     assert await manager.get_session_history_readonly("session-1") == []
