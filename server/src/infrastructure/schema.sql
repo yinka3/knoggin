@@ -1033,7 +1033,10 @@ CREATE TABLE IF NOT EXISTS public.entity_merge_proposals (
                 'rejected',
                 'failed'
             )
-        )
+        ),
+    CONSTRAINT entity_merge_proposals_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS entity_merge_proposals_project_idx
@@ -1063,7 +1066,10 @@ CREATE TABLE IF NOT EXISTS public.entity_merge_audits (
     rolled_back_at TIMESTAMPTZ,
     rolled_back_by TEXT,
     rollback_failure_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT entity_merge_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 ALTER TABLE public.entity_merge_proposals
@@ -1227,7 +1233,10 @@ CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
     base_score DOUBLE PRECISION NOT NULL,
     reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_entity_id BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ingestion_candidate_suggestions_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_project_idx
@@ -1266,7 +1275,10 @@ CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     ),
     CONSTRAINT agent_tool_audits_status_check CHECK (
         status IN ('started', 'succeeded', 'rejected', 'failed')
-    )
+    ),
+    CONSTRAINT agent_tool_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS agent_tool_audits_scope_idx
@@ -1348,7 +1360,10 @@ CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
             AND excluded_count >= 0
             AND excluded_bytes >= 0
             AND excluded_directory_count >= 0
-        )
+        ),
+    CONSTRAINT document_folder_uploads_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS document_folder_uploads_project_idx
@@ -1395,7 +1410,10 @@ CREATE TABLE IF NOT EXISTS public.document_workspace_sources (
             last_manifest_candidate_count >= 0
             AND last_manifest_included_count >= 0
             AND last_manifest_excluded_count >= 0
-        )
+        ),
+    CONSTRAINT document_workspace_sources_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 ALTER TABLE public.document_workspace_sources
@@ -1446,7 +1464,8 @@ ON public.document_workspace_sources(project_id)
 WHERE ownership_mode = 'managed_project_workspace';
 
 CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
-    project_id TEXT PRIMARY KEY,
+    project_id TEXT PRIMARY KEY REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
     settings JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1455,7 +1474,8 @@ CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
 -- Project-owned source documents and their derived retrieval chunks.
 CREATE TABLE IF NOT EXISTS public.project_documents (
     document_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
     session_id TEXT,
     visibility_scope TEXT NOT NULL,
     folder_root_id UUID REFERENCES public.document_folder_uploads(folder_root_id)
@@ -2082,6 +2102,85 @@ CREATE TRIGGER episode_entities_focus_limit_trigger
 AFTER INSERT OR UPDATE OF episode_id, is_focus_entity
 ON public.episode_entities
 FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();
+
+-- Existing unreleased databases may predate the direct project foreign keys
+-- above.  Make project deletion one cascade root rather than a handwritten
+-- list of every descendant table.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ingestion_candidate_suggestions_project_fk'
+    ) THEN
+        ALTER TABLE public.ingestion_candidate_suggestions
+        ADD CONSTRAINT ingestion_candidate_suggestions_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'agent_tool_audits_project_fk'
+    ) THEN
+        ALTER TABLE public.agent_tool_audits
+        ADD CONSTRAINT agent_tool_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entity_merge_proposals_project_fk'
+    ) THEN
+        ALTER TABLE public.entity_merge_proposals
+        ADD CONSTRAINT entity_merge_proposals_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entity_merge_audits_project_fk'
+    ) THEN
+        ALTER TABLE public.entity_merge_audits
+        ADD CONSTRAINT entity_merge_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'document_folder_uploads_project_fk'
+    ) THEN
+        ALTER TABLE public.document_folder_uploads
+        ADD CONSTRAINT document_folder_uploads_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'document_workspace_sources_project_fk'
+    ) THEN
+        ALTER TABLE public.document_workspace_sources
+        ADD CONSTRAINT document_workspace_sources_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'project_document_scan_settings_project_id_fkey'
+    ) THEN
+        ALTER TABLE public.project_document_scan_settings
+        ADD CONSTRAINT project_document_scan_settings_project_id_fkey
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'project_documents_project_id_fkey'
+    ) THEN
+        ALTER TABLE public.project_documents
+        ADD CONSTRAINT project_documents_project_id_fkey
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+END $$;
 
 -- Preserve the session-owned episode shape while adding the current user-edit
 -- marker to databases created before that field was introduced.

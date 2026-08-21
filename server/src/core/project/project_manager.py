@@ -735,12 +735,19 @@ class ProjectManager:
                 await active_state.shutdown()
                 del self.active_projects[project_id]
 
-            session_ids, agent_ids = await self._project_runtime_member_ids(project_id)
-            await self._delete_project_redis_state(
-                project_id,
-                session_ids=session_ids,
-                agent_ids=agent_ids,
-            )
+            session_ids: List[str] = []
+            agent_ids: List[str] = []
+            if getattr(self.resources, "redis", None) is not None:
+                try:
+                    session_ids, agent_ids = await self._project_runtime_member_ids(
+                        project_id
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not snapshot Redis cleanup members for project {}: {}",
+                        project_id,
+                        exc,
+                    )
             deleted = await self._project_deletion_writer.delete_project(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -748,6 +755,19 @@ class ProjectManager:
             if deleted is None:
                 raise RuntimeError(
                     f"Project '{project_id}' disappeared during deletion"
+                )
+
+            try:
+                await self._delete_project_redis_state(
+                    project_id,
+                    session_ids=session_ids,
+                    agent_ids=agent_ids,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Durable deletion completed but Redis cleanup failed for project {}: {}",
+                    project_id,
+                    exc,
                 )
 
             logger.info(

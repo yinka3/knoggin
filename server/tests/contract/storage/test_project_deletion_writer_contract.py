@@ -7,9 +7,9 @@ from infrastructure.postgres_client import PostgresClient
 
 
 class RecordingCursor:
-    def __init__(self, *, project_exists=True, fail_on_table=None) -> None:
+    def __init__(self, *, project_exists=True, fail_on_operation=None) -> None:
         self.project_exists = project_exists
-        self.fail_on_table = fail_on_table
+        self.fail_on_operation = fail_on_operation
         self.calls = []
         self.rowcount = 0
         self._result = None
@@ -17,11 +17,8 @@ class RecordingCursor:
     async def execute(self, query, params=None) -> None:
         normalized = " ".join(query.split())
         self.calls.append((normalized, params))
-        if (
-            self.fail_on_table
-            and f"DELETE FROM public.{self.fail_on_table}" in normalized
-        ):
-            raise RuntimeError("injected aggregate delete failure")
+        if self.fail_on_operation and self.fail_on_operation in normalized:
+            raise RuntimeError("injected project delete failure")
         if normalized.startswith("SELECT project_id FROM public.projects"):
             self._result = {"project_id": "project-1"} if self.project_exists else None
             self.rowcount = 1 if self.project_exists else 0
@@ -56,21 +53,22 @@ class RecordingClient:
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_project_deletion_removes_all_relational_and_age_state_atomically():
+async def test_project_deletion_uses_one_project_cascade_root_atomically():
     client = RecordingClient()
     writer = ProjectDeletionWriter(client)
 
     deleted = await writer.delete_project(user_name="ada", project_id="project-1")
 
     assert deleted is not None
-    assert set(deleted) == {*writer._PROJECT_TABLES, "projects"}
+    assert set(deleted) == {"entities", "projects"}
     assert client.transaction_exits == ["commit"]
 
     queries = [query for query, _ in client.cursor.calls]
     assert queries[0].startswith("SELECT project_id FROM public.projects")
     assert any("DETACH DELETE n" in query for query in queries)
-    for table in writer._PROJECT_TABLES:
-        assert any(f"DELETE FROM public.{table}" in query for query in queries)
+    assert any("DELETE FROM public.entities" in query for query in queries)
+    assert not any("DELETE FROM public.messages" in query for query in queries)
+    assert not any("DELETE FROM public.project_documents" in query for query in queries)
     assert queries[-1].startswith("DELETE FROM public.projects")
 
 
@@ -88,10 +86,10 @@ async def test_project_deletion_returns_none_without_mutating_missing_project():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_project_deletion_failure_escapes_atomic_transaction():
-    client = RecordingClient(fail_on_table="episode_entities")
+    client = RecordingClient(fail_on_operation="DELETE FROM public.entities")
     writer = ProjectDeletionWriter(client)
 
-    with pytest.raises(RuntimeError, match="injected aggregate delete failure"):
+    with pytest.raises(RuntimeError, match="injected project delete failure"):
         await writer.delete_project(user_name="ada", project_id="project-1")
 
     assert client.transaction_exits == ["rollback"]
