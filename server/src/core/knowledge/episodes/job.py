@@ -61,7 +61,6 @@ class EpisodeJob(BaseJob):
             settings=settings,
             episode_window_size=current_window_size,
         )
-        self.retrieval_episode_limit = settings.retrieval_episode_limit
 
     def update_episode_window_size(self, episode_window_size: int) -> None:
         self._policy = EpisodeGenerationPolicy.capture(

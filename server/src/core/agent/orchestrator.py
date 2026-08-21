@@ -251,7 +251,6 @@ class Orchestrator:
             postgres=context.resources.postgres,
             redis=context.redis_client,
             agent_id=agent_id,
-            episode_settings=config.developer_settings.jobs.episode,
             health_service=getattr(context, "health_service", None),
         )
 

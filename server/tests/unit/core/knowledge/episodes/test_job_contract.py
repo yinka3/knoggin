@@ -1,7 +1,9 @@
 import pytest
+from pydantic import ValidationError
 
 from common.schema.settings import EpisodeSettings
 from core.knowledge.episodes.job import EpisodeJob
+from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from infrastructure.job.base import JobContext
 
 
@@ -28,7 +30,7 @@ async def test_episode_should_run_uses_project_readiness_without_loading_message
     store = _ReadinessStore(ready=True)
     job = EpisodeJob(
         knowledge_store=store,
-        settings=EpisodeSettings(max_message_count=12),
+        settings=EpisodeSettings(),
         episode_window_size=8,
         episode_window_size_provider=project_window_size,
         llm=object(),
@@ -44,3 +46,21 @@ async def test_episode_should_run_uses_project_readiness_without_loading_message
         }
     ]
     assert store.window_reads == 0
+
+
+@pytest.mark.no_network
+def test_episode_policy_only_snapshots_current_generation_controls():
+    policy = EpisodeGenerationPolicy.capture(
+        settings=EpisodeSettings(max_narrative_chars=5000),
+        episode_window_size=12,
+    )
+
+    assert policy.metadata() == {
+        "version": policy.version,
+        "target_message_count": 12,
+        "max_narrative_chars": 5000,
+        "prompt_narrative_chars": 4500,
+        "prior_episode_candidate_count": 3,
+    }
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        EpisodeSettings(max_message_count=12)

@@ -71,7 +71,7 @@ def test_config_manager_subscription_and_update(mock_config_paths, reset_config_
 
     # Update unrelated setting (should not fire)
     mgr.update_settings(
-        {"developer_settings": {"jobs": {"episode": {"max_message_count": 100}}}}
+        {"developer_settings": {"jobs": {"episode": {"max_narrative_chars": 5000}}}}
     )
     assert len(received_updates) == 1
 

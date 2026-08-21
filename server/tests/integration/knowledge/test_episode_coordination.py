@@ -153,7 +153,7 @@ def _episode_job(store, llm, embedding=None):
     embedding = embedding or DeterministicEmbeddingService()
     return EpisodeJob(
         knowledge_store=store,
-        settings=EpisodeSettings(max_message_count=8),
+        settings=EpisodeSettings(),
         episode_window_size=8,
         llm=llm,
         embedding_service=embedding,

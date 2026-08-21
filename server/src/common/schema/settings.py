@@ -115,15 +115,10 @@ class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
     enabled: bool = Field(True)
-    # The window size belongs to each project, not to global ingestion batch
-    # tuning.  These remain server-wide operational limits only.
-    max_message_count: int = Field(72, ge=1)
     # A server-owned hard cap across every persisted narrative field.  The
     # prompt uses 90% of this value; persistence validates the full limit.
     max_narrative_chars: int = Field(4000, ge=500, le=20000)
-    max_age_hours: Optional[float] = Field(None, gt=0)
     prior_episode_candidate_count: int = Field(3, ge=1, le=3)
-    retrieval_episode_limit: int = Field(5, ge=1)
 
 
 class MergeRollbackSettings(ConfigModel):

@@ -12,7 +12,6 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
-from common.schema.settings import EpisodeSettings
 from core.agent.tools.graph import GraphTools
 from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
@@ -811,7 +810,6 @@ class Tools(
         postgres=None,
         redis=None,
         agent_id: Optional[str] = None,
-        episode_settings: Optional[EpisodeSettings] = None,
         health_service=None,
         workspace_service=None,
     ):
@@ -837,8 +835,6 @@ class Tools(
             list(compiled_domain.active_topics) if compiled_domain else None
         )
         self.search_cfg = search_config or {}
-        episode_settings = episode_settings or EpisodeSettings()
-        self.episode_retrieval_limit = episode_settings.retrieval_episode_limit
         self.agent_id = agent_id or "AGENT_IDENTITY"
         self.tool_authorization: Optional[ToolPermissions] = None
         self.active_tool_schemas: Dict[str, dict] = {}

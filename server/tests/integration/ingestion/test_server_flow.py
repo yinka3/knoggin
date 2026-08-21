@@ -340,7 +340,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
 
         episode_job = EpisodeJob(
             knowledge_store=store,
-            settings=EpisodeSettings(max_message_count=8),
+            settings=EpisodeSettings(),
             episode_window_size=8,
             llm=_DeterministicEpisodeLLM(),
             embedding_service=_DeterministicEmbeddingService(),
