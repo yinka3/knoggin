@@ -115,7 +115,7 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_domain_constraints_enforce_attachment_checkpoint_and_hierarchy_scope(
+async def test_domain_constraints_enforce_attachment_and_checkpoint_scope(
     real_postgres_client,
 ):
     await _seed_scoped_graph(real_postgres_client)
@@ -140,28 +140,6 @@ async def test_domain_constraints_enforce_attachment_checkpoint_and_hierarchy_sc
             VALUES ('project-2', 'session-1')
             """
         )
-    with pytest.raises(CheckViolation, match="hierarchy endpoints"):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO hierarchy_edges (project_id, parent_id, child_id)
-            VALUES ('project-1', 2, 4)
-            """
-        )
-
-    await real_postgres_client.execute(
-        """
-        INSERT INTO hierarchy_edges (project_id, parent_id, child_id)
-        VALUES ('project-1', 2, 3)
-        """
-    )
-    with pytest.raises(CheckViolation, match="hierarchy edge would create a cycle"):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO hierarchy_edges (project_id, parent_id, child_id)
-            VALUES ('project-1', 3, 2)
-            """
-        )
-
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres

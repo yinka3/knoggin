@@ -261,14 +261,6 @@ class MergeAuditWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM hierarchy_edges
-                WHERE project_id = %s
-                  AND (parent_id = ANY(%s) OR child_id = ANY(%s))
-                """,
-                (project_id, ids, ids),
-            )
-            await cur.execute(
-                """
                 DELETE FROM message_entity_refs
                 WHERE entity_id = ANY(%s)
                 """,
@@ -504,27 +496,6 @@ class MergeAuditWriter:
                         float(episode_relationship.get("prominence_weight") or 0.0),
                         bool(episode_relationship.get("is_central_relationship")),
                         int(episode_relationship.get("source_message_count") or 0),
-                    ),
-                )
-
-            for edge in before_state["hierarchy"]:
-                await cur.execute(
-                    """
-                    INSERT INTO hierarchy_edges (
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    )
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (project_id, parent_id, child_id)
-                    DO UPDATE SET created_at_ms = EXCLUDED.created_at_ms
-                    """,
-                    (
-                        edge["project_id"],
-                        int(edge["parent_id"]),
-                        int(edge["child_id"]),
-                        edge.get("created_at_ms"),
                     ),
                 )
 

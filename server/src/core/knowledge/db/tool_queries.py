@@ -285,21 +285,7 @@ class ToolQueries:
                 COALESCE(
                     (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = e.entity_id),
                     '{}'::text[]
-                ) as aliases,
-                (
-                    SELECT canonical_name
-                    FROM entities p
-                    JOIN hierarchy_edges he ON he.parent_id = p.entity_id
-                    WHERE he.child_id = e.entity_id
-                      AND he.project_id = ANY(%s)
-                    LIMIT 1
-                ) as parent_name,
-                (
-                    SELECT count(*)
-                    FROM hierarchy_edges
-                    WHERE parent_id = e.entity_id
-                      AND project_id = ANY(%s)
-                ) as children_count
+                ) as aliases
             FROM entities e
             WHERE e.entity_id = ANY(%s)
               AND (e.project_id = ANY(%s) OR e.entity_id = %s)
@@ -307,8 +293,6 @@ class ToolQueries:
             if active_topics:
                 entity_sql += " AND e.topic = ANY(%s)"
                 params = (
-                    visible_project_ids,
-                    visible_project_ids,
                     entity_ids,
                     visible_project_ids,
                     IDENTITY_ENTITY_ID,
@@ -316,8 +300,6 @@ class ToolQueries:
                 )
             else:
                 params = (
-                    visible_project_ids,
-                    visible_project_ids,
                     entity_ids,
                     visible_project_ids,
                     IDENTITY_ENTITY_ID,
@@ -335,10 +317,6 @@ class ToolQueries:
                     "type": row["type"],
                     "topic": row["topic"],
                     "last_mentioned": row["last_mentioned"],
-                    "hierarchy": {
-                        "parent": row["parent_name"],
-                        "children_count": row["children_count"],
-                    },
                     "top_connections": [],
                     "_conn_names": set(),
                 }

@@ -681,13 +681,6 @@ class KnowledgeStore:
             alias_updates, project_id=project_id
         )
 
-    async def create_hierarchy_edge(
-        self, parent_id: int, child_id: int, *, project_id: str
-    ) -> bool:
-        return await self._graph_writer.create_hierarchy_edge(
-            parent_id, child_id, project_id=project_id
-        )
-
     async def merge_entities(
         self,
         primary_id: int,
@@ -1197,14 +1190,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_parent_entities(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._graph_reader.get_parent_entities(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
     async def get_neighbor_entities(
         self,
         entity_id: int,
@@ -1216,26 +1201,6 @@ class KnowledgeStore:
             entity_id,
             visible_project_ids=visible_project_ids,
             limit=limit,
-        )
-
-    async def get_child_entities(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._graph_reader.get_child_entities(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def get_hierarchy_candidates(
-        self,
-        project_id: str,
-        topic: str,
-        parent_type: str,
-        child_types: List[str],
-        min_weight: int = 2,
-    ) -> List[Dict]:
-        return await self._graph_reader.get_hierarchy_candidates(
-            project_id, topic, parent_type, child_types, min_weight
         )
 
     async def get_merge_topic_strength(
@@ -1254,15 +1219,6 @@ class KnowledgeStore:
         self, id_a: int, id_b: int, *, visible_project_ids: List[str]
     ) -> bool:
         return await self._graph_reader.has_direct_edge(
-            id_a,
-            id_b,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def has_hierarchy_edge(
-        self, id_a: int, id_b: int, *, visible_project_ids: List[str]
-    ) -> bool:
-        return await self._graph_reader.has_hierarchy_edge(
             id_a,
             id_b,
             visible_project_ids=visible_project_ids,

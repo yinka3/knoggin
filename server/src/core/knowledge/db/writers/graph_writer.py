@@ -168,18 +168,6 @@ class GraphWriter:
                 )
         return params
 
-    @staticmethod
-    def _hierarchy_projection_params(rows: List[Dict]) -> List[Dict]:
-        return [
-            {
-                "project_id": row["project_id"],
-                "parent_id": int(row["parent_id"]),
-                "child_id": int(row["child_id"]),
-                "created_at": int(row.get("created_at_ms") or 0),
-            }
-            for row in rows
-        ]
-
     async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
         if not messages:
             return True
@@ -328,98 +316,6 @@ class GraphWriter:
         logger.info(f"Saved {len(messages)} message logs to Postgres/AGE.")
         return True
 
-    async def create_hierarchy_edge(
-        self, parent_id: int, child_id: int, *, project_id: str
-    ) -> bool:
-        project_id = self._require_project_id(project_id, "create_hierarchy_edge")
-        if parent_id == child_id:
-            logger.warning(f"Self hierarchy edge rejected: {parent_id}")
-            return False
-        try:
-            now_ms = self._current_time_ms()
-            async with self.client.transaction() as cur:
-                await cur.execute(
-                    """
-                    SELECT pg_advisory_xact_lock(
-                        hashtextextended(%s, 0)
-                    )
-                    """,
-                    (project_id,),
-                )
-                await cur.execute(
-                    """
-                    WITH RECURSIVE ancestors(entity_id) AS (
-                        SELECT parent_id
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND child_id = %s
-
-                        UNION
-
-                        SELECT edge.parent_id
-                        FROM hierarchy_edges edge
-                        JOIN ancestors
-                          ON edge.child_id = ancestors.entity_id
-                        WHERE edge.project_id = %s
-                    )
-                    INSERT INTO hierarchy_edges (
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    )
-                    SELECT %s, %s, %s, %s
-                    WHERE EXISTS (
-                        SELECT 1
-                        FROM entities
-                        WHERE entity_id = %s
-                          AND project_id = %s
-                    )
-                    AND EXISTS (
-                        SELECT 1
-                        FROM entities
-                        WHERE entity_id = %s
-                          AND project_id = %s
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM ancestors
-                        WHERE entity_id = %s
-                    )
-                    ON CONFLICT (project_id, parent_id, child_id)
-                    DO NOTHING
-                    RETURNING parent_id
-                    """,
-                    (
-                        project_id,
-                        parent_id,
-                        project_id,
-                        project_id,
-                        parent_id,
-                        child_id,
-                        now_ms,
-                        parent_id,
-                        project_id,
-                        child_id,
-                        project_id,
-                        child_id,
-                    ),
-                )
-                canonical_record = await cur.fetchone()
-                if not canonical_record:
-                    return False
-
-                projected = await self.projection.create_hierarchy_edge(
-                    cur,
-                    parent_id,
-                    child_id,
-                    project_id,
-                    now_ms,
-                )
-                return projected
-        except Exception as e:
-            self._raise_storage_write("create_hierarchy_edge", e)
-
     async def delete_relationship(
         self,
         entity_a_id: int,
@@ -536,68 +432,6 @@ class GraphWriter:
                     logger.error(
                         "Merge failed: one or both entities not found "
                         f"({primary_id}, {secondary_id})"
-                    )
-                    return False
-
-                await cur.execute(
-                    """
-                    WITH RECURSIVE
-                    primary_ancestors(entity_id) AS (
-                        SELECT parent_id
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND child_id = %s
-
-                        UNION
-
-                        SELECT edge.parent_id
-                        FROM hierarchy_edges edge
-                        JOIN primary_ancestors ancestor
-                          ON edge.child_id = ancestor.entity_id
-                        WHERE edge.project_id = %s
-                    ),
-                    secondary_ancestors(entity_id) AS (
-                        SELECT parent_id
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND child_id = %s
-
-                        UNION
-
-                        SELECT edge.parent_id
-                        FROM hierarchy_edges edge
-                        JOIN secondary_ancestors ancestor
-                          ON edge.child_id = ancestor.entity_id
-                        WHERE edge.project_id = %s
-                    )
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM primary_ancestors
-                        WHERE entity_id = %s
-
-                        UNION ALL
-
-                        SELECT 1
-                        FROM secondary_ancestors
-                        WHERE entity_id = %s
-                    ) AS creates_cycle
-                    """,
-                    (
-                        project_id,
-                        primary_id,
-                        project_id,
-                        project_id,
-                        secondary_id,
-                        project_id,
-                        secondary_id,
-                        primary_id,
-                    ),
-                )
-                cycle_check = await cur.fetchone() or {}
-                if cycle_check.get("creates_cycle"):
-                    logger.warning(
-                        "Merge rejected because hierarchy connects "
-                        f"{primary_id} and {secondary_id}"
                     )
                     return False
 
@@ -1084,75 +918,6 @@ class GraphWriter:
 
                 await cur.execute(
                     """
-                    WITH rewritten AS (
-                        SELECT
-                            project_id,
-                            CASE
-                                WHEN parent_id = %s THEN %s
-                                ELSE parent_id
-                            END AS parent_id,
-                            CASE
-                                WHEN child_id = %s THEN %s
-                                ELSE child_id
-                            END AS child_id,
-                            created_at_ms
-                        FROM hierarchy_edges
-                        WHERE project_id = %s
-                          AND (
-                              parent_id = %s
-                              OR child_id = %s
-                          )
-                    ),
-                    deduplicated AS (
-                        SELECT
-                            project_id,
-                            parent_id,
-                            child_id,
-                            MIN(created_at_ms) AS created_at_ms
-                        FROM rewritten
-                        WHERE parent_id <> child_id
-                        GROUP BY project_id, parent_id, child_id
-                    )
-                    INSERT INTO hierarchy_edges (
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    )
-                    SELECT
-                        project_id,
-                        parent_id,
-                        child_id,
-                        created_at_ms
-                    FROM deduplicated
-                    ON CONFLICT (project_id, parent_id, child_id)
-                    DO NOTHING
-                    """,
-                    (
-                        secondary_id,
-                        primary_id,
-                        secondary_id,
-                        primary_id,
-                        project_id,
-                        secondary_id,
-                        secondary_id,
-                    ),
-                )
-
-                await cur.execute(
-                    """
-                    DELETE FROM hierarchy_edges
-                    WHERE project_id = %s
-                      AND (
-                          parent_id = %s
-                          OR child_id = %s
-                      )
-                    """,
-                    (project_id, secondary_id, secondary_id),
-                )
-
-                await cur.execute(
-                    """
                     SELECT
                         rel.relationship_id,
                         rel.user_name,
@@ -1202,23 +967,6 @@ class GraphWriter:
 
                 await cur.execute(
                     """
-                    SELECT project_id, parent_id, child_id, created_at_ms
-                    FROM hierarchy_edges
-                    WHERE project_id = %s
-                      AND (
-                          parent_id = %s
-                          OR child_id = %s
-                      )
-                    """,
-                    (project_id, primary_id, primary_id),
-                )
-                hierarchy_projection_rows = await cur.fetchall()
-                hierarchy_projection = self._hierarchy_projection_params(
-                    hierarchy_projection_rows
-                )
-
-                await cur.execute(
-                    """
                     SELECT
                         (
                             SELECT count(*)
@@ -1235,17 +983,9 @@ class GraphWriter:
                             FROM relationships
                             WHERE entity_a_id = %s
                                OR entity_b_id = %s
-                        ) AS relationship_count,
-                        (
-                            SELECT count(*)
-                            FROM hierarchy_edges
-                            WHERE parent_id = %s
-                               OR child_id = %s
-                        ) AS hierarchy_count
+                        ) AS relationship_count
                     """,
                     (
-                        secondary_id,
-                        secondary_id,
                         secondary_id,
                         secondary_id,
                         secondary_id,
@@ -1259,7 +999,6 @@ class GraphWriter:
                         "message_ref_count",
                         "episode_entity_count",
                         "relationship_count",
-                        "hierarchy_count",
                     )
                 ):
                     raise RuntimeError(
@@ -1283,12 +1022,6 @@ class GraphWriter:
                     project_id,
                     [primary_id, secondary_id],
                     relationship_projection,
-                )
-                await self.projection.replace_hierarchy_edges_for_entities(
-                    cur,
-                    project_id,
-                    [primary_id, secondary_id],
-                    hierarchy_projection,
                 )
                 await self.projection.delete_entity_projection(
                     cur,

@@ -645,66 +645,6 @@ class GraphTools:
 
         return []
 
-    async def get_hierarchy(
-        self, entity_name: str, direction: str = "both"
-    ) -> List[Dict]:
-        """
-        Get hierarchy relationships for an entity.
-
-        Args:
-            entity_name: Entity to check hierarchy for
-            direction: "up" (parents), "down" (children), or "both"
-
-        Returns:
-            Dict with parent chain and/or children list
-        """
-        canonical = await self._resolve_entity_name(entity_name)
-        if not canonical:
-            return []
-
-        entity_id = await self.entities.get_id(canonical)
-        if not entity_id:
-            return []
-
-        result = {"entity": canonical, "entity_id": entity_id}
-
-        if direction in ("up", "both"):
-            parents = await self.knowledge_store.get_parent_entities(
-                entity_id,
-                visible_project_ids=self.readable_project_ids,
-            )
-            result["parents"] = parents
-
-            if parents:
-                ancestry = []
-                current_id = entity_id
-                visited = {current_id}
-
-                while True:
-                    parent_list = await self.knowledge_store.get_parent_entities(
-                        current_id,
-                        visible_project_ids=self.readable_project_ids,
-                    )
-                    if not parent_list:
-                        break
-                    parent = parent_list[0]  # assume single parent for now
-                    if parent["id"] in visited:
-                        break  # cycle protection
-                    visited.add(parent["id"])
-                    ancestry.append(parent["canonical_name"])
-                    current_id = parent["id"]
-
-                result["ancestry"] = ancestry
-
-        if direction in ("down", "both"):
-            children = await self.knowledge_store.get_child_entities(
-                entity_id,
-                visible_project_ids=self.readable_project_ids,
-            )
-            result["children"] = children
-
-        return [result]
-
     async def get_hot_topic_context(
         self, hot_topics: List[str], *, slim: bool = False
     ) -> Dict[str, Dict]:

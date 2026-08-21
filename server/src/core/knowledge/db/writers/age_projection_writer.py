@@ -350,57 +350,6 @@ class AgeProjectionWriter:
             ),
         )
 
-    async def replace_hierarchy_edges_for_entities(
-        self,
-        cur,
-        project_id: str,
-        entity_ids: List[int],
-        hierarchy_edges: List[Dict],
-    ) -> None:
-        if not entity_ids:
-            return
-
-        delete_cypher = """
-        MATCH (child:Entity)-[r:PART_OF]->(parent:Entity)
-        WHERE (child.id IN $entity_ids OR parent.id IN $entity_ids)
-          AND child.project_id = $project_id
-          AND parent.project_id = $project_id
-          AND r.project_id = $project_id
-        WITH DISTINCT r
-        DELETE r
-        RETURN count(r)
-        """
-        await cur.execute(
-            self._build_cypher(delete_cypher),
-            (
-                json.dumps(
-                    {
-                        "project_id": project_id,
-                        "entity_ids": entity_ids,
-                    }
-                ),
-            ),
-        )
-
-        if not hierarchy_edges:
-            return
-
-        write_cypher = """
-        UNWIND $batch AS edge
-        MATCH (child:Entity {id: edge.child_id})
-        MATCH (parent:Entity {id: edge.parent_id})
-        WHERE child.project_id = edge.project_id
-          AND parent.project_id = edge.project_id
-        MERGE (child)-[r:PART_OF]->(parent)
-        SET r.project_id = edge.project_id,
-            r.created_at = edge.created_at
-        RETURN count(r)
-        """
-        await cur.execute(
-            self._build_cypher(write_cypher),
-            (json.dumps({"batch": hierarchy_edges}),),
-        )
-
     async def delete_entity_projection(
         self,
         cur,
@@ -433,42 +382,6 @@ class AgeProjectionWriter:
             self._build_cypher(entity_cypher),
             (json.dumps(params),),
         )
-
-    async def create_hierarchy_edge(
-        self,
-        cur,
-        parent_id: int,
-        child_id: int,
-        project_id: str,
-        now_ms: int,
-    ) -> bool:
-        cypher = """
-        MATCH (child:Entity {id: $child_id})
-        MATCH (parent:Entity {id: $parent_id})
-        WHERE child.project_id = $project_id
-          AND parent.project_id = $project_id
-          AND NOT (child)-[:PART_OF]->(parent)
-        CREATE (child)-[:PART_OF {
-            project_id: $project_id,
-            created_at: $now
-        }]->(parent)
-        RETURN true as created
-        """
-        await cur.execute(
-            self._build_cypher(cypher, "created agtype"),
-            (
-                json.dumps(
-                    {
-                        "child_id": child_id,
-                        "parent_id": parent_id,
-                        "project_id": project_id,
-                        "now": now_ms,
-                    }
-                ),
-            ),
-        )
-        record = await cur.fetchone()
-        return bool(record and record["created"])
 
     async def delete_relationship(
         self,

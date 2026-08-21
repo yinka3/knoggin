@@ -83,8 +83,8 @@ def merge_validation_row(
 @pytest.mark.storage
 @pytest.mark.no_network
 def test_graph_writer_requires_project_scope_for_scoped_operations():
-    with pytest.raises(ValueError, match="create_hierarchy_edge requires project_id"):
-        GraphWriter._require_project_id(None, "create_hierarchy_edge")
+    with pytest.raises(ValueError, match="operation requires project_id"):
+        GraphWriter._require_project_id(None, "operation")
 
     assert GraphWriter._require_project_id("project-1", "op") == "project-1"
 
@@ -208,111 +208,6 @@ async def test_graph_writer_save_message_logs_rejects_missing_scope_without_exec
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_create_hierarchy_edge_uses_project_scope(monkeypatch):
-    client = RecordingPostgresClient(
-        fetch_one_results=[
-            {"parent_id": 2},
-            {"created": True},
-        ],
-    )
-    writer = GraphWriter(client)
-    monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
-
-    assert await writer.create_hierarchy_edge(
-        parent_id=2,
-        child_id=3,
-        project_id="project-1",
-    ) is True
-
-    assert len(client.calls) == 3
-    lock_call, canonical_call, projection_call = client.calls
-    assert "pg_advisory_xact_lock" in lock_call[1]
-    assert lock_call[2] == ("project-1",)
-    assert canonical_call[0] == "execute"
-    assert "WITH RECURSIVE ancestors" in canonical_call[1]
-    assert "INSERT INTO hierarchy_edges" in canonical_call[1]
-    assert "NOT EXISTS" in canonical_call[1]
-    assert canonical_call[2] == (
-        "project-1",
-        2,
-        "project-1",
-        "project-1",
-        2,
-        3,
-        123456,
-        2,
-        "project-1",
-        3,
-        "project-1",
-        3,
-    )
-    assert projection_call[0] == "execute"
-    assert "CREATE (child)-[:PART_OF" in projection_call[1]
-    assert "project_id: $project_id" in projection_call[1]
-    assert json.loads(projection_call[2][0]) == {
-        "child_id": 3,
-        "parent_id": 2,
-        "project_id": "project-1",
-        "now": 123456,
-    }
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_create_hierarchy_edge_rejects_self_without_db_access():
-    client = RecordingPostgresClient()
-    writer = GraphWriter(client)
-
-    assert (
-        await writer.create_hierarchy_edge(
-            parent_id=2,
-            child_id=2,
-            project_id="project-1",
-        )
-        is False
-    )
-    assert client.calls == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_create_hierarchy_edge_rejects_cycle_candidate():
-    client = RecordingPostgresClient(fetch_one_results=[None])
-    writer = GraphWriter(client)
-
-    assert (
-        await writer.create_hierarchy_edge(
-            parent_id=2,
-            child_id=3,
-            project_id="project-1",
-        )
-        is False
-    )
-    assert len(client.calls) == 2
-    assert "pg_advisory_xact_lock" in client.calls[0][1]
-    assert "WITH RECURSIVE ancestors" in client.calls[1][1]
-    assert "WHERE entity_id = %s" in client.calls[1][1]
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_writer_create_hierarchy_edge_raises_on_db_failure():
-    client = RecordingPostgresClient(
-        cursor_execute_exceptions=[RuntimeError("graph down")]
-    )
-    writer = GraphWriter(client)
-
-    with pytest.raises(StorageWriteError, match="create_hierarchy_edge"):
-        await writer.create_hierarchy_edge(
-            parent_id=2,
-            child_id=3,
-            project_id="project-1",
-        )
-    assert len(client.calls) == 1
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 async def test_graph_writer_delete_relationship_uses_project_and_identity_scope():
     client = RecordingPostgresClient(
         fetch_one_results=[
@@ -366,7 +261,6 @@ async def test_graph_writer_delete_relationship_returns_false_on_zero_rows():
 @pytest.mark.parametrize(
     ("method_name", "args", "kwargs"),
     [
-        ("create_hierarchy_edge", (2, 3), {}),
         ("delete_relationship", (2, 3), {"relationship_type": "works_with"}),
         ("merge_entities", (2, 3), {}),
     ],
@@ -426,49 +320,16 @@ async def test_graph_writer_merge_entities_returns_false_when_validation_misses(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_merge_entities_rejects_hierarchy_contraction_cycle():
-    client = RecordingPostgresClient(
-        fetch_one_results=[
-            {
-                "p_name": "Parent",
-                "p_topic": "Projects",
-                "p_aliases": [],
-                "p_conf": 0.8,
-                "p_last": 100,
-                "s_name": "Child",
-                "s_topic": "Projects",
-                "s_aliases": [],
-                "s_conf": 0.7,
-                "s_last": 90,
-            },
-            {"creates_cycle": True},
-        ]
-    )
-    writer = GraphWriter(client)
-
-    assert await writer.merge_entities(2, 3, project_id="project-1") is False
-
-    assert len(client.calls) == 3
-    assert "pg_advisory_xact_lock" in client.calls[0][1]
-    assert "primary_ancestors" in client.calls[2][1]
-    assert "secondary_ancestors" in client.calls[2][1]
-    assert not any("UPDATE entities" in call[1] for call in client.calls)
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
 async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup(
     monkeypatch,
 ):
     client = RecordingPostgresClient(
         fetch_one_results=[
             merge_validation_row(),
-            {"creates_cycle": False},
             {
                 "message_ref_count": 0,
                 "episode_entity_count": 0,
                 "relationship_count": 0,
-                "hierarchy_count": 0,
             },
             {"entity_id": 3},
         ],
@@ -513,26 +374,6 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
                     ],
                 }
             ],
-            [
-                {
-                    "project_id": "project-1",
-                    "parent_id": 10,
-                    "child_id": 2,
-                    "created_at_ms": 111,
-                },
-                {
-                    "project_id": "project-1",
-                    "parent_id": 11,
-                    "child_id": 2,
-                    "created_at_ms": 112,
-                },
-                {
-                    "project_id": "project-1",
-                    "parent_id": 2,
-                    "child_id": 12,
-                    "created_at_ms": 113,
-                },
-            ],
         ],
     )
     writer = GraphWriter(client)
@@ -555,19 +396,6 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     validation_call = client.calls[1]
     assert "FROM entities p" in validation_call[1]
     assert validation_call[2] == (3, "project-1", 2, "project-1")
-
-    cycle_call = client.calls[2]
-    assert "primary_ancestors" in cycle_call[1]
-    assert cycle_call[2] == (
-        "project-1",
-        2,
-        "project-1",
-        "project-1",
-        3,
-        "project-1",
-        3,
-        2,
-    )
 
     update_primary_call = next(
         call
@@ -691,60 +519,12 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         )
         for call in client.calls
     )
-    hierarchy_rewrite_call = next(
-        call
-        for call in client.calls
-        if (
-            call[0] == "execute"
-            and "WITH rewritten AS" in call[1]
-            and "FROM hierarchy_edges" in call[1]
-        )
-    )
-    assert "LIMIT 1" not in hierarchy_rewrite_call[1]
-    assert hierarchy_rewrite_call[2] == (
-        3,
-        2,
-        3,
-        2,
-        "project-1",
-        3,
-        3,
-    )
-    hierarchy_projection_call = next(
-        call
-        for call in client.calls
-        if "UNWIND $batch AS edge" in call[1]
-        and "MERGE (child)-[r:PART_OF]->(parent)" in call[1]
-    )
-    hierarchy_batch = json.loads(hierarchy_projection_call[2][0])["batch"]
-    assert hierarchy_batch == [
-        {
-            "project_id": "project-1",
-            "parent_id": 10,
-            "child_id": 2,
-            "created_at": 111,
-        },
-        {
-            "project_id": "project-1",
-            "parent_id": 11,
-            "child_id": 2,
-            "created_at": 112,
-        },
-        {
-            "project_id": "project-1",
-            "parent_id": 2,
-            "child_id": 12,
-            "created_at": 113,
-        },
-    ]
     dependency_check = next(
         call
         for call in client.calls
         if call[0] == "execute" and "AS message_ref_count" in call[1]
     )
     assert dependency_check[2] == (
-        3,
-        3,
         3,
         3,
         3,
@@ -798,15 +578,13 @@ async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
                 s_conf=0.7,
                 s_last=90,
             ),
-            {"creates_cycle": False},
             {
                 "message_ref_count": 1,
                 "episode_entity_count": 0,
                 "relationship_count": 0,
-                "hierarchy_count": 0,
             },
         ],
-        fetch_all_results=[[], [], []],
+        fetch_all_results=[[]],
     )
     writer = GraphWriter(client)
 
@@ -829,7 +607,6 @@ async def test_graph_writer_merge_entities_raises_on_transaction_error():
                 s_conf="0.9",
                 s_last="200",
             ),
-            {"creates_cycle": False},
         ],
         cursor_execute_exceptions=[
             None,
@@ -846,7 +623,6 @@ async def test_graph_writer_merge_entities_raises_on_transaction_error():
     assert len(client.calls) == 4
     assert "pg_advisory_xact_lock" in client.calls[0][1]
     assert "FROM entities p" in client.calls[1][1]
-    assert "primary_ancestors" in client.calls[2][1]
-    assert "UPDATE entities" in client.calls[3][1]
+    assert "UPDATE entities" in client.calls[2][1]
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1

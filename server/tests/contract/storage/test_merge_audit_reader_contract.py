@@ -15,7 +15,6 @@ async def test_merge_audit_reader_reads_candidate_snapshot():
             [{"relationship_id": "rel-1"}],
             [{"observation_id": 1, "relationship_id": "rel-1"}],
             [{"episode_id": "episode-1", "relationship_id": "rel-1"}],
-            [{"parent_id": 9, "child_id": 2}],
         ]
     )
     reader = MergeAuditReader(client)
@@ -33,11 +32,10 @@ async def test_merge_audit_reader_reads_candidate_snapshot():
         "episode_relationships": [
             {"episode_id": "episode-1", "relationship_id": "rel-1"}
         ],
-        "hierarchy": [{"parent_id": 9, "child_id": 2}],
     }
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
-    assert len(client.calls) == 8
+    assert len(client.calls) == 7
     assert (
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
         in client.calls[0][1]
@@ -48,7 +46,6 @@ async def test_merge_audit_reader_reads_candidate_snapshot():
     assert "FROM relationships r" in client.calls[4][1]
     assert "FROM relationship_observations observation" in client.calls[5][1]
     assert "FROM episode_relationships" in client.calls[6][1]
-    assert "FROM hierarchy_edges h" in client.calls[7][1]
 
 
 class MutatingMergeAuditReader(MergeAuditReader):

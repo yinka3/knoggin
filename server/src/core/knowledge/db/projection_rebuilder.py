@@ -89,18 +89,6 @@ class GraphBuilder:
                 )
         return params
 
-    @staticmethod
-    def _hierarchy_projection_params(rows: List[Dict]) -> List[Dict]:
-        return [
-            {
-                "project_id": row["project_id"],
-                "parent_id": int(row["parent_id"]),
-                "child_id": int(row["child_id"]),
-                "created_at": int(row.get("created_at_ms") or 0),
-            }
-            for row in rows
-        ]
-
     async def rebuild_project_projection(
         self,
         project_id: str,
@@ -138,11 +126,6 @@ class GraphBuilder:
                     project_id,
                     user_name,
                 )
-                hierarchy_edges = await self._fetch_hierarchy_edges(
-                    cur,
-                    project_id,
-                )
-
                 await self.projection.project_messages(cur, messages)
                 await self.projection.project_entities(cur, entities)
                 await self.projection.project_entity_topics(
@@ -160,18 +143,10 @@ class GraphBuilder:
                     self._relationship_projection_params(relationships),
                 )
 
-                await self.projection.replace_hierarchy_edges_for_entities(
-                    cur,
-                    project_id,
-                    [entity["id"] for entity in entities],
-                    self._hierarchy_projection_params(hierarchy_edges),
-                )
-
                 summary = {
                     "messages": len(messages),
                     "entities": len(entities),
                     "relationships": len(relationships),
-                    "hierarchy_edges": len(hierarchy_edges),
                 }
                 logger.info(
                     f"Rebuilt AGE projection for project {project_id}: {summary}"
@@ -289,17 +264,5 @@ class GraphBuilder:
             ORDER BY rel.relationship_id
             """,
             (project_id, user_name),
-        )
-        return list(await cur.fetchall())
-
-    async def _fetch_hierarchy_edges(self, cur, project_id: str) -> List[Dict]:
-        await cur.execute(
-            """
-            SELECT project_id, parent_id, child_id, created_at_ms
-            FROM hierarchy_edges
-            WHERE project_id = %s
-            ORDER BY parent_id, child_id
-            """,
-            (project_id,),
         )
         return list(await cur.fetchall())

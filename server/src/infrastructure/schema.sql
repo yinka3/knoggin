@@ -1070,30 +1070,6 @@ CREATE TABLE IF NOT EXISTS public.episode_processing_checkpoints (
 ALTER TABLE public.episode_processing_checkpoints
 ADD COLUMN IF NOT EXISTS last_evaluated_timestamp_ms BIGINT;
 
-CREATE TABLE IF NOT EXISTS public.hierarchy_edges (
-    project_id TEXT NOT NULL,
-    parent_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    child_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    created_at_ms BIGINT,
-    PRIMARY KEY (project_id, parent_id, child_id),
-    CONSTRAINT hierarchy_edges_distinct_entities
-        CHECK (parent_id <> child_id)
-);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_child_idx
-ON public.hierarchy_edges(project_id, child_id);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_parent_idx
-ON public.hierarchy_edges(project_id, parent_id);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_parent_entity_idx
-ON public.hierarchy_edges(parent_id);
-
-CREATE INDEX IF NOT EXISTS hierarchy_edges_child_entity_idx
-ON public.hierarchy_edges(child_id);
-
 -- Durable review boundary for destructive entity merges. Proposal records do
 -- not use entity foreign keys because the duplicate entity is deleted after a
 -- successful merge and the historical IDs must remain auditable.
@@ -1322,90 +1298,6 @@ BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id
 ON public.relationships
 FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
 
-CREATE OR REPLACE FUNCTION public.enforce_hierarchy_edge_invariants()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    creates_cycle BOOLEAN;
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM public.entities entity
-        JOIN public.projects project ON project.project_id = NEW.project_id
-        WHERE entity.entity_id = NEW.parent_id
-          AND entity.project_id = NEW.project_id
-          AND entity.user_name = project.user_name
-    ) OR NOT EXISTS (
-        SELECT 1
-        FROM public.entities entity
-        JOIN public.projects project ON project.project_id = NEW.project_id
-        WHERE entity.entity_id = NEW.child_id
-          AND entity.project_id = NEW.project_id
-          AND entity.user_name = project.user_name
-    ) THEN
-        RAISE EXCEPTION
-            'hierarchy endpoints must belong to the hierarchy project scope'
-            USING ERRCODE = '23514';
-    END IF;
-
-    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.project_id, 0));
-
-    IF TG_OP = 'UPDATE' THEN
-        WITH RECURSIVE descendants(entity_id) AS (
-            SELECT edge.child_id
-            FROM public.hierarchy_edges edge
-            WHERE edge.project_id = NEW.project_id
-              AND edge.parent_id = NEW.child_id
-              AND (edge.project_id, edge.parent_id, edge.child_id)
-                  IS DISTINCT FROM (OLD.project_id, OLD.parent_id, OLD.child_id)
-
-            UNION
-
-            SELECT edge.child_id
-            FROM public.hierarchy_edges edge
-            JOIN descendants ON edge.parent_id = descendants.entity_id
-            WHERE edge.project_id = NEW.project_id
-              AND (edge.project_id, edge.parent_id, edge.child_id)
-                  IS DISTINCT FROM (OLD.project_id, OLD.parent_id, OLD.child_id)
-        )
-        SELECT EXISTS (
-            SELECT 1 FROM descendants WHERE entity_id = NEW.parent_id
-        ) INTO creates_cycle;
-    ELSE
-        WITH RECURSIVE descendants(entity_id) AS (
-            SELECT child_id
-            FROM public.hierarchy_edges
-            WHERE project_id = NEW.project_id
-              AND parent_id = NEW.child_id
-
-            UNION
-
-            SELECT edge.child_id
-            FROM public.hierarchy_edges edge
-            JOIN descendants ON edge.parent_id = descendants.entity_id
-            WHERE edge.project_id = NEW.project_id
-        )
-        SELECT EXISTS (
-            SELECT 1 FROM descendants WHERE entity_id = NEW.parent_id
-        ) INTO creates_cycle;
-    END IF;
-
-    IF creates_cycle THEN
-        RAISE EXCEPTION 'hierarchy edge would create a cycle'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS hierarchy_edges_invariants_trigger
-    ON public.hierarchy_edges;
-CREATE TRIGGER hierarchy_edges_invariants_trigger
-BEFORE INSERT OR UPDATE OF project_id, parent_id, child_id
-ON public.hierarchy_edges
-FOR EACH ROW EXECUTE FUNCTION public.enforce_hierarchy_edge_invariants();
-
 CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
     suggestion_id TEXT PRIMARY KEY,
     user_name TEXT NOT NULL,
@@ -1485,6 +1377,8 @@ ALTER TABLE public.agent_tool_audits
 
 DROP TABLE IF EXISTS public.entity_search;
 DROP TABLE IF EXISTS public.message_search;
+DROP TABLE IF EXISTS public.hierarchy_edges;
+DROP FUNCTION IF EXISTS public.enforce_hierarchy_edge_invariants();
 
 DO $$
 BEGIN

@@ -66,11 +66,12 @@ async def test_graph_write_failure_is_not_reported_as_false_result():
     )
 
     with pytest.raises(StorageWriteError) as error:
-        await writer.create_hierarchy_edge(
-            parent_id=2,
-            child_id=3,
+        await writer.delete_relationship(
+            2,
+            3,
+            relationship_type="related_to",
             project_id="project-1",
         )
 
     assert error.value.code == "storage_write_error"
-    assert error.value.details["operation"] == "create_hierarchy_edge"
+    assert error.value.details["operation"] == "delete_relationship"

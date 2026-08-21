@@ -141,33 +141,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_hierarchy",
-            "description": (
-                "Explores the structural organization of an entity. "
-                "Use this to find parents (What does this belong to?) or children (What is inside this?). "
-                "Essential for questions like 'What tasks are in this project?', 'Which course is this exam for?', or 'List all sub-components'."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "entity_name": {
-                        "type": "string",
-                        "description": "Entity to get hierarchy for",
-                    },
-                    "direction": {
-                        "type": "string",
-                        "enum": ["up", "down", "both"],
-                        "description": "'up' for parents/containers, 'down' for children/contents, 'both' for full context (default: both).",
-                    },
-                },
-                "required": ["entity_name"],
-            },
-            "tags": ["graph:read", "core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "search_messages",
             "description": (
                 "A fallback tool for raw keyword recall. "

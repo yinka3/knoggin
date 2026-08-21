@@ -259,34 +259,6 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
     return "\n".join(blocks)
 
 
-def format_hierarchy_results(results: List[Dict]) -> str:
-    """Format hierarchical ancestry and descendants for a given entity."""
-    if not results:
-        return "No hierarchy found."
-
-    blocks = []
-    for h in results:
-        entity = h.get("entity", "Unknown")
-        block = f"=== {entity} ===\n"
-
-        if h.get("ancestry"):
-            block += f"Ancestry: {' → '.join(h['ancestry'])}\n"
-
-        if h.get("parents"):
-            block += "Parents:\n"
-            for p in h["parents"]:
-                block += f"  ↑ {p.get('canonical_name', '?')}\n"
-
-        if h.get("children"):
-            block += "Children:\n"
-            for c in h["children"]:
-                block += f"  ↓ {c.get('canonical_name', '?')}\n"
-
-        blocks.append(block)
-
-    return "\n".join(blocks)
-
-
 def format_memory_context(blocks: dict) -> str:
     """Format short-term and persistent memory blocks for the system prompt."""
     if not blocks:
