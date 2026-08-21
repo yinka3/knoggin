@@ -124,12 +124,17 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
         domain_config=make_domain_config(version=0),
     )
     session_id = "session-1"
+    resources.postgres.sessions[session_id] = {
+        "session_id": session_id,
+        "user_name": "ada",
+        "project_id": project["id"],
+        "status": "open",
+    }
     manager = SessionManager(
         resources=resources,
         user_name="ada",
         project_manager=project_manager,
     )
-    await project_manager.add_session(project["id"], session_id)
     await resources.redis.rpush(RedisKeys.buffer("ada", session_id), "pending")
     await resources.redis.hset(
         RedisKeys.conversation("ada", session_id),

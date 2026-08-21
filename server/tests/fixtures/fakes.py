@@ -1103,8 +1103,6 @@ class FakeProjectManager:
         self.project_state = project_state
         self.acquire_calls: list[tuple[str, str]] = []
         self.release_calls: list[tuple[str, str]] = []
-        self.add_session_calls: list[tuple[str, str]] = []
-        self.remove_session_calls: list[tuple[str, str]] = []
 
     async def acquire_project_for_session(self, project_id, session_id):
         self.acquire_calls.append((project_id, session_id))
@@ -1114,13 +1112,6 @@ class FakeProjectManager:
 
     async def release_project_for_session(self, project_id, session_id):
         self.release_calls.append((project_id, session_id))
-
-    async def add_session(self, project_id, session_id):
-        self.add_session_calls.append((project_id, session_id))
-
-    async def remove_session(self, project_id, session_id):
-        self.remove_session_calls.append((project_id, session_id))
-
 
 class FakeConfigValue:
     def __init__(self, conversation_context_turns=100):

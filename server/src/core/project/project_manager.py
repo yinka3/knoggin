@@ -560,44 +560,6 @@ class ProjectManager:
 
         return await self.get_episode_session_participation(project_id)
 
-    async def add_session(self, project_id: str, session_id: str) -> None:
-        """Record project/session membership when a caller manages a session row."""
-        await self.pg.execute(
-            """
-            INSERT INTO public.sessions (
-                session_id, user_name, project_id, status
-            ) VALUES (
-                %(session_id)s, %(user_name)s, %(project_id)s, 'open'
-            )
-            ON CONFLICT (session_id) DO UPDATE
-            SET last_active_at = now()
-            WHERE public.sessions.user_name = EXCLUDED.user_name
-              AND public.sessions.project_id = EXCLUDED.project_id
-              AND public.sessions.status = 'open'
-            """,
-            {
-                "session_id": session_id,
-                "user_name": self.user_name,
-                "project_id": project_id,
-            },
-        )
-
-    async def remove_session(self, project_id: str, session_id: str) -> None:
-        """Remove durable project/session membership for explicit session cleanup."""
-        await self.pg.execute(
-            """
-            DELETE FROM public.sessions
-            WHERE user_name = %(user_name)s
-              AND project_id = %(project_id)s
-              AND session_id = %(session_id)s
-            """,
-            {
-                "user_name": self.user_name,
-                "project_id": project_id,
-                "session_id": session_id,
-            },
-        )
-
     async def _validate_allowed_project_ids(
         self, project_id: str, allowed_projects: List[str]
     ) -> List[str]:
