@@ -30,7 +30,6 @@ class ProjectDeletionWriter:
         "document_workspace_sources",
         "project_document_scan_settings",
         "message_entity_refs",
-        "message_search",
         "hierarchy_edges",
         "relationships",
         "entity_aliases",

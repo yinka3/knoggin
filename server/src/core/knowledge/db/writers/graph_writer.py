@@ -325,34 +325,6 @@ class GraphWriter:
                 ],
             )
 
-            # Write to Hybrid Full Text Search Table
-            for msg in batch_params:
-                await cur.execute(
-                    """
-                    INSERT INTO message_search (
-                        message_id,
-                        user_name,
-                        session_id,
-                        project_id,
-                        content_tsvector
-                    )
-                    VALUES (%s, %s, %s, %s, to_tsvector('english', %s))
-                    ON CONFLICT (message_id)
-                    DO UPDATE SET
-                        user_name = EXCLUDED.user_name,
-                        session_id = EXCLUDED.session_id,
-                        project_id = EXCLUDED.project_id,
-                        content_tsvector = EXCLUDED.content_tsvector
-                    """,
-                    (
-                        msg["id"],
-                        msg["user_name"],
-                        msg["session_id"],
-                        msg["project_id"],
-                        msg["content"],
-                    ),
-                )
-
         logger.info(f"Saved {len(messages)} message logs to Postgres/AGE.")
         return True
 

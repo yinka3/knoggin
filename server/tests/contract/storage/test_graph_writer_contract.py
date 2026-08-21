@@ -117,7 +117,7 @@ def test_graph_writer_merges_evidence_refs_without_duplicates():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
+async def test_graph_writer_save_message_logs_writes_canonical_and_graph_rows(
     monkeypatch,
 ):
     client = RecordingPostgresClient(fetch_one_results=[{"message_id": 7}])
@@ -138,8 +138,8 @@ async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
     )
 
     assert saved is True
-    assert len(client.calls) == 3
-    canonical_call, graph_call, search_call = client.calls
+    assert len(client.calls) == 2
+    canonical_call, graph_call = client.calls
 
     assert canonical_call[0] == "execute"
     assert "INSERT INTO messages" in canonical_call[1]
@@ -167,16 +167,6 @@ async def test_graph_writer_save_message_logs_writes_graph_and_search_rows(
         ]
     }
 
-    assert search_call[0] == "execute"
-    assert "INSERT INTO message_search" in search_call[1]
-    assert "ON CONFLICT (message_id)" in search_call[1]
-    assert search_call[2] == (
-        7,
-        "ada",
-        "session-1",
-        "project-1",
-        "hello graph",
-    )
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
     assert client.cursor_enters == 1

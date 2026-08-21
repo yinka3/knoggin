@@ -290,15 +290,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         )
         await cur.execute(
             """
-            INSERT INTO message_search (
-                message_id, user_name, session_id, project_id, content_tsvector
-            ) VALUES
-                (101, 'ada', 'session-1', 'project-1', to_tsvector('simple', 'Delete project one')),
-                (201, 'ada', 'session-2', 'project-2', to_tsvector('simple', 'Keep project two'))
-            """
-        )
-        await cur.execute(
-            """
             INSERT INTO project_documents (
                 document_id, project_id, visibility_scope, original_name,
                 relative_path, extension, size_bytes, content_hash
@@ -382,7 +373,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-1'",
         "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-1'",
-        "message_search": "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-1'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-1'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-1'",
         "chunks": (
@@ -419,7 +409,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-2'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-2'",
         "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-2'",
-        "message_search": "SELECT count(*) AS count FROM message_search WHERE project_id = 'project-2'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-2'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-2'",
         "chunks": (

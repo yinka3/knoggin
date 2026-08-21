@@ -207,9 +207,9 @@ class ToolQueries:
             return []
 
         sql = """
-        SELECT message_id, session_id, ts_rank(content_tsvector, to_tsquery('english', %s)) as score
-        FROM message_search
-        WHERE content_tsvector @@ to_tsquery('english', %s)
+        SELECT message_id, session_id, ts_rank(search_tsvector, to_tsquery('english', %s)) as score
+        FROM messages
+        WHERE search_tsvector @@ to_tsquery('english', %s)
           AND user_name = %s
           AND session_id = ANY(%s)
           AND project_id = ANY(%s)

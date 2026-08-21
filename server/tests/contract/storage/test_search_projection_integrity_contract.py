@@ -18,16 +18,6 @@ async def _seed_search_projection_rows(client) -> None:
         )
         VALUES ('ada', 'session-1', 101, 'project-1', 'user', 'Original message');
 
-        INSERT INTO message_search (
-            message_id, user_name, session_id, project_id, content_tsvector
-        )
-        VALUES (
-            101,
-            'ada',
-            'session-1',
-            'project-1',
-            to_tsvector('english', 'Original message')
-        );
         """
     )
 
@@ -49,7 +39,7 @@ async def test_entities_hold_the_canonical_name_directly(
     with pytest.raises(ForeignKeyViolation):
         await real_postgres_client.execute(
             """
-            UPDATE message_search
+            UPDATE messages
             SET project_id = 'project-2'
             WHERE message_id = 101
             """

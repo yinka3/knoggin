@@ -175,6 +175,9 @@ CREATE TABLE IF NOT EXISTS public.messages (
     project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    search_tsvector TSVECTOR GENERATED ALWAYS AS (
+        to_tsvector('english', content)
+    ) STORED,
     user_msg_id BIGINT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     timestamp_ms BIGINT,
@@ -203,8 +206,16 @@ CREATE TABLE IF NOT EXISTS public.messages (
         ON DELETE CASCADE
 );
 
+ALTER TABLE public.messages
+    ADD COLUMN IF NOT EXISTS search_tsvector TSVECTOR GENERATED ALWAYS AS (
+        to_tsvector('english', content)
+    ) STORED;
+
 CREATE INDEX IF NOT EXISTS messages_project_idx
 ON public.messages(user_name, project_id, message_id);
+
+CREATE INDEX IF NOT EXISTS messages_search_tsvector_idx
+ON public.messages USING gin (search_tsvector);
 
 CREATE INDEX IF NOT EXISTS messages_ingestion_queue_idx
 ON public.messages(user_name, session_id, message_id)
@@ -1473,31 +1484,7 @@ ALTER TABLE public.agent_tool_audits
 -- and join them against the graph using the integer `id` property.
 
 DROP TABLE IF EXISTS public.entity_search;
-
-CREATE TABLE IF NOT EXISTS public.message_search (
-    message_id BIGINT PRIMARY KEY REFERENCES public.messages(message_id)
-        ON DELETE CASCADE,
-    user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    content_tsvector tsvector,
-    CONSTRAINT message_search_message_scope_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED
-);
-
--- Index for Full-Text Search on messages
-CREATE INDEX IF NOT EXISTS message_search_fts_idx 
-ON public.message_search USING gin (content_tsvector);
-
-CREATE INDEX IF NOT EXISTS message_search_session_idx
-ON public.message_search(user_name, session_id);
-
-CREATE INDEX IF NOT EXISTS message_search_project_idx
-ON public.message_search(user_name, project_id);
+DROP TABLE IF EXISTS public.message_search;
 
 DO $$
 BEGIN
@@ -1511,19 +1498,6 @@ BEGIN
         UNIQUE (entity_id, user_name, project_id);
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'message_search_message_scope_fk'
-          AND conrelid = 'public.message_search'::regclass
-    ) THEN
-        ALTER TABLE public.message_search
-        ADD CONSTRAINT message_search_message_scope_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON UPDATE CASCADE
-        ON DELETE CASCADE
-        DEFERRABLE INITIALLY DEFERRED;
-    END IF;
 END $$;
 
 -- Search rebuilds generate embeddings outside a transaction.  These revisions
@@ -1578,11 +1552,6 @@ BEGIN
     RETURN NULL;
 END;
 $$;
-
-DROP TRIGGER IF EXISTS messages_search_revision_trigger ON public.messages;
-CREATE TRIGGER messages_search_revision_trigger
-AFTER INSERT OR DELETE OR UPDATE OF content ON public.messages
-FOR EACH ROW EXECUTE FUNCTION public.bump_search_index_revision();
 
 DROP TRIGGER IF EXISTS entities_search_revision_trigger ON public.entities;
 CREATE TRIGGER entities_search_revision_trigger
