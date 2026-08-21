@@ -86,32 +86,51 @@ def make_manager(postgres):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_project_runtime_releases_its_lease_when_session_work_fails(
-    monkeypatch,
-):
+async def test_project_runtime_releases_its_exact_final_lease():
     manager = make_manager(RecordingPostgres())
-    project_state = SimpleNamespace(project_id="project-1")
+    shutdowns = []
+
+    async def shutdown():
+        shutdowns.append("project-1")
+
+    manager.active_projects["project-1"] = SimpleNamespace(shutdown=shutdown)
+    manager._project_leases["project-1"] = {"session-1", "session-2"}
+
+    await manager.release_project_for_session("project-1", "session-1")
+    assert manager._project_leases == {"project-1": {"session-2"}}
+    assert shutdowns == []
+
+    await manager.release_project_for_session("project-1", "session-2")
+    assert manager._project_leases == {}
+    assert manager.active_projects == {}
+    assert shutdowns == ["project-1"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_acquire_bootstraps_once_and_tracks_exact_session_leases():
+    manager = make_manager(RecordingPostgres([[project_row()], [project_row()]]))
     calls = []
+    state = SimpleNamespace(project_id="project-1")
 
-    async def acquire(project_id, session_id):
-        calls.append(("acquire", project_id, session_id))
-        return project_state
+    async def create(**kwargs):
+        calls.append(kwargs)
+        return state
 
-    async def release(project_id):
-        calls.append(("release", project_id))
+    manager.project_factory = SimpleNamespace(create=create)
 
-    monkeypatch.setattr(manager, "acquire_project_for_session", acquire)
-    monkeypatch.setattr(manager, "release_project", release)
-
-    with pytest.raises(RuntimeError, match="session startup failed"):
-        async with manager.project_runtime("project-1", "session-1") as state:
-            assert state is project_state
-            raise RuntimeError("session startup failed")
+    assert await manager.acquire_project_for_session("project-1", "session-1") is state
+    assert await manager.acquire_project_for_session("project-1", "session-2") is state
 
     assert calls == [
-        ("acquire", "project-1", "session-1"),
-        ("release", "project-1"),
+        {
+            "project_id": "project-1",
+            "readable_project_ids": [IDENTITY_SCOPE, "project-1"],
+        }
     ]
+    assert manager._project_leases == {"project-1": {"session-1", "session-2"}}
+    with pytest.raises(RuntimeError, match="already holds a lease"):
+        await manager.acquire_project_for_session("project-1", "session-1")
 
 
 @pytest.mark.runtime
@@ -233,9 +252,7 @@ async def test_readable_scope_includes_identity_project_and_valid_allowed_projec
 async def test_update_project_rejects_scope_change_while_runtime_is_active():
     postgres = RecordingPostgres([[project_row()]])
     manager = make_manager(postgres)
-    manager.active_projects["project-1"] = SimpleNamespace(
-        active_runtime_sessions_count=1
-    )
+    manager._project_leases["project-1"] = {"session-1"}
 
     with pytest.raises(RuntimeError, match="active runtime sessions"):
         await manager.update_project(
@@ -278,9 +295,7 @@ async def test_update_project_replaces_read_scope_in_postgres():
 async def test_archive_project_refuses_active_runtime_sessions():
     postgres = RecordingPostgres([[project_row()]])
     manager = make_manager(postgres)
-    manager.active_projects["project-1"] = SimpleNamespace(
-        active_runtime_sessions_count=1
-    )
+    manager._project_leases["project-1"] = {"session-1"}
 
     with pytest.raises(RuntimeError, match="cannot be archived"):
         await manager.archive_project("project-1")
@@ -366,7 +381,6 @@ async def test_delete_project_clears_project_session_and_agent_redis_state():
         "preserve",
     )
     await redis.hset(RedisKeys.projects("ada"), "project-1", "metadata")
-    await redis.hset(RedisKeys.sessions("ada"), "session-1", "metadata")
     await redis.hset(RedisKeys.agents("ada"), "agent-1", "metadata")
     await redis.set(RedisKeys.agents_default("ada"), "agent-1")
 
@@ -382,7 +396,6 @@ async def test_delete_project_clears_project_session_and_agent_redis_state():
     assert await redis.get(RedisKeys.agent_directives("ada", "agent-1")) is None
     assert await redis.get(RedisKeys.agents_default("ada")) is None
     assert await redis.hget(RedisKeys.projects("ada"), "project-1") is None
-    assert await redis.hget(RedisKeys.sessions("ada"), "session-1") is None
     assert await redis.hget(RedisKeys.agents("ada"), "agent-1") is None
     assert await redis.get(RedisKeys.dirty_entities("ada", "project-2")) == ("preserve")
 

@@ -10,7 +10,6 @@ from common.schema.settings import RedisConnectionSettings
 
 SESSION_RUNTIME_TTL_SECONDS = 72 * 3600
 SHORT_LIVED_DEDUP_TTL_SECONDS = 5 * 60
-PROJECT_ACTIVITY_TTL_SECONDS = 30 * 24 * 3600
 
 
 def _endpoint_label(url: str) -> str:
@@ -151,7 +150,6 @@ class RedisKeys:
             "message_content",
             "last_processed",
             "project_last_processed",
-            "project_last_activity",
         }
     )
     EPHEMERAL_ONLY = frozenset(
@@ -165,8 +163,6 @@ class RedisKeys:
             "merge_proposals",
             "merge_intent",
             "merge_intents_index",
-            "job_last_run",
-            "job_lease",
             "maintenance_attempts",
             "maintenance_cooldown",
             "dlq",
@@ -229,10 +225,6 @@ class RedisKeys:
         return f"project_last_processed_msg:{user}:{project_id}"
 
     @staticmethod
-    def project_last_activity(user: str, project_id: str) -> str:
-        return f"project_last_activity:{user}:{project_id}"
-
-    @staticmethod
     def project_heartbeat_counter(user: str, project_id: str) -> str:
         return f"project_heartbeat_counter:{user}:{project_id}"
 
@@ -262,7 +254,6 @@ class RedisKeys:
             RedisKeys.dlq_parked(user, project_id),
             RedisKeys.dlq_completed(user, project_id),
             RedisKeys.project_last_processed(user, project_id),
-            RedisKeys.project_last_activity(user, project_id),
             RedisKeys.project_heartbeat_counter(user, project_id),
             RedisKeys.dirty_entities(user, project_id),
             RedisKeys.project_sessions(user, project_id),
@@ -274,8 +265,6 @@ class RedisKeys:
         """Return variable-suffix Redis key patterns owned by one project."""
         return [
             f"merge_intent:{user}:{project_id}:*",
-            f"last_run:*:{user}:{project_id}",
-            f"job_lease:{user}:{project_id}:*",
             f"maintenance_attempts:{user}:{project_id}:*",
             f"maintenance_cooldown:{user}:{project_id}:*",
             f"last_profile_update:{user}:{project_id}:*",
@@ -341,14 +330,6 @@ class RedisKeys:
         return f"merge_intents_index:{user}:{project_id}"
 
     @staticmethod
-    def job_last_run(job_name: str, user: str, project_id: str) -> str:
-        return f"last_run:{job_name}:{user}:{project_id}"
-
-    @staticmethod
-    def job_lease(user: str, project_id: str, job_name: str) -> str:
-        return f"job_lease:{user}:{project_id}:{job_name}"
-
-    @staticmethod
     def maintenance_attempts(user: str, project_id: str, candidate_id: str) -> str:
         return f"maintenance_attempts:{user}:{project_id}:{candidate_id}"
 
@@ -359,10 +340,6 @@ class RedisKeys:
     @staticmethod
     def projects(user: str) -> str:
         return f"projects:{user}"
-
-    @staticmethod
-    def sessions(user: str) -> str:
-        return f"sessions:{user}"
 
     @staticmethod
     def project_sessions(user: str, project_id: str) -> str:

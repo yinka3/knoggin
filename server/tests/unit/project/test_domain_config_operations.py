@@ -2,7 +2,6 @@ import pytest
 
 from common.conf.domain_config import DomainConfig
 from core.project.domain_config_operations import (
-    DomainConfigOperations,
     parse_candidate,
     preview_domain_config,
     validate_domain_config,
@@ -37,7 +36,6 @@ def make_domain(version=1):
         }
     )
 
-
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_validation_returns_canonical_candidate_without_side_effects():
@@ -63,7 +61,7 @@ def test_validation_returns_canonical_candidate_without_side_effects():
     assert result.config.entity_types[0].labels == ("project",)
     assert result.to_dict()["config"]["version"] == 99
     assert parse_candidate(result.config.to_dict()) == result.config
-    assert DomainConfigOperations.edit(result.config.to_dict()) == result.config
+    assert parse_candidate(result.config.to_dict()) == result.config
 
 
 @pytest.mark.unit
@@ -142,7 +140,7 @@ def test_preview_reports_future_effects_and_no_historical_rewrite():
 @pytest.mark.no_network
 def test_preview_is_pure_and_empty_candidate_has_no_changes():
     current = make_domain(version=2)
-    preview = DomainConfigOperations.preview(current, current.to_dict())
+    preview = preview_domain_config(current, current.to_dict())
 
     assert not preview.has_changes
     assert preview.future_effects == (
@@ -172,24 +170,3 @@ def test_preview_describes_changes_to_existing_definitions():
         "updated topic, labels, or description" in effect
         for effect in preview.future_effects
     )
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
-async def test_activation_operation_validates_before_delegating_to_project():
-    candidate = make_domain(version=0)
-    calls = []
-
-    class Project:
-        async def activate_domain_config(self, config, *, expected_version):
-            calls.append((config, expected_version))
-            return "activated"
-
-    result = await DomainConfigOperations.activate(
-        Project(),
-        candidate.to_dict(),
-        expected_version=4,
-    )
-
-    assert result == "activated"
-    assert calls == [(candidate, 4)]

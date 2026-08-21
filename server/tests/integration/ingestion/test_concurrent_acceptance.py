@@ -8,7 +8,7 @@ import pytest
 
 from common.schema.primitives import Message
 from core.knowledge.store import KnowledgeStore
-from core.session.context import Session
+from runtime.session_runtime import SessionRuntime as Session
 from infrastructure.redis_client import RedisKeys
 from tests.integration.ingestion.test_server_flow import (
     _DeterministicEmbeddingService,

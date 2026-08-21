@@ -1066,7 +1066,6 @@ class FakeScheduler:
         self.running = False
         self.started = 0
         self.stopped = 0
-        self.activity_count = 0
 
     async def start(self):
         self.running = True
@@ -1075,10 +1074,6 @@ class FakeScheduler:
     async def stop(self):
         self.running = False
         self.stopped += 1
-
-    async def record_activity(self):
-        self.activity_count += 1
-
 
 class FakeConsumer:
     def __init__(self):
@@ -1107,9 +1102,7 @@ class FakeProjectManager:
     def __init__(self, project_state=None):
         self.project_state = project_state
         self.acquire_calls: list[tuple[str, str]] = []
-        self.release_calls: list[str] = []
-        self.add_session_calls: list[tuple[str, str]] = []
-        self.remove_session_calls: list[tuple[str, str]] = []
+        self.release_calls: list[tuple[str, str]] = []
 
     async def acquire_project_for_session(self, project_id, session_id):
         self.acquire_calls.append((project_id, session_id))
@@ -1117,26 +1110,8 @@ class FakeProjectManager:
             return self.project_state
         return object()
 
-    async def release_project(self, project_id):
-        self.release_calls.append(project_id)
-
-    @asynccontextmanager
-    async def project_runtime(self, project_id, session_id):
-        project_state = await self.acquire_project_for_session(
-            project_id,
-            session_id,
-        )
-        try:
-            yield project_state
-        finally:
-            await self.release_project(project_id)
-
-    async def add_session(self, project_id, session_id):
-        self.add_session_calls.append((project_id, session_id))
-
-    async def remove_session(self, project_id, session_id):
-        self.remove_session_calls.append((project_id, session_id))
-
+    async def release_project_for_session(self, project_id, session_id):
+        self.release_calls.append((project_id, session_id))
 
 class FakeConfigValue:
     def __init__(self, conversation_context_turns=100):

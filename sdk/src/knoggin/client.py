@@ -8,7 +8,7 @@ from common.schema.document import DocumentFocus as EngineDocumentFocus
 from common.schema.document import create_document_focus
 from common.schema.primitives import Message
 from common.utils.time_utils import get_now_iso
-from core.runtime import ApplicationRuntime
+from runtime.application import ApplicationRuntime
 
 from .contracts import (
     DocumentFocus,

@@ -183,13 +183,9 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgres)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
-    resources_module.ResourceManager._instance = None
-    resources_module.ResourceManager._lock = None
-
     with pytest.raises(DependencyError, match=failure):
-        await resources_module.ResourceManager.initialize(num_workers=2)
+        await resources_module.RuntimeResources.create(num_workers=2)
 
-    assert resources_module.ResourceManager._instance is None
     assert all(resource.shutdown_calls for resource in created.background)
     assert all(resource.shutdown_calls for resource in created.model_work)
     assert all(resource.closed for resource in created.redis)
@@ -197,3 +193,25 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     assert all(resource.cleaned for resource in created.embedding)
     assert all(resource.closed for resource in created.postgres)
     assert all(executor.shutdown_calls == [False] for executor in created.executors)
+
+
+@pytest.mark.no_network
+async def test_runtime_resources_preserves_startup_error_when_cleanup_also_fails(
+    monkeypatch,
+):
+    async def fail_start(self, *, num_workers):
+        raise DependencyError("primary startup failure")
+
+    async def fail_teardown(self, *, wait):
+        return (
+            resources_module.RuntimeResourceShutdownFailure(
+                phase="background work",
+                error=RuntimeError("cleanup failure"),
+            ),
+        )
+
+    monkeypatch.setattr(resources_module.RuntimeResources, "_start", fail_start)
+    monkeypatch.setattr(resources_module.RuntimeResources, "_teardown", fail_teardown)
+
+    with pytest.raises(DependencyError, match="primary startup failure"):
+        await resources_module.RuntimeResources.create()

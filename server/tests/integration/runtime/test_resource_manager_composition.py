@@ -6,7 +6,7 @@ import os
 import pytest
 
 from infrastructure.model_work import ModelWorkPriority
-from runtime.resources import ResourceManager
+from runtime.resources import RuntimeResources
 
 
 def _local_snapshot(
@@ -83,9 +83,7 @@ async def real_resource_manager(monkeypatch):
     )
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
-    ResourceManager._instance = None
-    ResourceManager._lock = None
-    manager = await ResourceManager.initialize(num_workers=2)
+    manager = await RuntimeResources.create(num_workers=2)
     try:
         yield manager
     finally:
@@ -168,7 +166,6 @@ async def test_real_runtime_startup_and_shutdown_drains_active_work(
     }
     assert postgres._pool is None
     assert redis_manager._client is None
-    assert ResourceManager._instance is None
 
     # A second close is a supported no-op after both complete and partial boots.
     await manager.shutdown()

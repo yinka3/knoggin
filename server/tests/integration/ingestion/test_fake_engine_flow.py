@@ -6,15 +6,14 @@ import pytest
 from common.schema.primitives import Message
 from common.utils.events import EventEmitter
 from core.project.project_manager import ProjectManager
-from core.session.context import Session
 from core.session.session_manager import SessionManager
 from infrastructure.redis_client import RedisKeys
+from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config, make_project_state
 from tests.fixtures.fakes import (
     FakeConfigValue,
     FakeConsumer,
     FakeResources,
-    FakeSession,
 )
 
 
@@ -27,13 +26,12 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         "Research",
         domain_config=make_domain_config(version=0),
     )
-    active_sessions = {}
     manager = SessionManager(
         resources=resources,
         user_name="ada",
-        active_sessions=active_sessions,
         project_manager=project_manager,
     )
+    active_sessions = manager._active_sessions
     monkeypatch.setattr(
         Session,
         "current_config",
@@ -41,18 +39,20 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     )
     project_state = make_project_state(project["id"], redis=resources.redis)
 
-    async def fake_get_or_start_project(project_id, project_metadata=None):
-        project_state.active_runtime_sessions_count += 1
-        project_manager.active_projects[project_id] = project_state
+    async def create_project_runtime(*_args, **_kwargs):
         return project_state
 
-    async def fake_create(**kwargs):
-        ctx = Session(kwargs["user_name"], ["General"], kwargs["resources"])
-        ctx.session_id = kwargs["session_id"]
-        ctx.project_id = kwargs["project_state"].project_id
-        ctx.project = kwargs["project_state"]
-        ctx.consumer = FakeConsumer()
-        return ctx
+    class RuntimeFactory:
+        async def bootstrap(self, state, **kwargs):
+            ctx = Session(resources=resources, user_name="ada")
+            ctx.session_id = kwargs["session_id"]
+            ctx.project_id = state.project_id
+            ctx.project = state
+            ctx.model = kwargs["model"]
+            ctx.agent_id = kwargs["agent_id"]
+            ctx.enabled_tools = kwargs["enabled_tools"]
+            ctx.consumer = FakeConsumer()
+            return ctx
 
     class FakeEmitter:
         def __init__(self):
@@ -72,10 +72,10 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     emitter = FakeEmitter()
     monkeypatch.setattr(
         project_manager,
-        "_get_or_start_project",
-        fake_get_or_start_project,
+        "project_factory",
+        type("Factory", (), {"create": create_project_runtime})(),
     )
-    monkeypatch.setattr(Session, "create", fake_create)
+    monkeypatch.setattr(manager, "_session_runtime_factory", RuntimeFactory)
     monkeypatch.setattr(EventEmitter, "get", staticmethod(lambda: emitter))
 
     ctx = await manager.create_session(
@@ -86,19 +86,8 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     msg = await ctx.add(
         Message(content="  hello from integration  ", timestamp=timestamp)
     )
-    history = await manager.get_session_history_readonly(ctx.session_id)
-
     assert msg.id == 1
-    assert history == [
-        {
-            "message_id": 1,
-            "role": "user",
-            "content": "hello from integration",
-            "timestamp": timestamp.isoformat(),
-        }
-    ]
     assert await project_manager.get_session_ids(project["id"]) == [ctx.session_id]
-    assert ctx.project.scheduler.activity_count == 1
     assert ctx.consumer.signaled == 1
 
     assert await manager.close_session(ctx.session_id) is True
@@ -106,7 +95,6 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
     assert project["id"] not in project_manager.active_projects
 
     assert resources.postgres.sessions[ctx.session_id]["status"] == "deleted"
-    assert await resources.redis.hget(RedisKeys.sessions("ada"), ctx.session_id) is None
 
 
 @pytest.mark.integration
@@ -136,24 +124,16 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
         domain_config=make_domain_config(version=0),
     )
     session_id = "session-1"
-    active_sessions = {session_id: FakeSession(session_id, project["id"])}
+    resources.postgres.sessions[session_id] = {
+        "session_id": session_id,
+        "user_name": "ada",
+        "project_id": project["id"],
+        "status": "open",
+    }
     manager = SessionManager(
         resources=resources,
         user_name="ada",
-        active_sessions=active_sessions,
         project_manager=project_manager,
-    )
-    class FakeRuntime:
-        async def __aexit__(self, *_args):
-            return False
-
-    manager._project_runtime_contexts[session_id] = FakeRuntime()
-
-    await project_manager.add_session(project["id"], session_id)
-    await resources.redis.hset(
-        RedisKeys.sessions("ada"),
-        session_id,
-        json.dumps({"project_id": project["id"]}),
     )
     await resources.redis.rpush(RedisKeys.buffer("ada", session_id), "pending")
     await resources.redis.hset(
@@ -171,7 +151,6 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
     deleted_project = await project_manager.delete_project(project["id"])
     assert await project_manager.get_session_ids(project["id"]) == []
 
-    assert await resources.redis.hget(RedisKeys.sessions("ada"), session_id) is None
     assert (
         await resources.redis.lrange(RedisKeys.buffer("ada", session_id), 0, -1) == []
     )

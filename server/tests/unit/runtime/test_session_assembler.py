@@ -3,9 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.settings import DeveloperSettings, RootConfig
-from runtime.project_factory import ProjectFactory
-from runtime.session_factory import SessionFactory
-from tests.fixtures.factories import make_domain_config
+from runtime.session_runtime_factory import SessionRuntimeFactory
+from tests.fixtures.factories import make_domain_config, make_project_state
 from tests.fixtures.fakes import (
     FakeKnowledgeStore,
     FakePipeline,
@@ -84,30 +83,27 @@ def assembler_harness(monkeypatch):
         compiled_domain=make_domain_config().compile(),
         get_next_ent_id=get_next_ent_id,
     )
-    project_state = ProjectFactory.create_runtime(
+    project_state = make_project_state(
         project_id="project-1",
+        scheduler=FakeScheduler(),
+        postgres=resources.postgres,
+        embedding=resources.embedding,
+        domain_config=make_domain_config(),
+        batch_processor=shared_processor,
         entities=entities,
         pipeline=pipeline,
-        scheduler=FakeScheduler(),
-        user_name="ada",
-        redis_client=resources.redis,
-        postgres_client=resources.postgres,
-        embedding_service=resources.embedding,
-        domain_config=make_domain_config(),
-        readable_project_ids=["project-1"],
-        batch_processor=shared_processor,
     )
 
     monkeypatch.setattr(
-        "runtime.session_factory.ConfigManager.get",
+        "runtime.session_runtime_factory.ConfigManager.get",
         staticmethod(lambda: config_manager),
     )
     monkeypatch.setattr(
-        "runtime.session_factory.IngestionWorker",
+        "runtime.session_runtime_factory.IngestionWorker",
         RecordingIngestionWorker,
     )
     return SimpleNamespace(
-        assembler=SessionFactory("ada", resources),
+        assembler=SessionRuntimeFactory("ada", resources),
         config_manager=config_manager,
         project_state=project_state,
         resources=resources,
@@ -127,6 +123,8 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
         harness.project_state,
         session_id="session-1",
         model="model-a",
+        agent_id="agent-1",
+        enabled_tools=[],
     )
 
     assert ctx.user_name == "ada"
@@ -134,7 +132,8 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.project_id == "project-1"
     assert ctx.project is harness.project_state
     assert ctx.model == "model-a"
-    assert ctx.active_topics == ["Identity", "General"]
+    assert ctx.agent_id == "agent-1"
+    assert ctx.enabled_tools == []
 
     assert harness.resources.redis.evals == []
 
@@ -177,8 +176,20 @@ async def test_sessions_in_same_project_share_document_service(
 ):
     harness = assembler_harness
 
-    first = await harness.assembler.assemble(harness.project_state, "session-1")
-    second = await harness.assembler.assemble(harness.project_state, "session-2")
+    first = await harness.assembler.assemble(
+        harness.project_state,
+        session_id="session-1",
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
+    second = await harness.assembler.assemble(
+        harness.project_state,
+        session_id="session-2",
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
 
     assert first.document_service is harness.project_state.document_service
     assert second.document_service is harness.project_state.document_service
@@ -186,26 +197,38 @@ async def test_sessions_in_same_project_share_document_service(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_assembler_launch_starts_scheduler_and_consumer(
+async def test_session_assembler_launch_starts_consumer_only(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(harness.project_state, "session-1")
+    ctx = await harness.assembler.assemble(
+        harness.project_state,
+        session_id="session-1",
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
 
     await harness.assembler.launch(ctx)
 
-    assert harness.project_state.scheduler.running is True
-    assert harness.project_state.scheduler.started == 1
+    assert harness.project_state.scheduler.running is False
+    assert harness.project_state.scheduler.started == 0
     assert ctx.consumer.started == 1
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_assembler_launch_does_not_restart_running_scheduler(
+async def test_session_assembler_launch_leaves_project_scheduler_untouched(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(harness.project_state, "session-1")
+    ctx = await harness.assembler.assemble(
+        harness.project_state,
+        session_id="session-1",
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
     harness.project_state.scheduler.running = True
 
     await harness.assembler.launch(ctx)
@@ -220,7 +243,13 @@ async def test_session_assembler_launch_rejects_missing_consumer_callbacks(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(harness.project_state, "session-1")
+    ctx = await harness.assembler.assemble(
+        harness.project_state,
+        session_id="session-1",
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
     ctx.consumer.get_session_context = None
 
     with pytest.raises(RuntimeError, match="consumer.get_session_context callback"):
@@ -239,7 +268,13 @@ async def test_session_assembler_launch_rejects_missing_entity_id_callback(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(harness.project_state, "session-1")
+    ctx = await harness.assembler.assemble(
+        harness.project_state,
+        session_id="session-1",
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
     ctx.batch_processor.get_next_ent_id = None
 
     with pytest.raises(RuntimeError, match="batch_processor.get_next_ent_id callback"):

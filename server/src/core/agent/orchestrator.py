@@ -25,7 +25,7 @@ from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
 
 if TYPE_CHECKING:
-    from core.session.context import Session
+    from runtime.session_runtime import SessionRuntime
 
 
 PUBLIC_AGENT_ERROR_MESSAGE = (
@@ -47,7 +47,7 @@ class Orchestrator:
         user_query: str,
         user_name: str,
         session_id: str,
-        context: Session,
+        context: SessionRuntime,
         user_timezone: Optional[str] = None,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
@@ -202,7 +202,7 @@ class Orchestrator:
 
     async def _resolve_agent_identity(
         self,
-        context: Session,
+        context: SessionRuntime,
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
@@ -226,7 +226,7 @@ class Orchestrator:
 
     async def _bootstrap_services(
         self,
-        context: Session,
+        context: SessionRuntime,
         agent_id: Optional[str] = None,
     ) -> Tools:
         """Retrieve context services and instantiate the agent tool suite."""
@@ -252,14 +252,14 @@ class Orchestrator:
             redis=context.redis_client,
             agent_id=agent_id,
             episode_settings=config.developer_settings.jobs.episode,
-            health_service=getattr(context.resources, "health_service", None),
+            health_service=getattr(context, "health_service", None),
         )
 
         return tools
 
     async def _load_document_focus(
         self,
-        context: Session,
+        context: SessionRuntime,
     ) -> Optional[dict]:
         """Load and validate Postgres-owned session focus for this run."""
         rows = await context.resources.postgres.fetch_all(

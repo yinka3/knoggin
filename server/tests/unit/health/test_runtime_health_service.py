@@ -6,6 +6,17 @@ import pytest
 from core.health.service import RuntimeHealthService
 
 
+class SessionRuntimeReader:
+    def __init__(self, active_sessions):
+        self._active_sessions = active_sessions
+
+    def get_runtime_session(self, session_id):
+        return self._active_sessions.get(session_id)
+
+    def active_runtime_count(self):
+        return len(self._active_sessions)
+
+
 class FakePostgres:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
@@ -140,7 +151,7 @@ async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
         projects=SimpleNamespace(
             active_projects={"project-a": object(), "project-b": object()}
         ),
-        active_sessions={"session-a": object()},
+        sessions=SessionRuntimeReader({"session-a": object()}),
     )
 
     snapshot = await service.get_engine_health()
@@ -164,7 +175,7 @@ async def test_failed_dependency_probes_are_bounded_and_redacted():
             postgres=FakePostgres(fail=True), redis=FakeRedis(fail=True)
         ),
         projects=SimpleNamespace(active_projects={}),
-        active_sessions={},
+        sessions=SessionRuntimeReader({}),
     )
 
     payload = (await service.get_engine_health()).model_dump(mode="json")
@@ -186,7 +197,7 @@ async def test_resource_health_projects_current_queue_without_other_project_ids(
         projects=SimpleNamespace(
             active_projects={"project-a": object(), "project-b": object()}
         ),
-        active_sessions={"session-a": object()},
+        sessions=SessionRuntimeReader({"session-a": object()}),
     )
 
     payload = (await service.get_resource_health(project_id="project-a")).model_dump(
@@ -218,11 +229,11 @@ async def test_ingestion_health_reads_fixed_keys_and_classifies_pending_work():
     service = RuntimeHealthService(
         resources=resource_set,
         projects=SimpleNamespace(active_projects={}),
-        active_sessions={
+        sessions=SessionRuntimeReader({
             "session-a": SimpleNamespace(
                 project_id="project-a", consumer=FakeWorker()
             )
-        },
+        }),
     )
 
     payload = (
@@ -258,11 +269,11 @@ async def test_ingestion_health_degrades_without_failing_when_redis_reads_fail()
     service = RuntimeHealthService(
         resources=resources(redis=FailingRedis()),
         projects=SimpleNamespace(active_projects={}),
-        active_sessions={
+        sessions=SessionRuntimeReader({
             "session-a": SimpleNamespace(
                 project_id="project-a", consumer=FakeWorker()
             )
-        },
+        }),
     )
 
     payload = (
@@ -322,7 +333,7 @@ async def test_background_health_combines_scheduler_queue_and_document_indexing(
     service = RuntimeHealthService(
         resources=resource_set,
         projects=SimpleNamespace(active_projects={"project-a": project}),
-        active_sessions={},
+        sessions=SessionRuntimeReader({}),
     )
 
     payload = (
@@ -373,7 +384,7 @@ async def test_background_health_does_not_claim_a_stopped_scheduler_is_healthy()
     service = RuntimeHealthService(
         resources=resource_set,
         projects=SimpleNamespace(active_projects={"project-a": project}),
-        active_sessions={},
+        sessions=SessionRuntimeReader({}),
     )
 
     payload = (

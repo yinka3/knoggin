@@ -121,7 +121,14 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
     service = RuntimeHealthService(
         resources=resources,
         projects=SimpleNamespace(active_projects={"project-a": project}),
-        active_sessions={"session-a": SimpleNamespace(project_id="project-a")},
+        sessions=SimpleNamespace(
+            get_runtime_session=lambda session_id: (
+                SimpleNamespace(project_id="project-a")
+                if session_id == "session-a"
+                else None
+            ),
+            active_runtime_count=lambda: 1,
+        ),
     )
     tools = HealthToolHarness(service)
 

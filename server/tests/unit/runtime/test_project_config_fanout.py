@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.settings import DeveloperSettings, RootConfig
-from core.project.project_manager import ProjectManager
+from runtime.project_factory import ProjectRuntimeFactory
 
 
 class RecordingConfigManager:
@@ -83,42 +83,46 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         executor=object(),
         embedding=object(),
     )
-    manager = ProjectManager(resources=resources, user_name="ada")
+    factory = ProjectRuntimeFactory(
+        resources=resources,
+        user_name="ada",
+        episode_window_size_provider=lambda _project_id: 8,
+    )
     project_state = RecordingProjectRuntime()
     entities = RecordingEntities()
     processor = RecordingProcessor()
     episode = RecordingJob("episode")
 
     monkeypatch.setattr(
-        "core.project.project_manager.ConfigManager.get",
+        "runtime.project_factory.ConfigManager.get",
         staticmethod(lambda: config_manager),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.DLQReplayJob",
+        "runtime.project_factory.DLQReplayJob",
         lambda **kwargs: RecordingJob("dlq_auto_replay", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.EntityCleanupJob",
+        "runtime.project_factory.EntityCleanupJob",
         lambda **kwargs: RecordingJob("entity_cleanup", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.MergeCleanupJob",
+        "runtime.project_factory.MergeCleanupJob",
         lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.AuditRetentionCleanupJob",
+        "runtime.project_factory.AuditRetentionCleanupJob",
         lambda **kwargs: RecordingJob("audit_retention_cleanup", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.ConflictDiscoveryJob",
+        "runtime.project_factory.ConflictDiscoveryJob",
         lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.DocumentIndexingRecoveryJob",
+        "runtime.project_factory.DocumentIndexingRecoveryJob",
         lambda *args, **kwargs: RecordingJob("document_index_recovery", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.AACJob",
+        "runtime.project_factory.AACJob",
         lambda state, deps: RecordingJob(
             "aac_discussion",
             state=state,
@@ -126,11 +130,11 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         ),
     )
 
-    manager._register_background_jobs(
+    factory._register_background_jobs(
         project_state,
-        entities,
-        processor,
-        episode,
+        entities=entities,
+        processor=processor,
+        episode_job=episode,
     )
 
     assert list(project_state.scheduler._jobs) == [
@@ -171,45 +175,54 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         executor=object(),
         embedding=object(),
     )
-    manager = ProjectManager(resources=resources, user_name="ada")
+    factory = ProjectRuntimeFactory(
+        resources=resources,
+        user_name="ada",
+        episode_window_size_provider=lambda _project_id: 8,
+    )
     state = RecordingProjectRuntime()
     entities = RecordingEntities()
     processor = RecordingProcessor()
     episode = RecordingJob("episode")
 
     monkeypatch.setattr(
-        "core.project.project_manager.ConfigManager.get",
+        "runtime.project_factory.ConfigManager.get",
         staticmethod(lambda: config_manager),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.DLQReplayJob",
+        "runtime.project_factory.DLQReplayJob",
         lambda **kwargs: RecordingJob("dlq_auto_replay", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.EntityCleanupJob",
+        "runtime.project_factory.EntityCleanupJob",
         lambda **kwargs: RecordingJob("entity_cleanup", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.MergeCleanupJob",
+        "runtime.project_factory.MergeCleanupJob",
         lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.AuditRetentionCleanupJob",
+        "runtime.project_factory.AuditRetentionCleanupJob",
         lambda **kwargs: RecordingJob("audit_retention_cleanup", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.ConflictDiscoveryJob",
+        "runtime.project_factory.ConflictDiscoveryJob",
         lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.DocumentIndexingRecoveryJob",
+        "runtime.project_factory.DocumentIndexingRecoveryJob",
         lambda *args, **kwargs: RecordingJob("document_index_recovery", **kwargs),
     )
     monkeypatch.setattr(
-        "core.project.project_manager.AACJob",
+        "runtime.project_factory.AACJob",
         lambda *_: RecordingJob("aac_discussion"),
     )
-    manager._register_background_jobs(state, entities, processor, episode)
+    factory._register_background_jobs(
+        state,
+        entities=entities,
+        processor=processor,
+        episode_job=episode,
+    )
 
     marker = object()
     config_manager.emit("developer_settings.entity_resolution", marker)

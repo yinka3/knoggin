@@ -8,7 +8,6 @@ class JobContext:
 
     user_name: str
     project_id: str
-    idle_seconds: float = 0.0
 
 
 @dataclass
