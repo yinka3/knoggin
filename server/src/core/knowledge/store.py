@@ -241,6 +241,40 @@ class KnowledgeStore:
             batch_size=batch_size,
         )
 
+    async def get_ingestion_queue_health(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> Dict[str, int | None]:
+        """Return bounded PostgreSQL queue counters without exposing messages."""
+
+        row = await self._postgres_client.fetch_one(
+            """
+            SELECT
+                count(*) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS pending_count,
+                count(*) FILTER (WHERE ingestion_state = 'claimed') AS claimed_count,
+                count(*) FILTER (WHERE ingestion_state = 'blocked') AS blocked_count,
+                min(timestamp_ms) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS oldest_pending_ms,
+                max(timestamp_ms) FILTER (WHERE ingestion_state = 'processed') AS last_processed_ms
+            FROM public.messages
+            WHERE user_name = %s AND project_id = %s AND session_id = %s
+              AND role = 'user'
+            """,
+            (user_name, project_id, session_id),
+        )
+        return {
+            key: row.get(key) if row else None
+            for key in (
+                "pending_count",
+                "claimed_count",
+                "blocked_count",
+                "oldest_pending_ms",
+                "last_processed_ms",
+            )
+        }
+
     async def release_ingestion_claim(
         self,
         *,

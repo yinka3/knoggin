@@ -64,6 +64,7 @@ class FakeRedis:
     async def get(self, key):
         return self.strings.get(key)
 
+
 class FakeCoordinator:
     def __init__(self, snapshot: dict):
         self.snapshot = snapshot
@@ -101,6 +102,43 @@ def resources(*, postgres=None, redis=None):
         embedding=object(),
         llm_service=object(),
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_ingestion_health_prefers_durable_postgres_queue_state():
+    class Store:
+        async def get_ingestion_queue_health(self, **_kwargs):
+            return {
+                "pending_count": 2,
+                "claimed_count": 1,
+                "blocked_count": 0,
+                "oldest_pending_ms": None,
+                "last_processed_ms": 1,
+            }
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(active_projects={}),
+        sessions=SessionRuntimeReader(
+            {
+                "session-a": SimpleNamespace(
+                    project_id="project-a", consumer=FakeWorker()
+                )
+            }
+        ),
+    )
+
+    payload = (
+        await service.get_ingestion_health(
+            user_name="ada", project_id="project-a", session_id="session-a"
+        )
+    ).model_dump(mode="json")
+
+    assert payload["details"]["queue"]["pending_count"] == 2
+    assert payload["details"]["redis_available"] is True
 
 
 class FakeWorker:
@@ -229,11 +267,13 @@ async def test_ingestion_health_reads_fixed_keys_and_classifies_pending_work():
     service = RuntimeHealthService(
         resources=resource_set,
         projects=SimpleNamespace(active_projects={}),
-        sessions=SessionRuntimeReader({
-            "session-a": SimpleNamespace(
-                project_id="project-a", consumer=FakeWorker()
-            )
-        }),
+        sessions=SessionRuntimeReader(
+            {
+                "session-a": SimpleNamespace(
+                    project_id="project-a", consumer=FakeWorker()
+                )
+            }
+        ),
     )
 
     payload = (
@@ -269,11 +309,13 @@ async def test_ingestion_health_degrades_without_failing_when_redis_reads_fail()
     service = RuntimeHealthService(
         resources=resources(redis=FailingRedis()),
         projects=SimpleNamespace(active_projects={}),
-        sessions=SessionRuntimeReader({
-            "session-a": SimpleNamespace(
-                project_id="project-a", consumer=FakeWorker()
-            )
-        }),
+        sessions=SessionRuntimeReader(
+            {
+                "session-a": SimpleNamespace(
+                    project_id="project-a", consumer=FakeWorker()
+                )
+            }
+        ),
     )
 
     payload = (
@@ -336,9 +378,9 @@ async def test_background_health_combines_scheduler_queue_and_document_indexing(
         sessions=SessionRuntimeReader({}),
     )
 
-    payload = (
-        await service.get_background_health(project_id="project-a")
-    ).model_dump(mode="json")
+    payload = (await service.get_background_health(project_id="project-a")).model_dump(
+        mode="json"
+    )
 
     assert payload["status"] == "healthy"
     assert payload["activity"] == "busy"
@@ -387,9 +429,9 @@ async def test_background_health_does_not_claim_a_stopped_scheduler_is_healthy()
         sessions=SessionRuntimeReader({}),
     )
 
-    payload = (
-        await service.get_background_health(project_id="project-a")
-    ).model_dump(mode="json")
+    payload = (await service.get_background_health(project_id="project-a")).model_dump(
+        mode="json"
+    )
 
     assert payload["status"] == "degraded"
     assert payload["activity"] == "idle"

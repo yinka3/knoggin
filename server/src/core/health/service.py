@@ -238,9 +238,7 @@ class RuntimeHealthService:
 
         worker_state = worker_snapshot.get("state")
         redis_available = redis_details.get("redis_available") is True
-        pending_count = self._nonnegative_int(
-            redis_details.get("pending_count")
-        )
+        pending_count = self._nonnegative_int(redis_details.get("pending_count"))
         dlq = redis_details.get("dlq", {})
         dlq_count = sum(
             self._nonnegative_int(dlq.get(name))
@@ -399,21 +397,15 @@ class RuntimeHealthService:
 
         scheduler_state = scheduler_snapshot.get("state")
         queued_jobs = self._nonnegative_int(scheduler_snapshot.get("queued_jobs"))
-        running_jobs = self._nonnegative_int(
-            scheduler_snapshot.get("running_jobs")
-        )
-        stalled_jobs = self._nonnegative_int(
-            scheduler_snapshot.get("stalled_jobs")
-        )
+        running_jobs = self._nonnegative_int(scheduler_snapshot.get("running_jobs"))
+        stalled_jobs = self._nonnegative_int(scheduler_snapshot.get("stalled_jobs"))
         recent_failed_jobs = self._nonnegative_int(
             scheduler_snapshot.get("recent_failed_jobs")
         )
         queued_background = self._nonnegative_int(
             background_snapshot.get("queued_for_project")
         )
-        active_background = int(
-            background_snapshot.get("active_for_project") is True
-        )
+        active_background = int(background_snapshot.get("active_for_project") is True)
         local_indexing_tasks = self._nonnegative_int(
             indexing_snapshot.get("local_submission_tasks")
         )
@@ -453,9 +445,11 @@ class RuntimeHealthService:
             status = HealthStatus.HEALTHY
             summary = "Background work is healthy"
 
-        if stalled_jobs or (
-            scheduler_state != "running" and work_present
-        ) or (pending_documents and not running_jobs and not active_background):
+        if (
+            stalled_jobs
+            or (scheduler_state != "running" and work_present)
+            or (pending_documents and not running_jobs and not active_background)
+        ):
             activity = HealthActivity.DELAYED
         elif work_present:
             activity = HealthActivity.BUSY
@@ -530,6 +524,54 @@ class RuntimeHealthService:
         project_id: str,
         session_id: str,
     ) -> dict[str, Any]:
+        store = getattr(self.resources, "knowledge_store", None)
+        read_queue_health = getattr(store, "get_ingestion_queue_health", None)
+        if callable(read_queue_health):
+            queue, error = await self._bounded_read(
+                lambda: read_queue_health(
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                )
+            )
+            if error is None and isinstance(queue, Mapping):
+                pending_count = self._nonnegative_int(queue.get("pending_count"))
+                oldest_ms = self._nonnegative_int_or_none(
+                    queue.get("oldest_pending_ms")
+                )
+                oldest_age = None
+                if oldest_ms is not None:
+                    oldest_age = max(get_now().timestamp() - oldest_ms / 1000, 0.0)
+                return {
+                    "redis_available": True,
+                    "warnings": [],
+                    "pending_count": pending_count,
+                    "oldest_pending_available": oldest_ms is not None,
+                    "oldest_pending_age_seconds": oldest_age,
+                    "last_processed_available": queue.get("last_processed_ms")
+                    is not None,
+                    "project_last_processed_available": queue.get("last_processed_ms")
+                    is not None,
+                    "checkpoint_available": False,
+                    "checkpoint_count": None,
+                    "dlq": {
+                        "queued": 0,
+                        "processing": self._nonnegative_int(queue.get("claimed_count")),
+                        "parked": self._nonnegative_int(queue.get("blocked_count")),
+                    },
+                }
+            return {
+                "redis_available": False,
+                "warnings": ["PostgreSQL ingestion metrics are unavailable"],
+                "pending_count": 0,
+                "oldest_pending_available": False,
+                "oldest_pending_age_seconds": None,
+                "last_processed_available": False,
+                "project_last_processed_available": False,
+                "checkpoint_available": False,
+                "checkpoint_count": None,
+                "dlq": {"queued": 0, "processing": 0, "parked": 0},
+            }
         redis = getattr(self.resources, "redis", None)
         if redis is None:
             manager = getattr(self.resources, "redis_manager", None)
@@ -564,9 +606,7 @@ class RuntimeHealthService:
             "checkpoint": lambda: redis.get(
                 RedisKeys.checkpoint(user_name, session_id)
             ),
-            "dlq_queued": lambda: redis.llen(
-                RedisKeys.dlq(user_name, project_id)
-            ),
+            "dlq_queued": lambda: redis.llen(RedisKeys.dlq(user_name, project_id)),
             "dlq_processing": lambda: redis.llen(
                 RedisKeys.dlq_processing(user_name, project_id)
             ),
@@ -609,9 +649,7 @@ class RuntimeHealthService:
             "checkpoint_count": checkpoint_count,
             "dlq": {
                 "queued": self._nonnegative_int(values["dlq_queued"][0]),
-                "processing": self._nonnegative_int(
-                    values["dlq_processing"][0]
-                ),
+                "processing": self._nonnegative_int(values["dlq_processing"][0]),
                 "parked": self._nonnegative_int(values["dlq_parked"][0]),
             },
         }
