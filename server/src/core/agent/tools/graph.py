@@ -720,22 +720,12 @@ class GraphTools:
         if not hot_topics:
             return {}
 
-        # Fetch context
-        try:
-            raw = await self.knowledge_store.get_hot_topic_context_with_messages(
-                hot_topics,
-                msg_limit=10,
-                slim=slim,
-                visible_project_ids=self.readable_project_ids,
-            )
-        except TypeError as exc:
-            if "slim" not in str(exc):
-                raise
-            raw = await self.knowledge_store.get_hot_topic_context_with_messages(
-                hot_topics,
-                msg_limit=10,
-                visible_project_ids=self.readable_project_ids,
-            )
+        raw = await self.knowledge_store.get_hot_topic_context_with_messages(
+            hot_topics,
+            msg_limit=10,
+            slim=slim,
+            visible_project_ids=self.readable_project_ids,
+        )
         for _, data in raw.items():
             message_refs = data.get("message_refs", data.get("message_ids", []))
             data["messages"] = await self._hydrate_evidence(message_refs)

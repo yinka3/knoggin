@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
-from common.exceptions import StorageUnavailableError
+from common.exceptions import StorageReadError
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -88,6 +88,14 @@ class EntityReader:
             cleaned = self._clean_string(aliases)
             return [cleaned] if cleaned else []
         return [self._clean_string(alias) for alias in aliases if alias]
+
+    @staticmethod
+    def _raise_storage_read(operation: str, exc: Exception) -> None:
+        logger.error("Storage read failed for {}: {}", operation, exc)
+        raise StorageReadError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
 
     async def _fetch_embeddings(
         self,
@@ -179,8 +187,7 @@ class EntityReader:
                 return self._parse_vector(row["embedding"])
             return []
         except Exception as e:
-            logger.error(f"Failed to get embedding for entity {entity_id}: {e}")
-            return []
+            self._raise_storage_read("get_entity_embedding", e)
 
     async def list_entities(
         self,
@@ -268,8 +275,7 @@ class EntityReader:
                 )
             return entities, total
         except Exception as e:
-            logger.error(f"Failed to list entities: {e}")
-            return [], 0
+            self._raise_storage_read("list_entities", e)
 
     async def get_entity_by_id(
         self,
@@ -315,8 +321,7 @@ class EntityReader:
             )
             return self._hydrate_entity_row(row, embedding=embedding)
         except Exception as e:
-            logger.error(f"Failed to get entity {entity_id}: {e}")
-            return None
+            self._raise_storage_read("get_entity_by_id", e)
 
     async def get_entities_by_ids(
         self,
@@ -377,8 +382,7 @@ class EntityReader:
                 )
             return entities
         except Exception as e:
-            logger.error(f"Failed to fetch entities by ids: {e}")
-            return []
+            self._raise_storage_read("get_entities_by_ids", e)
 
     async def get_entity_ids_for_messages(
         self,
@@ -428,8 +432,7 @@ class EntityReader:
                 ),
             )
         except Exception as e:
-            logger.error(f"Failed to fetch message entities: {e}")
-            return {}
+            self._raise_storage_read("get_entity_ids_for_messages", e)
 
         entities_by_message = {message_id: [] for message_id in normalized_message_ids}
         for row in rows:
@@ -495,11 +498,7 @@ class EntityReader:
                 for row in res
             ]
         except Exception as e:
-            logger.error(f"Failed to get entities by names: {e}")
-            raise StorageUnavailableError(
-                "get_entities_by_names",
-                details={"error_type": type(e).__name__},
-            ) from e
+            self._raise_storage_read("get_entities_by_names", e)
 
     async def search_similar_entities(
         self,
@@ -543,8 +542,7 @@ class EntityReader:
             res = await self.client.fetch_all(query, tuple(params))
             return [(r["entity_id"], r["similarity"]) for r in res]
         except Exception as e:
-            logger.error(f"Failed to search similar entities for {entity_id}: {e}")
-            return []
+            self._raise_storage_read("search_similar_entities", e)
 
     async def search_entities_by_embedding(
         self,
@@ -582,8 +580,7 @@ class EntityReader:
             res = await self.client.fetch_all(query, tuple(params))
             return [(r["entity_id"], r["similarity"]) for r in res]
         except Exception as e:
-            logger.error(f"Entity vector search failed: {e}")
-            return []
+            self._raise_storage_read("search_entities_by_embedding", e)
 
     async def validate_existing_ids(
         self,
@@ -610,8 +607,7 @@ class EntityReader:
             )
             return {int(r["id"]) for r in res}
         except Exception as e:
-            logger.error(f"Liveness check failed: {e}")
-            return None
+            self._raise_storage_read("validate_existing_ids", e)
 
     async def get_orphan_entities(
         self,
@@ -701,8 +697,7 @@ class EntityReader:
             )
             return [int(r["id"]) for r in res]
         except Exception as e:
-            logger.error(f"Failed to fetch orphans: {e}")
-            return []
+            self._raise_storage_read("get_orphan_entities", e)
 
     async def get_entity_count_by_type(
         self, *, visible_project_ids: List[str]
@@ -732,8 +727,7 @@ class EntityReader:
                 for r in res
             ]
         except Exception as e:
-            logger.error(f"Failed to get entity count by type: {e}")
-            return []
+            self._raise_storage_read("get_entity_count_by_type", e)
 
     async def get_entity_count_by_topic(
         self, *, visible_project_ids: List[str]
@@ -763,8 +757,7 @@ class EntityReader:
                 for r in res
             ]
         except Exception as e:
-            logger.error(f"Failed to get entity count by topic: {e}")
-            return []
+            self._raise_storage_read("get_entity_count_by_topic", e)
 
     async def get_top_connected_entities(
         self, *, visible_project_ids: List[str], limit: int = 10
@@ -808,8 +801,7 @@ class EntityReader:
                 for r in res
             ]
         except Exception as e:
-            logger.error(f"Failed to get top connected entities: {e}")
-            return []
+            self._raise_storage_read("get_top_connected_entities", e)
 
     async def get_entity_relationships(
         self,
@@ -889,8 +881,7 @@ class EntityReader:
                 for r in res
             ]
         except Exception as e:
-            logger.error(f"Failed to get relationships for entity {entity_id}: {e}")
-            return []
+            self._raise_storage_read("get_entity_relationships", e)
 
     async def get_recently_active_entities(
         self,
@@ -943,8 +934,7 @@ class EntityReader:
                 for r in res
             ]
         except Exception as e:
-            logger.error(f"Failed to get recently active entities: {e}")
-            return []
+            self._raise_storage_read("get_recently_active_entities", e)
 
     async def get_notable_entities(
         self, *, visible_project_ids: List[str], limit: int = 10
@@ -1005,5 +995,4 @@ class EntityReader:
                 for r in res
             ]
         except Exception as e:
-            logger.error(f"Failed to get notable entities: {e}")
-            return []
+            self._raise_storage_read("get_notable_entities", e)

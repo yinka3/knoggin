@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
-from common.exceptions import StorageUnavailableError
+from common.exceptions import StorageReadError
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -22,9 +22,9 @@ class ToolQueries:
         self.graph_name = graph_name
 
     @staticmethod
-    def _raise_storage_unavailable(operation: str, exc: Exception) -> None:
+    def _raise_storage_read(operation: str, exc: Exception) -> None:
         logger.error(f"Storage query failed for {operation}: {exc}")
-        raise StorageUnavailableError(
+        raise StorageReadError(
             operation,
             details={"error_type": type(exc).__name__},
         ) from exc
@@ -172,7 +172,7 @@ class ToolQueries:
                 }
             return result
         except Exception as e:
-            self._raise_storage_unavailable("get_hot_topic_context_with_messages", e)
+            self._raise_storage_read("get_hot_topic_context_with_messages", e)
 
     @staticmethod
     def _sanitize_fts_query(query: str) -> str:
@@ -232,7 +232,7 @@ class ToolQueries:
                 for row in res
             ]
         except Exception as e:
-            self._raise_storage_unavailable("search_messages_fts", e)
+            self._raise_storage_read("search_messages_fts", e)
 
     async def search_entity(
         self,
@@ -430,7 +430,7 @@ class ToolQueries:
             return result[:limit]
 
         except Exception as e:
-            self._raise_storage_unavailable("search_entity", e)
+            self._raise_storage_read("search_entity", e)
 
     async def get_related_entities(
         self,
@@ -595,7 +595,7 @@ class ToolQueries:
                 for r in data
             ]
         except Exception as e:
-            self._raise_storage_unavailable("get_related_entities", e)
+            self._raise_storage_read("get_related_entities", e)
 
     async def get_recent_activity(
         self,
@@ -678,7 +678,7 @@ class ToolQueries:
                 for r in data
             ]
         except Exception as e:
-            self._raise_storage_unavailable("get_recent_activity", e)
+            self._raise_storage_read("get_recent_activity", e)
 
     async def _find_shortest_path(
         self,
@@ -754,7 +754,7 @@ class ToolQueries:
                 bool(row["has_inactive"]),
             )
         except Exception as e:
-            self._raise_storage_unavailable("find_shortest_path", e)
+            self._raise_storage_read("find_shortest_path", e)
 
     async def _find_active_only_path(
         self,
@@ -823,7 +823,7 @@ class ToolQueries:
             row = data[0]
             return (row["names"], row["node_topics"], row["evidence_refs"])
         except Exception as e:
-            self._raise_storage_unavailable("find_active_only_path", e)
+            self._raise_storage_read("find_active_only_path", e)
 
     async def find_path_filtered(
         self,

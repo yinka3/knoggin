@@ -5,6 +5,7 @@ from typing import Dict, List
 
 from loguru import logger
 
+from common.exceptions import StorageWriteError
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from core.knowledge.db.writers.age_projection_writer import (
     AgeProjectionWriter,
@@ -177,17 +178,13 @@ class GraphBuilder:
                 )
                 return summary
         except Exception as e:
-            logger.error(
-                f"Failed to rebuild AGE projection for project {project_id}: {e}"
-            )
             if using_existing_cursor:
                 raise
-            return {
-                "messages": 0,
-                "entities": 0,
-                "relationships": 0,
-                "hierarchy_edges": 0,
-            }
+            logger.error("AGE projection rebuild failed for {}: {}", project_id, e)
+            raise StorageWriteError(
+                "rebuild_project_projection",
+                details={"error_type": type(e).__name__},
+            ) from e
 
     async def _fetch_messages(
         self,

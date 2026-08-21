@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from common.exceptions import StorageWriteError
 from common.scoping import IDENTITY_ENTITY_ID
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from tests.fixtures.fakes import RecordingPostgresClient
@@ -305,17 +306,18 @@ async def test_graph_writer_create_hierarchy_edge_rejects_cycle_candidate():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_create_hierarchy_edge_returns_false_on_db_failure():
+async def test_graph_writer_create_hierarchy_edge_raises_on_db_failure():
     client = RecordingPostgresClient(
         cursor_execute_exceptions=[RuntimeError("graph down")]
     )
     writer = GraphWriter(client)
 
-    assert await writer.create_hierarchy_edge(
-        parent_id=2,
-        child_id=3,
-        project_id="project-1",
-    ) is False
+    with pytest.raises(StorageWriteError, match="create_hierarchy_edge"):
+        await writer.create_hierarchy_edge(
+            parent_id=2,
+            child_id=3,
+            project_id="project-1",
+        )
     assert len(client.calls) == 1
 
 
@@ -824,7 +826,8 @@ async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
     )
     writer = GraphWriter(client)
 
-    assert await writer.merge_entities(2, 3, project_id="project-1") is False
+    with pytest.raises(StorageWriteError, match="merge_entities"):
+        await writer.merge_entities(2, 3, project_id="project-1")
     assert not any(
         call[0] == "execute" and "DELETE FROM entities" in call[1]
         for call in client.calls
@@ -833,7 +836,7 @@ async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_merge_entities_returns_false_on_transaction_error():
+async def test_graph_writer_merge_entities_raises_on_transaction_error():
     client = RecordingPostgresClient(
         fetch_one_results=[
             merge_validation_row(
@@ -853,7 +856,8 @@ async def test_graph_writer_merge_entities_returns_false_on_transaction_error():
     )
     writer = GraphWriter(client)
 
-    assert await writer.merge_entities(2, 3, project_id="project-1") is False
+    with pytest.raises(StorageWriteError, match="merge_entities"):
+        await writer.merge_entities(2, 3, project_id="project-1")
 
     assert len(client.calls) == 4
     assert "pg_advisory_xact_lock" in client.calls[0][1]

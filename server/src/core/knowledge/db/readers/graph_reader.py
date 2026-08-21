@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from common.exceptions import StorageUnavailableError
+from common.exceptions import StorageReadError
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -18,9 +18,9 @@ class GraphReader:
         self.graph_name = graph_name
 
     @staticmethod
-    def _raise_storage_unavailable(operation: str, exc: Exception) -> None:
+    def _raise_storage_read(operation: str, exc: Exception) -> None:
         logger.error(f"Storage query failed for {operation}: {exc}")
-        raise StorageUnavailableError(
+        raise StorageReadError(
             operation,
             details={"error_type": type(exc).__name__},
         ) from exc
@@ -103,7 +103,7 @@ class GraphReader:
             return self._clean_string(content)
         except Exception as e:
             logger.error(f"Failed to get message text for {message_id}: {e}")
-            self._raise_storage_unavailable("get_message_text", e)
+            self._raise_storage_read("get_message_text", e)
 
     async def get_messages_by_ids(
         self,
@@ -157,7 +157,7 @@ class GraphReader:
             return [self._parse_message_row(row) for row in res]
         except Exception as e:
             logger.error(f"Failed to fetch messages by ids: {e}")
-            self._raise_storage_unavailable("get_messages_by_ids", e)
+            self._raise_storage_read("get_messages_by_ids", e)
 
     async def get_recent_project_messages(
         self,
@@ -216,7 +216,7 @@ class GraphReader:
             return [self._parse_message_row(row) for row in reversed(rows)]
         except Exception as e:
             logger.error(f"Failed to fetch recent project messages: {e}")
-            self._raise_storage_unavailable("get_recent_project_messages", e)
+            self._raise_storage_read("get_recent_project_messages", e)
 
     async def get_surrounding_messages(
         self,
@@ -346,7 +346,7 @@ class GraphReader:
             return prev_msgs + [target] + next_msgs
         except Exception as e:
             logger.error(f"Failed to fetch surrounding messages for {message_id}: {e}")
-            self._raise_storage_unavailable("get_surrounding_messages", e)
+            self._raise_storage_read("get_surrounding_messages", e)
 
     async def get_neighbor_ids(
         self, entity_id: int, *, visible_project_ids: List[str]
@@ -379,7 +379,7 @@ class GraphReader:
             return {int(row["neighbor_id"]) for row in res}
         except Exception as e:
             logger.error(f"Failed to get neighbor IDs for {entity_id}: {e}")
-            self._raise_storage_unavailable("get_neighbor_ids", e)
+            self._raise_storage_read("get_neighbor_ids", e)
 
     async def get_parent_entities(
         self, entity_id: int, *, visible_project_ids: List[str]
@@ -421,7 +421,7 @@ class GraphReader:
             ]
         except Exception as e:
             logger.error(f"Failed to get parents for entity {entity_id}: {e}")
-            self._raise_storage_unavailable("get_parent_entities", e)
+            self._raise_storage_read("get_parent_entities", e)
 
     async def get_neighbor_entities(
         self,
@@ -461,7 +461,7 @@ class GraphReader:
             return [{"id": int(r["id"]), "name": r["name"]} for r in res]
         except Exception as e:
             logger.error(f"Failed to get neighbor entities for {entity_id}: {e}")
-            self._raise_storage_unavailable("get_neighbor_entities", e)
+            self._raise_storage_read("get_neighbor_entities", e)
 
     async def get_child_entities(
         self, entity_id: int, *, visible_project_ids: List[str]
@@ -503,7 +503,7 @@ class GraphReader:
             ]
         except Exception as e:
             logger.error(f"Failed to get children for entity {entity_id}: {e}")
-            self._raise_storage_unavailable("get_child_entities", e)
+            self._raise_storage_read("get_child_entities", e)
 
     async def has_direct_edge(
         self, id_a: int, id_b: int, *, visible_project_ids: List[str]
@@ -537,7 +537,7 @@ class GraphReader:
             return self._parse_boolean(row["connected"]) if row else False
         except Exception as e:
             logger.error(f"Failed to check direct edge between {id_a} and {id_b}: {e}")
-            self._raise_storage_unavailable("has_direct_edge", e)
+            self._raise_storage_read("has_direct_edge", e)
 
     async def has_hierarchy_edge(
         self, id_a: int, id_b: int, *, visible_project_ids: List[str]
@@ -567,7 +567,7 @@ class GraphReader:
             logger.error(
                 f"Failed to check hierarchy edge between {id_a} and {id_b}: {e}"
             )
-            self._raise_storage_unavailable("has_hierarchy_edge", e)
+            self._raise_storage_read("has_hierarchy_edge", e)
 
     async def get_merge_topic_strength(
         self,
@@ -682,7 +682,7 @@ class GraphReader:
                 "Failed to get merge topic strength for "
                 f"{primary_id}<-{secondary_id}: {e}"
             )
-            self._raise_storage_unavailable("get_merge_topic_strength", e)
+            self._raise_storage_read("get_merge_topic_strength", e)
 
     async def get_hierarchy_candidates(
         self,
@@ -784,7 +784,7 @@ class GraphReader:
 
         except Exception as e:
             logger.error(f"Hierarchy candidate query failed: {e}")
-            self._raise_storage_unavailable("get_hierarchy_candidates", e)
+            self._raise_storage_read("get_hierarchy_candidates", e)
 
     async def get_graph_stats(
         self, *, visible_project_ids: List[str]
@@ -830,7 +830,7 @@ class GraphReader:
             }
         except Exception as e:
             logger.error(f"Failed to get graph stats: {e}")
-            self._raise_storage_unavailable("get_graph_stats", e)
+            self._raise_storage_read("get_graph_stats", e)
 
     async def get_neighbor_ids_batch(
         self,
@@ -877,4 +877,4 @@ class GraphReader:
             return result_map
         except Exception as e:
             logger.error(f"Failed to batch fetch neighbor IDs: {e}")
-            self._raise_storage_unavailable("get_neighbor_ids_batch", e)
+            self._raise_storage_read("get_neighbor_ids_batch", e)

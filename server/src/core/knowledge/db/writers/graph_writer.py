@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
     normalize_relationship_type,
     relationship_identity,
@@ -25,6 +26,14 @@ class GraphWriter:
 
     def _current_time_ms(self) -> int:
         return get_now_ms()
+
+    @staticmethod
+    def _raise_storage_write(operation: str, exc: Exception) -> None:
+        logger.error("Storage write failed for {}: {}", operation, exc)
+        raise StorageWriteError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
 
     @asynccontextmanager
     async def _merge_cursor(self, cur):
@@ -437,11 +446,7 @@ class GraphWriter:
                 )
                 return projected
         except Exception as e:
-            logger.error(
-                "Failed to create hierarchy edge "
-                f"({child_id})-[:PART_OF]->({parent_id}): {e}"
-            )
-            return False
+            self._raise_storage_write("create_hierarchy_edge", e)
 
     async def delete_relationship(
         self,
@@ -452,13 +457,13 @@ class GraphWriter:
         project_id: str,
     ) -> bool:
         project_id = self._require_project_id(project_id, "delete_relationship")
+        relationship_id = self._relationship_id(
+            project_id,
+            entity_a_id,
+            entity_b_id,
+            relationship_type,
+        )
         try:
-            relationship_id = self._relationship_id(
-                project_id,
-                entity_a_id,
-                entity_b_id,
-                relationship_type,
-            )
             async with self.client.transaction() as cur:
                 await cur.execute(
                     """
@@ -484,11 +489,7 @@ class GraphWriter:
 
             return bool(canonical_record or projected_deleted)
         except Exception as e:
-            logger.error(
-                "Failed to delete relationship "
-                f"({entity_a_id}, {entity_b_id}, {relationship_type}): {e}"
-            )
-            return False
+            self._raise_storage_write("delete_relationship", e)
 
     async def merge_entities(
         self,
@@ -1398,7 +1399,6 @@ class GraphWriter:
                 logger.info(f"Merged entity {secondary_id} into {primary_id}")
                 return True
         except Exception as e:
-            logger.error(f"Merge transaction failed: {e}")
             if using_existing_cursor:
                 raise
-            return False
+            self._raise_storage_write("merge_entities", e)

@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from common.exceptions import (
     DependencyError,
     LLMProviderError,
-    StorageUnavailableError,
+    StorageError,
     ToolExecutionError,
 )
 from common.schema.public import (
@@ -249,7 +249,7 @@ def _status_for_error(error: Exception) -> int:
         return 422
     if isinstance(
         error,
-        (DependencyError, StorageUnavailableError, LLMProviderError),
+        (DependencyError, StorageError, LLMProviderError),
     ):
         return 503
     if isinstance(error, ToolExecutionError):
