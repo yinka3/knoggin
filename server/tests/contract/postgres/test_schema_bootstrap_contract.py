@@ -84,6 +84,12 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
             "AND column_name = 'session_id'"
         ) == {"is_nullable": "NO"}
         assert await client.fetch_one(
+            "SELECT 1 AS present FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'agent_tool_audits' "
+            "AND column_name = 'confirmation_state'"
+        ) is None
+        assert await client.fetch_one(
             "SELECT 1 AS present FROM ag_catalog.ag_graph WHERE name = 'knoggin_graph'"
         ) == {"present": 1}
     finally:

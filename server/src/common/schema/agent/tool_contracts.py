@@ -1072,7 +1072,6 @@ READ_CAPABILITY = "read"
 REVERSIBLE_WRITE_CAPABILITY = "reversible_write"
 CONFIGURATION_WRITE_CAPABILITY = "configuration_write"
 IDENTITY_WRITE_CAPABILITY = "identity_write"
-DESTRUCTIVE_WRITE_CAPABILITY = "destructive_write"
 
 CAPABILITY_CLASSES = frozenset(
     {
@@ -1080,12 +1079,11 @@ CAPABILITY_CLASSES = frozenset(
         REVERSIBLE_WRITE_CAPABILITY,
         CONFIGURATION_WRITE_CAPABILITY,
         IDENTITY_WRITE_CAPABILITY,
-        DESTRUCTIVE_WRITE_CAPABILITY,
     }
 )
 
-# Missing agent configuration gets useful autonomy without destructive authority.
-# A destructive tool must be explicitly enabled and confirmed at execution time.
+# Missing agent configuration gets useful autonomy for the currently exposed
+# read and reversible write tools.
 SAFE_DEFAULT_CAPABILITIES = frozenset(
     {
         READ_CAPABILITY,

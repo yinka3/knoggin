@@ -295,12 +295,14 @@ async def test_executor_loop_recovers_from_invalid_arguments_and_tool_exceptions
 
 
 @pytest.mark.no_network
-async def test_executor_loop_timeout_restores_tool_state_and_records_failure(
+async def test_executor_loop_timeout_keeps_run_scoped_tool_references(
     monkeypatch,
 ):
     run = make_run(limits=AgentRunLimits(tool_timeout=0.01))
+    run.short_uuid_references["entity_2"] = "run-actual-2"
     tools = SimpleNamespace(short_uuid_references={"entity_1": "actual-1"})
     executor = AgentExecutor(run, ScriptedLLM([]), tools)
+    assert tools.short_uuid_references is run.short_uuid_references
 
     async def slow_execute(*_args):
         await asyncio.sleep(1)
@@ -319,15 +321,17 @@ async def test_executor_loop_timeout_restores_tool_state_and_records_failure(
     assert events[-1]["event"] == "tool_error"
     assert "timed out" in events[-1]["data"]["error"]
     assert run.consecutive_errors == 1
-    assert tools.short_uuid_references == {"entity_1": "actual-1"}
+    assert tools.short_uuid_references == {"entity_2": "run-actual-2"}
 
 
 @pytest.mark.no_network
-async def test_executor_cancellation_restores_tool_state_and_propagates(monkeypatch):
+async def test_executor_cancellation_keeps_run_scoped_tool_references(monkeypatch):
     started = asyncio.Event()
     run = make_run()
+    run.short_uuid_references["entity_2"] = "run-actual-2"
     tools = SimpleNamespace(short_uuid_references={"entity_1": "actual-1"})
     executor = AgentExecutor(run, ScriptedLLM([]), tools)
+    assert tools.short_uuid_references is run.short_uuid_references
 
     async def blocking_execute(*_args):
         started.set()
@@ -350,7 +354,7 @@ async def test_executor_cancellation_restores_tool_state_and_propagates(monkeypa
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert tools.short_uuid_references == {"entity_1": "actual-1"}
+    assert tools.short_uuid_references == {"entity_2": "run-actual-2"}
     assert run.call_count == 1
 
 

@@ -24,7 +24,7 @@ class StreamingLLM:
             yield chunk
 
 
-def make_executor(llm):
+def make_executor(llm, *, additional_tool_schemas=None):
     ctx = AgentRun.open(
         user_name="ada",
         project_id="project-1",
@@ -42,6 +42,7 @@ def make_executor(llm):
         brain="Use citations",
         directives="Required:\n- stay grounded",
         enabled_tools=["search_messages"],
+        additional_tool_schemas=additional_tool_schemas,
         active_topics=["Identity", "Testing"],
     )
     tools = SimpleNamespace(document_service=None)
@@ -114,7 +115,6 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
         },
     ]
     llm = StreamingLLM(chunks)
-    executor = make_executor(llm)
     prompt_calls = []
 
     def fake_agent_prompt(*args, **kwargs):
@@ -133,7 +133,10 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
             "parameters": {"type": "object"},
         },
     }
-    executor.ctx.additional_tool_schemas = (client_tool,)
+    executor = make_executor(
+        llm,
+        additional_tool_schemas=[client_tool],
+    )
 
     events = [
         event

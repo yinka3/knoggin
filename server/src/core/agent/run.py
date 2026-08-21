@@ -17,6 +17,8 @@ from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.tools.registry import (
+    ToolRuntime,
+    build_tool_runtime,
     get_default_tool_limits,
     get_registered_tool_names,
 )
@@ -103,6 +105,7 @@ class AgentRun:
     directives: str
     enabled_tools: Optional[Tuple[str, ...]]
     additional_tool_schemas: Tuple[Dict[str, Any], ...]
+    tool_runtime: ToolRuntime
     limits: AgentRunLimits
     history: List[Dict] = field(default_factory=list)
     document_focus: Optional[DocumentFocus] = None
@@ -160,8 +163,22 @@ class AgentRun:
 
         if not user_name or not project_id or not session_id:
             raise ValueError("AgentRun requires user, project, and session scope")
+        effective_run_id = run_id or str(uuid4())
+        effective_enabled_tools = (
+            tuple(enabled_tools) if enabled_tools is not None else None
+        )
+        effective_additional_schemas = tuple(additional_tool_schemas or ())
+        tool_runtime = build_tool_runtime(
+            enabled_tools=effective_enabled_tools,
+            additional_schemas=effective_additional_schemas,
+            user_name=user_name,
+            agent_id=str(getattr(agent.config, "id", "") or ""),
+            project_id=project_id,
+            session_id=session_id,
+            run_id=effective_run_id,
+        )
         return cls(
-            run_id=run_id or str(uuid4()),
+            run_id=effective_run_id,
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
@@ -171,8 +188,9 @@ class AgentRun:
             temperature=temperature,
             brain=brain or "",
             directives=directives or "",
-            enabled_tools=tuple(enabled_tools) if enabled_tools is not None else None,
-            additional_tool_schemas=tuple(additional_tool_schemas or ()),
+            enabled_tools=effective_enabled_tools,
+            additional_tool_schemas=effective_additional_schemas,
+            tool_runtime=tool_runtime,
             limits=limits,
             **state,
         )

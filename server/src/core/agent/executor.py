@@ -45,10 +45,7 @@ from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
 from core.agent.tools.registry import (
     Tools,
-    configure_tool_authorization,
-    get_active_tool_names,
-    get_runtime_instructions,
-    get_tool_schemas,
+    install_tool_runtime,
 )
 from infrastructure.llm_client import LLMService
 
@@ -107,6 +104,11 @@ class AgentExecutor:
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
+        install_tool_runtime(
+            tools,
+            ctx.tool_runtime,
+            ctx.short_uuid_references,
+        )
         for candidate in ctx.initial_source_candidates:
             ctx.record_source(candidate)
 
@@ -366,15 +368,6 @@ class AgentExecutor:
         project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
-        active_schemas = get_tool_schemas(
-            list(self.ctx.enabled_tools) if self.ctx.enabled_tools is not None else None
-        )
-        if self.ctx.additional_tool_schemas:
-            active_schemas = active_schemas + list(self.ctx.additional_tool_schemas)
-
-        active_tool_names = get_active_tool_names(active_schemas)
-        runtime_instructions = get_runtime_instructions(self.ctx, active_tool_names)
-
         system_prompt = get_agent_prompt(
             user_name=self.ctx.user_name,
             current_time=date,
@@ -385,7 +378,7 @@ class AgentExecutor:
             agent_directives=self.ctx.directives,
             agent_brain=self.ctx.brain,
             project_context=project_context,
-            runtime_instructions=runtime_instructions,
+            runtime_instructions=self.ctx.tool_runtime.runtime_instructions,
             active_topics=self.ctx.active_topics,
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
@@ -394,23 +387,13 @@ class AgentExecutor:
 
         user_message = build_user_message(self.ctx, last_result)
         self.ctx.clear_last_error()
-        configure_tool_authorization(
-            self.tools,
-            active_schemas,
-            user_name=self.ctx.user_name,
-            agent_id=self.ctx.agent.config.id or getattr(self.tools, "agent_id", ""),
-            project_id=self.ctx.project_id or str(getattr(self.tools, "project_id", "")),
-            session_id=self.ctx.session_id,
-            run_id=self.ctx.run_id,
-        )
-
         saw_tool_calls = False
 
         try:
             async for event in self.llm.stream_with_tools(
                 system=system_prompt,
                 user=user_message,
-                tools=active_schemas,
+                tools=list(self.ctx.tool_runtime.schemas),
                 model=model or self.llm.agent_model,
                 temperature=self.ctx.temperature,
             reasoning=reasoning,
@@ -601,25 +584,12 @@ class AgentExecutor:
                     }
                     continue
 
-                missing = object()
-                previous_short_uuid_references = getattr(
-                    self.tools, "short_uuid_references", missing
-                )
-                self.tools.short_uuid_references = self.ctx.short_uuid_references
-                try:
-                    async with asyncio.timeout(self.ctx.limits.tool_timeout):
-                        result = await execute_tool(
-                            self.tools,
-                            call.name,
-                            call.args,
-                        )
-                finally:
-                    if previous_short_uuid_references is missing:
-                        delattr(self.tools, "short_uuid_references")
-                    else:
-                        self.tools.short_uuid_references = (
-                            previous_short_uuid_references
-                        )
+                async with asyncio.timeout(self.ctx.limits.tool_timeout):
+                    result = await execute_tool(
+                        self.tools,
+                        call.name,
+                        call.args,
+                    )
 
                 self.ctx.record_sources(
                     capture_tool_source_candidates(self.ctx, call, result)

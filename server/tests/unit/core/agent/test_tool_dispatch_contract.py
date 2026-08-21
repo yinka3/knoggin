@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from common.exceptions import ToolExecutionError
@@ -213,12 +215,21 @@ async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
     tools = DispatchTools()
 
     monkeypatch.setattr(
-        "core.agent.tools.registry.TOOL_DISPATCH",
-        {"broken_tool": ("broken", [])},
-    )
-    monkeypatch.setattr(
-        "core.agent.tool_runtime.TOOL_DISPATCH",
-        {"broken_tool": ("broken", [])},
+        "core.agent.tool_runtime.get_tool_definition",
+        lambda name: (
+            SimpleNamespace(
+                dispatch=("broken", ()),
+                schema={
+                    "function": {
+                        "capability": "read",
+                        "parameters": {"type": "object"},
+                    }
+                },
+                capability="read",
+            )
+            if name == "broken_tool"
+            else None
+        ),
     )
 
     with pytest.raises(ToolExecutionError) as exc:

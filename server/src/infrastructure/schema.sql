@@ -1239,7 +1239,6 @@ CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     run_id TEXT NOT NULL,
     tool_name TEXT NOT NULL,
     capability TEXT NOT NULL,
-    confirmation_state TEXT NOT NULL DEFAULT 'not_confirmed',
     arguments JSONB NOT NULL DEFAULT '{}'::jsonb,
     result JSONB,
     status TEXT NOT NULL,
@@ -1250,8 +1249,7 @@ CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
         capability IN (
             'reversible_write',
             'configuration_write',
-            'identity_write',
-            'destructive_write'
+            'identity_write'
         )
     ),
     CONSTRAINT agent_tool_audits_status_check CHECK (
@@ -1273,10 +1271,17 @@ CREATE INDEX IF NOT EXISTS agent_tool_audits_run_idx
 ON public.agent_tool_audits(run_id, created_at);
 
 ALTER TABLE public.agent_tool_audits
-    DROP CONSTRAINT IF EXISTS agent_tool_audits_confirmation_state_check;
+    DROP CONSTRAINT IF EXISTS agent_tool_audits_capability_check;
 ALTER TABLE public.agent_tool_audits
-    ADD CONSTRAINT agent_tool_audits_confirmation_state_check
-        CHECK (confirmation_state IN ('not_confirmed', 'confirmed'));
+    ADD CONSTRAINT agent_tool_audits_capability_check CHECK (
+        capability IN (
+            'reversible_write',
+            'configuration_write',
+            'identity_write'
+        )
+    );
+ALTER TABLE public.agent_tool_audits
+    DROP COLUMN IF EXISTS confirmation_state;
 
 -- 4. Message full-text search projection.
 -- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
