@@ -113,7 +113,7 @@ async def test_episode_writer_attaches_complete_derived_context_idempotently():
     episode_call = next(
         call for call in client.calls if "INSERT INTO episodes" in call[1]
     )
-    assert episode_call[2][8:11] == (
+    assert episode_call[2][7:10] == (
         2,
         datetime.fromtimestamp(1700000000000 / 1000, tz=timezone.utc),
         datetime.fromtimestamp(1700000001000 / 1000, tz=timezone.utc),
@@ -146,7 +146,7 @@ async def test_episode_writer_persists_an_episode_embedding():
         call for call in client.calls if "INSERT INTO episodes" in call[1]
     )
     assert "embedding" in insert_call[1]
-    assert insert_call[2][11].startswith("[0.25")
+    assert insert_call[2][10].startswith("[0.25")
 
 
 @pytest.mark.storage

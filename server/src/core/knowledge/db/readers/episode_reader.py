@@ -104,7 +104,6 @@ class EpisodeReader:
             SELECT
                 e.episode_id,
                 e.project_id,
-                e.session_id,
                 e.summary,
                 e.new_developments,
                 e.updates,
@@ -119,16 +118,20 @@ class EpisodeReader:
                 e.updated_at,
                 COUNT(DISTINCT ee.entity_id) AS entity_overlap
             FROM episodes e
-            JOIN sessions s
-              ON s.session_id = e.session_id
-             AND s.project_id = e.project_id
             JOIN episode_entities ee
               ON ee.episode_id = e.episode_id
              AND ee.project_id = e.project_id
             WHERE ee.entity_id = ANY(%s)
-              AND s.user_name = %s
-              AND e.project_id = %s
-              AND e.session_id = %s
+              AND EXISTS (
+                  SELECT 1 FROM episode_messages em
+                  JOIN sessions s ON s.session_id = em.session_id
+                     AND s.project_id = em.project_id
+                  WHERE em.episode_id = e.episode_id
+                    AND em.project_id = e.project_id
+                    AND s.user_name = %s
+                    AND em.project_id = %s
+                    AND em.session_id = %s
+              )
             GROUP BY e.episode_id
             ORDER BY entity_overlap DESC, e.updated_at DESC
             LIMIT %s
@@ -211,7 +214,6 @@ class EpisodeReader:
                 SELECT
                     ee.entity_id,
                     e.episode_id,
-                    e.session_id,
                     e.summary,
                     e.importance,
                     ee.is_focus_entity,
@@ -262,7 +264,6 @@ class EpisodeReader:
                     JOIN episodes e
                       ON e.episode_id = em.episode_id
                      AND e.project_id = em.project_id
-                     AND e.session_id = em.session_id
                     JOIN messages m
                       ON m.message_id = em.message_id
                      AND m.project_id = em.project_id
@@ -339,7 +340,6 @@ class EpisodeReader:
             SELECT
                 e.episode_id,
                 e.project_id,
-                e.session_id,
                 e.summary,
                 e.new_developments,
                 e.updates,
@@ -353,13 +353,13 @@ class EpisodeReader:
                 e.created_at,
                 e.updated_at
             FROM episodes e
-            JOIN sessions s
-              ON s.session_id = e.session_id
-             AND s.project_id = e.project_id
             CROSS JOIN query_terms q
-            WHERE s.user_name = %s
-              AND e.project_id = %s
-              AND e.session_id = %s
+            WHERE EXISTS (
+                SELECT 1 FROM episode_messages em
+                JOIN sessions s ON s.session_id = em.session_id AND s.project_id = em.project_id
+                WHERE em.episode_id = e.episode_id AND em.project_id = e.project_id
+                  AND s.user_name = %s AND em.project_id = %s AND em.session_id = %s
+            )
               AND e.search_tsvector @@ q.terms
             ORDER BY
                 ts_rank_cd(e.search_tsvector, q.terms) DESC,
@@ -400,7 +400,6 @@ class EpisodeReader:
             SELECT
                 e.episode_id,
                 e.project_id,
-                e.session_id,
                 e.summary,
                 e.new_developments,
                 e.updates,
@@ -416,12 +415,12 @@ class EpisodeReader:
                 e.updated_at,
                 1 - (e.embedding <=> %s::vector) AS similarity
             FROM episodes e
-            JOIN sessions s
-              ON s.session_id = e.session_id
-             AND s.project_id = e.project_id
-            WHERE s.user_name = %s
-              AND e.project_id = %s
-              AND e.session_id = %s
+            WHERE EXISTS (
+                SELECT 1 FROM episode_messages em
+                JOIN sessions s ON s.session_id = em.session_id AND s.project_id = em.project_id
+                WHERE em.episode_id = e.episode_id AND em.project_id = e.project_id
+                  AND s.user_name = %s AND em.project_id = %s AND em.session_id = %s
+            )
               AND e.embedding IS NOT NULL
               AND 1 - (e.embedding <=> %s::vector) >= %s
             ORDER BY e.embedding <=> %s::vector ASC
@@ -489,13 +488,12 @@ class EpisodeReader:
             em.message_position,
             em.attached_at
         FROM episodes e
-        JOIN sessions s
-          ON s.session_id = e.session_id
-         AND s.project_id = e.project_id
         JOIN episode_messages em
           ON em.episode_id = e.episode_id
          AND em.project_id = e.project_id
-         AND em.session_id = e.session_id
+        JOIN sessions s
+          ON s.session_id = em.session_id
+         AND s.project_id = em.project_id
         JOIN messages m
           ON m.message_id = em.message_id
          AND m.project_id = em.project_id
@@ -503,7 +501,7 @@ class EpisodeReader:
         WHERE e.episode_id = %s
           AND s.user_name = %s
           AND e.project_id = %s
-          AND e.session_id = %s
+          AND em.session_id = %s
           AND m.user_name = %s
           AND m.project_id = %s
           AND m.session_id = %s
@@ -1087,7 +1085,6 @@ class EpisodeReader:
         SELECT
             e.episode_id,
             e.project_id,
-            e.session_id,
             e.summary,
             e.new_developments,
             e.updates,
@@ -1102,14 +1099,20 @@ class EpisodeReader:
             e.created_at,
             e.updated_at
         FROM episodes e
-        JOIN sessions s
-          ON s.session_id = e.session_id
-         AND s.project_id = e.project_id
         {joins}
         WHERE {predicate}
-          AND s.user_name = %s
-          AND e.project_id = %s
-          AND e.session_id = %s
+          AND EXISTS (
+              SELECT 1
+              FROM episode_messages em
+              JOIN sessions s
+                ON s.session_id = em.session_id
+               AND s.project_id = em.project_id
+              WHERE em.episode_id = e.episode_id
+                AND em.project_id = e.project_id
+                AND s.user_name = %s
+                AND e.project_id = %s
+                AND em.session_id = %s
+          )
         ORDER BY {ordering}
         """
         if limit:
@@ -1124,7 +1127,6 @@ class EpisodeReader:
         return Episode(
             episode_id=episode_id,
             project_id=str(row["project_id"]),
-            session_id=str(row["session_id"]),
             summary=str(row["summary"]),
             new_developments=self._json_list(row.get("new_developments")),
             updates=self._json_list(row.get("updates")),

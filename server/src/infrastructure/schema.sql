@@ -171,7 +171,6 @@ MINVALUE 1;
 
 CREATE TABLE IF NOT EXISTS public.messages (
     user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
     message_id BIGINT NOT NULL UNIQUE,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
     role TEXT NOT NULL,
@@ -805,14 +804,11 @@ ADD COLUMN IF NOT EXISTS project_id TEXT,
 ADD COLUMN IF NOT EXISTS session_id TEXT;
 
 UPDATE public.episode_messages episode_message
-SET project_id = episode.project_id,
-    session_id = episode.session_id
-FROM public.episodes episode
-WHERE episode.episode_id = episode_message.episode_id
-  AND (
-      episode_message.project_id IS NULL
-      OR episode_message.session_id IS NULL
-  );
+SET project_id = message.project_id,
+    session_id = message.session_id
+FROM public.messages message
+WHERE message.message_id = episode_message.message_id
+  AND (episode_message.project_id IS NULL OR episode_message.session_id IS NULL);
 
 ALTER TABLE public.episode_messages
 ALTER COLUMN project_id SET NOT NULL,
@@ -861,16 +857,6 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'episodes_scope_key'
-          AND conrelid = 'public.episodes'::regclass
-    ) THEN
-        ALTER TABLE public.episodes
-        ADD CONSTRAINT episodes_scope_key
-        UNIQUE (episode_id, project_id, session_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
         WHERE conname = 'episodes_id_project_key'
           AND conrelid = 'public.episodes'::regclass
     ) THEN
@@ -891,25 +877,13 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'episodes_session_project_fk'
-          AND conrelid = 'public.episodes'::regclass
-    ) THEN
-        ALTER TABLE public.episodes
-        ADD CONSTRAINT episodes_session_project_fk
-        FOREIGN KEY (session_id, project_id)
-        REFERENCES public.sessions(session_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
         WHERE conname = 'episode_messages_episode_scope_fk'
           AND conrelid = 'public.episode_messages'::regclass
     ) THEN
         ALTER TABLE public.episode_messages
         ADD CONSTRAINT episode_messages_episode_scope_fk
-        FOREIGN KEY (episode_id, project_id, session_id)
-        REFERENCES public.episodes(episode_id, project_id, session_id)
+        FOREIGN KEY (episode_id, project_id)
+        REFERENCES public.episodes(episode_id, project_id)
         ON DELETE CASCADE;
     END IF;
 
@@ -925,6 +899,8 @@ BEGIN
         ON DELETE CASCADE;
     END IF;
 END $$;
+
+ALTER TABLE public.episodes DROP COLUMN IF EXISTS session_id;
 
 CREATE TABLE IF NOT EXISTS public.episode_entities (
     episode_id TEXT NOT NULL,
