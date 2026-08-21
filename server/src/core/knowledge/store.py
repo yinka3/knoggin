@@ -827,14 +827,30 @@ class KnowledgeStore:
             max_relationships=max_relationships,
         )
 
-    async def delete_entity(self, entity_id: int, *, project_id: str) -> bool:
-        return await self._graph_writer.delete_entity(entity_id, project_id=project_id)
+    async def preview_project_entity_cleanup(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+    ) -> List[Dict]:
+        return await self._entity_reader.preview_project_entity_cleanup(
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+        )
 
-    async def bulk_delete_entities(
-        self, entity_ids: List[int], *, project_id: str
+    async def delete_selected_project_entities(
+        self,
+        entity_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
     ) -> List[int]:
-        return await self._graph_writer.bulk_delete_entities(
-            entity_ids, project_id=project_id
+        return await self._graph_writer.delete_selected_project_entities(
+            entity_ids,
+            user_name=user_name,
+            project_id=project_id,
         )
 
     async def expire_merge_rollback_states(

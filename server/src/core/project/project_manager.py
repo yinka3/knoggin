@@ -35,6 +35,7 @@ from core.project.domain_config_store import (
     DomainConfigConflict,
     DomainConfigStore,
 )
+from core.project.entity_cleanup import EntityCleanupWorkflow
 from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
 from infrastructure.redis_client import RedisKeys
 from runtime.project_factory import ProjectRuntimeFactory
@@ -917,6 +918,52 @@ class ProjectManager:
                 project_id,
                 self.user_name,
             )
+
+    async def preview_entity_cleanup(
+        self,
+        project_id: str,
+        *,
+        limit: int = 100,
+    ) -> dict:
+        """Preview project-owned derived entities for explicit user cleanup."""
+
+        async with self._maintenance_lock:
+            project = await self.get_project(project_id)
+            if project is None:
+                raise ValueError(f"Project '{project_id}' does not exist")
+            return await self._entity_cleanup_workflow().preview(
+                user_name=self.user_name,
+                project_id=project_id,
+                limit=limit,
+            )
+
+    async def apply_entity_cleanup(
+        self,
+        project_id: str,
+        *,
+        entity_ids: List[int],
+    ) -> dict:
+        """Delete user-selected derived entities while preserving messages."""
+
+        async with self._maintenance_lock:
+            project = await self.get_project(project_id)
+            if project is None:
+                raise ValueError(f"Project '{project_id}' does not exist")
+            result = await self._entity_cleanup_workflow().apply(
+                user_name=self.user_name,
+                project_id=project_id,
+                entity_ids=entity_ids,
+            )
+            runtime = self.active_projects.get(project_id)
+            if runtime is not None:
+                runtime.entities.remove_entities(result["deleted_entity_ids"])
+            return result
+
+    def _entity_cleanup_workflow(self) -> EntityCleanupWorkflow:
+        knowledge_store = getattr(self.resources, "knowledge_store", None)
+        if knowledge_store is None:
+            raise RuntimeError("Knowledge storage is unavailable for entity cleanup")
+        return EntityCleanupWorkflow(knowledge_store)
 
     async def preview_historical_reclassification(
         self,

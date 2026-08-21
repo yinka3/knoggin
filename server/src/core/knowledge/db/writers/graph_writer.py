@@ -976,26 +976,56 @@ class GraphWriter:
         )
         return deleted_ids
 
-    @_storage_write("delete_entity")
-    async def delete_entity(
+    @_storage_write("delete_selected_project_entities")
+    async def delete_selected_project_entities(
         self,
-        entity_id: int,
+        entity_ids: Sequence[int],
         *,
+        user_name: str,
         project_id: str,
-    ) -> bool:
-        project_id = self._require_project_id(project_id, "delete_entity")
-        if entity_id == IDENTITY_ENTITY_ID:
-            logger.warning("Identity entity deletion rejected")
-            return False
-
-        deleted_ids = await self._delete_entity_aggregate([entity_id], project_id)
-        return entity_id in deleted_ids
-
-    @_storage_write("bulk_delete_entities")
-    async def bulk_delete_entities(
-        self, entity_ids: List[int], *, project_id: str
     ) -> List[int]:
-        project_id = self._require_project_id(project_id, "bulk_delete_entities")
-        if not entity_ids:
-            return []
-        return await self._delete_entity_aggregate(entity_ids, project_id)
+        """Delete explicitly selected, project-owned derived entities atomically."""
+
+        project_id = self._require_project_id(
+            project_id,
+            "delete_selected_project_entities",
+        )
+        if not user_name or not user_name.strip():
+            raise ValueError("delete_selected_project_entities requires user_name")
+        normalized_ids: list[int] = []
+        for entity_id in entity_ids:
+            if not isinstance(entity_id, int) or isinstance(entity_id, bool):
+                raise TypeError("entity_ids must contain integer IDs")
+            if entity_id <= 0:
+                raise ValueError("entity_ids must contain positive IDs")
+            normalized_ids.append(entity_id)
+        selected_ids = sorted(set(normalized_ids))
+        if not selected_ids:
+            raise ValueError("Entity cleanup requires at least one selected entity")
+        if IDENTITY_ENTITY_ID in selected_ids:
+            raise ValueError("The reserved identity entity cannot be deleted")
+
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT entity_id
+                FROM public.entities
+                WHERE entity_id = ANY(%s)
+                  AND user_name = %s
+                  AND project_id = %s
+                FOR UPDATE
+                """,
+                (selected_ids, user_name, project_id),
+            )
+            owned_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
+            missing_ids = sorted(set(selected_ids) - owned_ids)
+            if missing_ids:
+                raise ValueError(
+                    "Entity cleanup selection contains IDs outside the project: "
+                    f"{missing_ids}"
+                )
+            return await self._delete_entity_aggregate_with_cursor(
+                cur,
+                selected_ids,
+                project_id,
+            )

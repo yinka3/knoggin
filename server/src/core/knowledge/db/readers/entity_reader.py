@@ -693,6 +693,65 @@ class EntityReader:
         except Exception as e:
             self._raise_storage_read("validate_existing_ids", e)
 
+    async def preview_project_entity_cleanup(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+    ) -> List[Dict]:
+        """Return project-owned derived entities with deletion decision evidence."""
+
+        project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "preview_project_entity_cleanup",
+        )
+        if not user_name or not user_name.strip():
+            raise ValueError("preview_project_entity_cleanup requires user_name")
+        limit = self._validate_query_limit(limit, "preview_project_entity_cleanup")
+        query = """
+        SELECT
+            e.entity_id,
+            e.canonical_name,
+            e.type,
+            e.topic,
+            COALESCE(array_agg(DISTINCT alias.alias)
+                FILTER (WHERE alias.alias IS NOT NULL), ARRAY[]::TEXT[]) AS aliases,
+            e.last_mentioned_ms,
+            COUNT(DISTINCT mer.message_id) AS message_reference_count,
+            COUNT(DISTINCT relationship.relationship_id) AS relationship_count,
+            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count
+        FROM public.entities e
+        LEFT JOIN public.entity_aliases alias
+            ON alias.entity_id = e.entity_id
+        LEFT JOIN public.message_entity_refs mer
+            ON mer.entity_id = e.entity_id
+        LEFT JOIN public.relationships relationship
+            ON relationship.project_id = e.project_id
+           AND (
+                relationship.entity_a_id = e.entity_id
+                OR relationship.entity_b_id = e.entity_id
+           )
+        LEFT JOIN public.episode_entities episode_entity
+            ON episode_entity.project_id = e.project_id
+           AND episode_entity.entity_id = e.entity_id
+        WHERE e.user_name = %s
+          AND e.project_id = %s
+          AND e.entity_id <> %s
+        GROUP BY e.entity_id, e.canonical_name, e.type, e.topic, e.last_mentioned_ms
+        ORDER BY e.last_mentioned_ms NULLS FIRST, e.entity_id
+        LIMIT %s
+        """
+        try:
+            rows = await self.client.fetch_all(
+                query,
+                (user_name, project_id, IDENTITY_ENTITY_ID, limit),
+            )
+            return [dict(row) for row in rows]
+        except Exception as e:
+            self._raise_storage_read("preview_project_entity_cleanup", e)
+
     async def get_entity_count_by_type(
         self, *, visible_project_ids: List[str]
     ) -> List[Dict]:
