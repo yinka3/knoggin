@@ -1232,35 +1232,6 @@ BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id
 ON public.relationships
 FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
 
-CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
-    suggestion_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    msg_id BIGINT NOT NULL,
-    mention TEXT NOT NULL,
-    mention_type TEXT NOT NULL,
-    mention_topic TEXT NOT NULL,
-    candidate_id BIGINT NOT NULL,
-    candidate_name TEXT NOT NULL,
-    base_score DOUBLE PRECISION NOT NULL,
-    reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_entity_id BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT ingestion_candidate_suggestions_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_project_idx
-ON public.ingestion_candidate_suggestions(user_name, project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_candidate_idx
-ON public.ingestion_candidate_suggestions(user_name, project_id, candidate_id);
-
-CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_created_entity_idx
-ON public.ingestion_candidate_suggestions(user_name, project_id, created_entity_id);
-
 -- Durable authorization and outcome trail for every model-initiated write.
 CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     audit_id UUID PRIMARY KEY,
@@ -2121,15 +2092,6 @@ FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();
 -- list of every descendant table.
 DO $$
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'ingestion_candidate_suggestions_project_fk'
-    ) THEN
-        ALTER TABLE public.ingestion_candidate_suggestions
-        ADD CONSTRAINT ingestion_candidate_suggestions_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conname = 'agent_tool_audits_project_fk'

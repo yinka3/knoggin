@@ -14,22 +14,10 @@ class RetentionWriter:
         *,
         user_name: str,
         project_id: str,
-        candidate_suggestion_cutoff: datetime,
         tool_audit_cutoff: datetime,
         merge_history_cutoff: datetime,
     ) -> dict[str, int]:
         async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                DELETE FROM ingestion_candidate_suggestions
-                WHERE user_name = %s
-                  AND project_id = %s
-                  AND created_at < %s
-                """,
-                (user_name, project_id, candidate_suggestion_cutoff),
-            )
-            candidate_suggestions = cur.rowcount
-
             await cur.execute(
                 """
                 DELETE FROM agent_tool_audits
@@ -74,7 +62,6 @@ class RetentionWriter:
             merge_proposals = cur.rowcount
 
         return {
-            "candidate_suggestions": candidate_suggestions,
             "tool_audits": tool_audits,
             "merge_audits": merge_audits,
             "merge_proposals": merge_proposals,

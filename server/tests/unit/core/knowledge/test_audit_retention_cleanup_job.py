@@ -49,7 +49,6 @@ async def test_audit_retention_cleanup_uses_each_configured_window():
         {
             "user_name": "ada",
             "project_id": "project-1",
-            "candidate_suggestion_cutoff": now - timedelta(days=30),
             "tool_audit_cutoff": now - timedelta(days=180),
             "merge_history_cutoff": now - timedelta(days=365),
         }

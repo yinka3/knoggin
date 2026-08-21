@@ -7,7 +7,6 @@ from loguru import logger
 from common.conf.domain_config import CompiledDomain
 from common.schema.episode.models import Episode, EpisodeCheckpoint
 from common.schema.ingestion.contracts import (
-    CandidateSuggestion,
     EntityWrite,
     EpisodeEligibility,
     ExecutionScope,
@@ -50,9 +49,6 @@ from core.knowledge.db.readers.relationship_observation_reader import (
     RelationshipObservationReader,
 )
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
-from core.knowledge.db.writers.candidate_suggestion_writer import (
-    CandidateSuggestionWriter,
-)
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
 from core.knowledge.db.writers.entity_merge_writer import EntityMergeWriter
 from core.knowledge.db.writers.entity_reclassification_writer import (
@@ -112,9 +108,6 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._episode_writer = EpisodeWriter(self._postgres_client)
-        self._candidate_suggestion_writer = CandidateSuggestionWriter(
-            self._postgres_client
-        )
         self._entity_merge_writer = EntityMergeWriter(self._postgres_client)
         self._message_writer = MessageWriter(self._postgres_client)
         self._message_lifecycle_writer = MessageLifecycleWriter(
@@ -126,9 +119,7 @@ class KnowledgeStore:
             reviews=self._human_review_writer,
         )
         self._conflict_service = ConflictService(self._conflict_writer)
-        self._conflict_discovery_reader = ConflictDiscoveryReader(
-            self._postgres_client
-        )
+        self._conflict_discovery_reader = ConflictDiscoveryReader(self._postgres_client)
         self._conflict_reader = ConflictReader(self._postgres_client)
         self._parked_dlq_writer = ParkedDLQWriter(
             self._postgres_client,
@@ -208,7 +199,12 @@ class KnowledgeStore:
         )
 
     async def seal_due_user_messages(
-        self, *, user_name: str, project_id: str, session_id: str, settle_delay_seconds: float
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        settle_delay_seconds: float,
     ) -> List[int]:
         return await self._message_lifecycle_writer.seal_due_user_messages(
             user_name=user_name,
@@ -327,15 +323,6 @@ class KnowledgeStore:
                 session_id=message["session_id"],
                 cursor=cur,
             )
-
-    async def save_candidate_suggestions(
-        self,
-        scope: ExecutionScope,
-        suggestions: List[CandidateSuggestion],
-    ) -> int:
-        return await self._candidate_suggestion_writer.save_candidate_suggestions(
-            scope, suggestions
-        )
 
     async def write_message_source_refs(
         self,
@@ -503,11 +490,19 @@ class KnowledgeStore:
         )
 
     async def search_project_episodes_by_embedding(
-        self, embedding: List[float], *, user_name: str, project_id: str,
-        limit: int = 10, score_threshold: float = 0.35,
+        self,
+        embedding: List[float],
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 10,
+        score_threshold: float = 0.35,
     ) -> List[tuple[Episode, float]]:
         return await self._episode_reader.search_project_episodes_by_embedding(
-            embedding, user_name=user_name, project_id=project_id, limit=limit,
+            embedding,
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
             score_threshold=score_threshold,
         )
 
@@ -825,14 +820,12 @@ class KnowledgeStore:
         *,
         user_name: str,
         project_id: str,
-        candidate_suggestion_cutoff: datetime,
         tool_audit_cutoff: datetime,
         merge_history_cutoff: datetime,
     ) -> Dict[str, int]:
         return await self._retention_writer.purge_expired_records(
             user_name=user_name,
             project_id=project_id,
-            candidate_suggestion_cutoff=candidate_suggestion_cutoff,
             tool_audit_cutoff=tool_audit_cutoff,
             merge_history_cutoff=merge_history_cutoff,
         )

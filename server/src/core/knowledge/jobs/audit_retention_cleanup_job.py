@@ -35,8 +35,6 @@ class AuditRetentionCleanupJob(BaseJob):
         counts = await self.knowledge_store.purge_expired_operational_records(
             user_name=ctx.user_name,
             project_id=ctx.project_id,
-            candidate_suggestion_cutoff=now
-            - timedelta(days=self.candidate_suggestion_days),
             tool_audit_cutoff=now - timedelta(days=self.tool_audit_days),
             merge_history_cutoff=now - timedelta(days=self.merge_history_days),
         )
@@ -54,6 +52,5 @@ class AuditRetentionCleanupJob(BaseJob):
     def update_settings(self, settings: AuditRetentionSettings) -> None:
         self.enabled = settings.enabled
         self._interval_seconds = settings.interval_hours * 3600
-        self.candidate_suggestion_days = settings.candidate_suggestion_days
         self.tool_audit_days = settings.tool_audit_days
         self.merge_history_days = settings.merge_history_days
