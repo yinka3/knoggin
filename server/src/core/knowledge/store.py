@@ -506,24 +506,50 @@ class KnowledgeStore:
         )
 
     async def get_project_episode(
-        self, episode_id: str, *, user_name: str, project_id: str
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> Optional[Episode]:
         return await self._episode_reader.get_project_episode(
-            episode_id, user_name=user_name, project_id=project_id
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            visible_project_ids=visible_project_ids,
         )
 
     async def get_recent_project_episodes(
-        self, *, user_name: str, project_id: str, limit: int
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Episode]:
         return await self._episode_reader.get_recent_project_episodes(
-            user_name=user_name, project_id=project_id, limit=limit
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+            visible_project_ids=visible_project_ids,
         )
 
     async def search_project_episodes(
-        self, query: str, *, user_name: str, project_id: str, limit: int
+        self,
+        query: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Episode]:
         return await self._episode_reader.search_project_episodes(
-            query, user_name=user_name, project_id=project_id, limit=limit
+            query,
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+            visible_project_ids=visible_project_ids,
         )
 
     async def search_project_episodes_by_embedding(
@@ -534,6 +560,7 @@ class KnowledgeStore:
         project_id: str,
         limit: int = 10,
         score_threshold: float = 0.35,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[tuple[Episode, float]]:
         return await self._episode_reader.search_project_episodes_by_embedding(
             embedding,
@@ -541,20 +568,39 @@ class KnowledgeStore:
             project_id=project_id,
             limit=limit,
             score_threshold=score_threshold,
+            visible_project_ids=visible_project_ids,
         )
 
     async def get_project_episode_source_messages(
-        self, episode_id: str, *, user_name: str, project_id: str
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Dict]:
         return await self._episode_reader.get_project_episode_source_messages(
-            episode_id, user_name=user_name, project_id=project_id
+            episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            visible_project_ids=visible_project_ids,
         )
 
     async def get_project_episodes_for_entities(
-        self, entity_ids: List[int], *, user_name: str, project_id: str, limit: int
+        self,
+        entity_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Episode]:
         return await self._episode_reader.get_project_episodes_for_entities(
-            entity_ids, user_name=user_name, project_id=project_id, limit=limit
+            entity_ids,
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+            visible_project_ids=visible_project_ids,
         )
 
     async def get_episode(

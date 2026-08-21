@@ -490,6 +490,7 @@ class CommunityManager:
             postgres=self.resources.postgres,
             redis=self.resources.redis,
             readable_project_ids=readable_project_ids,
+            knowledge_retrieval=ctx.project.knowledge_retrieval,
         )
 
         comm_tools = CommunityTools(

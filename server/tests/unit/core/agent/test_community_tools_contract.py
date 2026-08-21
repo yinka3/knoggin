@@ -90,6 +90,7 @@ def make_tool(*, postgres=None, participants=None):
         search_cfg={},
         document_service=None,
         document_focus=None,
+        knowledge_retrieval=SimpleNamespace(),
         knowledge_store=SimpleNamespace(),
         postgres=postgres,
         redis=redis,

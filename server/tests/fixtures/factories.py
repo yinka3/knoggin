@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from common.conf.domain_config import DomainConfig
 from core.knowledge.documents import DocumentService
 from core.project.domain_config_store import DomainConfigStore
@@ -49,9 +51,12 @@ def make_project_state(
     scheduler = scheduler or FakeScheduler()
     postgres = postgres or FakePostgresClient()
     embedding = embedding or FakeEmbeddingService()
+    entities = entities if entities is not None else object()
+    retrieval = SimpleNamespace(set_active_topics=lambda _: None)
     return ProjectRuntime(
         project_id=project_id,
-        entities=entities if entities is not None else object(),
+        entities=entities,
+        knowledge_retrieval=retrieval,
         pipeline=pipeline if pipeline is not None else FakePipeline(),
         scheduler=scheduler,
         user_name="ada",

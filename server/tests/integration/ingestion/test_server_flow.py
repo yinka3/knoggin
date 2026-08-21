@@ -32,6 +32,7 @@ from core.ingestion.worker import IngestionWorker
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
+from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
@@ -366,10 +367,21 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             scope["project_id"],
             [scope["project_id"]],
         )
+        retrieval = KnowledgeRetrieval(
+            project_id=scope["project_id"],
+            readable_project_ids=[scope["project_id"]],
+            user_name=scope["user_name"],
+            entities=resolver,
+            embedding_service=resolver.embedding_service,
+            knowledge_store=store,
+            postgres=postgres,
+            redis=redis,
+        )
         tools = Tools(
             scope["user_name"],
             resolver,
             scope["session_id"],
+            knowledge_retrieval=retrieval,
             knowledge_store=store,
             postgres=postgres,
             redis=redis,

@@ -43,6 +43,7 @@ class CommunityTools(Tools):
             document_service=getattr(base_tools, "document_service", None),
             workspace_service=getattr(base_tools, "workspace_service", None),
             document_focus=getattr(base_tools, "document_focus", None),
+            knowledge_retrieval=base_tools.knowledge_retrieval,
             knowledge_store=base_tools.knowledge_store,
             postgres=base_tools.postgres,
             redis=base_tools.redis,

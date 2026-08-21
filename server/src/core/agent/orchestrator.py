@@ -247,6 +247,7 @@ class Orchestrator:
             document_service=context.document_service,
             workspace_service=getattr(context.project, "workspace_service", None),
             document_focus=document_focus,
+            knowledge_retrieval=context.project.knowledge_retrieval,
             knowledge_store=context.knowledge_store,
             postgres=context.resources.postgres,
             redis=context.redis_client,

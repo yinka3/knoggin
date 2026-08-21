@@ -25,6 +25,7 @@ from core.knowledge.jobs.audit_retention_cleanup_job import (
 )
 from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
 from core.knowledge.jobs.merge_rollback_cleanup_job import MergeCleanupJob
+from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
 from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
@@ -86,6 +87,23 @@ class ProjectRuntimeFactory:
         )
         await self._verify_user_entity(entities)
 
+        runtime_config = ConfigManager.get().config
+        retrieval = KnowledgeRetrieval(
+            project_id=project_id,
+            readable_project_ids=readable_project_ids,
+            user_name=self.user_name,
+            entities=entities,
+            embedding_service=self.resources.embedding,
+            knowledge_store=self.resources.knowledge_store,
+            postgres=self.resources.postgres,
+            redis=self.resources.redis,
+            search_config={
+                **runtime_config.developer_settings.search.model_dump(),
+                **runtime_config.search.model_dump(),
+            },
+            active_topics=list(compiled_domain.active_topics),
+        )
+
         pipeline = await asyncio.get_running_loop().run_in_executor(
             self.resources.executor,
             partial(
@@ -125,6 +143,7 @@ class ProjectRuntimeFactory:
         runtime = ProjectRuntime(
             project_id=project_id,
             entities=entities,
+            knowledge_retrieval=retrieval,
             pipeline=pipeline,
             scheduler=scheduler,
             user_name=self.user_name,

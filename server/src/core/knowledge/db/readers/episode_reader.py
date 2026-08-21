@@ -1,6 +1,6 @@
 import json
 import math
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from common.schema.episode.models import (
     EPISODE_EMBEDDING_DIMENSION,
@@ -868,67 +868,103 @@ class EpisodeReader:
         return int(row["ready_count"] if row else 0) >= message_count
 
     async def get_project_episode(
-        self, episode_id: str, *, user_name: str, project_id: str
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> Episode | None:
         row = await self.client.fetch_one(
             """
             SELECT e.* FROM episodes e
             JOIN projects p ON p.project_id = e.project_id
-            WHERE e.episode_id = %s AND e.project_id = %s AND p.user_name = %s
+            WHERE e.episode_id = %s AND e.project_id = ANY(%s) AND p.user_name = %s
             """,
-            (episode_id, project_id, user_name),
+            (episode_id, visible_project_ids or [project_id], user_name),
         )
         return await self._hydrate_episode(row) if row else None
 
     async def get_recent_project_episodes(
-        self, *, user_name: str, project_id: str, limit: int
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Episode]:
         rows = await self.client.fetch_all(
             """
             SELECT e.* FROM episodes e JOIN projects p ON p.project_id = e.project_id
-            WHERE e.project_id = %s AND p.user_name = %s
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s
             ORDER BY e.updated_at DESC LIMIT %s
             """,
-            (project_id, user_name, limit),
+            (visible_project_ids or [project_id], user_name, limit),
         )
         return [await self._hydrate_episode(row) for row in rows]
 
     async def search_project_episodes(
-        self, query: str, *, user_name: str, project_id: str, limit: int
+        self,
+        query: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Episode]:
         rows = await self.client.fetch_all(
             """
             WITH terms AS (SELECT websearch_to_tsquery('simple', %s) AS query)
             SELECT e.* FROM episodes e
             JOIN projects p ON p.project_id = e.project_id CROSS JOIN terms
-            WHERE e.project_id = %s AND p.user_name = %s
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s
               AND e.search_tsvector @@ terms.query
             ORDER BY ts_rank_cd(e.search_tsvector, terms.query) DESC,
                      e.importance DESC, e.updated_at DESC LIMIT %s
             """,
-            (query, project_id, user_name, limit),
+            (query, visible_project_ids or [project_id], user_name, limit),
         )
         return [await self._hydrate_episode(row) for row in rows]
 
     async def search_project_episodes_by_embedding(
-        self, embedding: List[float], *, user_name: str, project_id: str,
-        limit: int, score_threshold: float = 0.35,
+        self,
+        embedding: List[float],
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        score_threshold: float = 0.35,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[tuple[Episode, float]]:
         vector = json.dumps(self._normalize_embedding(embedding))
         rows = await self.client.fetch_all(
             """
             SELECT e.*, 1 - (e.embedding <=> %s::vector) AS similarity
             FROM episodes e JOIN projects p ON p.project_id = e.project_id
-            WHERE e.project_id = %s AND p.user_name = %s AND e.embedding IS NOT NULL
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s AND e.embedding IS NOT NULL
               AND 1 - (e.embedding <=> %s::vector) >= %s
             ORDER BY e.embedding <=> %s::vector ASC LIMIT %s
             """,
-            (vector, project_id, user_name, vector, score_threshold, vector, limit),
+            (
+                vector,
+                visible_project_ids or [project_id],
+                user_name,
+                vector,
+                score_threshold,
+                vector,
+                limit,
+            ),
         )
         return [(await self._hydrate_episode(row), float(row["similarity"])) for row in rows]
 
     async def get_project_episodes_for_entities(
-        self, entity_ids: List[int], *, user_name: str, project_id: str, limit: int
+        self,
+        entity_ids: List[int],
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Episode]:
         if not entity_ids:
             return []
@@ -938,17 +974,22 @@ class EpisodeReader:
             FROM episodes e
             JOIN projects p ON p.project_id = e.project_id
             JOIN episode_entities ee ON ee.episode_id = e.episode_id AND ee.project_id = e.project_id
-            WHERE e.project_id = %s AND p.user_name = %s AND ee.entity_id = ANY(%s)
+            WHERE e.project_id = ANY(%s) AND p.user_name = %s AND ee.entity_id = ANY(%s)
               AND e.user_modified = FALSE
             GROUP BY e.episode_id
             ORDER BY entity_overlap DESC, e.updated_at DESC LIMIT %s
             """,
-            (project_id, user_name, entity_ids, limit),
+            (visible_project_ids or [project_id], user_name, entity_ids, limit),
         )
         return [await self._hydrate_episode(row) for row in rows]
 
     async def get_project_episode_source_messages(
-        self, episode_id: str, *, user_name: str, project_id: str
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        visible_project_ids: Optional[List[str]] = None,
     ) -> List[Dict]:
         return await self.client.fetch_all(
             """
@@ -960,10 +1001,10 @@ class EpisodeReader:
             JOIN episode_messages em ON em.episode_id = e.episode_id AND em.project_id = e.project_id
             JOIN messages m ON m.message_id = em.message_id AND m.project_id = em.project_id
                            AND m.session_id = em.session_id
-            WHERE e.episode_id = %s AND e.project_id = %s AND p.user_name = %s
+            WHERE e.episode_id = %s AND e.project_id = ANY(%s) AND p.user_name = %s
             ORDER BY em.message_position
             """,
-            (episode_id, project_id, user_name),
+            (episode_id, visible_project_ids or [project_id], user_name),
         )
 
     async def get_relationship_ids_for_messages(

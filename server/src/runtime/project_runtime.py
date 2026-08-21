@@ -25,6 +25,7 @@ class ProjectRuntime:
         self,
         project_id: str,
         entities: EntityResolver,
+        knowledge_retrieval: Any,
         pipeline: TextProcessor,
         scheduler: Scheduler,
         user_name: str,
@@ -47,6 +48,7 @@ class ProjectRuntime:
         if not isinstance(domain_config, DomainConfig):
             raise TypeError("ProjectRuntime requires a DomainConfig")
         self.entities = entities
+        self.knowledge_retrieval = knowledge_retrieval
         self.pipeline = pipeline
         self.scheduler = scheduler
         self.user_name = user_name
@@ -175,6 +177,9 @@ class ProjectRuntime:
             setter = getattr(component, "set_compiled_domain", None)
             if setter is not None:
                 setter(compiled_domain)
+        set_active_topics = getattr(self.knowledge_retrieval, "set_active_topics", None)
+        if callable(set_active_topics):
+            set_active_topics(compiled_domain.active_topics)
 
     async def capture_domain(self) -> CompiledDomain:
         """Return a stable domain snapshot for one admitted runtime operation."""

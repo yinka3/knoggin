@@ -20,6 +20,7 @@ from core.agent.tools.search import SearchTools
 from core.agent.tools.workspace import WorkspaceTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.retrieval import KnowledgeRetrieval
 
 SPECIAL_TOOL_NAMES = frozenset(
     {"request_clarification", "request_replanning", "submit_answer"}
@@ -806,6 +807,7 @@ class Tools(
         search_config: Optional[dict] = None,
         document_service: Optional[DocumentService] = None,
         document_focus: Optional[dict] = None,
+        knowledge_retrieval: Optional[KnowledgeRetrieval] = None,
         knowledge_store=None,
         postgres=None,
         redis=None,
@@ -817,9 +819,12 @@ class Tools(
             raise ValueError(
                 "Tools requires explicit knowledge_store, postgres, and redis"
             )
+        if knowledge_retrieval is None:
+            raise ValueError("Tools requires a project-scoped KnowledgeRetrieval")
 
         self.session_id = session_id
         self.knowledge_store = knowledge_store
+        self.knowledge_retrieval = knowledge_retrieval
         self.postgres = postgres
         self.entities = entities
         self.user_name = user_name
@@ -841,6 +846,54 @@ class Tools(
         self.health_service = health_service
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
+
+    # Internal-memory tools are formatting/argument adapters only.  Retrieval
+    # policy, cache fallbacks, ranking, and evidence expansion live in the
+    # project-scoped KnowledgeRetrieval service.
+    async def search_messages(self, query: str, limit: int = None):
+        return await self.knowledge_retrieval.search_messages(
+            query, session_id=self.session_id, limit=limit
+        )
+
+    async def search_entity(self, query: str, limit: int = None):
+        return await self.knowledge_retrieval.search_entities(
+            query, session_id=self.session_id, limit=limit
+        )
+
+    async def get_connections(self, entity_name: str):
+        return await self.knowledge_retrieval.get_connections(
+            entity_name, session_id=self.session_id
+        )
+
+    async def get_recent_activity(self, entity_name: str, hours: int = 24):
+        return await self.knowledge_retrieval.get_recent_activity(
+            entity_name, session_id=self.session_id, hours=hours
+        )
+
+    async def episode_check(self, query: str, entity_name: Optional[str] = None):
+        return await self.knowledge_retrieval.episode_check(
+            query, session_id=self.session_id, entity_name=entity_name
+        )
+
+    async def read_episode(self, episode_id: str):
+        return await self.knowledge_retrieval.read_episode(
+            episode_id, session_id=self.session_id
+        )
+
+    async def read_recent_episodes(self, limit: int = 2):
+        return await self.knowledge_retrieval.read_recent_episodes(
+            session_id=self.session_id, limit=limit
+        )
+
+    async def find_path(self, entity_a: str, entity_b: str):
+        return await self.knowledge_retrieval.find_path(
+            entity_a, entity_b, session_id=self.session_id
+        )
+
+    async def get_hot_topic_context(self, hot_topics, *, slim: bool = False):
+        return await self.knowledge_retrieval.get_hot_topic_context(
+            hot_topics, session_id=self.session_id, slim=slim
+        )
 
     async def get_document_manifest(self):
         """Get indexed documents for prompt context."""
