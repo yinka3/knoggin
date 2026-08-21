@@ -99,6 +99,8 @@ class AgentOrchestrator:
                     else 0.7
                 )
             )
+            effective_brain = agent_brain or (agent_cfg.brain if agent_cfg else "")
+            effective_directives = agent_directives or ""
 
             # Services (Session-Aware)
             effective_document_focus = await self._resolve_document_focus(
@@ -155,7 +157,10 @@ class AgentOrchestrator:
                 limits=run_limits,
                 model=effective_model,
                 temperature=effective_temperature,
+                brain=effective_brain,
+                directives=effective_directives,
                 enabled_tools=effective_enabled_tools,
+                additional_tool_schemas=additional_tool_schemas,
                 hot_topics=effective_hot_topics,
                 active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
@@ -181,13 +186,7 @@ class AgentOrchestrator:
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
-                model=effective_model,
-                enabled_tools=effective_enabled_tools,
                 simulated_date=simulated_date,
-                agent_temperature=effective_temperature,
-                agent_brain=agent_brain or (agent_cfg.brain if agent_cfg else None),
-                agent_directives=agent_directives,
-                additional_tool_schemas=additional_tool_schemas,
             ):
                 yield validate_agent_execution_event(event)
 

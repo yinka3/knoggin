@@ -15,7 +15,6 @@ from common.schema.agent.identity import AgentConfig
 from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
-from common.schema.ingestion.contracts import ExecutionScope
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.maintenance import MaintenanceCandidate
 from core.agent.tools.registry import (
@@ -101,7 +100,10 @@ class AgentRun:
     agent: AgentIdentity
     model: Optional[str]
     temperature: float
+    brain: str
+    directives: str
     enabled_tools: Optional[Tuple[str, ...]]
+    additional_tool_schemas: Tuple[Dict[str, Any], ...]
     limits: AgentRunLimits
     history: List[Dict] = field(default_factory=list)
     document_focus: Optional[DocumentFocus] = None
@@ -149,7 +151,10 @@ class AgentRun:
         limits: AgentRunLimits,
         model: Optional[str] = None,
         temperature: float = 0.7,
+        brain: Optional[str] = None,
+        directives: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
+        additional_tool_schemas: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
         **state: Any,
     ) -> "AgentRun":
@@ -166,19 +171,12 @@ class AgentRun:
             agent=agent,
             model=model,
             temperature=temperature,
+            brain=brain or "",
+            directives=directives or "",
             enabled_tools=tuple(enabled_tools) if enabled_tools is not None else None,
+            additional_tool_schemas=tuple(additional_tool_schemas or ()),
             limits=limits,
             **state,
-        )
-
-    @property
-    def scope(self) -> ExecutionScope:
-        """Compatibility view for scope-aware tools and helper functions."""
-
-        return ExecutionScope(
-            user_name=self.user_name,
-            project_id=self.project_id,
-            session_id=self.session_id,
         )
 
     def _require_active(self) -> None:

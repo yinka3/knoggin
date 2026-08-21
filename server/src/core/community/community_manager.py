@@ -476,6 +476,7 @@ class CommunityManager:
         """Runs a single agent turn using the core AgentExecutor."""
 
         agent_directives = await self._get_agent_directives(agent.id)
+        enabled_tools, additional_tool_schemas = self._resolve_agent_tools(agent)
 
         readable_project_ids = await self._resolve_project_scope()
         base_tools = SimpleNamespace(
@@ -516,7 +517,10 @@ class CommunityManager:
             limits=COMMUNITY_RUN_LIMITS,
             model=agent.model,
             temperature=agent.temperature,
-            enabled_tools=None,
+            brain=agent.brain,
+            directives=agent_directives,
+            enabled_tools=enabled_tools,
+            additional_tool_schemas=additional_tool_schemas,
             history=history,
             is_community=True,
             current_participants=participants,
@@ -529,17 +533,9 @@ class CommunityManager:
         )
 
         full_response: str = ""
-        enabled_tools, additional_tool_schemas = self._resolve_agent_tools(agent)
 
         try:
-            async for event in executor.execute(
-                model=agent.model,
-                agent_temperature=agent.temperature,
-                agent_brain=agent.brain,
-                agent_directives=agent_directives,
-                enabled_tools=enabled_tools,
-                additional_tool_schemas=additional_tool_schemas,
-            ):
+            async for event in executor.execute():
                 e_type = event.get("event")
                 data = event.get("data", {})
 

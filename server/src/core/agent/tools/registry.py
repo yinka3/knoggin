@@ -171,13 +171,13 @@ async def _mark_maintenance_handled(ctx, tools, candidate) -> None:
     from core.agent.maintenance import mark_maintenance_handled
 
     redis = getattr(tools, "redis", None)
-    project_id = ctx.scope.project_id or str(getattr(tools, "project_id", ""))
+    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
     if redis is not None and project_id:
         try:
             await mark_maintenance_handled(
                 redis,
                 candidate,
-                user_name=ctx.scope.user_name,
+                user_name=ctx.user_name,
                 project_id=project_id,
             )
         except Exception as exc:
@@ -194,13 +194,13 @@ async def _record_maintenance_failure(ctx, tools, candidate) -> None:
     from core.agent.maintenance import record_maintenance_failure
 
     redis = getattr(tools, "redis", None)
-    project_id = ctx.scope.project_id or str(getattr(tools, "project_id", ""))
+    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
     if redis is not None and project_id:
         try:
             await record_maintenance_failure(
                 redis,
                 candidate,
-                user_name=ctx.scope.user_name,
+                user_name=ctx.user_name,
                 project_id=project_id,
             )
         except Exception as exc:

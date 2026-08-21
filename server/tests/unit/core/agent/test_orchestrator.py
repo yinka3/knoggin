@@ -221,10 +221,14 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.active_topics == ["Research", "Identity"]
     assert executor.ctx.hot_topic_context == {}
     assert tools.hot_topic_calls == []
-    assert executor.execute_kwargs["model"] == "agent-model"
-    assert executor.execute_kwargs["agent_temperature"] == 0.25
-    assert "Use memory" in executor.execute_kwargs["agent_brain"]
-    assert executor.execute_kwargs["enabled_tools"] == ["episode_check"]
+    assert executor.ctx.model == "agent-model"
+    assert executor.ctx.temperature == 0.25
+    assert "Use memory" in executor.ctx.brain
+    assert executor.ctx.enabled_tools == ("episode_check",)
+    assert executor.execute_kwargs == {
+        "user_timezone": None,
+        "simulated_date": None,
+    }
     assert tools.closed is True
 
 
@@ -278,10 +282,18 @@ async def test_orchestrator_resolves_request_then_session_then_agent_config(
         pass
     session_run = FakeExecutor.instances[-1]
 
-    assert request_run.execute_kwargs["model"] == "request-model"
-    assert request_run.execute_kwargs["enabled_tools"] == ["graph_query"]
-    assert session_run.execute_kwargs["model"] == "session-model"
-    assert session_run.execute_kwargs["enabled_tools"] == ["message_search"]
+    assert request_run.ctx.model == "request-model"
+    assert request_run.ctx.enabled_tools == ("graph_query",)
+    assert session_run.ctx.model == "session-model"
+    assert session_run.ctx.enabled_tools == ("message_search",)
+    assert request_run.execute_kwargs == {
+        "user_timezone": None,
+        "simulated_date": None,
+    }
+    assert session_run.execute_kwargs == {
+        "user_timezone": None,
+        "simulated_date": None,
+    }
 
 
 @pytest.mark.runtime
@@ -355,7 +367,7 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
     ]
 
     assert events == [FAKE_RESPONSE_EVENT]
-    assert FakeExecutor.instances[0].execute_kwargs["enabled_tools"] == []
+    assert FakeExecutor.instances[0].ctx.enabled_tools == ()
 
 
 @pytest.mark.runtime

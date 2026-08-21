@@ -40,13 +40,29 @@ def make_run(**overrides) -> AgentRun:
 
 
 @pytest.mark.no_network
-def test_agent_run_owns_scope_limits_and_identity():
-    run = make_run()
+def test_agent_run_owns_scope_limits_identity_and_effective_policy():
+    run = make_run(
+        model="run-model",
+        temperature=0.2,
+        brain="Use evidence.",
+        directives="Be concise.",
+        enabled_tools=["search_messages"],
+        additional_tool_schemas=[{"function": {"name": "community_tool"}}],
+    )
 
-    assert run.scope.user_name == "ada"
-    assert run.scope.project_id == "project-1"
+    assert run.user_name == "ada"
+    assert run.project_id == "project-1"
+    assert run.session_id == "session-1"
     assert run.limits.max_calls == 2
     assert run.agent.config.id == "agent-1"
+    assert run.model == "run-model"
+    assert run.temperature == 0.2
+    assert run.brain == "Use evidence."
+    assert run.directives == "Be concise."
+    assert run.enabled_tools == ("search_messages",)
+    assert run.additional_tool_schemas == (
+        {"function": {"name": "community_tool"}},
+    )
     with pytest.raises(AttributeError):
         run.limits.max_calls = 4
 

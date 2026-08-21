@@ -97,15 +97,9 @@ class AgentExecutor:
     async def execute(
         self,
         user_timezone: Optional[str] = None,
-        model: Optional[str] = None,
-        enabled_tools: Optional[List[str]] = None,
         simulated_date: Optional[str] = None,
-        agent_temperature: float = 0.7,
-        agent_brain: Optional[str] = None,
-        agent_directives: Optional[str] = None,
-        additional_tool_schemas: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
-        """Run one agent execution and discard its model-only UUID handles."""
+        """Run one execution from the policy captured on ``AgentRun``."""
 
         with diagnostic_scope(
             user_name=self.ctx.user_name,
@@ -116,13 +110,7 @@ class AgentExecutor:
             try:
                 async for event in self._execute_run(
                     user_timezone=user_timezone,
-                    model=model,
-                    enabled_tools=enabled_tools,
                     simulated_date=simulated_date,
-                    agent_temperature=agent_temperature,
-                    agent_brain=agent_brain,
-                    agent_directives=agent_directives,
-                    additional_tool_schemas=additional_tool_schemas,
                 ):
                     yield event
             finally:
@@ -131,13 +119,7 @@ class AgentExecutor:
     async def _execute_run(
         self,
         user_timezone: Optional[str] = None,
-        model: Optional[str] = None,
-        enabled_tools: Optional[List[str]] = None,
         simulated_date: Optional[str] = None,
-        agent_temperature: float = 0.7,
-        agent_brain: Optional[str] = None,
-        agent_directives: Optional[str] = None,
-        additional_tool_schemas: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Runs the reasoning loop and yields events."""
 
@@ -156,8 +138,6 @@ class AgentExecutor:
             getattr(self.tools, "document_focus", None)
         )
         project_context = await self._load_project_context()
-
-        a_directives = agent_directives or ""
 
         last_result = None
 
@@ -179,7 +159,7 @@ class AgentExecutor:
             if self.ctx.attempt_count == 1 or needs_replanning or needs_final_synthesis:
                 # Architect Mode: Strategic planning or final synthesis
                 current_mode_name = "Architect"
-                current_model = model or self.llm.agent_model
+                current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "high"
                 if needs_replanning:
                     logger.info(
@@ -192,7 +172,7 @@ class AgentExecutor:
             else:
                 # Librarian Mode: Execution, use the lighter extraction model
                 current_mode_name = "Librarian"
-                current_model = model or self.llm.extraction_model
+                current_model = self.ctx.model or self.llm.extraction_model
                 current_reasoning = "medium"
 
             # Reset flags so the next turn defaults to Librarian.
@@ -212,14 +192,9 @@ class AgentExecutor:
                 current_model,
                 current_reasoning,
                 current_mode_name,
-                enabled_tools,
                 documents_context,
                 document_focus_context,
-                a_directives,
-                agent_temperature,
-                agent_brain or "",
                 last_result,
-                additional_tool_schemas,
                 project_context=project_context,
             ):
                 event_type = event["event"]
@@ -392,33 +367,30 @@ class AgentExecutor:
         model: Optional[str],
         reasoning: str,
         current_mode: str,
-        enabled_tools: Optional[List[str]],
         documents_context: str,
         document_focus_context: str,
-        directives: str,
-        temp: float,
-        agent_brain: str,
         last_result: Optional[List[Dict]],
-        additional_tool_schemas: Optional[List[Dict]] = None,
         project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
-        active_schemas = get_tool_schemas(enabled_tools)
-        if additional_tool_schemas:
-            active_schemas = active_schemas + additional_tool_schemas
+        active_schemas = get_tool_schemas(
+            list(self.ctx.enabled_tools) if self.ctx.enabled_tools is not None else None
+        )
+        if self.ctx.additional_tool_schemas:
+            active_schemas = active_schemas + list(self.ctx.additional_tool_schemas)
 
         active_tool_names = get_active_tool_names(active_schemas)
         runtime_instructions = get_runtime_instructions(self.ctx, active_tool_names)
 
         system_prompt = get_agent_prompt(
-            user_name=self.ctx.scope.user_name,
+            user_name=self.ctx.user_name,
             current_time=date,
             persona=self.ctx.agent.persona,
             agent_name=self.ctx.agent.name,
             documents_context=documents_context,
             document_focus_context=document_focus_context,
-            agent_directives=directives,
-            agent_brain=agent_brain,
+            agent_directives=self.ctx.directives,
+            agent_brain=self.ctx.brain,
             project_context=project_context,
             runtime_instructions=runtime_instructions,
             active_topics=self.ctx.active_topics,
@@ -432,12 +404,10 @@ class AgentExecutor:
         configure_tool_authorization(
             self.tools,
             active_schemas,
-            user_name=self.ctx.scope.user_name,
+            user_name=self.ctx.user_name,
             agent_id=self.ctx.agent.config.id or getattr(self.tools, "agent_id", ""),
-            project_id=(
-                self.ctx.scope.project_id or str(getattr(self.tools, "project_id", ""))
-            ),
-            session_id=self.ctx.scope.session_id,
+            project_id=self.ctx.project_id or str(getattr(self.tools, "project_id", "")),
+            session_id=self.ctx.session_id,
             run_id=self.ctx.run_id,
         )
 
@@ -449,7 +419,7 @@ class AgentExecutor:
                 user=user_message,
                 tools=active_schemas,
                 model=model or self.llm.agent_model,
-                temperature=temp,
+                temperature=self.ctx.temperature,
             reasoning=reasoning,
         ):
                 if event["event"] == "tool_calls":
@@ -722,7 +692,7 @@ class AgentExecutor:
             except ToolExecutionError as e:
                 if _is_local_reference_resolution_error(e.message):
                     await emit(
-                        self.ctx.scope.session_id,
+                        self.ctx.session_id,
                         "agent",
                         "local_reference_resolution_failed",
                         {
@@ -847,7 +817,7 @@ class AgentExecutor:
             )
 
         prompt = get_fallback_summary_prompt(
-            self.ctx.scope.user_name, self.ctx.user_query, evidence_ctx
+            self.ctx.user_name, self.ctx.user_query, evidence_ctx
         )
 
         return await self.llm.generate_text(
@@ -917,7 +887,7 @@ class AgentExecutor:
 
     async def _emit_llm_call(self, model: Optional[str], reasoning: str):
         await emit(
-            self.ctx.scope.session_id,
+            self.ctx.session_id,
             "agent",
             "llm_call",
             {

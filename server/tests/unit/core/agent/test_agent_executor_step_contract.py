@@ -38,6 +38,11 @@ def make_executor(llm):
             persona="Careful memory assistant",
         ),
         limits=AgentRunLimits(),
+        model="test-model",
+        temperature=0.2,
+        brain="Use citations",
+        directives="Required:\n- stay grounded",
+        enabled_tools=["search_messages"],
         active_topics=["Identity", "Testing"],
     )
     tools = SimpleNamespace(document_service=None)
@@ -129,6 +134,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
             "parameters": {"type": "object"},
         },
     }
+    executor.ctx.additional_tool_schemas = (client_tool,)
 
     events = [
         event
@@ -137,14 +143,9 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
             model="test-model",
             reasoning="high",
             current_mode="Architect",
-            enabled_tools=["search_messages"],
             documents_context="- file.md",
             document_focus_context="",
-            directives="Required:\n- stay grounded",
-            temp=0.2,
-            agent_brain="Use citations",
             last_result=None,
-            additional_tool_schemas=[client_tool],
         )
     ]
 
@@ -217,6 +218,7 @@ async def test_step_presents_maintenance_as_optional_when_tool_is_enabled(
         "core.agent.executor.get_agent_prompt",
         fake_agent_prompt,
     )
+    executor.ctx.enabled_tools = ("check_graph_health",)
 
     events = [
         event
@@ -225,12 +227,8 @@ async def test_step_presents_maintenance_as_optional_when_tool_is_enabled(
             model="model",
             reasoning="high",
             current_mode="Architect",
-            enabled_tools=["check_graph_health"],
             documents_context="",
             document_focus_context="",
-            directives="",
-            temp=0.7,
-            agent_brain="",
             last_result=None,
         )
     ]
@@ -272,6 +270,7 @@ async def test_step_does_not_auto_add_disabled_maintenance_tool(monkeypatch):
         "core.agent.executor.get_agent_prompt",
         fake_agent_prompt,
     )
+    executor.ctx.enabled_tools = ("search_messages",)
 
     await anext(
         executor._step(
@@ -279,12 +278,8 @@ async def test_step_does_not_auto_add_disabled_maintenance_tool(monkeypatch):
             model="model",
             reasoning="high",
             current_mode="Architect",
-            enabled_tools=["search_messages"],
             documents_context="",
             document_focus_context="",
-            directives="",
-            temp=0.7,
-            agent_brain="",
             last_result=None,
         )
     )
@@ -341,12 +336,8 @@ async def test_step_completed_without_tool_calls_yields_formatting_step_error():
             model="model",
             reasoning="high",
             current_mode="Architect",
-            enabled_tools=None,
             documents_context="",
             document_focus_context="",
-            directives="",
-            temp=0.7,
-            agent_brain="",
             last_result=None,
         )
     ]
@@ -376,12 +367,8 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             model="model",
             reasoning="high",
             current_mode="Architect",
-            enabled_tools=None,
             documents_context="",
             document_focus_context="",
-            directives="",
-            temp=0.7,
-            agent_brain="",
             last_result=None,
         )
     ]
@@ -392,12 +379,8 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             model="model",
             reasoning="high",
             current_mode="Architect",
-            enabled_tools=None,
             documents_context="",
             document_focus_context="",
-            directives="",
-            temp=0.7,
-            agent_brain="",
             last_result=None,
         )
     ]

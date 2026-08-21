@@ -418,7 +418,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
                     run,
                     _DeterministicAgentLLM(),
                     tools,
-                ).execute(enabled_tools=["search_messages"])
+                ).execute()
             ]
         finally:
             await tools.close()

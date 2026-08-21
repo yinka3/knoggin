@@ -53,8 +53,8 @@ def capture_tool_source_candidates(
             candidate = SourceReferenceCandidate.model_validate(
                 {
                     **source_context,
-                    "project_id": ctx.scope.project_id,
-                    "session_id": ctx.scope.session_id,
+                    "project_id": ctx.project_id,
+                    "session_id": ctx.session_id,
                     "encounter_kind": encounter_kind,
                     "agent_run_id": ctx.run_id,
                     "tool_call_id": call.call_id,
