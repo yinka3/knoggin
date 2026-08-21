@@ -1,9 +1,9 @@
 import pytest
 
-from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     MessageLifecycleWriter,
 )
+from core.knowledge.db.writers.message_writer import MessageWriter
 
 
 async def _seed_session(client, session_id: str) -> None:
@@ -43,7 +43,7 @@ async def test_real_postgres_reclaims_expired_ingestion_claim_without_redis(
     )
     lifecycle = MessageLifecycleWriter(
         real_postgres_client,
-        GraphWriter(real_postgres_client),
+        MessageWriter(real_postgres_client),
     )
 
     claim = await lifecycle.claim_next_full_batch(
@@ -83,4 +83,3 @@ async def test_real_postgres_reclaims_expired_ingestion_claim_without_redis(
         WHERE session_id = 'session-2' AND message_id = 201
         """
     ) == {"ingestion_claim_id": "abandoned-session-2"}
-

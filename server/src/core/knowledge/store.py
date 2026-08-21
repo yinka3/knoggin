@@ -64,6 +64,7 @@ from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
     MessageLifecycleWriter,
 )
+from core.knowledge.db.writers.message_writer import MessageWriter
 from core.knowledge.db.writers.parked_dlq_writer import ParkedDLQWriter
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
@@ -112,8 +113,9 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._graph_writer = GraphWriter(self._postgres_client)
+        self._message_writer = MessageWriter(self._postgres_client)
         self._message_lifecycle_writer = MessageLifecycleWriter(
-            self._postgres_client, self._graph_writer
+            self._postgres_client, self._message_writer
         )
         self._human_review_writer = HumanReviewWriter(self._postgres_client)
         self._conflict_writer = ConflictWriter(
@@ -158,7 +160,7 @@ class KnowledgeStore:
         return self._community
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
-        return await self._graph_writer.save_message_logs(messages)
+        return await self._message_writer.save_message_logs(messages)
 
     async def create_editable_user_message(
         self, message: Dict, *, edit_window_seconds: int
@@ -271,7 +273,7 @@ class KnowledgeStore:
             return []
 
         async with self._postgres_client.transaction() as cur:
-            await self._graph_writer.save_message_logs([message], cur=cur)
+            await self._message_writer.save_message_logs([message], cur=cur)
             return await self._source_reference_writer.write_for_assistant_message(
                 message["id"],
                 candidates,

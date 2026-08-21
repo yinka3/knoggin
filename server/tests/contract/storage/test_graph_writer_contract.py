@@ -5,6 +5,7 @@ import pytest
 from common.exceptions import StorageWriteError
 from common.scoping import IDENTITY_ENTITY_ID
 from core.knowledge.db.writers.graph_writer import GraphWriter
+from core.knowledge.db.writers.message_writer import MessageWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
 MESSAGE_GRAPH_FIELDS = {
@@ -117,12 +118,9 @@ def test_graph_writer_merges_evidence_refs_without_duplicates():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_save_message_logs_writes_canonical_rows(
-    monkeypatch,
-):
+async def test_message_writer_saves_canonical_rows():
     client = RecordingPostgresClient(fetch_one_results=[{"message_id": 7}])
-    writer = GraphWriter(client)
-    monkeypatch.setattr(writer, "_current_time_ms", lambda: 123456)
+    writer = MessageWriter(client)
 
     saved = await writer.save_message_logs(
         [
@@ -133,6 +131,7 @@ async def test_graph_writer_save_message_logs_writes_canonical_rows(
                 "user_name": "ada",
                 "session_id": "session-1",
                 "project_id": "project-1",
+                "timestamp": 123456,
             }
         ]
     )
@@ -155,9 +154,9 @@ async def test_graph_writer_save_message_logs_writes_canonical_rows(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_save_message_logs_empty_list_skips_db():
+async def test_message_writer_empty_list_skips_db():
     client = RecordingPostgresClient()
-    writer = GraphWriter(client)
+    writer = MessageWriter(client)
 
     assert await writer.save_message_logs([]) is True
     assert client.calls == []
@@ -166,9 +165,9 @@ async def test_graph_writer_save_message_logs_empty_list_skips_db():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_save_message_logs_rejects_missing_scope_without_execute():
+async def test_message_writer_rejects_missing_scope_without_execute():
     client = RecordingPostgresClient()
-    writer = GraphWriter(client)
+    writer = MessageWriter(client)
 
     with pytest.raises(ValueError, match="missing required scope fields"):
         await writer.save_message_logs(
@@ -512,9 +511,9 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_rejects_conflicting_canonical_message_payload():
+async def test_message_writer_rejects_conflicting_canonical_message_payload():
     client = RecordingPostgresClient(fetch_one_results=[None])
-    writer = GraphWriter(client)
+    writer = MessageWriter(client)
 
     with pytest.raises(RuntimeError, match="Canonical message ID collision"):
         await writer.save_message_logs(

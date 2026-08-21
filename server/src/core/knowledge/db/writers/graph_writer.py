@@ -1,6 +1,5 @@
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from loguru import logger
@@ -42,19 +41,6 @@ class GraphWriter:
             return
         async with self.client.transaction() as transaction_cursor:
             yield transaction_cursor
-
-    def _normalize_timestamp_ms(self, value) -> int:
-        if value is None or value == "":
-            return self._current_time_ms()
-        if isinstance(value, datetime):
-            return int(value.timestamp() * 1000)
-        if isinstance(value, str):
-            normalized = value.replace("Z", "+00:00")
-            parsed = datetime.fromisoformat(normalized)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return int(parsed.timestamp() * 1000)
-        return int(value)
 
     @staticmethod
     def _require_project_id(project_id: str, operation: str) -> str:
@@ -137,130 +123,6 @@ class GraphWriter:
             )
             params[-1]["symmetric"] = bool(row.get("symmetric", False))
         return params
-
-    async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
-        if not messages:
-            return True
-
-        async with self._merge_cursor(cur) as cur:
-            batch_params = []
-            for msg in messages:
-                missing = [
-                    key
-                    for key in ("user_name", "session_id", "project_id")
-                    if not msg.get(key)
-                ]
-                if missing:
-                    raise ValueError(
-                        f"Message {msg.get('id')} missing required scope "
-                        f"fields: {missing}"
-                    )
-
-                batch_params.append(
-                    {
-                        "id": msg["id"],
-                        "content": msg["content"],
-                        "role": msg["role"],
-                        "user_name": msg["user_name"],
-                        "session_id": msg["session_id"],
-                        "project_id": msg["project_id"],
-                        "user_msg_id": (
-                            msg.get("user_msg_id")
-                            or (msg["id"] if msg["role"] == "user" else None)
-                        ),
-                        "metadata": json.dumps(msg.get("metadata") or {}),
-                        "timestamp": self._normalize_timestamp_ms(msg.get("timestamp")),
-                        "lifecycle_state": msg.get("lifecycle_state", "sealed"),
-                        "editable_until_ms": msg.get("editable_until_ms"),
-                        "sealed_at_ms": msg.get("sealed_at_ms"),
-                        "selected_revision": int(msg.get("selected_revision", 1)),
-                        "replaces_message_id": msg.get("replaces_message_id"),
-                        "superseded_at_ms": msg.get("superseded_at_ms"),
-                        "ingestion_state": msg.get("ingestion_state", "excluded"),
-                        "ingestion_not_before_ms": msg.get("ingestion_not_before_ms"),
-                        "ingestion_claim_id": msg.get("ingestion_claim_id"),
-                        "ingestion_claimed_at_ms": msg.get("ingestion_claimed_at_ms"),
-                        "episode_eligible": bool(msg.get("episode_eligible", False)),
-                        "episode_type": msg.get("episode_type"),
-                    }
-                )
-
-            # Write canonical messages first.
-            for msg in batch_params:
-                await cur.execute(
-                    """
-                    INSERT INTO messages (
-                        user_name,
-                        session_id,
-                        message_id,
-                        project_id,
-                        role,
-                        content,
-                        user_msg_id,
-                        metadata,
-                        timestamp_ms,
-                        lifecycle_state,
-                        editable_until_ms,
-                        sealed_at_ms,
-                        selected_revision,
-                        replaces_message_id,
-                        superseded_at_ms,
-                        ingestion_state,
-                        ingestion_not_before_ms,
-                        ingestion_claim_id,
-                        ingestion_claimed_at_ms,
-                        episode_eligible,
-                        episode_type
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                    )
-                    ON CONFLICT (user_name, session_id, message_id)
-                    DO UPDATE SET
-                        message_id = EXCLUDED.message_id,
-                        user_msg_id = EXCLUDED.user_msg_id,
-                        metadata = EXCLUDED.metadata
-                    WHERE messages.project_id = EXCLUDED.project_id
-                      AND messages.role = EXCLUDED.role
-                      AND messages.content = EXCLUDED.content
-                      AND messages.timestamp_ms = EXCLUDED.timestamp_ms
-                    RETURNING message_id
-                    """,
-                    (
-                        msg["user_name"],
-                        msg["session_id"],
-                        msg["id"],
-                        msg["project_id"],
-                        msg["role"],
-                        msg["content"],
-                        msg["user_msg_id"],
-                        msg["metadata"],
-                        msg["timestamp"],
-                        msg["lifecycle_state"],
-                        msg["editable_until_ms"],
-                        msg["sealed_at_ms"],
-                        msg["selected_revision"],
-                        msg["replaces_message_id"],
-                        msg["superseded_at_ms"],
-                        msg["ingestion_state"],
-                        msg["ingestion_not_before_ms"],
-                        msg["ingestion_claim_id"],
-                        msg["ingestion_claimed_at_ms"],
-                        msg["episode_eligible"],
-                        msg["episode_type"],
-                    ),
-                )
-                persisted = await cur.fetchone()
-                if not persisted:
-                    raise RuntimeError(
-                        "Canonical message ID collision for "
-                        f"{msg['user_name']}/{msg['session_id']}/"
-                        f"{msg['id']}"
-                    )
-
-        logger.info(f"Saved {len(messages)} canonical message logs to Postgres.")
-        return True
 
     async def delete_relationship(
         self,
