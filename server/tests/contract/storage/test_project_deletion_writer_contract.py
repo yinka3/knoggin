@@ -154,10 +154,6 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
         "SELECT count(*) AS count FROM public.entities WHERE project_id = 'project-1'"
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.project_search_revisions "
-        "WHERE project_id = 'project-1'"
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
         "WHERE project_id = 'project-1'"
     ) == {"count": 0}
@@ -397,10 +393,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "JOIN entities e ON e.entity_id = a.entity_id "
             "WHERE e.project_id = 'project-1'"
         ),
-        "project_search_revisions": (
-            "SELECT count(*) AS count FROM project_search_revisions "
-            "WHERE project_id = 'project-1'"
-        ),
     }
     for query in project_one_queries.values():
         assert await real_postgres_client.fetch_one(query) == {"count": 0}
@@ -432,10 +424,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "SELECT count(*) AS count FROM entity_aliases a "
             "JOIN entities e ON e.entity_id = a.entity_id "
             "WHERE e.project_id = 'project-2'"
-        ),
-        "project_search_revisions": (
-            "SELECT count(*) AS count FROM project_search_revisions "
-            "WHERE project_id = 'project-2'"
         ),
     }
     for name, query in project_two_queries.items():

@@ -53,7 +53,7 @@ class ReclassificationPlan:
             "unchanged": self.unchanged,
             "unmapped": self.unmapped,
             "changes": [change.to_dict() for change in self.changes],
-            "search_index_rebuild_required": self.changed > 0,
+            "embedding_rebuild_required": self.changed > 0,
         }
 
 

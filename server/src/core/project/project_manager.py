@@ -890,7 +890,7 @@ class ProjectManager:
         leases.add(session_id)
         return project_state
 
-    async def rebuild_project_search_indexes(self, project_id: str) -> Dict[str, int]:
+    async def rebuild_project_embeddings(self, project_id: str) -> Dict[str, int]:
         async with self._maintenance_lock:
             project = await self.get_project(project_id)
             if project is None:
@@ -903,25 +903,13 @@ class ProjectManager:
             ]
             if active_runtime_projects:
                 raise RuntimeError(
-                    "Search index repair requires all project runtimes to be "
+                    "Embedding rebuild requires all project runtimes to be "
                     f"inactive; active projects: {active_runtime_projects}"
                 )
 
-            rows = await self.pg.fetch_all(
-                """
-                SELECT project_id
-                FROM public.projects
-                WHERE user_name = %(user_name)s
-                  AND status IN ('active', 'archived')
-                ORDER BY project_id
-                """,
-                {"user_name": self.user_name},
-            )
-            identity_project_ids = [row["project_id"] for row in rows]
-            return await self.resources.knowledge_store.rebuild_project_search_indexes(
+            return await self.resources.knowledge_store.rebuild_project_embeddings(
                 project_id,
                 self.user_name,
-                identity_project_ids,
             )
 
     async def preview_historical_reclassification(
@@ -1007,7 +995,7 @@ class ProjectManager:
             )
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
-            summary["search_index_rebuilt"] = False
+            summary["embeddings_rebuilt"] = False
             if result.updated:
                 summary["projection"] = (
                     await self.resources.knowledge_store.rebuild_project_projection(
@@ -1017,24 +1005,13 @@ class ProjectManager:
                 )
                 summary["projection_rebuilt"] = True
 
-                rows = await self.pg.fetch_all(
-                    """
-                    SELECT project_id
-                    FROM public.projects
-                    WHERE user_name = %(user_name)s
-                      AND status IN ('active', 'archived')
-                    ORDER BY project_id
-                    """,
-                    {"user_name": self.user_name},
-                )
-                summary["search_index"] = (
-                    await self.resources.knowledge_store.rebuild_project_search_indexes(
+                summary["embeddings"] = (
+                    await self.resources.knowledge_store.rebuild_project_embeddings(
                         project_id,
                         self.user_name,
-                        [row["project_id"] for row in rows],
                     )
                 )
-                summary["search_index_rebuilt"] = True
+                summary["embeddings_rebuilt"] = True
             return summary
 
     async def preview_historical_relationship_normalization(

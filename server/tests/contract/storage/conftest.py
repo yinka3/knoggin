@@ -71,8 +71,6 @@ async def _reset_storage_db(client: PostgresClient):
             entity_aliases,
             entities,
             messages,
-            project_search_revisions,
-            identity_search_revisions,
             sessions,
             projects
         RESTART IDENTITY CASCADE;

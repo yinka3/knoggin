@@ -1,8 +1,10 @@
+"""Contracts for quiescent canonical embedding rebuilds."""
+
 import json
 
 import pytest
 
-from core.knowledge.db.search_index_rebuilder import SearchIndexer
+from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -56,15 +58,14 @@ def make_client():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_search_index_rebuilder_replaces_all_derived_indexes():
+async def test_embedding_rebuilder_replaces_canonical_embeddings():
     client = make_client()
     embedding = RecordingEmbeddingService()
-    rebuilder = SearchIndexer(client, embedding)
+    rebuilder = EmbeddingRebuilder(client, embedding)
 
-    summary = await rebuilder.rebuild_project_indexes(
+    summary = await rebuilder.rebuild_project_embeddings(
         "project-1",
         "ada",
-        ["project-1", "archive-1"],
     )
 
     assert summary == {
@@ -94,6 +95,7 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
         call
         for call in client.calls
         if call[0] == "execute" and "UPDATE episodes" in call[1]
+        and "SET embedding = %s::vector" in call[1]
     )
     assert episode_update[2][1:] == ("episode-1", "project-1")
     assert len(json.loads(episode_update[2][0])) == 1024
@@ -101,18 +103,17 @@ async def test_search_index_rebuilder_replaces_all_derived_indexes():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_search_index_rebuilder_embedding_failure_preserves_existing_rows():
+async def test_embedding_rebuilder_failure_preserves_existing_rows():
     client = make_client()
-    rebuilder = SearchIndexer(
+    rebuilder = EmbeddingRebuilder(
         client,
         RecordingEmbeddingService(fail=True),
     )
 
     with pytest.raises(RuntimeError, match="embedding failed"):
-        await rebuilder.rebuild_project_indexes(
+        await rebuilder.rebuild_project_embeddings(
             "project-1",
             "ada",
-            ["project-1"],
         )
 
     assert not any(
@@ -123,17 +124,16 @@ async def test_search_index_rebuilder_embedding_failure_preserves_existing_rows(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_search_index_rebuilder_rejects_wrong_embedding_dimension():
+async def test_embedding_rebuilder_rejects_wrong_embedding_dimension():
     client = make_client()
     embedding = RecordingEmbeddingService()
     embedding.embedding_dim = 3
-    rebuilder = SearchIndexer(client, embedding)
+    rebuilder = EmbeddingRebuilder(client, embedding)
 
     with pytest.raises(RuntimeError, match="1024-dimensional"):
-        await rebuilder.rebuild_project_indexes(
+        await rebuilder.rebuild_project_embeddings(
             "project-1",
             "ada",
-            ["project-1"],
         )
 
     assert client.calls == []
@@ -149,7 +149,7 @@ async def test_search_index_rebuilder_rejects_wrong_embedding_dimension():
         ([[0.0] * 3, [0.0] * 3], "dimension 3"),
     ],
 )
-async def test_search_index_rebuilder_rejects_malformed_embedding_results(
+async def test_embedding_rebuilder_rejects_malformed_embedding_results(
     result,
     match,
 ):
@@ -160,13 +160,12 @@ async def test_search_index_rebuilder_rejects_malformed_embedding_results(
             return result
 
     client = make_client()
-    rebuilder = SearchIndexer(client, MalformedEmbeddingService())
+    rebuilder = EmbeddingRebuilder(client, MalformedEmbeddingService())
 
     with pytest.raises(RuntimeError, match=match):
-        await rebuilder.rebuild_project_indexes(
+        await rebuilder.rebuild_project_embeddings(
             "project-1",
             "ada",
-            ["project-1"],
         )
 
     assert not any(
@@ -177,30 +176,29 @@ async def test_search_index_rebuilder_rejects_malformed_embedding_results(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_search_index_rebuilder_database_failure_exits_transaction():
+async def test_embedding_rebuilder_database_failure_exits_transaction():
     client = make_client()
     client.cursor_execute_exceptions = [
-        *([None] * 13),
+        *([None] * 4),
         RuntimeError("message insert failed"),
     ]
-    rebuilder = SearchIndexer(client, RecordingEmbeddingService())
+    rebuilder = EmbeddingRebuilder(client, RecordingEmbeddingService())
 
     with pytest.raises(RuntimeError, match="message insert failed"):
-        await rebuilder.rebuild_project_indexes(
+        await rebuilder.rebuild_project_embeddings(
             "project-1",
             "ada",
-            ["project-1"],
         )
 
-    assert client.transaction_enters == 3
-    assert client.transaction_exits == 3
+    assert client.transaction_enters == 2
+    assert client.transaction_exits == 2
 
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_search_index_rebuild_is_idempotent_and_preserves_sibling_project(
+async def test_embedding_rebuild_is_idempotent_and_preserves_sibling_project(
     real_postgres_client,
 ):
     await real_postgres_client.execute(
@@ -231,28 +229,24 @@ async def test_search_index_rebuild_is_idempotent_and_preserves_sibling_project(
     await real_postgres_client.execute(
         """
         INSERT INTO episodes (
-            episode_id, project_id, session_id, summary, source_message_count,
+            episode_id, project_id, summary, source_message_count,
             first_message_at, last_message_at
         ) VALUES (
-            'episode-1', 'project-1', 'session-1', 'Project one episode', 1,
+            'episode-1', 'project-1', 'Project one episode', 1,
             TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00'
         )
         """
     )
     embedding = RecordingEmbeddingService()
-    rebuilder = SearchIndexer(real_postgres_client, embedding)
+    rebuilder = EmbeddingRebuilder(real_postgres_client, embedding)
 
     expected_summary = {
         "entities": 1,
         "identity": 1,
         "episodes": 1,
     }
-    assert await rebuilder.rebuild_project_indexes(
-        "project-1", "ada", ["project-1"]
-    ) == expected_summary
-    assert await rebuilder.rebuild_project_indexes(
-        "project-1", "ada", ["project-1"]
-    ) == expected_summary
+    assert await rebuilder.rebuild_project_embeddings("project-1", "ada") == expected_summary
+    assert await rebuilder.rebuild_project_embeddings("project-1", "ada") == expected_summary
 
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM messages WHERE project_id = 'project-1'"

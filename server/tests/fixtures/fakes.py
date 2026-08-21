@@ -450,7 +450,7 @@ class FakeKnowledgeStore:
         self.identity_calls = []
         self.next_entity_id = 2
         self.next_message_id = 1
-        self.search_rebuild_calls = []
+        self.embedding_rebuild_calls = []
         self.parked_dlq_items = {}
 
     async def allocate_entity_id(self):
@@ -463,18 +463,12 @@ class FakeKnowledgeStore:
         self.next_message_id += 1
         return message_id
 
-    async def rebuild_project_search_indexes(
-        self,
-        project_id,
-        user_name,
-        identity_project_ids,
-    ):
+    async def rebuild_project_embeddings(self, project_id, user_name):
         call = {
             "project_id": project_id,
             "user_name": user_name,
-            "identity_project_ids": list(identity_project_ids),
         }
-        self.search_rebuild_calls.append(call)
+        self.embedding_rebuild_calls.append(call)
         return {"messages": 0, "entities": 0, "episodes": 0, "identity": 1}
 
     async def ensure_identity_entity(self, user_name, aliases=None):

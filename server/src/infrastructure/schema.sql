@@ -1309,69 +1309,13 @@ BEGIN
 
 END $$;
 
--- Search rebuilds generate embeddings outside a transaction.  These revisions
--- let the publisher reject a snapshot when its canonical inputs changed while
--- embedding was in progress, instead of overwriting the newer derived index.
-CREATE TABLE IF NOT EXISTS public.project_search_revisions (
-    project_id TEXT PRIMARY KEY,
-    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)
-);
-
-CREATE TABLE IF NOT EXISTS public.identity_search_revisions (
-    user_name TEXT PRIMARY KEY,
-    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)
-);
-
-CREATE OR REPLACE FUNCTION public.bump_search_index_revision()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    changed_project_id TEXT;
-    changed_user_name TEXT;
-    changed_entity_id BIGINT;
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        changed_project_id := OLD.project_id;
-        IF TG_TABLE_NAME = 'entities' THEN
-            changed_entity_id := OLD.entity_id;
-            changed_user_name := OLD.user_name;
-        END IF;
-    ELSE
-        changed_project_id := NEW.project_id;
-        IF TG_TABLE_NAME = 'entities' THEN
-            changed_entity_id := NEW.entity_id;
-            changed_user_name := NEW.user_name;
-        END IF;
-    END IF;
-
-    -- The reserved identity entity is shared by every project search rebuild.
-    IF TG_TABLE_NAME = 'entities' AND changed_entity_id = 1 THEN
-        INSERT INTO public.identity_search_revisions (user_name, revision)
-        VALUES (changed_user_name, 1)
-        ON CONFLICT (user_name) DO UPDATE
-        SET revision = identity_search_revisions.revision + 1;
-        RETURN NULL;
-    END IF;
-
-    INSERT INTO public.project_search_revisions (project_id, revision)
-    VALUES (changed_project_id, 1)
-    ON CONFLICT (project_id) DO UPDATE
-    SET revision = project_search_revisions.revision + 1;
-    RETURN NULL;
-END;
-$$;
-
 DROP TRIGGER IF EXISTS entities_search_revision_trigger ON public.entities;
-CREATE TRIGGER entities_search_revision_trigger
-AFTER INSERT OR DELETE OR UPDATE OF canonical_name, type ON public.entities
-FOR EACH ROW EXECUTE FUNCTION public.bump_search_index_revision();
-
+DROP TRIGGER IF EXISTS messages_search_revision_trigger ON public.messages;
 DROP TRIGGER IF EXISTS episodes_search_revision_trigger ON public.episodes;
-CREATE TRIGGER episodes_search_revision_trigger
-AFTER INSERT OR DELETE
-    OR UPDATE OF summary, new_developments, updates, unresolved ON public.episodes
-FOR EACH ROW EXECUTE FUNCTION public.bump_search_index_revision();
+DROP FUNCTION IF EXISTS public.bump_search_index_revision() CASCADE;
+DROP FUNCTION IF EXISTS public.sync_entity_search_canonical_name() CASCADE;
+DROP TABLE IF EXISTS public.project_search_revisions;
+DROP TABLE IF EXISTS public.identity_search_revisions;
 
 -- Project-owned folder upload batches.
 CREATE TABLE IF NOT EXISTS public.document_folder_uploads (

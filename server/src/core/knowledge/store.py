@@ -31,6 +31,7 @@ from core.knowledge.conflicts import (
     ConflictResolutionKind,
     ConflictWriteResult,
 )
+from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.conflict_discovery_reader import (
@@ -47,7 +48,6 @@ from core.knowledge.db.readers.relationship_observation_reader import (
     RelationshipObservationReader,
 )
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
-from core.knowledge.db.search_index_rebuilder import SearchIndexer
 from core.knowledge.db.writers.candidate_suggestion_writer import (
     CandidateSuggestionWriter,
 )
@@ -150,7 +150,7 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
-        self._search_index_rebuilder = SearchIndexer(
+        self._embedding_rebuilder = EmbeddingRebuilder(
             self._postgres_client,
             embedding_service,
         )
@@ -836,16 +836,14 @@ class KnowledgeStore:
             user_name=user_name,
         )
 
-    async def rebuild_project_search_indexes(
+    async def rebuild_project_embeddings(
         self,
         project_id: str,
         user_name: str,
-        identity_project_ids: List[str],
     ) -> Dict[str, int]:
-        return await self._search_index_rebuilder.rebuild_project_indexes(
+        return await self._embedding_rebuilder.rebuild_project_embeddings(
             project_id,
             user_name,
-            identity_project_ids,
         )
 
     async def get_entity_embedding(
