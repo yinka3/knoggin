@@ -14,10 +14,8 @@ from common.scoping import (
     require_visible_project_ids,
 )
 from core.community.community_job import AACJob
-from core.ingestion.graph_commit import write_batch_callback
 from core.ingestion.jobs.cleaner_job import EntityCleanupJob
 from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.recovery.replay_job import DLQReplayJob
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.documents import DocumentService
 from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
@@ -164,9 +162,7 @@ class ProjectRuntimeFactory:
             postgres_client=self.resources.postgres,
             embedding_service=self.resources.embedding,
             background_work=self.resources.background_work,
-            document_rerank_enabled=os.getenv(
-                "KNOGGIN_DOCUMENT_RERANK_ENABLED", "true"
-            )
+            document_rerank_enabled=os.getenv("KNOGGIN_DOCUMENT_RERANK_ENABLED", "true")
             .strip()
             .lower()
             in {"1", "true", "yes", "on"},
@@ -204,22 +200,8 @@ class ProjectRuntimeFactory:
         episode_job: EpisodeJob,
     ) -> None:
         scheduler = runtime.scheduler
-        project_id = runtime.project_id
         jobs = self.dev_settings.jobs
         config_manager = ConfigManager.get()
-
-        async def write_dlq_batch(result):
-            if not result.scope or not result.scope.session_id:
-                return False, "DLQ graph replay missing source session_id"
-            return await write_batch_callback(
-                result,
-                knowledge_store=self.resources.knowledge_store,
-                entities=entities,
-                session_id=result.scope.session_id,
-                project_id=project_id,
-                user_name=self.user_name,
-                redis_client=self.resources.redis,
-            )
 
         def update_entity_resolution(settings):
             entities.update_settings(settings)
@@ -255,19 +237,6 @@ class ProjectRuntimeFactory:
                 document_index_job.update_settings,
                 "developer_settings.jobs.document_indexing",
             )
-        )
-
-        dlq_job = DLQReplayJob(
-            entities=entities,
-            processor=processor,
-            write_to_graph=write_dlq_batch,
-            redis_client=self.resources.redis,
-            settings=jobs.dlq,
-        )
-        runtime.dlq_job = dlq_job
-        scheduler.register(dlq_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
         )
 
         cleaner_job = EntityCleanupJob(

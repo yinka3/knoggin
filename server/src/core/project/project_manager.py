@@ -48,7 +48,9 @@ class ProjectStatus(str, Enum):
     DELETED = "deleted"
 
 
-def _parse_initial_domain(candidate: DomainConfig | Mapping[str, object]) -> DomainConfig:
+def _parse_initial_domain(
+    candidate: DomainConfig | Mapping[str, object],
+) -> DomainConfig:
     """Validate the complete domain required to create a new project."""
 
     config = parse_candidate(candidate)
@@ -136,9 +138,7 @@ class ProjectManager:
                 f"knoggin-project-workspace:{project_id}",
             )
         )
-        project_file_content = build_project_markdown(name, description).encode(
-            "utf-8"
-        )
+        project_file_content = build_project_markdown(name, description).encode("utf-8")
         project_file_hash = hashlib.sha256(project_file_content).hexdigest()
         async with self.pg.transaction() as cur:
             await cur.execute(
@@ -357,18 +357,6 @@ class ProjectManager:
             project_id=project_id,
         )
 
-    async def requeue_parked_dlq_item(self, project_id: str, dlq_id: str) -> bool:
-        """Requeue a human-reviewed DLQ item through its active project runtime."""
-        await self._require_domain_project(project_id, allow_archived=True)
-        state = self.active_projects.get(project_id)
-        if state is None or state.dlq_job is None:
-            raise RuntimeError("Project runtime is not active for DLQ requeue")
-        return await state.dlq_job.requeue_parked_dlq_item(
-            user_name=self.user_name,
-            project_id=project_id,
-            dlq_id=dlq_id,
-        )
-
     async def get_conflict_group(self, project_id: str, conflict_id: str) -> dict:
         """Return the conflict workflow subject and immutable evidence snapshots."""
 
@@ -486,9 +474,7 @@ class ProjectManager:
             {
                 "session_id": str(row["session_id"]),
                 "enabled": bool(row["episode_participation_enabled"]),
-                "after_message_id": int(
-                    row["episode_participation_after_message_id"]
-                ),
+                "after_message_id": int(row["episode_participation_after_message_id"]),
             }
             for row in rows
         ]
@@ -1006,30 +992,32 @@ class ProjectManager:
                 raise DomainConfigConflict(expected_domain_version, actual_version)
 
             domain = stored.compile()
-            result = await self.resources.knowledge_store.reclassify_historical_entities(
-                user_name=self.user_name,
-                project_id=project_id,
-                domain=domain,
-                batch_size=batch_size,
-                max_entities=max_entities,
+            result = (
+                await self.resources.knowledge_store.reclassify_historical_entities(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                    domain=domain,
+                    batch_size=batch_size,
+                    max_entities=max_entities,
+                )
             )
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
             summary["embeddings_rebuilt"] = False
             if result.updated:
-                summary["projection"] = (
-                    await self.resources.knowledge_store.rebuild_project_projection(
-                        project_id,
-                        self.user_name,
-                    )
+                summary[
+                    "projection"
+                ] = await self.resources.knowledge_store.rebuild_project_projection(
+                    project_id,
+                    self.user_name,
                 )
                 summary["projection_rebuilt"] = True
 
-                summary["embeddings"] = (
-                    await self.resources.knowledge_store.rebuild_project_embeddings(
-                        project_id,
-                        self.user_name,
-                    )
+                summary[
+                    "embeddings"
+                ] = await self.resources.knowledge_store.rebuild_project_embeddings(
+                    project_id,
+                    self.user_name,
                 )
                 summary["embeddings_rebuilt"] = True
             return summary
@@ -1098,26 +1086,30 @@ class ProjectManager:
             if stored.version != expected_domain_version:
                 raise DomainConfigConflict(expected_domain_version, stored.version)
 
-            result = await self.resources.knowledge_store.normalize_historical_relationships(
-                user_name=self.user_name,
-                project_id=project_id,
-                domain=stored.compile(),
-                batch_size=batch_size,
-                max_relationships=max_relationships,
+            result = (
+                await self.resources.knowledge_store.normalize_historical_relationships(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                    domain=stored.compile(),
+                    batch_size=batch_size,
+                    max_relationships=max_relationships,
+                )
             )
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
             if result.updated:
-                summary["projection"] = (
-                    await self.resources.knowledge_store.rebuild_project_projection(
-                        project_id,
-                        self.user_name,
-                    )
+                summary[
+                    "projection"
+                ] = await self.resources.knowledge_store.rebuild_project_projection(
+                    project_id,
+                    self.user_name,
                 )
                 summary["projection_rebuilt"] = True
             return summary
 
-    async def release_project_for_session(self, project_id: str, session_id: str) -> None:
+    async def release_project_for_session(
+        self, project_id: str, session_id: str
+    ) -> None:
         """Release one exact session lease and stop the final project runtime."""
         async with self._maintenance_lock:
             leases = self._project_leases.get(project_id)

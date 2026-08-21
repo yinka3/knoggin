@@ -60,7 +60,6 @@ class ProjectRuntime:
         self.workspace_service = ProjectWorkspaceService(self.document_service)
 
         self.episode_job: Optional[Any] = None
-        self.dlq_job: Optional[Any] = None
         self._community_task: Optional[asyncio.Task] = None
         self.config_unsubscribers: list[Any] = []
         self._shutdown_lock = asyncio.Lock()
@@ -112,9 +111,11 @@ class ProjectRuntime:
                 (
                     "background work",
                     (
-                        lambda: self.background_work.cancel_project(self.project_id)
-                        if self.background_work is not None
-                        else None
+                        lambda: (
+                            self.background_work.cancel_project(self.project_id)
+                            if self.background_work is not None
+                            else None
+                        )
                     ),
                 ),
                 ("community", self._stop_community_task),
