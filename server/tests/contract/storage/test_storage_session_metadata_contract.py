@@ -23,7 +23,6 @@ async def test_session_metadata_update_persists_an_allowed_configuration_change(
     manager = SessionManager(
         resources=Resources(real_postgres_client),
         user_name="ada",
-        active_sessions={},
         project_manager=None,
     )
 

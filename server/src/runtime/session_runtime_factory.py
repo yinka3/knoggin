@@ -1,25 +1,32 @@
-import uuid
 from typing import Callable, Optional
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.schema.document import DocumentFocus
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.worker import IngestionWorker
-from core.session.context import Session
 from runtime.project_runtime import ProjectRuntime
-from runtime.resources import ResourceManager
+from runtime.resources import RuntimeResources
+from runtime.session_runtime import SessionRuntime
 
 
-class SessionFactory:
+class SessionRuntimeFactory:
     """
     Wires together the infrastructure, services, and background jobs for a session.
     Decouples construction from the Session state container.
     """
 
-    def __init__(self, user_name: str, resources: ResourceManager):
+    def __init__(
+        self,
+        user_name: str,
+        resources: RuntimeResources,
+        *,
+        health_service=None,
+    ):
         self.user_name = user_name
         self.resources = resources
+        self.health_service = health_service
 
     @property
     def config(self):
@@ -32,36 +39,58 @@ class SessionFactory:
     async def bootstrap(
         self,
         project_state: ProjectRuntime,
-        session_id: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> Session:
+        *,
+        session_id: str,
+        model: Optional[str],
+        agent_id: Optional[str],
+        enabled_tools: Optional[list[str]],
+        document_focus: Optional[DocumentFocus] = None,
+    ) -> SessionRuntime:
         """Perform the multi-phase boot sequence: assemble + launch."""
-        ctx = await self.assemble(project_state, session_id, model)
-        await self.launch(ctx)
+        ctx = await self.assemble(
+            project_state,
+            session_id=session_id,
+            model=model,
+            agent_id=agent_id,
+            enabled_tools=enabled_tools,
+            document_focus=document_focus,
+        )
+        try:
+            await self.launch(ctx)
+        except Exception:
+            await ctx.shutdown()
+            raise
         return ctx
 
     async def assemble(
         self,
         project_state: ProjectRuntime,
-        session_id: Optional[str] = None,
-        model: Optional[str] = None,
-    ) -> Session:
+        *,
+        session_id: str,
+        model: Optional[str],
+        agent_id: Optional[str],
+        enabled_tools: Optional[list[str]],
+        document_focus: Optional[DocumentFocus] = None,
+    ) -> SessionRuntime:
         """
         Wires together services and infrastructure into a Session.
         Does NOT start background loops.
         """
-        session_id = session_id or str(uuid.uuid4())
-
-        # Instantiate Session shell first
-        ctx = Session(
+        # Instantiate the live session shell after durable identity exists.
+        ctx = SessionRuntime(
             self.user_name,
-            list(project_state.compiled_domain.active_topics),
             self.resources,
+            health_service=self.health_service,
         )
         ctx.session_id = session_id
         ctx.project_id = project_state.project_id
         ctx.project = project_state
         ctx.model = model
+        ctx.agent_id = agent_id
+        ctx.enabled_tools = (
+            list(enabled_tools) if enabled_tools is not None else None
+        )
+        ctx.document_focus = document_focus
 
         # Use the project-owned processor so config updates and background jobs
         # share the same ingestion runtime as session consumers.
@@ -90,7 +119,7 @@ class SessionFactory:
 
         return ctx
 
-    async def launch(self, ctx: Session):
+    async def launch(self, ctx: SessionRuntime):
         """Starts background tasks and jobs for the context."""
         if ctx.consumer:
             if ctx.consumer.get_session_context is None:
@@ -101,10 +130,6 @@ class SessionFactory:
         if ctx.batch_processor:
             if ctx.batch_processor._get_next_ent_id is None:
                 raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
-
-        # Start the project scheduler if not already running
-        if ctx.project and ctx.project.scheduler and not ctx.project.scheduler.running:
-            await ctx.project.scheduler.start()
 
         if ctx.consumer:
             ctx.consumer.start()

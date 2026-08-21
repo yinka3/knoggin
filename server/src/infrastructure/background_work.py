@@ -1,11 +1,11 @@
-"""Fair, project-aware scheduling for complete background operations."""
+"""One bounded global queue for non-model background operations."""
 
 import asyncio
 from collections import defaultdict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Awaitable, Callable, Deque, TypeVar
+from typing import Awaitable, Callable, TypeVar
 
 from common.exceptions import KnogginError
 from common.schema.health import sanitize_health_details
@@ -15,8 +15,9 @@ ResultT = TypeVar("ResultT")
 
 @dataclass
 class QueuedBackgroundWork:
-    """In-memory work payload owned by a single project queue."""
+    """One globally queued operation tagged with its owning project."""
 
+    project_id: str
     future: asyncio.Future
     operation: Callable[[], Awaitable]
     name: str
@@ -25,7 +26,7 @@ class QueuedBackgroundWork:
 
 
 class BackgroundWorkRejected(KnogginError):
-    """Raised when bounded background work cannot be admitted."""
+    """Raised when the bounded global queue cannot admit more work."""
 
     def __init__(
         self,
@@ -51,37 +52,23 @@ class BackgroundWorkRejected(KnogginError):
 
 
 class BackgroundWorkCoordinator:
-    """Run background operations fairly across projects.
+    """Run complete operations through one bounded global FIFO queue.
 
-    A project gets at most one active operation. When that operation completes,
-    the next waiting project gets a turn before the same project can run again.
-    This coordinator intentionally schedules complete jobs; model-level resource
-    limits remain the responsibility of ``ModelWorkCoordinator``.
+    ``project_id`` remains an ownership tag: a project runtime can cancel all
+    queued and active work it owns during shutdown. It is not a fairness lane.
+    Model scheduling remains owned by ``ModelWorkCoordinator``.
     """
 
-    def __init__(
-        self,
-        max_concurrency: int = 1,
-        *,
-        max_queued_per_project: int = 8,
-        max_queued_global: int = 64,
-    ):
-        if min(max_concurrency, max_queued_per_project, max_queued_global) < 1:
-            raise ValueError(
-                "background-work concurrency and queue limits must be positive"
-            )
+    def __init__(self, max_concurrency: int = 1, *, max_queued_global: int = 64):
+        if min(max_concurrency, max_queued_global) < 1:
+            raise ValueError("background-work concurrency and queue limits must be positive")
         self._max_concurrency = max_concurrency
-        self._max_queued_per_project = max_queued_per_project
         self._max_queued_global = max_queued_global
-        self._project_queues: dict[str, Deque[QueuedBackgroundWork]] = defaultdict(
-            deque
-        )
-        self._ready_projects: Deque[str] = deque()
-        self._ready_project_ids: set[str] = set()
-        self._active_project_ids: set[str] = set()
-        self._active_work_by_project: dict[str, str] = {}
+        self._queue: deque[QueuedBackgroundWork] = deque()
         self._coalesced_futures: dict[tuple[str, str], asyncio.Future] = {}
+        self._active_operations: dict[asyncio.Task, QueuedBackgroundWork] = {}
         self._condition = asyncio.Condition()
+        self._start_lock = asyncio.Lock()
         self._workers: list[asyncio.Task] = []
         self._closed = False
         self._submitted = 0
@@ -91,20 +78,20 @@ class BackgroundWorkCoordinator:
         self._coalesced = 0
         self._wait_seconds_total = 0.0
         self._wait_seconds_by_name: dict[str, float] = defaultdict(float)
-        self._rejected_by_reason = {
-            "global_queue_full": 0,
-            "project_queue_full": 0,
-        }
+        self._rejected_by_reason = {"global_queue_full": 0}
 
     async def start(self) -> None:
         if self._workers:
             return
-        if self._closed:
-            raise RuntimeError("BackgroundWorkCoordinator is closed")
-        self._workers = [
-            asyncio.create_task(self._worker(index), name=f"background-work:{index}")
-            for index in range(self._max_concurrency)
-        ]
+        async with self._start_lock:
+            if self._workers:
+                return
+            if self._closed:
+                raise RuntimeError("BackgroundWorkCoordinator is closed")
+            self._workers = [
+                asyncio.create_task(self._worker(index), name=f"background-work:{index}")
+                for index in range(self._max_concurrency)
+            ]
 
     async def submit(
         self,
@@ -122,20 +109,36 @@ class BackgroundWorkCoordinator:
 
         loop = asyncio.get_running_loop()
         async with self._condition:
-            self._prune_cancelled_work()
+            if self._closed:
+                raise RuntimeError("BackgroundWorkCoordinator is closed")
             future = self._get_coalesced_future(project_id, coalesce_key)
             if future is not None:
                 self._coalesced += 1
             else:
+                queued = len(self._queue)
+                if queued >= self._max_queued_global:
+                    self._rejected_by_reason["global_queue_full"] += 1
+                    raise BackgroundWorkRejected(
+                        project_id=project_id,
+                        name=name,
+                        reason="global_queue_full",
+                        limit=self._max_queued_global,
+                        queued=queued,
+                    )
                 future = loop.create_future()
                 work = QueuedBackgroundWork(
+                    project_id=project_id,
                     future=future,
                     operation=operation,
                     name=name,
                     submitted_at=perf_counter(),
                     coalesce_key=coalesce_key,
                 )
-                self._admit_work(project_id, work)
+                self._queue.append(work)
+                if coalesce_key is not None:
+                    self._coalesced_futures[(project_id, coalesce_key)] = future
+                self._submitted += 1
+                self._condition.notify()
         return await asyncio.shield(future)
 
     def _get_coalesced_future(
@@ -148,105 +151,40 @@ class BackgroundWorkCoordinator:
         future = self._coalesced_futures.get((project_id, coalesce_key))
         return future if future is not None and not future.done() else None
 
-    def _admit_work(self, project_id: str, work: QueuedBackgroundWork) -> None:
-        project_queued = len(self._project_queues.get(project_id, ()))
-        if project_queued >= self._max_queued_per_project:
-            self._rejected_by_reason["project_queue_full"] += 1
-            raise BackgroundWorkRejected(
-                project_id=project_id,
-                name=work.name,
-                reason="project_queue_full",
-                limit=self._max_queued_per_project,
-                queued=project_queued,
-            )
-        total_queued = self._queued_count()
-        if total_queued >= self._max_queued_global:
-            self._rejected_by_reason["global_queue_full"] += 1
-            raise BackgroundWorkRejected(
-                project_id=project_id,
-                name=work.name,
-                reason="global_queue_full",
-                limit=self._max_queued_global,
-                queued=total_queued,
-            )
-        self._project_queues[project_id].append(work)
-        if work.coalesce_key is not None:
-            self._coalesced_futures[(project_id, work.coalesce_key)] = work.future
-        self._submitted += 1
-        self._mark_project_ready(project_id)
-        self._condition.notify()
-
-    def _queued_count(self) -> int:
-        return sum(len(queue) for queue in self._project_queues.values())
-
-    def _prune_cancelled_work(self) -> None:
-        for project_id, queue in list(self._project_queues.items()):
-            kept = deque(work for work in queue if not work.future.cancelled())
-            self._cancelled += len(queue) - len(kept)
-            if kept:
-                self._project_queues[project_id] = kept
-            else:
-                del self._project_queues[project_id]
-
-    def _mark_project_ready(self, project_id: str) -> None:
-        queue = self._project_queues.get(project_id)
-        if (
-            project_id not in self._active_project_ids
-            and project_id not in self._ready_project_ids
-            and queue
-        ):
-            self._ready_projects.append(project_id)
-            self._ready_project_ids.add(project_id)
-
-    async def _next_work(self) -> tuple[str, QueuedBackgroundWork] | None:
+    async def _next_work(self) -> QueuedBackgroundWork | None:
         async with self._condition:
             while True:
-                while self._ready_projects:
-                    project_id = self._ready_projects.popleft()
-                    self._ready_project_ids.remove(project_id)
-                    queue = self._project_queues.get(project_id)
-                    if not queue:
+                while self._queue:
+                    work = self._queue.popleft()
+                    if work.future.cancelled():
+                        self._cancelled += 1
+                        self._clear_coalesced_future(work)
                         continue
-                    work = queue.popleft()
-                    self._active_project_ids.add(project_id)
-                    self._active_work_by_project[project_id] = work.name
-                    if not queue:
-                        del self._project_queues[project_id]
-                    return project_id, work
+                    return work
                 if self._closed:
                     return None
                 await self._condition.wait()
 
-    async def _finish_project(
-        self,
-        project_id: str,
-        work: QueuedBackgroundWork,
-    ) -> None:
-        async with self._condition:
-            self._active_project_ids.discard(project_id)
-            self._active_work_by_project.pop(project_id, None)
-            if work.coalesce_key is not None:
-                key = (project_id, work.coalesce_key)
-                if self._coalesced_futures.get(key) is work.future:
-                    del self._coalesced_futures[key]
-            self._mark_project_ready(project_id)
-            self._condition.notify_all()
-
-    async def _worker(self, index: int) -> None:
+    async def _worker(self, _index: int) -> None:
         while True:
-            item = await self._next_work()
-            if item is None:
+            work = await self._next_work()
+            if work is None:
                 return
-            project_id, work = item
+            operation_task = asyncio.create_task(
+                work.operation(),
+                name=f"background-operation:{work.project_id}:{work.name}",
+            )
+            self._active_operations[operation_task] = work
             try:
-                if work.future.cancelled():
-                    self._cancelled += 1
-                    continue
                 wait_seconds = perf_counter() - work.submitted_at
                 self._wait_seconds_total += wait_seconds
                 self._wait_seconds_by_name[work.name] += wait_seconds
-                result = await work.operation()
-            except BaseException as exc:
+                result = await operation_task
+            except asyncio.CancelledError:
+                self._cancelled += 1
+                if not work.future.done():
+                    work.future.cancel()
+            except Exception as exc:
                 self._failed += 1
                 if not work.future.done():
                     work.future.set_exception(exc)
@@ -255,22 +193,69 @@ class BackgroundWorkCoordinator:
                 if not work.future.done():
                     work.future.set_result(result)
             finally:
-                await self._finish_project(project_id, work)
+                self._active_operations.pop(operation_task, None)
+                self._clear_coalesced_future(work)
+
+    def _clear_coalesced_future(self, work: QueuedBackgroundWork) -> None:
+        if work.coalesce_key is None:
+            return
+        key = (work.project_id, work.coalesce_key)
+        if self._coalesced_futures.get(key) is work.future:
+            del self._coalesced_futures[key]
+
+    async def cancel_project(self, project_id: str) -> None:
+        """Cancel and join all work tagged as owned by one project."""
+
+        if not project_id:
+            raise ValueError("project_id is required for background-work cancellation")
+        async with self._condition:
+            retained: deque[QueuedBackgroundWork] = deque()
+            while self._queue:
+                work = self._queue.popleft()
+                if work.project_id != project_id:
+                    retained.append(work)
+                    continue
+                if not work.future.done():
+                    work.future.cancel()
+                    self._cancelled += 1
+                self._clear_coalesced_future(work)
+            self._queue = retained
+            active = [
+                task
+                for task, work in self._active_operations.items()
+                if work.project_id == project_id and not task.done()
+            ]
+            for task in active:
+                task.cancel()
+            self._condition.notify_all()
+
+        current = asyncio.current_task()
+        joinable = [task for task in active if task is not current]
+        if joinable:
+            await asyncio.gather(*joinable, return_exceptions=True)
 
     def snapshot(self) -> dict[str, object]:
-        """Return in-memory scheduling metrics for future instrumentation."""
-        queued_by_project = {
-            project_id: len(queue)
-            for project_id, queue in self._project_queues.items()
-        }
+        """Return global queue metrics and project ownership diagnostics."""
+
+        queued_by_project: dict[str, int] = defaultdict(int)
+        queued_categories_by_project: dict[str, list[str]] = defaultdict(list)
+        for work in self._queue:
+            queued_by_project[work.project_id] += 1
+            if len(queued_categories_by_project[work.project_id]) < 20:
+                queued_categories_by_project[work.project_id].append(work.name[:100])
+
+        active_by_project: dict[str, list[str]] = defaultdict(list)
+        for task, work in self._active_operations.items():
+            if not task.done() and len(active_by_project[work.project_id]) < 20:
+                active_by_project[work.project_id].append(work.name[:100])
+
         return {
             "max_concurrency": self._max_concurrency,
-            "max_queued_per_project": self._max_queued_per_project,
             "max_queued_global": self._max_queued_global,
-            "queued": sum(queued_by_project.values()),
-            "queued_by_project": queued_by_project,
-            "ready_projects": list(self._ready_projects),
-            "active_projects": sorted(self._active_project_ids),
+            "queued": len(self._queue),
+            "queued_by_project": dict(queued_by_project),
+            "queued_categories_by_project": dict(queued_categories_by_project),
+            "active_by_project": dict(active_by_project),
             "submitted": self._submitted,
             "completed": self._completed,
             "failed": self._failed,
@@ -283,61 +268,57 @@ class BackgroundWorkCoordinator:
         }
 
     def snapshot_for_health(self, *, project_id: str | None = None) -> dict[str, object]:
-        """Return metrics safe for a project-scoped health response.
-
-        The internal snapshot intentionally contains project identifiers for
-        scheduler diagnostics. A public projection reports only the requested
-        project's queue depth and never forwards the identifier map itself.
-        """
+        """Return health-safe queue metrics, optionally scoped by ownership tag."""
 
         snapshot = dict(self.snapshot())
         queued_by_project = snapshot.pop("queued_by_project", {})
-        snapshot.pop("ready_projects", None)
-        snapshot.pop("active_projects", None)
-        if project_id is not None and isinstance(queued_by_project, Mapping):
-            queued_for_project = queued_by_project.get(project_id, 0)
+        queued_categories = snapshot.pop("queued_categories_by_project", {})
+        active_by_project = snapshot.pop("active_by_project", {})
+        if project_id is not None:
             snapshot["queued_for_project"] = (
-                queued_for_project
-                if isinstance(queued_for_project, int)
-                and not isinstance(queued_for_project, bool)
-                and queued_for_project >= 0
+                queued_by_project.get(project_id, 0)
+                if isinstance(queued_by_project, Mapping)
                 else 0
             )
-            if hasattr(self, "_project_queues"):
-                queued_work = self._project_queues.get(project_id, ())
-                snapshot["queued_operation_categories"] = [
-                    work.name[:100]
-                    for work in list(queued_work)[:20]
-                    if isinstance(work.name, str)
-                ]
-            if hasattr(self, "_active_work_by_project"):
-                active_name = self._active_work_by_project.get(project_id)
-                snapshot["active_operation_categories"] = (
-                    [active_name[:100]]
-                    if isinstance(active_name, str)
-                    else []
-                )
-                snapshot["active_for_project"] = (
-                    project_id in self._active_project_ids
-                )
+            snapshot["queued_operation_categories"] = (
+                queued_categories.get(project_id, [])
+                if isinstance(queued_categories, Mapping)
+                else []
+            )
+            snapshot["active_operation_categories"] = (
+                active_by_project.get(project_id, [])
+                if isinstance(active_by_project, Mapping)
+                else []
+            )
+            snapshot["active_for_project"] = bool(
+                snapshot["active_operation_categories"]
+            )
         return sanitize_health_details(snapshot)
 
     async def shutdown(self) -> None:
+        """Reject new work and cancel/join every queued or active operation."""
+
         if self._closed:
             return
         self._closed = True
         async with self._condition:
-            for queue in self._project_queues.values():
-                for work in queue:
-                    if not work.future.done():
-                        work.future.cancel()
-                        self._cancelled += 1
-            self._project_queues.clear()
-            self._ready_projects.clear()
-            self._ready_project_ids.clear()
-            self._active_work_by_project.clear()
-            self._coalesced_futures.clear()
+            while self._queue:
+                work = self._queue.popleft()
+                if not work.future.done():
+                    work.future.cancel()
+                    self._cancelled += 1
+                self._clear_coalesced_future(work)
+            active = [
+                task for task in self._active_operations if not task.done()
+            ]
+            for task in active:
+                task.cancel()
             self._condition.notify_all()
+
+        current = asyncio.current_task()
+        joinable = [task for task in active if task is not current]
+        if joinable:
+            await asyncio.gather(*joinable, return_exceptions=True)
         if self._workers:
             await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()

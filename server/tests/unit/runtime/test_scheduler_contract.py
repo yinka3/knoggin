@@ -5,8 +5,6 @@ import pytest
 from infrastructure.background_work import BackgroundWorkRejected
 from infrastructure.job.base import JobContext, JobResult
 from infrastructure.job.scheduler import Scheduler
-from infrastructure.redis_client import RedisKeys
-from tests.fixtures.fakes import FakeRedis
 
 
 class ControlledJob:
@@ -42,14 +40,14 @@ class ControlledJob:
     def name(self):
         return self._name
 
-    async def should_run(self, ctx):
+    async def should_run(self, _ctx):
         self.should_run_calls += 1
         self.check_started.set()
         if self.check_blocker is not None:
             await self.check_blocker.wait()
         return self.due
 
-    async def execute(self, ctx):
+    async def execute(self, _ctx):
         self.execute_calls += 1
         self.started.set()
         try:
@@ -78,9 +76,9 @@ def capture_events(monkeypatch):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_start_checks_jobs_immediately_and_start_stop_are_idempotent(monkeypatch):
+async def test_start_checks_jobs_immediately_and_stop_is_idempotent(monkeypatch):
     capture_events(monkeypatch)
-    scheduler = Scheduler("ada", "project-1", FakeRedis())
+    scheduler = Scheduler("ada", "project-1")
     job = ControlledJob()
     scheduler.register(job)
 
@@ -102,119 +100,73 @@ async def test_start_checks_jobs_immediately_and_start_stop_are_idempotent(monke
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_start_rolls_back_running_state_when_initial_check_fails():
-    class FailingRedis(FakeRedis):
-        async def get(self, key):
-            raise RuntimeError("redis unavailable")
-
-    scheduler = Scheduler("ada", "project-1", FailingRedis())
-    scheduler.register(ControlledJob())
-
-    with pytest.raises(RuntimeError, match="redis unavailable"):
-        await scheduler.start()
-
-    assert scheduler.running is False
-    assert scheduler._monitor_task is None
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-def test_register_rejects_duplicate_job_names():
-    scheduler = Scheduler("ada", "project-1", FakeRedis())
+def test_register_rejects_duplicate_names_and_stopped_scheduler():
+    scheduler = Scheduler("ada", "project-1")
     scheduler.register(ControlledJob(name="duplicate"))
-
     with pytest.raises(ValueError, match="already registered"):
         scheduler.register(ControlledJob(name="duplicate"))
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_scheduler_owns_delayed_cadence_and_records_success(monkeypatch):
+async def test_scheduler_keeps_cadence_locally_and_records_success(monkeypatch):
     capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
+    scheduler = Scheduler("ada", "project-1")
     job = ControlledJob(due=False, cadence_seconds=60)
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
 
-    monkeypatch.setattr(
-        "infrastructure.job.scheduler.get_now_unix",
-        lambda: 1000,
-    )
+    monkeypatch.setattr("infrastructure.job.scheduler.get_now_unix", lambda: 1000)
     await scheduler._schedule_if_due(job.name, job, context())
-
     assert job.execute_calls == 0
-    assert await redis.get(last_run_key) == "1000"
+    assert scheduler._last_successful_runs == {job.name: 1000}
 
-    monkeypatch.setattr(
-        "infrastructure.job.scheduler.get_now_unix",
-        lambda: 1060,
-    )
+    monkeypatch.setattr("infrastructure.job.scheduler.get_now_unix", lambda: 1060)
     await scheduler._schedule_if_due(job.name, job, context())
     await asyncio.wait_for(job.finished.wait(), timeout=1)
 
     assert job.execute_calls == 1
-    assert await redis.get(last_run_key) == "1060"
+    assert scheduler._last_successful_runs == {job.name: 1060}
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_immediate_cadence_runs_without_an_existing_timestamp(monkeypatch):
+async def test_immediate_cadence_runs_without_prior_local_timestamp(monkeypatch):
     capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
+    scheduler = Scheduler("ada", "project-1")
     job = ControlledJob(
         due=False,
         cadence_seconds=60,
         run_immediately_on_first_check=True,
     )
+    monkeypatch.setattr("infrastructure.job.scheduler.get_now_unix", lambda: 2000)
 
     await scheduler._schedule_if_due(job.name, job, context())
     await asyncio.wait_for(job.finished.wait(), timeout=1)
 
     assert job.execute_calls == 1
+    assert scheduler._last_successful_runs == {job.name: 2000}
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_invalid_cadence_timestamp_runs_and_repairs_on_success(monkeypatch):
+async def test_failed_job_does_not_advance_local_cadence(monkeypatch):
     capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    job = ControlledJob(due=False, cadence_seconds=60)
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
-    await redis.set(last_run_key, "invalid")
-    monkeypatch.setattr(
-        "infrastructure.job.scheduler.get_now_unix",
-        lambda: 2000,
-    )
-
-    await scheduler._schedule_if_due(job.name, job, context())
-    await asyncio.wait_for(job.finished.wait(), timeout=1)
-
-    assert job.execute_calls == 1
-    assert await redis.get(last_run_key) == "2000"
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_false_result_emits_failed_not_completed(monkeypatch):
-    events = capture_events(monkeypatch)
-    scheduler = Scheduler("ada", "project-1", FakeRedis())
+    scheduler = Scheduler("ada", "project-1")
+    scheduler._last_successful_runs["controlled"] = 1000
     job = ControlledJob(
-        result=JobResult(success=False, summary="rejected"),
+        cadence_seconds=60,
+        result=JobResult(success=False, summary="retry"),
     )
+    monkeypatch.setattr("infrastructure.job.scheduler.get_now_unix", lambda: 2000)
 
     result = await scheduler._execute_job(job, context())
 
     assert result.success is False
-    assert [event[2] for event in events] == ["started", "failed"]
+    assert scheduler._last_successful_runs == {"controlled": 1000}
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_scheduler_releases_lease_when_background_admission_is_rejected(
-    monkeypatch,
-):
+async def test_scheduler_rejects_background_admission_without_leases(monkeypatch):
     events = capture_events(monkeypatch)
 
     class RejectingBackgroundWork:
@@ -227,232 +179,76 @@ async def test_scheduler_releases_lease_when_background_admission_is_rejected(
                 queued=1,
             )
 
-    redis = FakeRedis()
     scheduler = Scheduler(
         "ada",
-        "project-c",
-        redis,
+        "project-1",
         background_work=RejectingBackgroundWork(),
     )
     job = ControlledJob(name="profile_refinement")
-    ctx = JobContext(user_name="ada", project_id="project-c")
-    lease_key, lease_token = await scheduler._acquire_lease(ctx, job)
-    rejected = await scheduler._execute_job(
-        job,
-        ctx,
-        lease_key=lease_key,
-        lease_token=lease_token,
-    )
+
+    rejected = await scheduler._execute_job(job, context())
 
     assert rejected.success is False
     assert job.execute_calls == 0
-    assert await redis.get(
-        RedisKeys.job_lease("ada", "project-c", job.name)
-    ) is None
     assert events[-1][2] == "admission_rejected"
     assert events[-1][3]["reason"] == "global_queue_full"
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_failed_result_does_not_advance_cadence(monkeypatch):
-    capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    job = ControlledJob(
-        cadence_seconds=60,
-        result=JobResult(success=False, summary="retry"),
-    )
-    last_run_key = RedisKeys.job_last_run(job.name, "ada", "project-1")
-    await redis.set(last_run_key, "1000")
-    monkeypatch.setattr(
-        "infrastructure.job.scheduler.get_now_unix",
-        lambda: 2000,
-    )
-
-    await scheduler._execute_job(job, context())
-
-    assert await redis.get(last_run_key) == "1000"
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_exception_emits_failed_and_releases_lease(monkeypatch):
+async def test_timeout_and_cancellation_are_reported_locally(monkeypatch):
     events = capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    job = ControlledJob(error=RuntimeError("boom"))
-
-    assert await scheduler._execute_job(job, context()) is None
-
-    assert [event[2] for event in events] == ["started", "failed"]
-    assert events[-1][3]["error"] == "boom"
-    assert await redis.get(
-        RedisKeys.job_lease("ada", "project-1", job.name)
-    ) is None
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_timeout_emits_timeout_and_releases_lease(monkeypatch):
-    events = capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
+    scheduler = Scheduler("ada", "project-1")
     scheduler.JOB_EXECUTION_TIMEOUT = 0.01
-    job = ControlledJob(blocker=asyncio.Event())
 
-    assert await scheduler._execute_job(job, context()) is None
-
+    assert await scheduler._execute_job(
+        ControlledJob(blocker=asyncio.Event()),
+        context(),
+    ) is None
     assert [event[2] for event in events] == ["started", "timeout"]
-    assert await redis.get(
-        RedisKeys.job_lease("ada", "project-1", job.name)
-    ) is None
 
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_event_failures_do_not_abort_job_execution(monkeypatch):
-    async def failing_emit(*args, **kwargs):
-        raise RuntimeError("observer unavailable")
-
-    monkeypatch.setattr("infrastructure.job.scheduler.emit", failing_emit)
-    scheduler = Scheduler("ada", "project-1", FakeRedis())
-    job = ControlledJob()
-
-    result = await scheduler._execute_job(job, context())
-
-    assert result.success is True
-    assert job.execute_calls == 1
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_two_schedulers_compete_for_one_execution_lease(monkeypatch):
-    capture_events(monkeypatch)
-    redis = FakeRedis()
-    blocker = asyncio.Event()
-    first = ControlledJob(name="shared", blocker=blocker)
-    second = ControlledJob(name="shared")
-    scheduler_a = Scheduler("ada", "project-1", redis)
-    scheduler_b = Scheduler("ada", "project-1", redis)
-
-    first_task = asyncio.create_task(
-        scheduler_a._execute_job(first, context())
+    events.clear()
+    scheduler.JOB_EXECUTION_TIMEOUT = 300
+    task = asyncio.create_task(
+        scheduler._execute_job(ControlledJob(blocker=asyncio.Event()), context())
     )
-    await asyncio.wait_for(first.started.wait(), timeout=1)
-    second_result = await scheduler_b._execute_job(second, context())
-
-    assert second_result is None
-    assert second.execute_calls == 0
-
-    blocker.set()
-    await first_task
-    assert await redis.get(
-        RedisKeys.job_lease("ada", "project-1", first.name)
-    ) is None
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_execution_lease_also_protects_trigger_evaluation(monkeypatch):
-    capture_events(monkeypatch)
-    redis = FakeRedis()
-    check_blocker = asyncio.Event()
-    first = ControlledJob(name="shared", check_blocker=check_blocker)
-    second = ControlledJob(name="shared")
-    scheduler_a = Scheduler("ada", "project-1", redis)
-    scheduler_b = Scheduler("ada", "project-1", redis)
-    scheduler_a.register(first)
-    scheduler_b.register(second)
-
-    first_check = asyncio.create_task(scheduler_a._check_jobs())
-    await asyncio.wait_for(first.check_started.wait(), timeout=1)
-    await scheduler_b._check_jobs()
-
-    assert second.should_run_calls == 0
-    assert second.execute_calls == 0
-
-    check_blocker.set()
-    await first_check
-    await asyncio.wait_for(first.finished.wait(), timeout=1)
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_stale_lease_expiry_allows_execution(monkeypatch):
-    capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    job = ControlledJob()
-    lease_key = RedisKeys.job_lease("ada", "project-1", job.name)
-    await redis.set(lease_key, "stale-owner", ex=360, nx=True)
-    redis.key_expirations[lease_key] = 0
-
-    result = await scheduler._execute_job(job, context())
-
-    assert result.success is True
-    assert job.execute_calls == 1
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_lease_release_requires_matching_owner_token():
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    lease_key = RedisKeys.job_lease("ada", "project-1", "owned")
-    await redis.set(lease_key, "owner-a", ex=360, nx=True)
-
-    await scheduler._release_lease(lease_key, "owner-b")
-    assert await redis.get(lease_key) == "owner-a"
-
-    await scheduler._release_lease(lease_key, "owner-a")
-    assert await redis.get(lease_key) is None
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_job_cancellation_releases_lease(monkeypatch):
-    events = capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    job = ControlledJob(blocker=asyncio.Event())
-    task = asyncio.create_task(scheduler._execute_job(job, context()))
-    await asyncio.wait_for(job.started.wait(), timeout=1)
-
+    await asyncio.sleep(0)
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
-
-    assert await redis.get(
-        RedisKeys.job_lease("ada", "project-1", job.name)
-    ) is None
     assert [event[2] for event in events] == ["started", "cancelled"]
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_job_policy_is_captured_before_lease_acquisition():
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
-    scheduler.JOB_EXECUTION_TIMEOUT = 45
-    scheduler.LEASE_GRACE_SECONDS = 7
-    policy = scheduler._capture_job_policy()
-    scheduler.JOB_EXECUTION_TIMEOUT = 1
-
-    await scheduler._acquire_lease(
-        context(),
-        ControlledJob(),
-        policy=policy,
+async def test_local_admission_lock_prevents_duplicate_execution():
+    scheduler = Scheduler("ada", "project-1")
+    allow_check = asyncio.Event()
+    allow_execution = asyncio.Event()
+    job = ControlledJob(
+        name="shared",
+        check_blocker=allow_check,
+        blocker=allow_execution,
     )
 
-    assert redis.expirations[-1][1] == 52
+    first = asyncio.create_task(scheduler._schedule_if_due(job.name, job, context()))
+    await asyncio.wait_for(job.check_started.wait(), timeout=1)
+    second = asyncio.create_task(scheduler._schedule_if_due(job.name, job, context()))
+    allow_check.set()
+    await first
+    await asyncio.wait_for(job.started.wait(), timeout=1)
+    await second
+
+    assert job.should_run_calls == 1
+    assert job.execute_calls == 1
+    allow_execution.set()
+    await asyncio.wait_for(job.finished.wait(), timeout=1)
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_stop_uses_one_deadline_then_cancels_all_jobs(monkeypatch):
     capture_events(monkeypatch)
-    redis = FakeRedis()
-    scheduler = Scheduler("ada", "project-1", redis)
+    scheduler = Scheduler("ada", "project-1")
     scheduler.SHUTDOWN_TIMEOUT = 0.01
     scheduler._is_running = True
     jobs = [
@@ -463,9 +259,7 @@ async def test_stop_uses_one_deadline_then_cancels_all_jobs(monkeypatch):
         task = asyncio.create_task(scheduler._execute_job(job, context()))
         scheduler._running_tasks[job.name] = task
         task.add_done_callback(
-            lambda completed, name=job.name: scheduler._cleanup_task(
-                name, completed
-            )
+            lambda completed, name=job.name: scheduler._cleanup_task(name, completed)
         )
 
     await asyncio.gather(*(job.started.wait() for job in jobs))
@@ -473,30 +267,21 @@ async def test_stop_uses_one_deadline_then_cancels_all_jobs(monkeypatch):
 
     assert all(job.finished.is_set() for job in jobs)
     assert scheduler._running_tasks == {}
-    for job in jobs:
-        assert await redis.get(
-            RedisKeys.job_lease("ada", "project-1", job.name)
-        ) is None
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_cleanup_observes_unhandled_task_exception(monkeypatch):
-    errors = []
-    monkeypatch.setattr(
-        "infrastructure.job.scheduler.logger.error",
-        lambda message: errors.append(str(message)),
-    )
+async def test_scheduler_health_snapshot_has_no_redis_lease_state(monkeypatch):
+    scheduler = Scheduler("ada", "project-1")
+    scheduler._is_running = True
+    job = ControlledJob(blocker=asyncio.Event())
+    task = asyncio.create_task(scheduler._execute_job(job, context()))
+    scheduler._running_tasks[job.name] = task
+    await asyncio.wait_for(job.started.wait(), timeout=1)
 
-    async def fail():
-        raise RuntimeError("unobserved")
+    snapshot = scheduler.snapshot_for_health()
 
-    scheduler = Scheduler("ada", "project-1", FakeRedis())
-    task = asyncio.create_task(fail())
-    await asyncio.sleep(0)
-    scheduler._running_tasks["broken"] = task
-
-    scheduler._cleanup_task("broken", task)
-
-    assert any("unobserved" in message for message in errors)
-    assert "broken" not in scheduler._running_tasks
+    assert snapshot["running_jobs"] == 1
+    assert "lease_seconds" not in snapshot["active_jobs"][0]
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)

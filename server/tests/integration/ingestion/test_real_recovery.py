@@ -21,7 +21,7 @@ from core.ingestion.recovery.replay_job import DLQReplayJob
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.store import KnowledgeStore
-from core.session.context import Session
+from runtime.session_runtime import SessionRuntime as Session
 from infrastructure.job.base import JobContext
 from infrastructure.redis_client import RedisKeys
 from tests.integration.ingestion.test_server_flow import _session

@@ -66,7 +66,7 @@ def test_project_cleanup_inventory_covers_fixed_and_variable_key_families():
     assert RedisKeys.community_discussion_active("ada", "project-1") in keys
     assert "last_profile_update:ada:project-1:*" in patterns
     assert "merge_intent:ada:project-1:*" in patterns
-    assert "job_lease:ada:project-1:*" in patterns
+    assert "job_lease:ada:project-1:*" not in patterns
     assert "maintenance_attempts:ada:project-1:*" in patterns
 
 

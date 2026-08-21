@@ -7,8 +7,8 @@ import pytest
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import fetch_conversation_turns
-from core.session.context import MAX_LOCAL_DURABLE_MESSAGE_CLAIMS, Session
 from infrastructure.redis_client import RedisKeys
+from runtime.session_runtime import MAX_LOCAL_DURABLE_MESSAGE_CLAIMS, SessionRuntime
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
 
@@ -68,13 +68,13 @@ async def _collect_turn(ctx, message, orchestrator):
 @pytest.fixture
 def context(monkeypatch):
     resources = FakeResources()
-    ctx = Session("ada", ["General"], resources)
+    ctx = SessionRuntime("ada", resources)
     ctx.session_id = "session-1"
     ctx.project_id = "project-1"
     ctx.project = make_project_state("project-1", redis=resources.redis)
     ctx.consumer = FakeConsumer()
     monkeypatch.setattr(
-        Session,
+        SessionRuntime,
         "current_config",
         property(lambda self: FakeConfigValue(conversation_context_turns=100)),
     )
@@ -85,7 +85,7 @@ def context(monkeypatch):
 @pytest.mark.no_network
 async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
     resources = FakeResources()
-    ctx = Session("ada", ["General"], resources)
+    ctx = SessionRuntime("ada", resources)
     ctx.session_id = "session-1"
 
     with pytest.raises(RuntimeError, match="not fully initialized"):
@@ -119,7 +119,6 @@ async def test_context_add_persists_editable_turn_maps_and_signals_consumer(cont
     msg = await ctx.add(Message(content="  hello world  ", timestamp=timestamp))
 
     assert msg.id == 1
-    assert ctx.project.scheduler.activity_count == 1
     assert ctx.consumer.signaled == 1
     assert resources.knowledge_store.saved_message_logs == [
         [
@@ -175,7 +174,6 @@ async def test_context_add_deduplicates_same_message_timestamp_and_session(conte
     assert first.id == 1
     assert second.id == 1
     assert ctx.consumer.signaled == 1
-    assert ctx.project.scheduler.activity_count == 1
 
 
 @pytest.mark.runtime
@@ -251,7 +249,6 @@ async def test_context_add_releases_dedup_claim_after_failure(context, monkeypat
 
     assert retried.id == 2
     assert ctx.consumer.signaled == 1
-    assert ctx.project.scheduler.activity_count == 1
     assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
 
 
@@ -317,21 +314,13 @@ async def test_context_durable_retry_hints_are_bounded(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_keeps_claim_after_message_is_queued(context, monkeypatch):
+async def test_context_add_keeps_claim_after_message_is_queued(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
-    async def fail_activity():
-        raise ConnectionError("temporary activity failure")
+    accepted = await ctx.add(Message(content="hello", timestamp=timestamp))
 
-    monkeypatch.setattr(ctx.project, "record_session_activity", fail_activity)
-
-    with pytest.raises(ConnectionError, match="temporary activity failure"):
-        await ctx.add(Message(content="hello", timestamp=timestamp))
-
-    retried = await ctx.add(Message(content="hello", timestamp=timestamp))
-
-    assert retried.id == 1
+    assert accepted.id == 1
     assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
 
 
@@ -436,7 +425,7 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     resources.knowledge_store.save_assistant_message_with_source_refs = (
         fail_once_then_save
     )
-    monkeypatch.setattr("core.session.context.asyncio.sleep", skip_retry_delay)
+    monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
 
     await ctx.add_assistant_turn(
         "hello from assistant",
@@ -468,7 +457,7 @@ async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
         return None
 
     resources.knowledge_store.save_assistant_message_with_source_refs = fail_atomically
-    monkeypatch.setattr("core.session.context.asyncio.sleep", skip_retry_delay)
+    monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
 
     with pytest.raises(ConnectionError, match="source reference write failed"):
         await ctx.add_assistant_turn(
@@ -503,7 +492,7 @@ async def test_context_assistant_turn_failure_rolls_back_redis_and_raises(
 
     monkeypatch.setattr(resources.knowledge_store, "save_message_logs", fail_save)
     monkeypatch.setattr(
-        "core.session.context.asyncio.sleep",
+        "runtime.session_runtime.asyncio.sleep",
         skip_retry_delay,
     )
 
@@ -771,7 +760,7 @@ async def test_session_shutdown_cancels_active_run_and_prevents_queued_run(conte
 async def test_cancelling_one_session_run_does_not_cancel_another(context):
     ctx, _ = context
     other_resources = FakeResources()
-    other = Session("ada", ["General"], other_resources)
+    other = SessionRuntime("ada", other_resources)
     other.session_id = "session-2"
     other.project_id = "project-2"
     other.project = make_project_state("project-2", redis=other_resources.redis)

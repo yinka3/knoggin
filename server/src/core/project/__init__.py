@@ -1,7 +1,6 @@
 """Project lifecycle services."""
 
 from core.project.domain_config_operations import (
-    DomainConfigOperations,
     DomainPreview,
     DomainValidation,
     parse_candidate,
@@ -15,7 +14,6 @@ from core.project.domain_config_store import (
 )
 
 __all__ = [
-    "DomainConfigOperations",
     "DomainActivation",
     "DomainConfigConflict",
     "DomainConfigStore",

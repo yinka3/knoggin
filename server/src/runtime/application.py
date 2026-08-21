@@ -9,11 +9,12 @@ from typing import Protocol
 
 from loguru import logger
 
+from common.conf.manager import ConfigManager
 from common.utils.time_utils import get_now
 from core.health.service import RuntimeHealthService
 from core.project.project_manager import ProjectManager
 from core.session.session_manager import SessionManager
-from runtime.resources import ResourceManager
+from runtime.resources import RuntimeResources
 
 
 class ShutdownOwner(Protocol):
@@ -24,7 +25,7 @@ class ShutdownOwner(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ShutdownFailure:
-    """One phase failure collected while the remaining shutdown phases continue."""
+    """One phase failure collected while remaining shutdown phases continue."""
 
     phase: str
     error: Exception
@@ -40,13 +41,7 @@ class ApplicationShutdownError(RuntimeError):
 
 
 class ApplicationShutdownCoordinator:
-    """Own the one ordered, idempotent application shutdown sequence.
-
-    Sessions release their project-runtime leases.  Any remaining project state
-    must then stop its own jobs before shared storage, model, and worker
-    resources are released.  Each phase is attempted even if an earlier one
-    fails, so a partial shutdown never intentionally leaks later resources.
-    """
+    """Own the one ordered, idempotent application shutdown sequence."""
 
     def __init__(
         self,
@@ -95,9 +90,9 @@ class ApplicationShutdownCoordinator:
 
 @dataclass(slots=True)
 class ApplicationRuntime:
-    """The application's root owner of shared resources, projects, and sessions."""
+    """The root owner of shared resources, projects, sessions, and health."""
 
-    resources: ResourceManager
+    resources: RuntimeResources
     projects: ProjectManager
     sessions: SessionManager
     shutdown_coordinator: ApplicationShutdownCoordinator = field(init=False)
@@ -109,15 +104,12 @@ class ApplicationRuntime:
         self.health_service = RuntimeHealthService(
             resources=self.resources,
             projects=self.projects,
-            active_sessions=getattr(self.sessions, "active_sessions", {}),
+            sessions=self.sessions,
             started_at=self.started_at,
         )
-        # Session-created agent tools reach the application-owned service
-        # through the shared resource graph without taking ownership of it.
-        try:
-            self.resources.health_service = self.health_service
-        except AttributeError:
-            pass
+        attach_health_service = getattr(self.sessions, "attach_health_service", None)
+        if callable(attach_health_service):
+            attach_health_service(self.health_service)
         self.shutdown_coordinator = ApplicationShutdownCoordinator(
             sessions=self.sessions,
             projects=self.projects,
@@ -133,15 +125,28 @@ class ApplicationRuntime:
     ) -> "ApplicationRuntime":
         """Build the canonical runtime whose shutdown owns every live layer."""
 
-        resources = await ResourceManager.initialize(num_workers=num_workers)
-        projects = ProjectManager(resources=resources, user_name=user_name)
-        sessions = SessionManager(
-            resources=resources,
-            user_name=user_name,
-            active_sessions={},
-            project_manager=projects,
-        )
-        return cls(resources=resources, projects=projects, sessions=sessions)
+        resources = await RuntimeResources.create(num_workers=num_workers)
+        try:
+            knowledge_store = resources.knowledge_store
+            if knowledge_store is None:
+                raise RuntimeError("Runtime resources did not initialize KnowledgeStore")
+            await knowledge_store.ensure_identity_entity(
+                user_name,
+                ConfigManager.get().config.user_aliases,
+            )
+            projects = ProjectManager(resources=resources, user_name=user_name)
+            sessions = SessionManager(
+                resources=resources,
+                user_name=user_name,
+                project_manager=projects,
+            )
+            return cls(resources=resources, projects=projects, sessions=sessions)
+        except Exception:
+            try:
+                await resources.shutdown()
+            except Exception:
+                logger.exception("Runtime resource cleanup failed during application startup")
+            raise
 
     async def shutdown(self) -> None:
         """Release application-owned work in the only safe dependency order."""

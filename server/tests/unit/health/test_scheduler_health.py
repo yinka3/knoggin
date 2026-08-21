@@ -6,7 +6,6 @@ import pytest
 from common.utils.time_utils import get_now
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 from infrastructure.job.scheduler import Scheduler
-from tests.fixtures.fakes import FakeRedis
 
 
 class _Job(BaseJob):
@@ -27,7 +26,7 @@ class _Job(BaseJob):
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_scheduler_health_reports_queued_and_stalled_runs_without_leases():
-    scheduler = Scheduler("ada", "project-a", FakeRedis())
+    scheduler = Scheduler("ada", "project-a")
     scheduler.register(_Job())
     scheduler._is_running = True
     scheduler._started_at = get_now()
@@ -39,7 +38,6 @@ async def test_scheduler_health_reports_queued_and_stalled_runs_without_leases()
         "queued_at": get_now(),
         "started_at": get_now() - timedelta(seconds=2),
         "execution_timeout_seconds": 0.01,
-        "lease_seconds": 1,
     }
 
     snapshot = scheduler.snapshot_for_health()
@@ -49,7 +47,7 @@ async def test_scheduler_health_reports_queued_and_stalled_runs_without_leases()
     assert snapshot["active_jobs"][0]["state"] == "stalled"
     assert snapshot["registered_jobs"] == ["document_index_recovery"]
     assert snapshot["recent_outcomes"] == []
-    assert not scheduler.redis.strings
+    assert "lease_seconds" not in snapshot["active_jobs"][0]
 
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
@@ -58,7 +56,7 @@ async def test_scheduler_health_reports_queued_and_stalled_runs_without_leases()
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_scheduler_health_keeps_recent_outcomes_bounded_and_safe():
-    scheduler = Scheduler("ada", "project-a", FakeRedis())
+    scheduler = Scheduler("ada", "project-a")
     scheduler.register(_Job())
     for _ in range(40):
         scheduler._finish_job_run("document_index_recovery", "failed")

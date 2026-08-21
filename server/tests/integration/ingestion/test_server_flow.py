@@ -37,7 +37,7 @@ from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWri
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.store import KnowledgeStore
-from core.session.context import Session
+from runtime.session_runtime import SessionRuntime as Session
 from infrastructure.job.base import JobContext
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys

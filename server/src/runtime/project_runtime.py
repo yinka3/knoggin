@@ -1,8 +1,6 @@
 import asyncio
-import os
 from typing import Any, Optional
 
-import redis.asyncio as aioredis
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
@@ -10,13 +8,10 @@ from common.scoping import require_scope_value, require_visible_project_ids
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.services.embedding_service import EmbeddingService
 from core.project.domain_config_store import DomainActivation, DomainConfigStore
 from core.project.workspace_service import ProjectWorkspaceService
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.job.scheduler import Scheduler
-from infrastructure.postgres_client import PostgresClient
-from infrastructure.resource_profile import ResourceProfile
 
 
 class ProjectRuntime:
@@ -33,15 +28,12 @@ class ProjectRuntime:
         pipeline: TextProcessor,
         scheduler: Scheduler,
         user_name: str,
-        redis_client: aioredis.Redis,
         readable_project_ids: list[str],
-        postgres_client: PostgresClient,
-        embedding_service: EmbeddingService,
         domain_config: DomainConfig,
+        document_service: DocumentService,
+        domain_config_store: DomainConfigStore,
         batch_processor: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
-        domain_config_store: Optional[DomainConfigStore] = None,
-        document_service: Optional[DocumentService] = None,
     ):
         self.project_id = require_scope_value(
             project_id,
@@ -58,46 +50,22 @@ class ProjectRuntime:
         self.pipeline = pipeline
         self.scheduler = scheduler
         self.user_name = user_name
-        self.redis_client = redis_client
-        self.postgres_client = postgres_client
-        self.embedding_service = embedding_service
         self.batch_processor = batch_processor
-        self.domain_config_store = domain_config_store or DomainConfigStore(
-            postgres_client
-        )
+        self.background_work = background_work
+        self.domain_config_store = domain_config_store
         self.domain_config = domain_config
         self.compiled_domain: CompiledDomain = domain_config.compile()
         self._domain_config_lock = asyncio.Lock()
-        resource_profile = ResourceProfile.from_environment()
-        self.document_service = DocumentService(
-            project_id=project_id,
-            postgres_client=postgres_client,
-            embedding_service=embedding_service,
-            background_work=background_work,
-            document_rerank_enabled=os.getenv("KNOGGIN_DOCUMENT_RERANK_ENABLED", "true")
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"},
-            document_rerank_candidates=int(
-                os.getenv("KNOGGIN_DOCUMENT_RERANK_CANDIDATES", "15")
-            ),
-            workspace_prepare_concurrency=(
-                resource_profile.workspace_prepare_concurrency
-            ),
-        ) if document_service is None else document_service
+        self.document_service = document_service
         self.workspace_service = ProjectWorkspaceService(self.document_service)
 
         self.episode_job: Optional[Any] = None
         self.dlq_job: Optional[Any] = None
         self._community_task: Optional[asyncio.Task] = None
-        self.active_runtime_sessions_count = 0
         self.config_unsubscribers: list[Any] = []
         self._shutdown_lock = asyncio.Lock()
+        self._closing = False
         self._closed = False
-
-    async def record_session_activity(self):
-        """Record user activity against the project-level scheduler."""
-        await self.scheduler.record_activity()
 
     def add_config_unsubscriber(self, unsubscribe):
         self.config_unsubscribers.append(unsubscribe)
@@ -130,13 +98,40 @@ class ProjectRuntime:
             )
 
     async def shutdown(self):
-        """Cleanly shuts down project-level background resources."""
+        """Stop admission, then release every project-owned runtime resource."""
         async with self._shutdown_lock:
             if self._closed:
                 return
 
             logger.info(f"Shutting down ProjectRuntime resources for {self.project_id}")
+            self._closing = True
             failures = []
+
+            for phase, shutdown in (
+                ("scheduler", self.scheduler.stop if self.scheduler else None),
+                (
+                    "background work",
+                    (
+                        lambda: self.background_work.cancel_project(self.project_id)
+                        if self.background_work is not None
+                        else None
+                    ),
+                ),
+                ("community", self._stop_community_task),
+                ("documents", self.document_service.shutdown),
+            ):
+                if shutdown is None:
+                    continue
+                try:
+                    result = shutdown()
+                    if result is not None:
+                        await result
+                except Exception as exc:
+                    logger.exception(
+                        f"Project shutdown phase failed for {self.project_id}: {phase}"
+                    )
+                    failures.append(exc)
+
             unsubscribers = self.config_unsubscribers
             self.config_unsubscribers = []
             for unsubscribe in unsubscribers:
@@ -145,21 +140,6 @@ class ProjectRuntime:
                 except Exception as exc:
                     logger.exception(
                         f"Project configuration cleanup failed for {self.project_id}"
-                    )
-                    failures.append(exc)
-
-            for phase, shutdown in (
-                ("community", self._stop_community_task),
-                ("documents", self.document_service.shutdown),
-                ("scheduler", self.scheduler.stop if self.scheduler else None),
-            ):
-                if shutdown is None:
-                    continue
-                try:
-                    await shutdown()
-                except Exception as exc:
-                    logger.exception(
-                        f"Project shutdown phase failed for {self.project_id}: {phase}"
                     )
                     failures.append(exc)
 
@@ -199,31 +179,6 @@ class ProjectRuntime:
         """Return a stable domain snapshot for one admitted runtime operation."""
         async with self._domain_config_lock:
             return self.compiled_domain
-
-    def validate_domain_config(self, candidate):
-        """Validate a complete candidate without touching project state."""
-
-        from core.project.domain_config_operations import validate_domain_config
-
-        return validate_domain_config(candidate)
-
-    def preview_domain_config(self, candidate):
-        """Preview a complete candidate against the loaded active config."""
-
-        from core.project.domain_config_operations import preview_domain_config
-
-        return preview_domain_config(self.domain_config, candidate)
-
-    async def activate_domain_candidate(self, candidate, *, expected_version: int):
-        """Run candidate validation and guarded activation as one workflow."""
-
-        from core.project.domain_config_operations import DomainConfigOperations
-
-        return await DomainConfigOperations.activate(
-            self,
-            candidate,
-            expected_version=expected_version,
-        )
 
     async def activate_domain_config(
         self,

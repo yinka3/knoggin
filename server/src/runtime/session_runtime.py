@@ -19,7 +19,6 @@ from common.utils.core_utils import (
     fetch_conversation_turns,
 )
 from common.utils.events import emit
-from common.utils.tasks import BackgroundTaskGroup
 from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.graph_commit import write_batch_callback
@@ -32,41 +31,46 @@ from infrastructure.redis_client import (
     RedisKeys,
 )
 from runtime.project_runtime import ProjectRuntime
-from runtime.resources import ResourceManager
+from runtime.resources import RuntimeResources
 
 SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS
 MAX_LOCAL_DURABLE_MESSAGE_CLAIMS = 1024
 
 
-class Session:
+class SessionRuntime:
     """
-    Session represents the state and lifecycle container for an active user session.
+    SessionRuntime represents one loaded, in-memory user session.
 
     It serves as the root orchestration point for a session, binding together user
     state, background ingestion workers, and dynamic configuration. It deliberately
     holds references to the ingestion pipeline (`IngestionPipeline`, `IngestionWorker`)
     so it can gracefully orchestrate the shutdown of all asynchronous session tasks.
 
-    Initialization and wiring logic is encapsulated in SessionFactory to decouple
+    Initialization and wiring logic is encapsulated in SessionRuntimeFactory to decouple
     the construction of these services from the state container itself.
     """
 
-    def __init__(self, user_name: str, topics: List[str], resources: ResourceManager):
+    def __init__(
+        self,
+        user_name: str,
+        resources: RuntimeResources,
+        health_service: Any | None = None,
+    ):
         self.resources = resources
+        self.health_service = health_service
         self.user_name: str = user_name
-        self.active_topics: List[str] = topics
         self.model: Optional[str] = None
+        self.agent_id: Optional[str] = None
+        self.enabled_tools: Optional[List[str]] = None
+        self.document_focus: Optional[DocumentFocus] = None
         self.document_service: Optional[DocumentService] = None
 
         self.session_id: Optional[str] = None
         self.project_id: Optional[str] = None
         self.project: Optional[ProjectRuntime] = None
 
-        self._max_conversation_history: int = 10000
-
         self.batch_processor: Optional[IngestionPipeline] = None
         self.consumer: Optional[IngestionWorker] = None
-        self.task_group = BackgroundTaskGroup("SessionTasks")
         self.config_unsubscribers: List = []
         self._message_add_lock = asyncio.Lock()
         # Conversation turns are accepted independently, but only the oldest
@@ -79,6 +83,8 @@ class Session:
         self._agent_queue_paused = False
         self._agent_runs_closed = False
         self._durable_message_claims: OrderedDict[str, int] = OrderedDict()
+        self._shutdown_lock = asyncio.Lock()
+        self._closed = False
 
     @property
     def current_config(self) -> RootConfig:
@@ -96,33 +102,9 @@ class Session:
     def llm(self):
         return self.resources.llm_service
 
-    @property
-    def embedding_service(self):
-        return self.resources.embedding
-
-    @property
-    def executor(self):
-        return self.resources.executor
-
-    @classmethod
-    async def create(
-        cls,
-        user_name: str,
-        resources: ResourceManager,
-        topics_config: dict = None,
-        session_id: str = None,
-        model: str = None,
-        project_state: ProjectRuntime = None,
-    ) -> "Session":
-        """Assembles and launches a new session context."""
-        from runtime.session_factory import SessionFactory
-
-        assembler = SessionFactory(user_name, resources)
-        ctx = await assembler.bootstrap(project_state, session_id, model)
-
-        return ctx
-
     async def add(self, msg: Message) -> Message:
+        if self._closed or self._agent_runs_closed:
+            raise RuntimeError("Session is shutting down")
         if not self.project or not self.project.scheduler or not self.consumer:
             raise RuntimeError("Session is not fully initialized for message ingestion")
 
@@ -258,8 +240,12 @@ class Session:
                 context=self,
                 user_timezone=user_timezone,
                 model=model or self.model,
-                agent_id=agent_id,
-                enabled_tools=enabled_tools,
+                agent_id=agent_id or self.agent_id,
+                enabled_tools=(
+                    enabled_tools
+                    if enabled_tools is not None
+                    else self.enabled_tools
+                ),
                 request_document_focus=document_focus,
                 conversation_history=history,
                 user_message_id=accepted.id,
@@ -434,7 +420,6 @@ class Session:
                     )
             raise
 
-        await self.project.record_session_activity()
         self.consumer.signal()
         await self.refresh_session_ttls()
 
@@ -810,18 +795,52 @@ class Session:
             pipe.expire(key, SESSION_KEY_TTL)
         await pipe.execute()
 
-    async def shutdown(self):
-        async with self._agent_queue_condition:
-            self._agent_runs_closed = True
-            self._agent_queue_condition.notify_all()
-        await self.cancel_active_agent_run()
+    async def shutdown(self) -> None:
+        """Stop all session-owned work without skipping later cleanup phases."""
 
-        for unsubscribe in self.config_unsubscribers:
-            unsubscribe()
-        self.config_unsubscribers.clear()
+        async with self._shutdown_lock:
+            if self._closed:
+                return
 
-        if self.consumer:
-            await self.consumer.stop()
+            failures: list[Exception] = []
+            async with self._agent_queue_condition:
+                self._agent_runs_closed = True
+                self._agent_queue_paused = True
+                self._agent_run_queue.clear()
+                self._agent_queue_condition.notify_all()
 
-        await self.task_group.shutdown(timeout=10.0)
-        await emit(self.session_id, "system", "session_shutdown", {})
+            try:
+                await self.cancel_active_agent_run()
+            except Exception as exc:
+                logger.exception("Failed to cancel agent run for session {}", self.session_id)
+                failures.append(exc)
+
+            if self.consumer is not None:
+                try:
+                    await self.consumer.stop()
+                except Exception as exc:
+                    logger.exception("Failed to stop worker for session {}", self.session_id)
+                    failures.append(exc)
+
+            unsubscribers, self.config_unsubscribers = self.config_unsubscribers, []
+            for unsubscribe in unsubscribers:
+                try:
+                    unsubscribe()
+                except Exception as exc:
+                    logger.exception(
+                        "Session configuration cleanup failed for {}", self.session_id
+                    )
+                    failures.append(exc)
+
+            self._durable_message_claims.clear()
+            self._closed = True
+            try:
+                await emit(self.session_id, "system", "session_shutdown", {})
+            except Exception as exc:
+                logger.exception("Failed to emit shutdown event for session {}", self.session_id)
+                failures.append(exc)
+
+            if failures:
+                raise RuntimeError(
+                    f"SessionRuntime shutdown failed for {self.session_id}"
+                ) from failures[0]

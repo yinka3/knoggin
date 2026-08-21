@@ -1,50 +1,169 @@
+"""Composition of project-scoped live runtime state."""
+
+from __future__ import annotations
+
+import asyncio
 import os
+from functools import partial
+from typing import Any, Callable
 
-import redis.asyncio as aioredis
-
-from common.conf.domain_config import DomainConfig
-from common.scoping import require_scope_value, require_visible_project_ids
+from common.conf.manager import ConfigManager
+from common.scoping import (
+    IDENTITY_ENTITY_ID,
+    require_scope_value,
+    require_visible_project_ids,
+)
+from core.community.community_job import AACJob
+from core.ingestion.graph_commit import write_batch_callback
+from core.ingestion.jobs.cleaner_job import EntityCleanupJob
+from core.ingestion.pipeline import IngestionPipeline
+from core.ingestion.recovery.replay_job import DLQReplayJob
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.documents import DocumentService
+from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
 from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.services.embedding_service import EmbeddingService
+from core.knowledge.episodes.job import EpisodeJob
+from core.knowledge.jobs.audit_retention_cleanup_job import (
+    AuditRetentionCleanupJob,
+)
+from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
+from core.knowledge.jobs.merge_rollback_cleanup_job import MergeCleanupJob
 from core.project.domain_config_store import DomainConfigStore
-from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.job.scheduler import Scheduler
-from infrastructure.postgres_client import PostgresClient
-from infrastructure.resource_profile import ResourceProfile
 from runtime.project_runtime import ProjectRuntime
+from runtime.resources import RuntimeResources
 
 
-class ProjectFactory:
-    """Construct project-scoped services and their live runtime container."""
+class ProjectRuntimeFactory:
+    """Build a complete project runtime from explicit engine-wide resources."""
 
-    @staticmethod
-    def create_runtime(
+    def __init__(
+        self,
+        *,
+        resources: RuntimeResources,
+        user_name: str,
+        episode_window_size_provider: Callable[[str], Any],
+    ) -> None:
+        self.resources = resources
+        self.user_name = user_name
+        self._episode_window_size_provider = episode_window_size_provider
+
+    @property
+    def dev_settings(self):
+        return ConfigManager.get().config.developer_settings
+
+    async def create(
+        self,
         *,
         project_id: str,
-        domain_config: DomainConfig,
-        entities: EntityResolver,
-        pipeline: TextProcessor,
-        scheduler: Scheduler,
-        user_name: str,
-        redis_client: aioredis.Redis,
         readable_project_ids: list[str],
-        postgres_client: PostgresClient,
-        embedding_service: EmbeddingService,
-        batch_processor=None,
-        background_work: BackgroundWorkCoordinator | None = None,
-        domain_config_store: DomainConfigStore | None = None,
     ) -> ProjectRuntime:
-        """Build the document boundary before creating the live runtime."""
-        require_scope_value(project_id, "project_id", "ProjectRuntime")
-        require_visible_project_ids(readable_project_ids, "ProjectRuntime")
-        resource_profile = ResourceProfile.from_environment()
-        document_service = DocumentService(
+        """Construct, register, and start all project-scoped runtime services."""
+
+        require_scope_value(project_id, "project_id", "ProjectRuntimeFactory")
+        require_visible_project_ids(readable_project_ids, "ProjectRuntimeFactory")
+        if (
+            self.resources.knowledge_store is None
+            or self.resources.embedding is None
+            or self.resources.executor is None
+            or self.resources.redis is None
+            or self.resources.postgres is None
+            or self.resources.llm_service is None
+        ):
+            raise RuntimeError("Runtime resources are not ready for project startup")
+
+        domain_store = DomainConfigStore(self.resources.postgres)
+        domain_config = await domain_store.load(self.user_name, project_id)
+        compiled_domain = domain_config.compile()
+        entity_settings = self.dev_settings.entity_resolution
+        entities = EntityResolver(
             project_id=project_id,
-            postgres_client=postgres_client,
-            embedding_service=embedding_service,
-            background_work=background_work,
+            readable_project_ids=readable_project_ids,
+            knowledge_store=self.resources.knowledge_store,
+            embedding_service=self.resources.embedding,
+            fuzzy_substring_threshold=entity_settings.fuzzy_substring_threshold,
+            fuzzy_non_substring_threshold=entity_settings.fuzzy_non_substring_threshold,
+            generic_token_freq=entity_settings.generic_token_freq,
+            candidate_fuzzy_threshold=entity_settings.candidate_fuzzy_threshold,
+            candidate_vector_threshold=entity_settings.candidate_vector_threshold,
+        )
+        await self._verify_user_entity(entities)
+
+        pipeline = await asyncio.get_running_loop().run_in_executor(
+            self.resources.executor,
+            partial(
+                TextProcessor,
+                llm=self.resources.llm_service,
+                get_known_aliases=entities.get_known_aliases,
+                get_alias_version=entities.get_alias_version,
+                get_profile=entities.get_profile,
+                gliner=self.resources.gliner,
+                spacy=self.resources.spacy,
+                settings=self.dev_settings.nlp_pipeline,
+                model_work=self.resources.model_work,
+            ),
+        )
+        project_processor = IngestionPipeline(
+            project_id=project_id,
+            redis_client=self.resources.redis,
+            llm=self.resources.llm_service,
+            entities=entities,
+            processor=pipeline,
+            knowledge_store=self.resources.knowledge_store,
+            cpu_executor=self.resources.executor,
+            user_name=self.user_name,
+            compiled_domain=compiled_domain,
+            get_next_ent_id=self.resources.knowledge_store.allocate_entity_id,
+            resolution_threshold=entity_settings.resolution_threshold,
+            common_word_frequency_threshold=(
+                entity_settings.common_word_frequency_threshold
+            ),
+            sparse_context_verbs=entity_settings.sparse_context_verbs,
+        )
+        scheduler = Scheduler(
+            self.user_name,
+            project_id,
+            background_work=self.resources.background_work,
+        )
+        document_service = self._create_document_service(project_id)
+        runtime = ProjectRuntime(
+            project_id=project_id,
+            entities=entities,
+            pipeline=pipeline,
+            scheduler=scheduler,
+            user_name=self.user_name,
+            readable_project_ids=readable_project_ids,
+            domain_config=domain_config,
+            document_service=document_service,
+            domain_config_store=domain_store,
+            batch_processor=project_processor,
+            background_work=self.resources.background_work,
+        )
+        episode_job = self._create_episode_job(project_id)
+        runtime.episode_job = episode_job
+
+        try:
+            self._register_background_jobs(
+                runtime,
+                entities=entities,
+                processor=project_processor,
+                episode_job=episode_job,
+            )
+            await scheduler.start()
+        except Exception:
+            await runtime.shutdown()
+            raise
+        return runtime
+
+    def _create_document_service(self, project_id: str) -> DocumentService:
+        resource_profile = self.resources.resource_profile
+        if resource_profile is None:
+            raise RuntimeError("Runtime resource profile is unavailable")
+        return DocumentService(
+            project_id=project_id,
+            postgres_client=self.resources.postgres,
+            embedding_service=self.resources.embedding,
+            background_work=self.resources.background_work,
             document_rerank_enabled=os.getenv(
                 "KNOGGIN_DOCUMENT_RERANK_ENABLED", "true"
             )
@@ -56,19 +175,150 @@ class ProjectFactory:
             ),
             workspace_prepare_concurrency=resource_profile.workspace_prepare_concurrency,
         )
-        return ProjectRuntime(
-            project_id=project_id,
-            entities=entities,
-            pipeline=pipeline,
-            scheduler=scheduler,
-            user_name=user_name,
-            redis_client=redis_client,
-            postgres_client=postgres_client,
-            embedding_service=embedding_service,
-            domain_config=domain_config,
-            document_service=document_service,
-            readable_project_ids=readable_project_ids,
-            batch_processor=batch_processor,
-            background_work=background_work,
-            domain_config_store=domain_config_store,
+
+    async def _verify_user_entity(self, entities: EntityResolver) -> None:
+        user_id = await entities.get_id(self.user_name)
+        if user_id != IDENTITY_ENTITY_ID:
+            raise RuntimeError(
+                f"Configured user '{self.user_name}' did not resolve to reserved "
+                f"entity ID {IDENTITY_ENTITY_ID}"
+            )
+
+    def _create_episode_job(self, project_id: str) -> EpisodeJob:
+        return EpisodeJob(
+            knowledge_store=self.resources.knowledge_store,
+            settings=self.dev_settings.jobs.episode,
+            llm=self.resources.llm_service,
+            embedding_service=self.resources.embedding,
+            episode_window_size_provider=lambda: self._episode_window_size_provider(
+                project_id
+            ),
         )
+
+    def _register_background_jobs(
+        self,
+        runtime: ProjectRuntime,
+        *,
+        entities: EntityResolver,
+        processor: IngestionPipeline,
+        episode_job: EpisodeJob,
+    ) -> None:
+        scheduler = runtime.scheduler
+        project_id = runtime.project_id
+        jobs = self.dev_settings.jobs
+        config_manager = ConfigManager.get()
+
+        async def write_dlq_batch(result):
+            if not result.scope or not result.scope.session_id:
+                return False, "DLQ graph replay missing source session_id"
+            return await write_batch_callback(
+                result,
+                knowledge_store=self.resources.knowledge_store,
+                entities=entities,
+                session_id=result.scope.session_id,
+                project_id=project_id,
+                user_name=self.user_name,
+                redis_client=self.resources.redis,
+            )
+
+        def update_entity_resolution(settings):
+            entities.update_settings(settings)
+            processor.update_settings(settings)
+
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                update_entity_resolution,
+                "developer_settings.entity_resolution",
+            )
+        )
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                processor.update_settings,
+                "developer_settings.nlp_pipeline",
+            )
+        )
+        scheduler.register(episode_job)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                episode_job.update_settings,
+                "developer_settings.jobs.episode",
+            )
+        )
+
+        document_index_job = DocumentIndexingRecoveryJob(
+            runtime.document_service,
+            jobs.document_indexing,
+        )
+        scheduler.register(document_index_job)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                document_index_job.update_settings,
+                "developer_settings.jobs.document_indexing",
+            )
+        )
+
+        dlq_job = DLQReplayJob(
+            entities=entities,
+            processor=processor,
+            write_to_graph=write_dlq_batch,
+            redis_client=self.resources.redis,
+            settings=jobs.dlq,
+        )
+        runtime.dlq_job = dlq_job
+        scheduler.register(dlq_job)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
+        )
+
+        cleaner_job = EntityCleanupJob(
+            user_name=self.user_name,
+            knowledge_store=self.resources.knowledge_store,
+            entities=entities,
+            redis_client=self.resources.redis,
+            settings=jobs.cleaner,
+        )
+        scheduler.register(cleaner_job)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                cleaner_job.update_settings,
+                "developer_settings.jobs.cleaner",
+            )
+        )
+
+        merge_cleanup_job = MergeCleanupJob(
+            knowledge_store=self.resources.knowledge_store,
+            settings=jobs.merge_rollback,
+        )
+        scheduler.register(merge_cleanup_job)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                merge_cleanup_job.update_settings,
+                "developer_settings.jobs.merge_rollback",
+            )
+        )
+
+        audit_retention_job = AuditRetentionCleanupJob(
+            knowledge_store=self.resources.knowledge_store,
+            settings=jobs.audit_retention,
+        )
+        scheduler.register(audit_retention_job)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                audit_retention_job.update_settings,
+                "developer_settings.jobs.audit_retention",
+            )
+        )
+
+        conflict_discovery_job = ConflictDiscoveryJob(
+            knowledge_store=self.resources.knowledge_store,
+            settings=jobs.conflict_discovery,
+            llm=self.resources.llm_service,
+        )
+        scheduler.register(conflict_discovery_job)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                conflict_discovery_job.update_settings,
+                "developer_settings.jobs.conflict_discovery",
+            )
+        )
+        scheduler.register(AACJob(runtime, self.resources))

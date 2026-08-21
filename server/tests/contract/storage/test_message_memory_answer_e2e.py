@@ -27,7 +27,7 @@ from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWri
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.store import KnowledgeStore
-from core.session.context import Session
+from runtime.session_runtime import SessionRuntime as Session
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from tests.fixtures.factories import make_domain_config

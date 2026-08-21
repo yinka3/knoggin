@@ -12,8 +12,7 @@ from time import monotonic
 from typing import Any, Callable
 
 from common.schema.health import HealthActivity, HealthSnapshot, HealthStatus
-from common.utils.time_utils import parse_iso_time
-from common.utils.time_utils import get_now
+from common.utils.time_utils import get_now, parse_iso_time
 from infrastructure.redis_client import RedisKeys
 
 _ProbeResult = dict[str, bool | float | str]
@@ -27,7 +26,7 @@ class RuntimeHealthService:
         *,
         resources: Any,
         projects: Any,
-        active_sessions: Mapping[str, Any],
+        sessions: Any,
         started_at: datetime | None = None,
         probe_timeout_seconds: float = 0.75,
     ) -> None:
@@ -35,7 +34,7 @@ class RuntimeHealthService:
             raise ValueError("probe_timeout_seconds must be between 0 and 5 seconds")
         self.resources = resources
         self.projects = projects
-        self.active_sessions = active_sessions
+        self.sessions = sessions
         self.started_at = started_at or get_now()
         self.probe_timeout_seconds = probe_timeout_seconds
         self._closing = False
@@ -466,7 +465,7 @@ class RuntimeHealthService:
         if scheduler_state == "stopped":
             warnings.append("background scheduler is stopped")
         if stalled_jobs:
-            warnings.append("background jobs exceed their captured timeout or lease")
+            warnings.append("background jobs exceed their captured timeout")
         if recent_failed_jobs:
             warnings.append("recent background jobs failed or timed out")
         if queued_background:
@@ -493,7 +492,8 @@ class RuntimeHealthService:
         """Find the current session's worker without traversing other sessions."""
 
         try:
-            context = self.active_sessions.get(session_id)
+            reader = getattr(self.sessions, "get_runtime_session", None)
+            context = reader(session_id) if callable(reader) else None
         except (AttributeError, TypeError):
             return None
         if context is None or getattr(context, "project_id", None) != project_id:
@@ -844,8 +844,9 @@ class RuntimeHealthService:
 
     def _active_session_count(self) -> int:
         try:
-            return max(len(self.active_sessions), 0)
-        except TypeError:
+            reader = getattr(self.sessions, "active_runtime_count", None)
+            return max(reader(), 0) if callable(reader) else 0
+        except (AttributeError, TypeError):
             return 0
 
     def _uptime_seconds(self) -> float:

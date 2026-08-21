@@ -2,36 +2,17 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from enum import Enum
-from functools import partial
 from typing import Dict, List, Optional
 
 from loguru import logger
 
 from common.conf.domain_config import DomainConfig
-from common.conf.manager import ConfigManager
-from common.scoping import IDENTITY_ENTITY_ID, build_readable_project_ids
+from common.scoping import build_readable_project_ids
 from common.utils.time_utils import get_now_iso
-from core.community.community_job import AACJob
-from core.ingestion.graph_commit import write_batch_callback
-from core.ingestion.jobs.cleaner_job import EntityCleanupJob
-from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.recovery.replay_job import DLQReplayJob
-from core.ingestion.text_processor import TextProcessor
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
-from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
-from core.knowledge.entity.resolver import EntityResolver
-from core.knowledge.episodes.job import EpisodeJob
-from core.knowledge.jobs.audit_retention_cleanup_job import (
-    AuditRetentionCleanupJob,
-)
-from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
-from core.knowledge.jobs.merge_rollback_cleanup_job import (
-    MergeCleanupJob,
-)
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
@@ -39,7 +20,6 @@ from core.knowledge.relationship_advisories import (
 )
 from core.project.domain_config_operations import (
     DomainCandidate,
-    DomainConfigOperations,
     DomainPreview,
     DomainValidation,
     parse_candidate,
@@ -56,11 +36,10 @@ from core.project.domain_config_store import (
     DomainConfigStore,
 )
 from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
-from infrastructure.job.scheduler import Scheduler
 from infrastructure.redis_client import RedisKeys
-from runtime.project_factory import ProjectFactory
+from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
-from runtime.resources import ResourceManager
+from runtime.resources import RuntimeResources
 
 
 class ProjectStatus(str, Enum):
@@ -102,24 +81,20 @@ def _parse_initial_domain(candidate: DomainConfig | Mapping[str, object]) -> Dom
 class ProjectManager:
     """Manages the lifecycle and storage of Projects."""
 
-    def __init__(self, resources: ResourceManager, user_name: str):
+    def __init__(self, resources: RuntimeResources, user_name: str):
         self.resources = resources
         self.user_name = user_name
-        self.project_factory = ProjectFactory()
+        self.project_factory = ProjectRuntimeFactory(
+            resources=resources,
+            user_name=user_name,
+            episode_window_size_provider=self.get_episode_window_size,
+        )
         self.pg = resources.postgres
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.active_projects: Dict[str, ProjectRuntime] = {}
-        self._identity_initialized = False
+        self._project_leases: Dict[str, set[str]] = {}
         self._maintenance_lock = asyncio.Lock()
         self._closed = False
-
-    @property
-    def config(self):
-        return ConfigManager.get().config
-
-    @property
-    def dev_settings(self):
-        return self.config.developer_settings
 
     async def create_project(
         self,
@@ -325,14 +300,13 @@ class ProjectManager:
         async with self._maintenance_lock:
             await self._require_domain_project(project_id, allow_archived=False)
             active_state = self.active_projects.get(project_id)
+            parsed = parse_candidate(candidate)
             if active_state is not None:
-                return await DomainConfigOperations.activate(
-                    active_state,
-                    candidate,
+                return await active_state.activate_domain_config(
+                    parsed,
                     expected_version=expected_version,
                 )
 
-            parsed = parse_candidate(candidate)
             return await DomainConfigStore(self.pg).activate(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -584,9 +558,6 @@ class ProjectManager:
                     ),
                 )
 
-        active = self.active_projects.get(project_id)
-        if active is not None:
-            await active.scheduler.record_activity()
         return await self.get_episode_session_participation(project_id)
 
     async def add_session(self, project_id: str, session_id: str) -> None:
@@ -686,7 +657,7 @@ class ProjectManager:
 
         if allowed_projects is not None:
             active_state = self.active_projects.get(project_id)
-            if active_state and active_state.active_runtime_sessions_count > 0:
+            if self._project_leases.get(project_id):
                 raise RuntimeError(
                     f"Project '{project_id}' has active runtime sessions and "
                     "cannot change its readable project scope"
@@ -743,7 +714,7 @@ class ProjectManager:
             return meta
 
         active_state = self.active_projects.get(project_id)
-        if active_state and active_state.active_runtime_sessions_count > 0:
+        if self._project_leases.get(project_id):
             raise RuntimeError(
                 f"Project '{project_id}' has active runtime sessions and cannot be archived"
             )
@@ -793,7 +764,7 @@ class ProjectManager:
                 return None
 
             active_state = self.active_projects.get(project_id)
-            if active_state and active_state.active_runtime_sessions_count > 0:
+            if self._project_leases.get(project_id):
                 raise RuntimeError(
                     f"Project '{project_id}' has active runtime sessions and "
                     "cannot be deleted"
@@ -889,8 +860,6 @@ class ProjectManager:
 
         deleted = int(await redis.delete(*sorted(keys))) if keys else 0
         await redis.hdel(RedisKeys.projects(self.user_name), project_id)
-        if session_ids:
-            await redis.hdel(RedisKeys.sessions(self.user_name), *session_ids)
         if agent_ids:
             await redis.hdel(RedisKeys.agents(self.user_name), *agent_ids)
             default_key = RedisKeys.agents_default(self.user_name)
@@ -901,7 +870,7 @@ class ProjectManager:
     async def acquire_project_for_session(
         self, project_id: str, session_id: str
     ) -> ProjectRuntime:
-        """Acquire runtime project state and record durable session membership."""
+        """Acquire one exact session lease on a live project runtime."""
         async with self._maintenance_lock:
             if self._closed:
                 raise RuntimeError("ProjectManager is shutting down")
@@ -910,172 +879,53 @@ class ProjectManager:
                 session_id,
             )
 
-    @asynccontextmanager
-    async def project_runtime(
-        self,
-        project_id: str,
-        session_id: str,
-    ) -> AsyncIterator[ProjectRuntime]:
-        """Own one session's lease on a project's in-memory runtime.
-
-        A caller that successfully enters this context owns exactly one
-        ``acquire_project_for_session`` reference.  Releasing that reference is
-        guaranteed on normal completion, failure, and cancellation.
-        """
-        state = await self.acquire_project_for_session(
-            project_id,
-            session_id,
-        )
-        try:
-            yield state
-        finally:
-            await self.release_project(project_id)
-
     async def _acquire_project_for_session(
         self, project_id: str, session_id: str
     ) -> ProjectRuntime:
         if not project_id or not project_id.strip():
             raise ValueError("A persisted project_id is required to acquire a project")
+        if not session_id or not session_id.strip():
+            raise ValueError("A persisted session_id is required to acquire a project")
+
+        leases = self._project_leases.setdefault(project_id, set())
+        if session_id in leases:
+            raise RuntimeError(
+                f"Session '{session_id}' already holds a lease for project '{project_id}'"
+            )
         project = await self.get_project(project_id)
         if project is None:
+            if not leases:
+                self._project_leases.pop(project_id, None)
             raise ValueError(
                 f"Project '{project_id}' does not exist; "
                 "create it before creating a session"
             )
         if project["status"] != ProjectStatus.ACTIVE.value:
+            if not leases:
+                self._project_leases.pop(project_id, None)
             raise ValueError(
                 f"Project '{project_id}' is {project['status']} and cannot "
                 "create or resume sessions"
             )
 
-        await self._ensure_identity_invariant()
-        project_state = await self._get_or_start_project(
-            project_id,
-            project_metadata=project,
-        )
-        return project_state
+        project_state = self.active_projects.get(project_id)
+        if project_state is None:
+            logger.info(f"Bootstrapping ProjectRuntime for project_id: {project_id}")
+            try:
+                project_state = await self.project_factory.create(
+                    project_id=project_id,
+                    readable_project_ids=await self.get_readable_project_ids(
+                        project_id,
+                        project_metadata=project,
+                    ),
+                )
+            except Exception:
+                if not leases:
+                    self._project_leases.pop(project_id, None)
+                raise
+            self.active_projects[project_id] = project_state
 
-    async def get_or_start_project(self, project_id: str) -> ProjectRuntime:
-        """Get an existing ProjectRuntime or bootstrap a new one."""
-        async with self._maintenance_lock:
-            return await self._get_or_start_project(
-                project_id,
-            )
-
-    async def _get_or_start_project(
-        self,
-        project_id: str,
-        project_metadata: Optional[dict] = None,
-    ) -> ProjectRuntime:
-        project = project_metadata or await self.get_project(project_id)
-        if project is None:
-            raise ValueError(
-                f"Project '{project_id}' does not exist; "
-                "create it before starting project runtime"
-            )
-        if project["status"] != ProjectStatus.ACTIVE.value:
-            raise ValueError(
-                f"Project '{project_id}' is {project['status']} and cannot "
-                "start project runtime"
-            )
-
-        if project_id in self.active_projects:
-            self.active_projects[project_id].active_runtime_sessions_count += 1
-            return self.active_projects[project_id]
-
-        logger.info(f"Bootstrapping ProjectRuntime for project_id: {project_id}")
-        readable_project_ids = await self.get_readable_project_ids(
-            project_id,
-            project_metadata=project,
-        )
-
-        domain_store = DomainConfigStore(self.pg)
-        domain_config = await domain_store.load(self.user_name, project_id)
-        compiled_domain = domain_config.compile()
-
-        # Entity Manager
-        er_cfg = self.dev_settings.entity_resolution
-        entities = EntityResolver(
-            project_id=project_id,
-            readable_project_ids=readable_project_ids,
-            knowledge_store=self.resources.knowledge_store,
-            embedding_service=self.resources.embedding,
-            fuzzy_substring_threshold=er_cfg.fuzzy_substring_threshold,
-            fuzzy_non_substring_threshold=er_cfg.fuzzy_non_substring_threshold,
-            generic_token_freq=er_cfg.generic_token_freq,
-            candidate_fuzzy_threshold=er_cfg.candidate_fuzzy_threshold,
-            candidate_vector_threshold=er_cfg.candidate_vector_threshold,
-        )
-
-        # NLP Pipeline
-        nlp_cfg = self.dev_settings.nlp_pipeline
-        pipeline = await asyncio.get_running_loop().run_in_executor(
-            self.resources.executor,
-            partial(
-                TextProcessor,
-                llm=self.resources.llm_service,
-                get_known_aliases=entities.get_known_aliases,
-                get_alias_version=entities.get_alias_version,
-                get_profile=entities.get_profile,
-                gliner=self.resources.gliner,
-                spacy=self.resources.spacy,
-                settings=nlp_cfg,
-                model_work=getattr(self.resources, "model_work", None),
-            ),
-        )
-
-        project_processor = IngestionPipeline(
-            project_id=project_id,
-            redis_client=self.resources.redis,
-            llm=self.resources.llm_service,
-            entities=entities,
-            processor=pipeline,
-            knowledge_store=self.resources.knowledge_store,
-            cpu_executor=self.resources.executor,
-            user_name=self.user_name,
-            compiled_domain=compiled_domain,
-            get_next_ent_id=self.resources.knowledge_store.allocate_entity_id,
-            resolution_threshold=er_cfg.resolution_threshold,
-            common_word_frequency_threshold=er_cfg.common_word_frequency_threshold,
-            sparse_context_verbs=er_cfg.sparse_context_verbs,
-        )
-
-        await self._verify_user_entity(entities)
-
-        scheduler = Scheduler(
-            self.user_name,
-            project_id,
-            self.resources.redis,
-            background_work=getattr(self.resources, "background_work", None),
-        )
-        episode_job = self._init_episode_job(project_id)
-
-        project_state = self.project_factory.create_runtime(
-            project_id=project_id,
-            entities=entities,
-            pipeline=pipeline,
-            scheduler=scheduler,
-            user_name=self.user_name,
-            redis_client=self.resources.redis,
-            postgres_client=self.resources.postgres,
-            embedding_service=self.resources.embedding,
-            domain_config=domain_config,
-            readable_project_ids=readable_project_ids,
-            batch_processor=project_processor,
-            background_work=getattr(self.resources, "background_work", None),
-            domain_config_store=domain_store,
-        )
-        project_state.episode_job = episode_job
-
-        self._register_background_jobs(
-            project_state,
-            entities,
-            project_processor,
-            episode_job,
-        )
-        project_state.active_runtime_sessions_count = 1
-        self.active_projects[project_id] = project_state
-
+        leases.add(session_id)
         return project_state
 
     async def rebuild_project_search_indexes(self, project_id: str) -> Dict[str, int]:
@@ -1087,7 +937,7 @@ class ProjectManager:
             active_runtime_projects = [
                 active_id
                 for active_id, state in self.active_projects.items()
-                if state.active_runtime_sessions_count > 0
+                if self._project_leases.get(active_id)
             ]
             if active_runtime_projects:
                 raise RuntimeError(
@@ -1168,7 +1018,7 @@ class ProjectManager:
             active_runtime_projects = [
                 active_id
                 for active_id, state in self.active_projects.items()
-                if state.active_runtime_sessions_count > 0
+                if self._project_leases.get(active_id)
             ]
             if active_runtime_projects:
                 raise RuntimeError(
@@ -1273,7 +1123,7 @@ class ProjectManager:
             active_runtime_projects = [
                 active_id
                 for active_id, state in self.active_projects.items()
-                if state.active_runtime_sessions_count > 0
+                if self._project_leases.get(active_id)
             ]
             if active_runtime_projects:
                 raise RuntimeError(
@@ -1308,18 +1158,22 @@ class ProjectManager:
                 summary["projection_rebuilt"] = True
             return summary
 
-    async def release_project(self, project_id: str):
-        """Release runtime project state when an active session closes."""
+    async def release_project_for_session(self, project_id: str, session_id: str) -> None:
+        """Release one exact session lease and stop the final project runtime."""
         async with self._maintenance_lock:
-            if project_id not in self.active_projects:
+            leases = self._project_leases.get(project_id)
+            if leases is None or session_id not in leases:
+                raise RuntimeError(
+                    f"Session '{session_id}' does not hold a lease for project '{project_id}'"
+                )
+            leases.remove(session_id)
+            if leases:
                 return
 
-            state = self.active_projects[project_id]
-            state.active_runtime_sessions_count -= 1
-
-            if state.active_runtime_sessions_count <= 0:
+            self._project_leases.pop(project_id, None)
+            state = self.active_projects.pop(project_id, None)
+            if state is not None:
                 await state.shutdown()
-                del self.active_projects[project_id]
                 logger.info(f"Released ProjectRuntime for project_id: {project_id}")
 
     async def shutdown(self) -> None:
@@ -1331,8 +1185,7 @@ class ProjectManager:
             self._closed = True
             states = list(self.active_projects.values())
             self.active_projects.clear()
-            for state in states:
-                state.active_runtime_sessions_count = 0
+            self._project_leases.clear()
 
         results = await asyncio.gather(
             *(state.shutdown() for state in states),
@@ -1343,161 +1196,3 @@ class ProjectManager:
             raise RuntimeError(
                 f"Failed to shut down {len(failures)} project runtime(s)"
             ) from failures[0]
-
-    async def _verify_user_entity(self, entities: EntityResolver) -> None:
-        user_id = await entities.get_id(self.user_name)
-        if user_id != IDENTITY_ENTITY_ID:
-            raise RuntimeError(
-                f"Configured user '{self.user_name}' did not resolve to reserved "
-                f"entity ID {IDENTITY_ENTITY_ID}"
-            )
-        logger.info(f"User entity verified: {self.user_name} (id={IDENTITY_ENTITY_ID})")
-
-    async def _ensure_identity_invariant(self) -> None:
-        if self._identity_initialized:
-            return
-
-        await self.resources.knowledge_store.ensure_identity_entity(
-            self.user_name,
-            getattr(self.config, "user_aliases", []),
-        )
-        self._identity_initialized = True
-
-    def _init_episode_job(self, project_id: str) -> EpisodeJob:
-        jobs_cfg = self.dev_settings.jobs
-        return EpisodeJob(
-            knowledge_store=self.resources.knowledge_store,
-            settings=jobs_cfg.episode,
-            llm=self.resources.llm_service,
-            embedding_service=self.resources.embedding,
-            episode_window_size_provider=lambda: self.get_episode_window_size(project_id),
-        )
-
-    def _register_background_jobs(
-        self,
-        project_state: ProjectRuntime,
-        entities: EntityResolver,
-        processor: IngestionPipeline,
-        episode_job: Optional[EpisodeJob] = None,
-    ):
-        scheduler = project_state.scheduler
-        project_id = project_state.project_id
-        jobs_cfg = self.dev_settings.jobs
-        episode_job = episode_job or self._init_episode_job(project_id)
-
-        config_mgr = ConfigManager.get()
-
-        async def _dlq_write_callback(result):
-            if not result.scope or not result.scope.session_id:
-                return False, "DLQ graph replay missing source session_id"
-            return await write_batch_callback(
-                result,
-                knowledge_store=self.resources.knowledge_store,
-                entities=entities,
-                session_id=result.scope.session_id,
-                project_id=project_id,
-                user_name=self.user_name,
-                redis_client=self.resources.redis,
-            )
-
-        def _entity_resolution_updated(config):
-            entities.update_settings(config)
-            processor.update_settings(config)
-
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                _entity_resolution_updated, "developer_settings.entity_resolution"
-            )
-        )
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                processor.update_settings, "developer_settings.nlp_pipeline"
-            )
-        )
-        scheduler.register(episode_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                lambda config: episode_job.update_settings(
-                    config,
-                ),
-                "developer_settings.jobs.episode",
-            )
-        )
-
-        document_index_job = DocumentIndexingRecoveryJob(
-            project_state.document_service,
-            jobs_cfg.document_indexing,
-        )
-        scheduler.register(document_index_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                document_index_job.update_settings,
-                "developer_settings.jobs.document_indexing",
-            )
-        )
-
-        dlq_cfg = jobs_cfg.dlq
-        dlq_job = DLQReplayJob(
-            entities=entities,
-            processor=processor,
-            write_to_graph=_dlq_write_callback,
-            redis_client=self.resources.redis,
-            settings=dlq_cfg,
-        )
-        project_state.dlq_job = dlq_job
-        scheduler.register(dlq_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
-        )
-        cleaner_job = EntityCleanupJob(
-            user_name=self.user_name,
-            knowledge_store=self.resources.knowledge_store,
-            entities=entities,
-            redis_client=self.resources.redis,
-            settings=jobs_cfg.cleaner,
-        )
-        scheduler.register(cleaner_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                cleaner_job.update_settings, "developer_settings.jobs.cleaner"
-            )
-        )
-
-        rollback_cleanup_job = MergeCleanupJob(
-            knowledge_store=self.resources.knowledge_store,
-            settings=jobs_cfg.merge_rollback,
-        )
-        scheduler.register(rollback_cleanup_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                rollback_cleanup_job.update_settings,
-                "developer_settings.jobs.merge_rollback",
-            )
-        )
-
-        audit_retention_job = AuditRetentionCleanupJob(
-            knowledge_store=self.resources.knowledge_store,
-            settings=jobs_cfg.audit_retention,
-        )
-        scheduler.register(audit_retention_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                audit_retention_job.update_settings,
-                "developer_settings.jobs.audit_retention",
-            )
-        )
-
-        conflict_discovery_job = ConflictDiscoveryJob(
-            knowledge_store=self.resources.knowledge_store,
-            settings=jobs_cfg.conflict_discovery,
-            llm=self.resources.llm_service,
-        )
-        scheduler.register(conflict_discovery_job)
-        project_state.add_config_unsubscriber(
-            config_mgr.subscribe(
-                conflict_discovery_job.update_settings,
-                "developer_settings.jobs.conflict_discovery",
-            )
-        )
-
-        scheduler.register(AACJob(project_state, self.resources))

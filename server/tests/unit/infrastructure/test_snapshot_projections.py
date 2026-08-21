@@ -31,14 +31,23 @@ def test_background_snapshot_for_health_projects_one_project_only() -> None:
     raw = {
         "queued": 3,
         "queued_by_project": {"project-a": 2, "project-b": 1},
-        "ready_projects": ["project-a", "project-b"],
-        "active_projects": ["project-b"],
+        "queued_categories_by_project": {
+            "project-a": ["profile", "aac"],
+            "project-b": ["document-index"],
+        },
+        "active_by_project": {"project-b": ["document-index"]},
     }
     coordinator.snapshot = lambda: raw
 
     safe = coordinator.snapshot_for_health(project_id="project-a")
 
-    assert safe == {"queued": 3, "queued_for_project": 2}
+    assert safe == {
+        "queued": 3,
+        "queued_for_project": 2,
+        "queued_operation_categories": ["profile", "aac"],
+        "active_operation_categories": [],
+        "active_for_project": False,
+    }
     assert raw["queued_by_project"] == {"project-a": 2, "project-b": 1}
 
 

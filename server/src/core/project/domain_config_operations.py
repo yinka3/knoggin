@@ -9,14 +9,9 @@ future-facing impact, and only then request an optimistic activation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
 from common.conf.domain_config import DomainConfig, DomainConfigError
-
-if TYPE_CHECKING:
-    from core.project.domain_config_store import DomainActivation
-    from runtime.project_runtime import ProjectRuntime
-
 
 DomainCandidate = DomainConfig | Mapping[str, Any]
 
@@ -108,7 +103,6 @@ def validate_domain_config(candidate: DomainCandidate) -> DomainValidation:
         config=config,
         warnings=_semantic_warnings(config),
     )
-
 
 def _keyed(values, key):
     return {key(value): value for value in values}
@@ -358,39 +352,3 @@ def preview_domain_config(
         relationships_changed=relationships_changed,
         future_effects=tuple(effects),
     )
-
-
-class DomainConfigOperations:
-    """Convenience facade for the complete candidate lifecycle."""
-
-    @staticmethod
-    def edit(candidate: DomainCandidate) -> DomainConfig:
-        """Materialize a detached candidate for the next workflow step."""
-
-        return parse_candidate(candidate)
-
-    @staticmethod
-    def validate(candidate: DomainCandidate) -> DomainValidation:
-        return validate_domain_config(candidate)
-
-    @staticmethod
-    def preview(
-        current: DomainConfig | None,
-        candidate: DomainCandidate,
-    ) -> DomainPreview:
-        return preview_domain_config(current, candidate)
-
-    @staticmethod
-    async def activate(
-        project: "ProjectRuntime",
-        candidate: DomainCandidate,
-        *,
-        expected_version: int,
-    ) -> "DomainActivation":
-        """Validate a candidate, then delegate guarded activation to the state."""
-
-        config = _candidate_config(candidate)
-        return await project.activate_domain_config(
-            config,
-            expected_version=expected_version,
-        )

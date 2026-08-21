@@ -1,7 +1,7 @@
 import asyncio
 import json
 import uuid
-from typing import Any, AsyncContextManager, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from psycopg import sql
@@ -15,9 +15,9 @@ from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
-from core.session.context import Session
 from infrastructure.redis_client import RedisKeys
-from runtime.project_runtime import ProjectRuntime
+from runtime.session_runtime import SessionRuntime
+from runtime.session_runtime_factory import SessionRuntimeFactory
 
 
 class SessionManager:
@@ -27,64 +27,37 @@ class SessionManager:
         self,
         resources: Any,
         user_name: str,
-        active_sessions: Dict[str, Session],
         project_manager: ProjectManager,
     ):
         self.resources = resources
         self.user_name = user_name
-        self.active_sessions = active_sessions
+        self._active_sessions: Dict[str, SessionRuntime] = {}
+        self._health_service: Any | None = None
         self.project_manager = project_manager
         self.pg = resources.postgres
         self._session_deletion_writer = SessionDeletionWriter(self.pg)
         self._session_locks: Dict[str, asyncio.Lock] = {}
-        self._project_runtime_contexts: Dict[
-            str, AsyncContextManager[ProjectRuntime]
-        ] = {}
-        # A tombstoned session must be unavailable immediately, before the
-        # durable status update completes. The database status enforces this
-        # again after an engine restart.
-        self._closed_session_ids: set[str] = set()
+        self._deleting_session_ids: set[str] = set()
         self._lock = asyncio.Lock()
         self._closed = False
 
-    async def _read_redis_session_metadata(self, session_id: str) -> Optional[dict]:
-        raw = await self.resources.redis.hget(
-            RedisKeys.sessions(self.user_name),
-            session_id,
-        )
-        if not raw:
-            return None
-        metadata = safe_json_loads(raw)
-        return metadata if isinstance(metadata, dict) else None
+    def attach_health_service(self, health_service: Any) -> None:
+        """Attach the application-owned health service before sessions are exposed."""
 
-    async def _write_redis_session_metadata(
-        self,
-        session_id: str,
-        metadata: dict,
-    ) -> None:
-        await self.resources.redis.hset(
-            RedisKeys.sessions(self.user_name),
-            session_id,
-            json.dumps(metadata, default=str),
-        )
-        project_id = metadata.get("project_id")
-        if project_id:
-            await self.resources.redis.sadd(
-                RedisKeys.project_sessions(self.user_name, project_id),
-                session_id,
-            )
+        if self._health_service is not None:
+            raise RuntimeError("SessionManager health service is already attached")
+        self._health_service = health_service
 
-    async def _delete_redis_session_metadata(
-        self,
-        session_id: str,
-        project_id: Optional[str] = None,
-    ) -> None:
-        await self.resources.redis.hdel(RedisKeys.sessions(self.user_name), session_id)
-        if project_id:
-            await self.resources.redis.srem(
-                RedisKeys.project_sessions(self.user_name, project_id),
-                session_id,
-            )
+    def get_runtime_session(self, session_id: str) -> SessionRuntime | None:
+        """Return one active session for read-only runtime inspection."""
+
+        return self._active_sessions.get(session_id)
+
+    def active_runtime_count(self) -> int:
+        """Return the number of loaded session runtimes."""
+
+        return len(self._active_sessions)
+
 
     async def list_sessions(self) -> Dict[str, dict]:
         try:
@@ -113,13 +86,34 @@ class SessionManager:
             logger.error(f"Failed to list sessions (check Postgres connection): {e}")
             raise
 
+    def _session_runtime_factory(self) -> SessionRuntimeFactory:
+        return SessionRuntimeFactory(
+            self.user_name,
+            self.resources,
+            health_service=self._health_service,
+        )
+
+    async def _hard_delete_failed_session(self, session_id: str) -> None:
+        """Remove a partially created session instead of preserving a tombstone."""
+
+        try:
+            await self.pg.execute(
+                "DELETE FROM public.sessions "
+                "WHERE user_name = %(user_name)s AND session_id = %(session_id)s",
+                {"user_name": self.user_name, "session_id": session_id},
+            )
+        except Exception:
+            logger.exception(
+                "Failed to hard-delete session {} after creation failed", session_id
+            )
+
     async def create_session(
         self,
         project_id: str,
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-    ) -> Session:
+    ) -> SessionRuntime:
         if not project_id or not project_id.strip():
             raise ValueError("create_session requires a project_id from an existing project")
 
@@ -128,22 +122,16 @@ class SessionManager:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("SessionManager is shutting down")
-            runtime = self.project_manager.project_runtime(
-                project_id,
-                session_id,
-            )
-            project_state = await runtime.__aenter__()
             context = None
+            project_leased = False
+            persisted = False
 
             try:
-                context = await Session.create(
-                    user_name=self.user_name,
-                    resources=self.resources,
-                    session_id=session_id,
-                    model=model,
-                    project_state=project_state,
+                tools_json = (
+                    json.dumps(enabled_tools)
+                    if enabled_tools is not None
+                    else None
                 )
-                tools_json = json.dumps(enabled_tools) if enabled_tools else None
 
                 query = """
                     INSERT INTO public.sessions (
@@ -160,41 +148,55 @@ class SessionManager:
                     "agent_id": agent_id,
                     "enabled_tools": tools_json
                 })
-                await self._write_redis_session_metadata(
+                persisted = True
+
+                project_state = await self.project_manager.acquire_project_for_session(
+                    project_id,
                     session_id,
-                    {
-                        "project_id": project_id,
-                        "model": model,
-                        "agent_id": agent_id,
-                        "enabled_tools": enabled_tools,
-                        "status": "open",
-                        "created_at": get_now_iso(),
-                        "last_active": get_now_iso(),
-                    },
+                )
+                project_leased = True
+                context = await self._session_runtime_factory().bootstrap(
+                    project_state,
+                    session_id=session_id,
+                    model=model,
+                    agent_id=agent_id,
+                    enabled_tools=enabled_tools,
                 )
 
-                self.active_sessions[session_id] = context
-                self._project_runtime_contexts[session_id] = runtime
+                self._active_sessions[session_id] = context
                 logger.info(f"Created session: {session_id}")
                 return context
             except Exception:
                 if context is not None:
-                    await self._shutdown_runtime_context(
-                        context,
-                        session_id,
-                        runtime=runtime,
-                    )
-                else:
-                    await runtime.__aexit__(None, None, None)
-                await self.project_manager.remove_session(project_id, session_id)
+                    try:
+                        await context.shutdown()
+                    except Exception:
+                        logger.exception(
+                            "Failed to unload runtime for failed session {}", session_id
+                        )
+                if project_leased:
+                    try:
+                        await self.project_manager.release_project_for_session(
+                            project_id,
+                            session_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to release project lease for failed session {}",
+                            session_id,
+                        )
+                if persisted:
+                    await self._hard_delete_failed_session(session_id)
                 raise
 
-    async def get_or_resume_session(self, session_id: str) -> Optional[Session]:
+    async def get_or_resume_session(self, session_id: str) -> Optional[SessionRuntime]:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("SessionManager is shutting down")
-            active_session = self.active_sessions.get(session_id)
-            if active_session is not None and session_id not in self._closed_session_ids:
+            active_session = self._active_sessions.get(session_id)
+            if session_id in self._deleting_session_ids:
+                return None
+            if active_session is not None:
                 return active_session
             if session_id not in self._session_locks:
                 self._session_locks[session_id] = asyncio.Lock()
@@ -204,15 +206,14 @@ class SessionManager:
             async with self._lock:
                 if self._closed:
                     raise RuntimeError("SessionManager is shutting down")
-                active_session = self.active_sessions.get(session_id)
+                active_session = self._active_sessions.get(session_id)
                 if (
                     active_session is not None
-                    and session_id not in self._closed_session_ids
                 ):
                     return active_session
 
             query = """
-                SELECT project_id, model
+                SELECT project_id, model, agent_id, enabled_tools, document_focus
                 FROM public.sessions
                 WHERE user_name = %(user_name)s
                   AND status <> 'deleted'
@@ -232,18 +233,34 @@ class SessionManager:
                 raise ValueError(f"Session {session_id} has no valid project_id")
 
             model = metadata.get("model")
+            agent_id = metadata.get("agent_id")
+            enabled_tools = metadata.get("enabled_tools")
+            if isinstance(enabled_tools, str):
+                enabled_tools = safe_json_loads(enabled_tools)
+            if enabled_tools is not None and not isinstance(enabled_tools, list):
+                raise ValueError(f"Session {session_id} has invalid enabled_tools")
 
-            runtime = self.project_manager.project_runtime(project_id, session_id)
-            project_state = await runtime.__aenter__()
+            document_focus = metadata.get("document_focus")
+            if isinstance(document_focus, str):
+                document_focus = safe_json_loads(document_focus)
+            if document_focus is not None:
+                document_focus = parse_document_focus(document_focus)
 
             context = None
+            project_leased = False
             try:
-                context = await Session.create(
-                    user_name=self.user_name,
-                    resources=self.resources,
+                project_state = await self.project_manager.acquire_project_for_session(
+                    project_id,
+                    session_id,
+                )
+                project_leased = True
+                context = await self._session_runtime_factory().bootstrap(
+                    project_state,
                     session_id=session_id,
                     model=model,
-                    project_state=project_state,
+                    agent_id=agent_id,
+                    enabled_tools=enabled_tools,
+                    document_focus=document_focus,
                 )
                 update_query = """
                     UPDATE public.sessions
@@ -257,64 +274,44 @@ class SessionManager:
                 )
                 if updated != 1:
                     raise RuntimeError("Session disappeared while resuming")
-                redis_metadata = (
-                    await self._read_redis_session_metadata(session_id) or {}
-                )
-                redis_metadata["project_id"] = project_id
-                redis_metadata["model"] = model
-                redis_metadata["status"] = "open"
-                redis_metadata["last_active"] = get_now_iso()
-                await self._write_redis_session_metadata(session_id, redis_metadata)
-
-                self.active_sessions[session_id] = context
-                self._project_runtime_contexts[session_id] = runtime
+                self._active_sessions[session_id] = context
                 logger.info(f"Resumed session: {session_id}")
                 return context
             except Exception:
                 if context is not None:
-                    await self._shutdown_runtime_context(
-                        context,
+                    try:
+                        await context.shutdown()
+                    except Exception:
+                        logger.exception(
+                            "Failed to unload runtime for session {}", session_id
+                        )
+                if project_leased:
+                    await self.project_manager.release_project_for_session(
+                        project_id,
                         session_id,
-                        runtime=runtime,
                     )
-                else:
-                    await runtime.__aexit__(None, None, None)
                 raise
-
-    async def _shutdown_runtime_context(
-        self,
-        context: Session,
-        session_id: str,
-        *,
-        runtime: Optional[AsyncContextManager[ProjectRuntime]] = None,
-    ) -> None:
-        """Release the non-durable resources owned by one live session."""
-        try:
-            if hasattr(context, "shutdown"):
-                await context.shutdown()
-        finally:
-            runtime = runtime or self._project_runtime_contexts.pop(
-                session_id,
-                None,
-            )
-            if runtime is None:
-                raise RuntimeError(
-                    f"Session {session_id} is missing its project runtime lease"
-                )
-            await runtime.__aexit__(None, None, None)
 
     async def deactivate_runtime_session(self, session_id: str) -> bool:
         """Unload a live session while retaining its durable session record."""
         async with self._lock:
-            context = self.active_sessions.pop(session_id, None)
-            if session_id not in self._closed_session_ids:
+            context = self._active_sessions.pop(session_id, None)
+            if session_id not in self._deleting_session_ids:
                 self._session_locks.pop(session_id, None)
-            runtime = self._project_runtime_contexts.pop(session_id, None)
 
         if context is None:
             return False
 
-        await self._shutdown_runtime_context(context, session_id, runtime=runtime)
+        project_id = context.project_id
+        if not project_id:
+            raise RuntimeError(f"Session {session_id} is missing its project id")
+        try:
+            await context.shutdown()
+        finally:
+            await self.project_manager.release_project_for_session(
+                project_id,
+                session_id,
+            )
         logger.info(f"Deactivated runtime session: {session_id}")
         return True
 
@@ -322,7 +319,8 @@ class SessionManager:
         """Unload every live session before global infrastructure shuts down."""
         async with self._lock:
             self._closed = True
-            session_ids = list(self.active_sessions)
+            session_ids = list(self._active_sessions)
+            self._deleting_session_ids.update(session_ids)
 
         results = await asyncio.gather(
             *(self.deactivate_runtime_session(session_id) for session_id in session_ids),
@@ -335,11 +333,7 @@ class SessionManager:
             ) from failures[0]
 
     async def close_session(self, session_id: str) -> bool:
-        """Compatibility alias for session deletion.
-
-        Sessions are not closable containers: removing one tombstones it and
-        retains only its immutable message provenance.
-        """
+        """Compatibility alias for session deletion."""
 
         await self.delete_session_data(session_id)
         return True
@@ -360,30 +354,6 @@ class SessionManager:
             "session_id": session_id,
             "limit": limit
         })
-        if not rows:
-            recent_key = RedisKeys.recent_conversation(self.user_name, session_id)
-            conv_key = RedisKeys.conversation(self.user_name, session_id)
-            message_ids = await self.resources.redis.zrange(recent_key, 0, -1)
-            if limit:
-                message_ids = message_ids[-limit:]
-            rows = []
-            for message_id in message_ids:
-                raw = await self.resources.redis.hget(conv_key, message_id)
-                data = safe_json_loads(raw) if raw else None
-                if not isinstance(data, dict):
-                    continue
-                rows.append(
-                    {
-                        "message_id": data.get("message_id", int(message_id)),
-                        "role": data.get("role", "user"),
-                        "content": data.get(
-                            "content",
-                            data.get("message", ""),
-                        ),
-                        "timestamp": data.get("timestamp", ""),
-                    }
-                )
-
         turns = []
         for row in rows:
             turns.append({
@@ -410,27 +380,12 @@ class SessionManager:
         async with self._lock:
             if self._closed:
                 raise RuntimeError("SessionManager is shutting down")
+            if session_id in self._deleting_session_ids:
+                raise RuntimeError(f"Session {session_id} is already being deleted")
+            self._deleting_session_ids.add(session_id)
             lock = self._session_locks.setdefault(session_id, asyncio.Lock())
 
         async with lock:
-            project_id = None
-            query = "SELECT project_id FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
-            rows = await self.pg.fetch_all(
-                query, {"user_name": user, "session_id": session_id}
-            )
-            if rows:
-                project_id = rows[0]["project_id"]
-
-            if not project_id and session_id in self.active_sessions:
-                project_id = self.active_sessions[session_id].project_id
-            if not project_id:
-                metadata = await self._read_redis_session_metadata(session_id)
-                if metadata:
-                    project_id = metadata.get("project_id")
-
-            async with self._lock:
-                self._closed_session_ids.add(session_id)
-
             # Session.shutdown closes the agent queue and waits for any active
             # task it cancels before the durable tombstone is written.
             try:
@@ -440,12 +395,11 @@ class SessionManager:
                     session_id=session_id,
                 )
             except Exception:
-                # The durable session is still open, so do not leave it
-                # permanently inaccessible in this process after a failed
-                # tombstone transaction.
-                async with self._lock:
-                    self._closed_session_ids.discard(session_id)
                 raise
+            finally:
+                async with self._lock:
+                    self._deleting_session_ids.discard(session_id)
+                    self._session_locks.pop(session_id, None)
 
             # Redis is a recoverable cache and follows the durable tombstone.
             # A transient cache failure must not report the committed deletion
@@ -471,7 +425,6 @@ class SessionManager:
 
                 if direct_keys:
                     deleted += await redis.delete(*direct_keys)
-                await self._delete_redis_session_metadata(session_id, project_id)
             except Exception as exc:
                 logger.error(
                     "Durable session deletion committed, but Redis cleanup failed "
@@ -512,7 +465,21 @@ class SessionManager:
                 sql.SQL("{} = %s").format(sql.Identifier(k)) for k in cols
             )
         )
-        await self.pg.execute(stmt, [*cols.values(), self.user_name, session_id])
+        updated = await self.pg.execute(
+            stmt,
+            [*cols.values(), self.user_name, session_id],
+        )
+        if updated != 1:
+            raise FileNotFoundError("Session not found")
+
+        context = self.get_runtime_session(session_id)
+        if context is not None:
+            for key, value in new_data.items():
+                setattr(
+                    context,
+                    key,
+                    list(value) if key == "enabled_tools" and value is not None else value,
+                )
         return new_data
 
     async def get_document_focus(
@@ -524,12 +491,8 @@ class SessionManager:
         rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "session_id": session_id})
 
         if not rows or not rows[0].get("document_focus"):
-            metadata = await self._read_redis_session_metadata(session_id)
-            if not metadata or not metadata.get("document_focus"):
-                return None
-            focus = metadata["document_focus"]
-        else:
-            focus = rows[0]["document_focus"]
+            return None
+        focus = rows[0]["document_focus"]
 
         if isinstance(focus, str):
             focus = safe_json_loads(focus)
@@ -577,11 +540,7 @@ class SessionManager:
                 "session_id": session_id,
             },
         )
-        metadata = await self._read_redis_session_metadata(session_id) or {
-            "project_id": getattr(context, "project_id", None),
-        }
-        metadata["document_focus"] = focus
-        await self._write_redis_session_metadata(session_id, metadata)
+        context.document_focus = parse_document_focus(focus)
 
         return focus
 
@@ -600,15 +559,9 @@ class SessionManager:
             query,
             {"user_name": self.user_name, "session_id": session_id},
         )
-        metadata = await self._read_redis_session_metadata(session_id)
-        if rowcount == 0 and metadata is None:
+        if rowcount == 0:
             raise FileNotFoundError("Session not found")
-        if metadata is not None:
-            had_focus = (
-                "document_focus" in metadata
-                and metadata["document_focus"] is not None
-            )
-            metadata["document_focus"] = None
-            await self._write_redis_session_metadata(session_id, metadata)
-            return had_focus
+        context = self.get_runtime_session(session_id)
+        if context is not None:
+            context.document_focus = None
         return True

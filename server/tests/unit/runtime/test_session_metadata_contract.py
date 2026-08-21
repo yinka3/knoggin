@@ -31,7 +31,6 @@ async def test_session_metadata_update_allows_only_configuration_columns():
     manager = SessionManager(
         resources=resources,
         user_name="ada",
-        active_sessions={},
         project_manager=None,
     )
 
@@ -52,7 +51,6 @@ async def test_session_metadata_update_rejects_lifecycle_and_ownership_columns(p
     manager = SessionManager(
         resources=resources,
         user_name="ada",
-        active_sessions={},
         project_manager=None,
     )
 
@@ -88,7 +86,6 @@ async def test_list_sessions_preserves_native_timestamps_and_normalizes_json_fie
     manager = SessionManager(
         resources=resources,
         user_name="ada",
-        active_sessions={},
         project_manager=None,
     )
 

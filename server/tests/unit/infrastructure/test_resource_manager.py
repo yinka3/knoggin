@@ -1,3 +1,4 @@
+import asyncio
 from concurrent.futures import Future
 from unittest.mock import MagicMock
 
@@ -155,10 +156,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
-    resources_module.ResourceManager._instance = None
-    resources_module.ResourceManager._lock = None
-
-    manager = await resources_module.ResourceManager.initialize()
+    manager = await resources_module.RuntimeResources.create()
 
     load_dotenv.assert_called_once_with()
     assert manager.redis is redis_client
@@ -191,13 +189,10 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 @pytest.mark.no_network
 async def test_resource_manager_raises_if_database_url_missing(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    resources_module.ResourceManager._instance = None
-    resources_module.ResourceManager._lock = None
-
     with pytest.raises(
         ConfigurationError, match="DATABASE_URL environment variable is not set"
     ):
-        await resources_module.ResourceManager.initialize()
+        await resources_module.RuntimeResources.create()
 
 
 @pytest.mark.no_network
@@ -329,18 +324,14 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
     monkeypatch.setattr(resources_module, "ThreadPoolExecutor", FakeExecutor)
-    resources_module.ResourceManager._instance = None
-    resources_module.ResourceManager._lock = None
-
     with pytest.raises(DependencyError, match="Postgres unavailable"):
-        await resources_module.ResourceManager.initialize()
+        await resources_module.RuntimeResources.create()
 
-    assert resources_module.ResourceManager._instance is None
-    assert len(knowledge_store_instances) == 1
+    assert knowledge_store_instances == []
     assert FailingPostgresClient.instances[0].closed is True
-    assert redis_instances[0].closed is True
-    assert embedding_instances[0].cleaned_up is True
-    assert llm_instances[0].closed is True
+    assert redis_instances == []
+    assert embedding_instances == []
+    assert llm_instances == []
     assert executor_instances[0].shutdown_calls == [False]
 
 
@@ -414,10 +405,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
 
-    resources_module.ResourceManager._instance = None
-    resources_module.ResourceManager._lock = None
-
-    manager = await resources_module.ResourceManager.initialize()
+    manager = await resources_module.RuntimeResources.create()
     assert manager.embedding.device.type == "cuda"
     await manager.shutdown()
 
@@ -511,10 +499,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
 
-    resources_module.ResourceManager._instance = None
-    resources_module.ResourceManager._lock = None
-
-    manager = await resources_module.ResourceManager.initialize()
+    manager = await resources_module.RuntimeResources.create()
     assert manager.embedding.device.type == "mps"
     await manager.shutdown()
 
@@ -589,9 +574,91 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
     monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
 
-    resources_module.ResourceManager._instance = None
-    resources_module.ResourceManager._lock = None
-
-    manager = await resources_module.ResourceManager.initialize()
+    manager = await resources_module.RuntimeResources.create()
     assert manager.embedding.device.type == "cpu"
     await manager.shutdown()
+
+
+@pytest.mark.no_network
+async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_errors():
+    calls = []
+
+    def failing_unsubscribe():
+        calls.append("unsubscribe")
+        raise RuntimeError("unsubscribe failed")
+
+    class AsyncResource:
+        def __init__(self, name, *, fail=False):
+            self.name = name
+            self.fail = fail
+            self.close_calls = 0
+
+        async def shutdown(self):
+            self.close_calls += 1
+            calls.append(self.name)
+            if self.fail:
+                raise RuntimeError(f"{self.name} failed")
+
+        async def close(self):
+            await self.shutdown()
+
+    class Executor:
+        def __init__(self):
+            self.shutdown_calls = 0
+
+        def shutdown(self, *, wait):
+            self.shutdown_calls += 1
+            calls.append("executor")
+
+    class Embedding:
+        def __init__(self):
+            self.cleanup_calls = 0
+
+        def cleanup(self):
+            self.cleanup_calls += 1
+            calls.append("embedding")
+
+    resources = resources_module.RuntimeResources()
+    background = AsyncResource("background", fail=True)
+    model_work = AsyncResource("model_work")
+    redis = AsyncResource("redis")
+    postgres = AsyncResource("postgres")
+    llm = AsyncResource("llm")
+    executor = Executor()
+    embedding = Embedding()
+    resources.config_unsubscribers = [failing_unsubscribe]
+    resources.background_work = background
+    resources.model_work = model_work
+    resources.executor = executor
+    resources.redis_manager = redis
+    resources.postgres = postgres
+    resources.embedding = embedding
+    resources.llm_service = llm
+
+    results = await asyncio.gather(
+        resources.shutdown(),
+        resources.shutdown(),
+        return_exceptions=True,
+    )
+
+    assert all(
+        isinstance(result, resources_module.RuntimeResourcesShutdownError)
+        for result in results
+    )
+    assert [failure.phase for failure in results[0].failures] == [
+        "configuration unsubscribe 1",
+        "background work",
+    ]
+    assert calls == [
+        "unsubscribe",
+        "background",
+        "model_work",
+        "executor",
+        "redis",
+        "postgres",
+        "embedding",
+        "llm",
+    ]
+    assert background.close_calls == model_work.close_calls == 1
+    assert redis.close_calls == postgres.close_calls == llm.close_calls == 1
+    assert executor.shutdown_calls == embedding.cleanup_calls == 1

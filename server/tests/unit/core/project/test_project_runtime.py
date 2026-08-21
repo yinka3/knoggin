@@ -1,17 +1,9 @@
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
-from runtime.project_factory import ProjectFactory
-from tests.fixtures.factories import make_domain_config, make_project_state
-from tests.fixtures.fakes import (
-    FakeEmbeddingService,
-    FakePipeline,
-    FakePostgresClient,
-    FakeRedis,
-    FakeScheduler,
-)
+from tests.fixtures.factories import make_project_state
+from tests.fixtures.fakes import FakeScheduler
 
 
 @pytest.mark.unit
@@ -67,43 +59,69 @@ async def test_project_runtime_shutdown_cancels_tracked_community_task():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_project_factory_owns_document_service_environment(monkeypatch):
-    captured = {}
+async def test_project_runtime_shutdown_cancels_project_work_after_scheduler_stop():
+    calls = []
 
-    class RecordingDocumentService:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            self.project_id = kwargs["project_id"]
-            self._reader = object()
-            self._writer = object()
+    class RecordingScheduler:
+        async def stop(self):
+            calls.append("scheduler")
 
-    monkeypatch.setenv("KNOGGIN_DOCUMENT_RERANK_ENABLED", "false")
-    monkeypatch.setenv("KNOGGIN_DOCUMENT_RERANK_CANDIDATES", "7")
-    monkeypatch.setattr(
-        "runtime.project_factory.DocumentService",
-        RecordingDocumentService,
+    class RecordingBackgroundWork:
+        async def cancel_project(self, project_id):
+            calls.append(f"background:{project_id}")
+
+    class RecordingDocuments:
+        async def shutdown(self):
+            calls.append("documents")
+
+    state = make_project_state(
+        scheduler=RecordingScheduler(),
+        background_work=RecordingBackgroundWork(),
     )
-    monkeypatch.setattr(
-        "runtime.project_factory.ResourceProfile.from_environment",
-        classmethod(
-            lambda cls: SimpleNamespace(workspace_prepare_concurrency=9)
-        ),
-    )
+    state.document_service = RecordingDocuments()
+    state.add_config_unsubscriber(lambda: calls.append("unsubscribe"))
 
-    runtime = ProjectFactory.create_runtime(
-        project_id="project-1",
-        domain_config=make_domain_config(),
-        entities=object(),
-        pipeline=FakePipeline(),
-        scheduler=FakeScheduler(),
-        user_name="ada",
-        redis_client=FakeRedis(),
-        readable_project_ids=["project-1"],
-        postgres_client=FakePostgresClient(),
-        embedding_service=FakeEmbeddingService(),
-    )
+    await state.shutdown()
 
-    assert runtime.document_service.__class__ is RecordingDocumentService
-    assert captured["document_rerank_enabled"] is False
-    assert captured["document_rerank_candidates"] == 7
-    assert captured["workspace_prepare_concurrency"] == 9
+    assert calls == [
+        "scheduler",
+        "background:project-1",
+        "documents",
+        "unsubscribe",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_project_runtime_shutdown_finishes_cleanup_after_a_phase_failure():
+    calls = []
+
+    class FailingScheduler:
+        async def stop(self):
+            calls.append("scheduler")
+            raise RuntimeError("scheduler failed")
+
+    class RecordingBackgroundWork:
+        async def cancel_project(self, project_id):
+            calls.append(f"background:{project_id}")
+
+    class RecordingDocuments:
+        async def shutdown(self):
+            calls.append("documents")
+
+    state = make_project_state(
+        scheduler=FailingScheduler(),
+        background_work=RecordingBackgroundWork(),
+    )
+    state.document_service = RecordingDocuments()
+    state.add_config_unsubscriber(lambda: calls.append("unsubscribe"))
+
+    with pytest.raises(RuntimeError, match="ProjectRuntime shutdown failed"):
+        await state.shutdown()
+
+    assert calls == [
+        "scheduler",
+        "background:project-1",
+        "documents",
+        "unsubscribe",
+    ]
