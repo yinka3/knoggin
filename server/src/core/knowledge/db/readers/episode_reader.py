@@ -769,6 +769,104 @@ class EpisodeReader:
             for row in selected
         ]
 
+    async def has_ready_project_episode_window(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        message_count: int,
+    ) -> bool:
+        """Return whether a project has one full unblocked episode window.
+
+        This intentionally reads no message bodies.  It mirrors the
+        project-window readiness rules while stopping after enough durable
+        evidence has been counted.
+        """
+
+        if message_count <= 0:
+            raise ValueError("message_count must be positive")
+        row = await self.client.fetch_one(
+            """
+            WITH candidate_messages AS (
+                SELECT
+                    m.message_id,
+                    m.session_id,
+                    m.role,
+                    m.timestamp_ms,
+                    m.user_msg_id,
+                    m.lifecycle_state,
+                    m.ingestion_state,
+                    m.episode_eligible,
+                    parent.ingestion_state AS parent_ingestion_state,
+                    parent.lifecycle_state AS parent_lifecycle_state,
+                    COALESCE(ec.last_evaluated_message_id, 0) AS checkpoint_message_id,
+                    ec.last_evaluated_timestamp_ms AS checkpoint_timestamp_ms
+                FROM messages m
+                JOIN sessions s
+                  ON s.session_id = m.session_id AND s.project_id = m.project_id
+                LEFT JOIN episode_processing_checkpoints ec
+                  ON ec.project_id = m.project_id AND ec.session_id = m.session_id
+                LEFT JOIN messages parent
+                  ON parent.message_id = m.user_msg_id
+                 AND parent.project_id = m.project_id
+                 AND parent.session_id = m.session_id
+                WHERE m.user_name = %s
+                  AND m.project_id = %s
+                  AND s.status <> 'deleted'
+                  AND s.episode_participation_enabled = TRUE
+                  AND m.message_id > s.episode_participation_after_message_id
+                  AND (
+                        (COALESCE(ec.last_evaluated_message_id, 0) = 0
+                         AND ec.last_evaluated_timestamp_ms IS NULL)
+                     OR (
+                        ec.last_evaluated_timestamp_ms IS NOT NULL AND (
+                            m.timestamp_ms > ec.last_evaluated_timestamp_ms
+                            OR (m.timestamp_ms = ec.last_evaluated_timestamp_ms
+                                AND m.message_id > ec.last_evaluated_message_id)
+                            OR m.timestamp_ms IS NULL
+                        )
+                     )
+                     OR (ec.last_evaluated_timestamp_ms IS NULL
+                         AND COALESCE(ec.last_evaluated_message_id, 0) > 0
+                         AND m.timestamp_ms IS NULL
+                         AND m.message_id > ec.last_evaluated_message_id)
+                  )
+            ),
+            readiness AS (
+                SELECT
+                    *,
+                    (
+                        (role = 'user'
+                         AND lifecycle_state = 'sealed'
+                         AND ingestion_state = 'processed'
+                         AND episode_eligible)
+                        OR (role = 'assistant'
+                            AND parent_lifecycle_state = 'sealed'
+                            AND parent_ingestion_state = 'processed')
+                    ) AS is_ready
+                FROM candidate_messages
+            ),
+            ordered_streams AS (
+                SELECT
+                    *,
+                    SUM(CASE WHEN is_ready THEN 0 ELSE 1 END) OVER (
+                        PARTITION BY session_id
+                        ORDER BY timestamp_ms ASC NULLS LAST, message_id
+                    ) AS blocked_count
+                FROM readiness
+            )
+            SELECT count(*) AS ready_count
+            FROM (
+                SELECT 1
+                FROM ordered_streams
+                WHERE is_ready AND blocked_count = 0
+                LIMIT %s
+            ) AS bounded_ready
+            """,
+            (user_name, project_id, message_count),
+        )
+        return int(row["ready_count"] if row else 0) >= message_count
+
     async def get_project_episode(
         self, episode_id: str, *, user_name: str, project_id: str
     ) -> Episode | None:

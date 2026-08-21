@@ -80,11 +80,11 @@ class EpisodeJob(BaseJob):
         if not self._policy.enabled or self.llm is None or self.embedding_service is None:
             return False
         await self._refresh_project_window_size()
-        window = await self.knowledge_store.get_next_project_episode_window(
-            user_name=ctx.user_name, project_id=ctx.project_id,
+        return await self.knowledge_store.has_ready_project_episode_window(
+            user_name=ctx.user_name,
+            project_id=ctx.project_id,
             message_count=self._policy.target_message_count,
         )
-        return bool(window)
 
     async def load_build(self, *, user_name: str, project_id: str) -> ProjectEpisodeBuild | None:
         messages = await self.knowledge_store.get_next_project_episode_window(

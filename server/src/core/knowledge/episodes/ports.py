@@ -13,6 +13,10 @@ ResponseT = TypeVar("ResponseT")
 class EpisodeStore(Protocol):
     """Project-scoped durable operations required by EpisodeJob."""
 
+    async def has_ready_project_episode_window(
+        self, *, user_name: str, project_id: str, message_count: int
+    ) -> bool: ...
+
     async def get_next_project_episode_window(
         self, *, user_name: str, project_id: str, message_count: int
     ) -> list[dict[str, Any]]: ...

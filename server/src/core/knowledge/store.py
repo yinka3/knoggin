@@ -497,6 +497,15 @@ class KnowledgeStore:
             user_name=user_name, project_id=project_id, message_count=message_count
         )
 
+    async def has_ready_project_episode_window(
+        self, *, user_name: str, project_id: str, message_count: int
+    ) -> bool:
+        return await self._episode_reader.has_ready_project_episode_window(
+            user_name=user_name,
+            project_id=project_id,
+            message_count=message_count,
+        )
+
     async def get_project_episode(
         self, episode_id: str, *, user_name: str, project_id: str
     ) -> Optional[Episode]:

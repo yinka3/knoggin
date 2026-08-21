@@ -127,6 +127,11 @@ async def test_project_episode_window_advances_each_source_session_cursor(
         ("session-project-b", 203),
         ("session-project-b", 204),
     ]
+    assert await reader.has_ready_project_episode_window(
+        user_name="ada",
+        project_id="project-1",
+        message_count=4,
+    )
     assert await writer.write_project_episode_window(
         [],
         window,
@@ -148,4 +153,9 @@ async def test_project_episode_window_advances_each_source_session_cursor(
     ) == EpisodeCheckpoint(
         last_evaluated_message_id=204,
         last_evaluated_timestamp_ms=2001,
+    )
+    assert not await reader.has_ready_project_episode_window(
+        user_name="ada",
+        project_id="project-1",
+        message_count=1,
     )
