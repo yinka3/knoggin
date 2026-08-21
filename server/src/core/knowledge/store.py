@@ -40,13 +40,14 @@ from core.knowledge.db.readers.conflict_reader import ConflictReader
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.graph_reader import GraphReader
+from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
+from core.knowledge.db.readers.message_reader import MessageReader
 from core.knowledge.db.readers.relationship_observation_reader import (
     RelationshipObservationReader,
 )
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.search_index_rebuilder import SearchIndexer
-from core.knowledge.db.tool_queries import ToolQueries
 from core.knowledge.db.writers.candidate_suggestion_writer import (
     CandidateSuggestionWriter,
 )
@@ -141,12 +142,13 @@ class KnowledgeStore:
         self._entity_reader = EntityReader(self._postgres_client)
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
+        self._message_reader = MessageReader(self._postgres_client)
+        self._knowledge_query_reader = KnowledgeQueryReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._relationship_observation_reader = RelationshipObservationReader(
             self._postgres_client
         )
-        self._tools = ToolQueries(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._search_index_rebuilder = SearchIndexer(
             self._postgres_client,
@@ -1358,7 +1360,7 @@ class KnowledgeStore:
         visible_project_ids: List[str],
         msg_limit: int = 5,
     ) -> Dict:
-        return await self._tools.get_hot_topic_context_with_messages(
+        return await self._knowledge_query_reader.get_hot_topic_context_with_messages(
             hot_topic_names,
             visible_project_ids=visible_project_ids,
             msg_limit=msg_limit,
@@ -1373,7 +1375,7 @@ class KnowledgeStore:
         visible_project_ids: List[str],
         limit: int = 50,
     ) -> List[Tuple[int, float, str]]:
-        return await self._tools.search_messages_fts(
+        return await self._message_reader.search_fts(
             query,
             user_name=user_name,
             session_ids=session_ids,
@@ -1391,7 +1393,7 @@ class KnowledgeStore:
         connections_limit: int = 5,
         evidence_limit: int = 5,
     ) -> List[Dict]:
-        return await self._tools.search_entity(
+        return await self._entity_reader.search_by_name(
             query,
             visible_project_ids=visible_project_ids,
             active_topics=active_topics,
@@ -1408,7 +1410,7 @@ class KnowledgeStore:
         active_topics: List[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
-        return await self._tools.get_related_entities(
+        return await self._entity_reader.get_related_entities_by_name(
             entity_names,
             visible_project_ids=visible_project_ids,
             active_topics=active_topics,
@@ -1423,7 +1425,7 @@ class KnowledgeStore:
         active_topics: List[str] = None,
         hours: int = 24,
     ) -> List[Dict]:
-        return await self._tools.get_recent_activity(
+        return await self._knowledge_query_reader.get_recent_activity(
             entity_name,
             visible_project_ids=visible_project_ids,
             active_topics=active_topics,
@@ -1439,7 +1441,7 @@ class KnowledgeStore:
         active_topics: List[str] = None,
         max_depth: int = 4,
     ) -> Tuple[List[Dict], bool]:
-        return await self._tools.find_path_filtered(
+        return await self._graph_reader.find_path_filtered(
             start_name,
             end_name,
             visible_project_ids=visible_project_ids,

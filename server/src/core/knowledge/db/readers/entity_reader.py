@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import timedelta
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -489,6 +490,100 @@ class EntityReader:
         except Exception as e:
             self._raise_storage_read("get_entities_by_names", e)
 
+    async def search_by_name(
+        self,
+        query: str,
+        *,
+        visible_project_ids: List[str],
+        active_topics: Optional[List[str]] = None,
+        limit: int = 5,
+        connections_limit: int = 5,
+        evidence_limit: int = 5,
+    ) -> List[Dict]:
+        """Search entities and hydrate their observed graph connections."""
+
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "search_by_name",
+        )
+        limit = self._validate_query_limit(limit, "search_by_name")
+        clean_query = re.sub(r"[^\w\s.\-']", "", query).strip()
+        if not clean_query:
+            return []
+
+        entity_query = """
+        SELECT
+            entity.entity_id AS id,
+            entity.canonical_name,
+            entity.type,
+            entity.topic,
+            entity.last_mentioned_ms AS last_mentioned,
+            COALESCE(
+                array_agg(DISTINCT alias.alias) FILTER (WHERE alias.alias IS NOT NULL),
+                '{}'::text[]
+            ) AS aliases
+        FROM entities entity
+        LEFT JOIN entity_aliases alias ON alias.entity_id = entity.entity_id
+        WHERE (
+            entity.canonical_name ILIKE %s
+            OR EXISTS (
+                SELECT 1
+                FROM entity_aliases entity_alias
+                WHERE entity_alias.entity_id = entity.entity_id
+                  AND entity_alias.alias ILIKE %s
+            )
+        )
+          AND (entity.project_id = ANY(%s) OR entity.entity_id = %s)
+        """
+        params: tuple = (
+            f"%{clean_query}%",
+            f"%{clean_query}%",
+            visible_project_ids,
+            IDENTITY_ENTITY_ID,
+        )
+        if active_topics:
+            entity_query += " AND entity.topic = ANY(%s)"
+            params = (*params, active_topics)
+        entity_query += """
+        GROUP BY entity.entity_id
+        ORDER BY entity.last_mentioned_ms DESC NULLS LAST
+        LIMIT %s
+        """
+        params = (*params, limit)
+
+        try:
+            entity_rows = await self.client.fetch_all(entity_query, params)
+            results: list[Dict] = []
+            for row in entity_rows:
+                entity_id = int(row["id"])
+                connections = await self.get_entity_relationships(
+                    entity_id,
+                    visible_project_ids=visible_project_ids,
+                )
+                results.append(
+                    {
+                        "id": entity_id,
+                        "canonical_name": row["canonical_name"],
+                        "aliases": row["aliases"] or [],
+                        "type": row["type"],
+                        "topic": row["topic"],
+                        "last_mentioned": row["last_mentioned"],
+                        "top_connections": [
+                            {
+                                "canonical_name": connection["neighbor_name"],
+                                "aliases": [],
+                                "weight": connection["evidence_count"],
+                                "evidence_refs": connection["message_refs"][:evidence_limit],
+                                "context": connection["context"],
+                            }
+                            for connection in connections[:connections_limit]
+                        ],
+                    }
+                )
+            return results
+        except Exception as exc:
+            self._raise_storage_read("search_by_name", exc)
+
     async def search_similar_entities(
         self,
         entity_id: int,
@@ -791,6 +886,128 @@ class EntityReader:
             ]
         except Exception as e:
             self._raise_storage_read("get_top_connected_entities", e)
+
+    async def get_related_entities_by_name(
+        self,
+        entity_names: List[str],
+        *,
+        visible_project_ids: List[str],
+        active_topics: Optional[List[str]] = None,
+        limit: int = 25,
+    ) -> List[Dict]:
+        """Return relationship identities and their canonical observations."""
+
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_related_entities_by_name",
+        )
+        limit = self._validate_query_limit(limit, "get_related_entities_by_name")
+        if not entity_names:
+            return []
+
+        query = """
+        SELECT
+            source.canonical_name AS source,
+            target.canonical_name AS target,
+            relationship.relationship_id,
+            relationship.relationship_type,
+            relationship."symmetric",
+            COUNT(observation.observation_id)::INTEGER AS observation_count,
+            COUNT(DISTINCT observation.message_id)::INTEGER AS evidence_message_count,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'user_name', observation.user_name,
+                        'session_id', observation.session_id,
+                        'message_id', observation.message_id
+                    )
+                    ORDER BY observation.observed_at_ms DESC,
+                             observation.observation_id DESC
+                ) FILTER (WHERE observation.observation_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS evidence_refs,
+            COALESCE(
+                jsonb_agg(
+                    jsonb_build_object(
+                        'observation_id', observation.observation_id,
+                        'observed_relationship_label', observation.observed_relationship_label,
+                        'canonical_relationship_type', observation.canonical_relationship_type,
+                        'observed_at_ms', observation.observed_at_ms,
+                        'confidence', observation.confidence,
+                        'context', left(COALESCE(observation.context, ''), 600)
+                    )
+                    ORDER BY observation.observed_at_ms DESC,
+                             observation.observation_id DESC
+                ) FILTER (WHERE observation.observation_id IS NOT NULL),
+                '[]'::jsonb
+            ) AS observation_refs,
+            MIN(observation.observed_at_ms) AS first_observed,
+            MAX(observation.observed_at_ms) AS last_observed
+        FROM entities source
+        JOIN relationships relationship
+          ON relationship.entity_a_id = source.entity_id
+          OR relationship.entity_b_id = source.entity_id
+        JOIN entities target
+          ON target.entity_id = CASE
+              WHEN relationship.entity_a_id = source.entity_id
+              THEN relationship.entity_b_id
+              ELSE relationship.entity_a_id
+          END
+        LEFT JOIN relationship_observations observation
+          ON observation.relationship_id = relationship.relationship_id
+         AND observation.project_id = relationship.project_id
+        WHERE source.canonical_name = ANY(%s)
+          AND (source.project_id = ANY(%s) OR source.entity_id = %s)
+          AND (target.project_id = ANY(%s) OR target.entity_id = %s)
+          AND relationship.project_id = ANY(%s)
+        """
+        params: tuple = (
+            entity_names,
+            visible_project_ids,
+            IDENTITY_ENTITY_ID,
+            visible_project_ids,
+            IDENTITY_ENTITY_ID,
+            visible_project_ids,
+        )
+        if active_topics is not None:
+            query += " AND target.topic = ANY(%s)"
+            params = (*params, active_topics)
+        query += """
+        GROUP BY
+            source.canonical_name,
+            target.canonical_name,
+            relationship.relationship_id,
+            relationship.relationship_type,
+            relationship."symmetric"
+        ORDER BY observation_count DESC, last_observed DESC
+        LIMIT %s
+        """
+        params = (*params, limit)
+
+        try:
+            rows = await self.client.fetch_all(query, params)
+            return [
+                {
+                    "source": row["source"],
+                    "target": row["target"],
+                    "relationship_id": row["relationship_id"],
+                    "relationship_type": row["relationship_type"],
+                    "symmetric": bool(row["symmetric"]),
+                    "relationship_semantics": "observed_evidence",
+                    "connection_strength": float(row["observation_count"] or 0),
+                    "evidence_refs": row["evidence_refs"] or [],
+                    "observation_refs": row["observation_refs"] or [],
+                    "evidence_message_count": int(
+                        row["evidence_message_count"] or 0
+                    ),
+                    "observation_count": int(row["observation_count"] or 0),
+                    "first_observed": row["first_observed"],
+                    "last_observed": row["last_observed"],
+                }
+                for row in rows
+            ]
+        except Exception as exc:
+            self._raise_storage_read("get_related_entities_by_name", exc)
 
     async def get_entity_relationships(
         self,

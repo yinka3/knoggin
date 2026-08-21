@@ -2,7 +2,7 @@ import pytest
 
 from common.exceptions import StorageReadError, StorageWriteError
 from core.knowledge.db.readers.graph_reader import GraphReader
-from core.knowledge.db.tool_queries import ToolQueries
+from core.knowledge.db.readers.message_reader import MessageReader
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -41,13 +41,13 @@ async def test_graph_read_keeps_a_missing_message_as_normal_absence():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_tool_query_failure_is_not_reported_as_empty_search():
-    queries = ToolQueries(
+async def test_message_search_failure_is_not_reported_as_empty_search():
+    reader = MessageReader(
         RecordingPostgresClient(fetch_all_exceptions=[RuntimeError("database down")])
     )
 
     with pytest.raises(StorageReadError) as error:
-        await queries.search_messages_fts(
+        await reader.search_fts(
             "release plan",
             user_name="ada",
             session_ids=["session-1"],
@@ -55,7 +55,7 @@ async def test_tool_query_failure_is_not_reported_as_empty_search():
         )
 
     assert error.value.code == "storage_read_error"
-    assert error.value.details["operation"] == "search_messages_fts"
+    assert error.value.details["operation"] == "search_fts"
 
 
 @pytest.mark.storage
