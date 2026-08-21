@@ -139,8 +139,8 @@ class RedisKeys:
 
     Ownership rule: Redis keys are cache/coordination only. Durable projects,
     sessions, agents, topic configuration, documents, messages, and merge
-    history are Postgres-owned. Legacy helpers remain only so cleanup and old
-    tests can name those key families; they are not authoritative write paths.
+    history are Postgres-owned. These helpers name transient coordination and
+    cache key families only; they are not authoritative write paths.
     """
 
     REBUILDABLE_FROM_POSTGRES = frozenset(
@@ -165,12 +165,6 @@ class RedisKeys:
             "merge_intents_index",
             "maintenance_attempts",
             "maintenance_cooldown",
-            "dlq",
-            "dlq_processing",
-            "dlq_state",
-            "dlq_claims",
-            "dlq_parked",
-            "dlq_completed",
             "community_discussion_active",
             "dirty_entities",
         }
@@ -197,29 +191,6 @@ class RedisKeys:
         return f"merge_proposals:{user}:{project_id}"
 
     @staticmethod
-    def dlq(user: str, project_id: str) -> str:
-        return f"dlq:{user}:{project_id}"
-
-    @staticmethod
-    def dlq_processing(user: str, project_id: str) -> str:
-        return f"dlq:processing:{user}:{project_id}"
-
-    @staticmethod
-    def dlq_state(user: str, project_id: str) -> str:
-        return f"dlq:state:{user}:{project_id}"
-
-    @staticmethod
-    def dlq_claims(user: str, project_id: str) -> str:
-        return f"dlq:claims:{user}:{project_id}"
-
-    @staticmethod
-    def dlq_parked(user: str, project_id: str) -> str:
-        return f"dlq:parked:{user}:{project_id}"
-
-    @staticmethod
-    def dlq_completed(user: str, project_id: str) -> str:
-        return f"dlq:completed:{user}:{project_id}"
-
     @staticmethod
     def project_last_processed(user: str, project_id: str) -> str:
         return f"project_last_processed_msg:{user}:{project_id}"
@@ -247,12 +218,6 @@ class RedisKeys:
             RedisKeys.merge_queue(user, project_id),
             RedisKeys.merge_proposals(user, project_id),
             RedisKeys.merge_intents_index(user, project_id),
-            RedisKeys.dlq(user, project_id),
-            RedisKeys.dlq_processing(user, project_id),
-            RedisKeys.dlq_state(user, project_id),
-            RedisKeys.dlq_claims(user, project_id),
-            RedisKeys.dlq_parked(user, project_id),
-            RedisKeys.dlq_completed(user, project_id),
             RedisKeys.project_last_processed(user, project_id),
             RedisKeys.project_heartbeat_counter(user, project_id),
             RedisKeys.dirty_entities(user, project_id),
@@ -308,9 +273,6 @@ class RedisKeys:
         return f"checkpoint_count:{user}:{session}"
 
     @staticmethod
-    def checkpoint_commit(user: str, session: str, batch_id: str) -> str:
-        return f"checkpoint_commit:{user}:{session}:{batch_id}"
-
     @staticmethod
     def message_content(user: str, session: str) -> str:
         return f"message_content:{user}:{session}"

@@ -40,8 +40,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "get_ingestion_health",
             "description": (
-                "Read bounded ingestion worker, pending-buffer, checkpoint, "
-                "and dead-letter queue health for the current session. This "
+                "Read bounded ingestion worker and canonical queue health for "
+                "the current session. This "
                 "is a read-only diagnostic and does not wake, flush, stop, "
                 "or retry ingestion work."
             ),

@@ -346,7 +346,7 @@ async def test_replay_does_not_resurrect_existing_entity_deleted_between_attempt
     with pytest.raises(RuntimeError, match="main graph transaction unavailable"):
         await write_graph_db._execute_graph_write_buffers(**buffers)
 
-    # A cleanup worker can delete the entity before the DLQ retry runs.  The
+    # A cleanup worker can delete the entity before a later graph write. The
     # replay must fail closed instead of turning the stale update into a new
     # entity.
     await real_postgres_client.execute("DELETE FROM entities WHERE entity_id = 301")

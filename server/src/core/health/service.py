@@ -215,10 +215,10 @@ class RuntimeHealthService:
         project_id: str,
         session_id: str,
     ) -> HealthSnapshot:
-        """Return bounded worker, queue, checkpoint, and DLQ health.
+        """Return bounded worker and canonical ingestion-queue health.
 
         This method only reads a fixed set of Redis keys.  It never drains a
-        queue, claims DLQ work, wakes a worker, or returns message identifiers
+        queue, claims work, wakes a worker, or returns message identifiers
         or payloads.
         """
 
@@ -239,12 +239,6 @@ class RuntimeHealthService:
         worker_state = worker_snapshot.get("state")
         redis_available = redis_details.get("redis_available") is True
         pending_count = self._nonnegative_int(redis_details.get("pending_count"))
-        dlq = redis_details.get("dlq", {})
-        dlq_count = sum(
-            self._nonnegative_int(dlq.get(name))
-            for name in ("queued", "processing", "parked")
-            if isinstance(dlq, Mapping)
-        )
         consecutive_failures = self._nonnegative_int(
             worker_snapshot.get("consecutive_failures")
         )
@@ -283,8 +277,6 @@ class RuntimeHealthService:
             warnings.append("pending ingestion work is stalled")
         elif delay_state == "delayed":
             warnings.append("pending ingestion work is delayed")
-        if dlq_count:
-            warnings.append("ingestion work is present in the dead-letter queue")
         if consecutive_failures:
             warnings.append("ingestion worker has consecutive failures")
         if worker_state in {"not_started", "stopped"}:
@@ -299,7 +291,6 @@ class RuntimeHealthService:
             not redis_available
             or worker_state != "running"
             or delay_state in {"delayed", "stalled"}
-            or dlq_count
             or consecutive_failures
         ):
             status = HealthStatus.DEGRADED
@@ -319,9 +310,7 @@ class RuntimeHealthService:
         else:
             activity = HealthActivity.IDLE
 
-        if dlq_count:
-            message_state = "failed"
-        elif pending_count:
+        if pending_count:
             message_state = "pending"
         elif redis_details.get("last_processed_available"):
             message_state = "processed"
@@ -357,7 +346,6 @@ class RuntimeHealthService:
                     ),
                     "message_state": message_state,
                 },
-                "dlq": dlq,
                 "redis_available": redis_available,
             },
             warnings=warnings,
@@ -554,11 +542,6 @@ class RuntimeHealthService:
                     is not None,
                     "checkpoint_available": False,
                     "checkpoint_count": None,
-                    "dlq": {
-                        "queued": 0,
-                        "processing": self._nonnegative_int(queue.get("claimed_count")),
-                        "parked": self._nonnegative_int(queue.get("blocked_count")),
-                    },
                 }
             return {
                 "redis_available": False,
@@ -570,7 +553,6 @@ class RuntimeHealthService:
                 "project_last_processed_available": False,
                 "checkpoint_available": False,
                 "checkpoint_count": None,
-                "dlq": {"queued": 0, "processing": 0, "parked": 0},
             }
         redis = getattr(self.resources, "redis", None)
         if redis is None:
@@ -590,7 +572,6 @@ class RuntimeHealthService:
                 "project_last_processed_available": False,
                 "checkpoint_available": False,
                 "checkpoint_count": None,
-                "dlq": {"queued": 0, "processing": 0, "parked": 0},
             }
 
         buffer_key = RedisKeys.buffer(user_name, session_id)
@@ -605,13 +586,6 @@ class RuntimeHealthService:
             ),
             "checkpoint": lambda: redis.get(
                 RedisKeys.checkpoint(user_name, session_id)
-            ),
-            "dlq_queued": lambda: redis.llen(RedisKeys.dlq(user_name, project_id)),
-            "dlq_processing": lambda: redis.llen(
-                RedisKeys.dlq_processing(user_name, project_id)
-            ),
-            "dlq_parked": lambda: redis.llen(
-                RedisKeys.dlq_parked(user_name, project_id)
             ),
         }
         results = await asyncio.gather(
@@ -647,11 +621,6 @@ class RuntimeHealthService:
             ),
             "checkpoint_available": checkpoint_count is not None,
             "checkpoint_count": checkpoint_count,
-            "dlq": {
-                "queued": self._nonnegative_int(values["dlq_queued"][0]),
-                "processing": self._nonnegative_int(values["dlq_processing"][0]),
-                "parked": self._nonnegative_int(values["dlq_parked"][0]),
-            },
         }
 
     async def _bounded_read(

@@ -13,24 +13,24 @@ async def test_open_reopens_a_stable_subject_review_and_resolve_only_changes_sta
     first_id = await writer.open(
         user_name="ada",
         project_id="project-1",
-        kind="parked_dlq",
-        subject_type="parked_dlq_item",
-        subject_id="dlq-1",
-        title="Parked ingestion work: graph_write",
+        kind="relationship_advisory",
+        subject_type="relationship_advisory",
+        subject_id="advisory-1",
+        title="Relationship advisory",
     )
     second_id = await writer.open(
         user_name="ada",
         project_id="project-1",
-        kind="parked_dlq",
-        subject_type="parked_dlq_item",
-        subject_id="dlq-1",
-        title="Parked ingestion work: graph_write",
+        kind="relationship_advisory",
+        subject_type="relationship_advisory",
+        subject_id="advisory-1",
+        title="Relationship advisory",
     )
     await writer.resolve(
         user_name="ada",
         project_id="project-1",
-        kind="parked_dlq",
-        subject_id="dlq-1",
+        kind="relationship_advisory",
+        subject_id="advisory-1",
     )
 
     assert first_id == second_id

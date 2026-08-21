@@ -127,13 +127,6 @@ class EpisodeSettings(ConfigModel):
     retrieval_episode_limit: int = Field(5, ge=1)
 
 
-class DLQSettings(ConfigModel):
-    interval_seconds: int = Field(60, ge=10)
-    batch_size: int = Field(50, ge=1)
-    max_attempts: int = Field(2, ge=1)
-    completed_state_retention_hours: float = Field(24.0, ge=0.25)
-
-
 class MergeRollbackSettings(ConfigModel):
     enabled: bool = Field(True)
     retention_hours: float = Field(5.0, ge=0.5)
@@ -160,7 +153,6 @@ class ConflictDiscoverySettings(ConfigModel):
 class JobSettings(ConfigModel):
     cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
-    dlq: DLQSettings = Field(default_factory=DLQSettings)
     merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
     audit_retention: AuditRetentionSettings = Field(
         default_factory=AuditRetentionSettings

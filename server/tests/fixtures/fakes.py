@@ -451,7 +451,6 @@ class FakeKnowledgeStore:
         self.next_entity_id = 2
         self.next_message_id = 1
         self.embedding_rebuild_calls = []
-        self.parked_dlq_items = {}
         self.reset_claimed_ingestion_calls = []
 
     async def allocate_entity_id(self):
@@ -513,39 +512,6 @@ class FakeKnowledgeStore:
     async def save_candidate_suggestions(self, scope, suggestions):
         self.saved_candidate_suggestions.append((scope, list(suggestions)))
         return len(suggestions)
-
-    async def park_dlq_item(self, *, dlq_id, user_name, project_id, entry):
-        self.parked_dlq_items[(user_name, project_id, dlq_id)] = {
-            **dict(entry),
-            "dlq_id": dlq_id,
-            "user_name": user_name,
-            "project_id": project_id,
-            "status": "parked",
-        }
-
-    async def get_parked_dlq_item(self, *, dlq_id, user_name, project_id):
-        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
-        if entry is None or entry["status"] != "parked":
-            return None
-        return dict(entry)
-
-    async def mark_parked_dlq_item_requeued(
-        self, *, dlq_id, user_name, project_id
-    ):
-        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
-        if entry is None or entry["status"] != "parked":
-            return False
-        entry["status"] = "requeued"
-        return True
-
-    async def mark_parked_dlq_item_completed_if_requeued(
-        self, *, dlq_id, user_name, project_id
-    ):
-        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
-        if entry is None or entry["status"] != "requeued":
-            return False
-        entry["status"] = "completed"
-        return True
 
     async def get_recent_project_messages(
         self, user_name, project_id, limit, before_message_id=None

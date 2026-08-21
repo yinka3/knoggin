@@ -490,29 +490,6 @@ ON public.relationship_advisory_decisions(
     user_name, project_id, pattern_key, created_at
 );
 
--- Redis remains the operational DLQ queue. Once an item is parked for human
--- inspection, this row is the durable subject that a review inbox can link to.
-CREATE TABLE IF NOT EXISTS public.parked_dlq_items (
-    dlq_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    session_id TEXT,
-    stage TEXT NOT NULL,
-    attempt INTEGER NOT NULL CHECK (attempt >= 0),
-    error_message TEXT,
-    payload JSONB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'parked'
-        CHECK (status IN ('parked', 'requeued', 'completed')),
-    parked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    requeued_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS parked_dlq_items_inbox_idx
-ON public.parked_dlq_items(user_name, project_id, status, parked_at DESC);
-
 -- A unified inbox points to workflow-owned subjects. It deliberately has no
 -- resolution payload: the subject workflow owns its state and mutations.
 CREATE TABLE IF NOT EXISTS public.human_reviews (

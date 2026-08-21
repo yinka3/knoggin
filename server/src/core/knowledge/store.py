@@ -64,7 +64,6 @@ from core.knowledge.db.writers.message_lifecycle_writer import (
     MessageLifecycleWriter,
 )
 from core.knowledge.db.writers.message_writer import MessageWriter
-from core.knowledge.db.writers.parked_dlq_writer import ParkedDLQWriter
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
 )
@@ -121,10 +120,6 @@ class KnowledgeStore:
         self._conflict_service = ConflictService(self._conflict_writer)
         self._conflict_discovery_reader = ConflictDiscoveryReader(self._postgres_client)
         self._conflict_reader = ConflictReader(self._postgres_client)
-        self._parked_dlq_writer = ParkedDLQWriter(
-            self._postgres_client,
-            reviews=self._human_review_writer,
-        )
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._retention_writer = RetentionWriter(self._postgres_client)
         self._relationship_advisory_writer = RelationshipAdvisoryWriter(
@@ -988,57 +983,6 @@ class KnowledgeStore:
                 advisory=advisory,
             )
         return advisories
-
-    async def park_dlq_item(
-        self,
-        *,
-        dlq_id: str,
-        user_name: str,
-        project_id: str,
-        entry: Dict,
-    ) -> None:
-        """Persist a human-actionable DLQ item before Redis parks it."""
-
-        await self._parked_dlq_writer.park(
-            dlq_id=dlq_id,
-            user_name=user_name,
-            project_id=project_id,
-            entry=entry,
-        )
-
-    async def get_parked_dlq_item(
-        self, *, dlq_id: str, user_name: str, project_id: str
-    ) -> Optional[Dict]:
-        return await self._parked_dlq_writer.get_parked(
-            dlq_id=dlq_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def mark_parked_dlq_item_requeued(
-        self, *, dlq_id: str, user_name: str, project_id: str
-    ) -> bool:
-        return await self._parked_dlq_writer.mark_requeued(
-            dlq_id=dlq_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def get_requeued_dlq_items(
-        self, *, user_name: str, project_id: str
-    ) -> list[Dict]:
-        return await self._parked_dlq_writer.list_requeued(
-            user_name=user_name, project_id=project_id
-        )
-
-    async def mark_parked_dlq_item_completed_if_requeued(
-        self, *, dlq_id: str, user_name: str, project_id: str
-    ) -> bool:
-        return await self._parked_dlq_writer.mark_completed_if_requeued(
-            dlq_id=dlq_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
 
     async def get_open_human_reviews(
         self, *, user_name: str, project_id: str

@@ -18,7 +18,6 @@ from common.schema.episode.generation import (
 from common.schema.ingestion.contracts import EpisodeEligibility
 from common.schema.primitives import Message
 from common.schema.settings import (
-    DLQSettings,
     EpisodeSettings,
     IngestionSettings,
     RedisConnectionSettings,
@@ -29,19 +28,15 @@ from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.recovery.dlq_state import DLQ_STATUS_COMPLETED
-from core.ingestion.recovery.replay_job import DLQReplayJob
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.store import KnowledgeStore
-from runtime.session_runtime import SessionRuntime as Session
-from infrastructure.job.base import JobContext
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from infrastructure.work_record import WorkRecord
+from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
 from tests.fixtures.ingestion import ingestion_policy
 
@@ -54,7 +49,9 @@ class _DeterministicEpisodeLLM:
                 LLMEpisodeDecision(
                     action="create",
                     summary="The accepted message is now durable episodic memory.",
-                    new_developments=["The complete server path is grounded in its source."],
+                    new_developments=[
+                        "The complete server path is grounded in its source."
+                    ],
                     message_influences=[
                         {
                             "message_id": "m1",
@@ -164,9 +161,6 @@ class _NoEntityProcessor:
         batch.set_relationship_observations([])
         batch.complete()
 
-    async def move_to_dead_letter(self, *args, **kwargs):
-        raise AssertionError("the deterministic success path must not use the DLQ")
-
 
 class _SignalCounter:
     def __init__(self):
@@ -174,45 +168,6 @@ class _SignalCounter:
 
     def signal(self):
         self.calls += 1
-
-
-class _CheckpointDlqProcessor(_NoEntityProcessor):
-    """Use the production DLQ serializer with the deterministic processor."""
-
-    def __init__(self, project_id, user_name, store, redis):
-        super().__init__(project_id, user_name)
-        self._dlq_pipeline = IngestionPipeline(
-            project_id=project_id,
-            redis_client=redis,
-            llm=None,
-            entities=None,
-            processor=None,
-            cpu_executor=None,
-            user_name=user_name,
-            compiled_domain=make_domain_config().compile(),
-            get_next_ent_id=None,
-            knowledge_store=store,
-        )
-
-    async def move_to_dead_letter(self, *args, **kwargs):
-        return await self._dlq_pipeline.move_to_dead_letter(*args, **kwargs)
-
-
-class _FailOnceEvalRedis:
-    """Delegate to real Redis while dropping one checkpoint execution."""
-
-    def __init__(self, client):
-        self.client = client
-        self.fail_eval = True
-
-    def __getattr__(self, name):
-        return getattr(self.client, name)
-
-    async def eval(self, *args, **kwargs):
-        if self.fail_eval:
-            self.fail_eval = False
-            raise ConnectionError("ConnectionError: simulated checkpoint outage")
-        return await self.client.eval(*args, **kwargs)
 
 
 @pytest.fixture
@@ -340,10 +295,14 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
     monkeypatch.setattr(
         Session,
         "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            ),
+        ),
     )
     context = _session(
         resources,
@@ -391,7 +350,10 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         accepted = accepted_messages[-1]
         await worker.flush()
 
-        assert await redis.llen(RedisKeys.buffer(scope["user_name"], scope["session_id"])) == 0
+        assert (
+            await redis.llen(RedisKeys.buffer(scope["user_name"], scope["session_id"]))
+            == 0
+        )
         assert await redis.get(
             RedisKeys.last_processed(scope["user_name"], scope["session_id"])
         ) == str(accepted.id)
@@ -534,10 +496,14 @@ async def test_real_concurrent_sessions_accept_one_message_once(
     monkeypatch.setattr(
         Session,
         "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            ),
+        ),
     )
     contexts = [
         _session(
@@ -566,9 +532,12 @@ async def test_real_concurrent_sessions_accept_one_message_once(
         (scope["session_id"],),
     )
     assert rows == [{"message_id": results[0].id, "content": "same accepted turn"}]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
+    assert (
+        await scope["redis"].get(
+            RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
+        )
+        == "1"
+    )
 
 
 @pytest.mark.integration
@@ -593,10 +562,14 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
     monkeypatch.setattr(
         Session,
         "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            ),
+        ),
     )
     context = _session(
         resources,
@@ -640,103 +613,5 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
         assert await scope["redis"].get(
             RedisKeys.last_processed(scope["user_name"], scope["session_id"])
         ) == str(accepted.id)
-    finally:
-        await worker.stop()
-
-
-@pytest.mark.integration
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
-@pytest.mark.no_network
-async def test_real_worker_checkpoint_failure_replays_through_dlq(
-    real_server_scope,
-    monkeypatch,
-):
-    """A checkpoint outage becomes a real DLQ item and replays once."""
-
-    scope = real_server_scope
-    real_store = KnowledgeStore(scope["postgres"], _DeterministicEmbeddingService())
-    redis_proxy = _FailOnceEvalRedis(scope["redis"])
-    resources = SimpleNamespace(
-        postgres=scope["postgres"],
-        redis=scope["redis"],
-        knowledge_store=real_store,
-        embedding=_DeterministicEmbeddingService(),
-    )
-    monkeypatch.setattr(
-        Session,
-        "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
-    )
-    context = _session(
-        resources,
-        user_name=scope["user_name"],
-        project_id=scope["project_id"],
-        session_id=scope["session_id"],
-    )
-    processor = _CheckpointDlqProcessor(
-        scope["project_id"], scope["user_name"], real_store, redis_proxy
-    )
-    worker = IngestionWorker(
-        user_name=scope["user_name"],
-        session_id=scope["session_id"],
-        knowledge_store=real_store,
-        processor=processor,
-        redis=redis_proxy,
-        get_session_context=context.get_conversation_context,
-        write_to_graph=_prepared_graph_callback(real_store),
-        settings=IngestionSettings(
-            batch_size=1,
-            batch_debounce_seconds=0,
-            batch_timeout=10,
-            ingestion_batch_settle_delay_seconds=0,
-            checkpoint_interval=1,
-        ),
-    )
-    context.consumer = worker
-    worker.start()
-
-    try:
-        accepted = await context.add(
-            Message(
-                content="Retry this checkpoint boundary.",
-                timestamp=datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc),
-            )
-        )
-        await asyncio.sleep(1.05)
-        await worker.flush()
-
-        dlq_key = RedisKeys.dlq(scope["user_name"], scope["project_id"])
-        queued = await scope["redis"].lrange(dlq_key, 0, -1)
-        assert len(queued) == 1
-        assert json.loads(queued[0])["stage"] == "checkpoint"
-        assert await scope["redis"].llen(
-            RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        ) == 0
-
-        replay = DLQReplayJob(
-            entities=SimpleNamespace(project_id=scope["project_id"]),
-            processor=SimpleNamespace(knowledge_store=real_store),
-            write_to_graph=None,
-            redis_client=scope["redis"],
-            settings=DLQSettings(max_attempts=2),
-        )
-        monkeypatch.setattr("core.ingestion.recovery.replay_job.emit", lambda *a, **k: asyncio.sleep(0))
-        result = await replay.execute(
-            JobContext(scope["user_name"], scope["project_id"])
-        )
-
-        assert result.summary == "Processed 1: 1 retried, 0 parked"
-        assert await scope["redis"].get(
-            RedisKeys.last_processed(scope["user_name"], scope["session_id"])
-        ) == str(accepted.id)
-        assert await scope["redis"].hget(
-            RedisKeys.dlq_state(scope["user_name"], scope["project_id"]),
-            json.loads(queued[0])["dlq_id"],
-        ) == DLQ_STATUS_COMPLETED
     finally:
         await worker.stop()

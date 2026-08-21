@@ -27,23 +27,13 @@ from common.utils.core_utils import format_vp02_input
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from common.utils.local_references import build_local_id_maps, resolve_local_id
-from common.utils.time_utils import get_now_unix
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.prompts import get_connection_reasoning_prompt
-from core.ingestion.recovery.dlq_payload import DLQPayload
-from core.ingestion.recovery.dlq_state import (
-    DLQ_STATUS_PROCESSING,
-    DLQ_STATUS_QUEUED,
-    TERMINAL_DLQ_STATUSES,
-    ensure_dlq_id,
-    serialize_dlq_entry,
-)
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.entity.resolver import EntityResolver
 from infrastructure.llm_client import LLMService
-from infrastructure.redis_client import RedisKeys
 
 
 class IngestionPipeline:
@@ -1486,116 +1476,3 @@ class IngestionPipeline:
                 trace.user_relationships_accepted += 1
 
         return observations
-
-    async def move_to_dead_letter(
-        self,
-        messages: List[Dict],
-        error: str,
-        stage: str = "processing",
-        session_text: str = None,
-        batch: IngestionBatch | None = None,
-        attempt: int = 1,
-        *,
-        session_id: str,
-    ) -> bool:
-        """Store failed work with its diagnostic correlation scope attached."""
-
-        with diagnostic_scope(
-            user_name=self.user_name,
-            project_id=self.project_id,
-            session_id=session_id,
-            ingestion_batch_id=batch.batch_id if batch is not None else None,
-            work_id=batch.work_unit.id if batch is not None else None,
-        ):
-            return await self._move_to_dead_letter_scoped(
-                messages,
-                error,
-                stage=stage,
-                session_text=session_text,
-                batch=batch,
-                attempt=attempt,
-                session_id=session_id,
-            )
-
-    async def _move_to_dead_letter_scoped(
-        self,
-        messages: List[Dict],
-        error: str,
-        stage: str = "processing",
-        session_text: str = None,
-        batch: IngestionBatch | None = None,
-        attempt: int = 1,
-        *,
-        session_id: str,
-    ) -> bool:
-        """Store failed batch in DLQ with stage info for smart retry."""
-
-        if not session_id:
-            raise ValueError("move_to_dead_letter requires session_id")
-
-        dlq_key = RedisKeys.dlq(self.user_name, self.project_id)
-        entry = {
-            "timestamp": get_now_unix(),
-            "error": error,
-            "attempt": attempt,
-            "stage": stage,
-            "batch_size": len(messages),
-            "user_name": self.user_name,
-            "session_id": session_id,
-            "project_id": self.project_id,
-            "messages": messages,
-        }
-
-        if stage in ["processing", "message_log"] and session_text is not None:
-            entry["session_text"] = session_text
-
-        if (
-            stage
-            in [
-                "graph_write",
-                "message_log",
-                "candidate_suggestions",
-                "checkpoint",
-                "processing",
-            ]
-            and batch is not None
-        ):
-            payload = DLQPayload.from_ingestion_batch(batch)
-            entry["batch_result"] = payload.model_dump(mode="json")
-
-        try:
-            dlq_id = ensure_dlq_id(entry)
-            state_key = RedisKeys.dlq_state(self.user_name, self.project_id)
-            existing_state = await self.redis.hget(state_key, dlq_id)
-            if existing_state in {
-                DLQ_STATUS_QUEUED,
-                DLQ_STATUS_PROCESSING,
-                *TERMINAL_DLQ_STATUSES,
-            }:
-                logger.warning(f"DLQ [{stage}]: duplicate item skipped ({dlq_id})")
-                return True
-
-            await self.redis.rpush(dlq_key, serialize_dlq_entry(entry))
-            await self.redis.hset(state_key, dlq_id, DLQ_STATUS_QUEUED)
-            logger.warning(f"DLQ [{stage}]: {len(messages)} messages stored")
-
-            await emit(
-                session_id,
-                "pipeline",
-                "dlq_enqueued",
-                {
-                    "user_name": self.user_name,
-                    "project_id": self.project_id,
-                    "session_id": session_id,
-                    "dlq_key": dlq_key,
-                    "dlq_id": dlq_id,
-                    "msg_ids": [m["id"] for m in messages],
-                    "error": error,
-                    "stage": stage,
-                    "attempt": attempt,
-                },
-            )
-            return True
-        except Exception as e:
-            logger.critical(f"DLQ storage failed: {e}")
-            return False

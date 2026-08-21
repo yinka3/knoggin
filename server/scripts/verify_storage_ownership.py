@@ -18,10 +18,6 @@ if str(SRC) not in sys.path:
 import redis.asyncio as aioredis  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from core.ingestion.recovery.dlq_state import (  # noqa: E402
-    ensure_dlq_id,
-    serialize_dlq_entry,
-)
 from infrastructure.postgres_client import PostgresClient  # noqa: E402
 from infrastructure.redis_client import RedisKeys  # noqa: E402
 
@@ -90,14 +86,6 @@ def format_report(results: list[CheckResult]) -> str:
 
 
 def redis_key_family(key: str) -> str:
-    if key.startswith("dlq:processing:"):
-        return "dlq_processing"
-    if key.startswith("dlq:state:"):
-        return "dlq_state"
-    if key.startswith("dlq:claims:"):
-        return "dlq_claims"
-    if key.startswith("dlq:parked:"):
-        return "dlq_parked"
     return key.split(":", 1)[0]
 
 
@@ -449,19 +437,7 @@ async def seed_durable_state(pg: PostgresClient, *, user: str, project_id: str) 
 async def seed_redis_runtime(
     redis: aioredis.Redis, *, user: str, project_id: str
 ) -> None:
-    session_id = f"{project_id}-session"
     await redis.set(RedisKeys.job_last_run("phase7", user, project_id), "1770000000")
-    entry = {
-        "user_name": user,
-        "project_id": project_id,
-        "session_id": session_id,
-        "stage": "processing",
-        "attempt": 1,
-        "messages": [{"id": 910000001, "message": "storage proof"}],
-    }
-    dlq_id = ensure_dlq_id(entry)
-    await redis.rpush(RedisKeys.dlq(user, project_id), serialize_dlq_entry(entry))
-    await redis.hset(RedisKeys.dlq_state(user, project_id), dlq_id, "queued")
 
 
 async def durable_counts(
