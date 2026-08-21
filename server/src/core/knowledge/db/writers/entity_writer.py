@@ -277,13 +277,6 @@ class EntityWriter:
 
                 await self.projection.project_entities(cur, entity_params)
 
-                topic_params = [
-                    {"id": e["id"], "topic": e["topic"]}
-                    for e in entity_params
-                    if e.get("topic")
-                ]
-                await self.projection.project_entity_topics(cur, topic_params)
-
             if message_entity_refs:
                 await self._write_message_entity_refs(
                     cur,

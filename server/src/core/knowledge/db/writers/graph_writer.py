@@ -124,10 +124,6 @@ class GraphWriter:
     def _relationship_projection_params(cls, rows: List[Dict]) -> List[Dict]:
         params = []
         for row in rows:
-            evidence_refs = [
-                json.dumps(ref, sort_keys=True)
-                for ref in cls._normalize_evidence_refs(row.get("evidence_refs"))
-            ]
             params.append(
                 {
                     "relationship_id": row["relationship_id"],
@@ -137,35 +133,9 @@ class GraphWriter:
                     "relationship_type": normalize_relationship_type(
                         row["relationship_type"]
                     ),
-                    "weight": int(row.get("weight") or 1),
-                    "confidence": float(row.get("confidence") or 0),
-                    "context": row.get("context"),
-                    "last_seen": int(row.get("last_seen_ms") or 0),
-                    "message_ids": evidence_refs,
                 }
             )
-            if any(
-                key in row
-                for key in (
-                    "canonical_relationship_type",
-                    "observed_relationship_label",
-                    "domain_status",
-                    "symmetric",
-                )
-            ):
-                params[-1].update(
-                    {
-                        "canonical_relationship_type": row.get(
-                            "canonical_relationship_type"
-                        ),
-                        "observed_relationship_label": row.get(
-                            "observed_relationship_label"
-                        )
-                        or normalize_relationship_type(row["relationship_type"]),
-                        "domain_status": row.get("domain_status") or "unrecognized",
-                        "symmetric": bool(row.get("symmetric", False)),
-                    }
-                )
+            params[-1]["symmetric"] = bool(row.get("symmetric", False))
         return params
 
     async def save_message_logs(self, messages: List[Dict], *, cur=None) -> bool:
@@ -289,31 +259,7 @@ class GraphWriter:
                         f"{msg['id']}"
                     )
 
-            # Lifecycle and ingestion fields are relational authority. AGE is
-            # a derived traversal projection and intentionally receives only
-            # the message fields it exposes to graph queries.
-            await self.projection.project_messages(
-                cur,
-                [
-                    {
-                        key: msg[key]
-                        for key in (
-                            "id",
-                            "content",
-                            "role",
-                            "user_name",
-                            "session_id",
-                            "project_id",
-                            "user_msg_id",
-                            "metadata",
-                            "timestamp",
-                        )
-                    }
-                    for msg in batch_params
-                ],
-            )
-
-        logger.info(f"Saved {len(messages)} message logs to Postgres/AGE.")
+        logger.info(f"Saved {len(messages)} canonical message logs to Postgres.")
         return True
 
     async def delete_relationship(
@@ -1012,10 +958,6 @@ class GraphWriter:
                     project_id,
                     combined_aliases,
                     new_last,
-                )
-                await self.projection.project_entity_topics(
-                    cur,
-                    [{"id": primary_id, "topic": final_topic}],
                 )
                 await self.projection.replace_relationships_for_entities(
                     cur,

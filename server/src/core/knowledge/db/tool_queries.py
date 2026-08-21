@@ -30,7 +30,7 @@ class ToolQueries:
         ) from exc
 
     def _build_path_data(
-        self, names: List[str], topics: List[str], evidence: List[List[str]]
+        self, names: List[str], topics: List[str], evidence: List[List[Dict]]
     ) -> List[Dict]:
         return [
             {
@@ -656,6 +656,38 @@ class ToolQueries:
         except Exception as e:
             self._raise_storage_read("get_recent_activity", e)
 
+    async def _relationship_evidence_refs(
+        self,
+        relationship_ids: List[str],
+        visible_project_ids: List[str],
+    ) -> List[List[Dict]]:
+        if not relationship_ids:
+            return []
+        rows = await self.client.fetch_all(
+            """
+            SELECT
+                relationship_id,
+                json_agg(
+                    json_build_object(
+                        'project_id', project_id,
+                        'user_name', user_name,
+                        'session_id', session_id,
+                        'message_id', message_id
+                    )
+                    ORDER BY observed_at_ms, observation_id
+                ) AS evidence_refs
+            FROM relationship_observations
+            WHERE relationship_id = ANY(%s)
+              AND project_id = ANY(%s)
+            GROUP BY relationship_id
+            """,
+            (relationship_ids, visible_project_ids),
+        )
+        by_relationship = {
+            row["relationship_id"]: row.get("evidence_refs") or [] for row in rows
+        }
+        return [by_relationship.get(relationship_id, []) for relationship_id in relationship_ids]
+
     async def _find_shortest_path(
         self,
         start_name: str,
@@ -686,22 +718,19 @@ class ToolQueries:
           AND ALL(r IN path_rels WHERE r.project_id IN $visible_project_ids)
         ORDER BY length(p) ASC LIMIT 1
 
-        UNWIND path_nodes AS n
-        OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
-
-        WITH p, path_nodes, path_rels, collect(COALESCE(t.name, 'General')) AS node_topics
-        WITH p, path_nodes, path_rels, node_topics,
+        WITH p, path_nodes, path_rels,
+             [node IN path_nodes | coalesce(node.topic, 'General')] AS node_topics,
              [node IN path_nodes | node.canonical_name] AS names,
-             [r IN path_rels | r.message_ids] AS evidence_refs
+             [r IN path_rels | r.relationship_id] AS relationship_ids
 
-        WITH names, node_topics, evidence_refs,
+        WITH names, node_topics, relationship_ids,
              ANY(topic IN node_topics WHERE NOT ($filter_topics = false OR topic IN $active_topics)) as has_inactive
 
-        RETURN names, node_topics, evidence_refs, has_inactive
+        RETURN names, node_topics, relationship_ids, has_inactive
         """
         q = self.client.build_cypher(
             cypher,
-            "names agtype, node_topics agtype, evidence_refs agtype, has_inactive agtype",
+            "names agtype, node_topics agtype, relationship_ids agtype, has_inactive agtype",
         )
         try:
             data = await self.client.fetch_all(
@@ -726,7 +755,10 @@ class ToolQueries:
             return (
                 row["names"],
                 row["node_topics"],
-                row["evidence_refs"],
+                await self._relationship_evidence_refs(
+                    row["relationship_ids"],
+                    visible_project_ids,
+                ),
                 bool(row["has_inactive"]),
             )
         except Exception as e:
@@ -759,24 +791,18 @@ class ToolQueries:
         WITH p, nodes(p) as path_nodes, relationships(p) as path_rels
         WHERE ALL(n IN path_nodes WHERE $filter_projects = false OR n.project_id IN $visible_project_ids OR n.id = $identity_entity_id)
           AND ALL(r IN path_rels WHERE r.project_id IN $visible_project_ids)
-          AND ALL(n IN path_nodes WHERE
-            EXISTS {{ MATCH (n)-[:BELONGS_TO]->(t:Topic) WHERE t.name IN $active_topics }} OR
-            NOT EXISTS {{ MATCH (n)-[:BELONGS_TO]->(:Topic) }}
-        )
+          AND ALL(n IN path_nodes WHERE n.topic IN $active_topics OR n.topic IS NULL)
         ORDER BY length(p) ASC
 
         WITH p, path_nodes, path_rels LIMIT 1
 
-        UNWIND path_nodes AS n
-        OPTIONAL MATCH (n)-[:BELONGS_TO]->(t:Topic)
-
-        WITH p, collect(COALESCE(t.name, 'General')) AS node_topics, path_nodes, path_rels
+        WITH p, [n IN path_nodes | coalesce(n.topic, 'General')] AS node_topics, path_nodes, path_rels
         RETURN [n IN path_nodes | n.canonical_name] AS names,
                node_topics,
-               [r IN path_rels | r.message_ids] AS evidence_refs
+               [r IN path_rels | r.relationship_id] AS relationship_ids
         """
         q = self.client.build_cypher(
-            cypher, "names agtype, node_topics agtype, evidence_refs agtype"
+            cypher, "names agtype, node_topics agtype, relationship_ids agtype"
         )
         try:
             data = await self.client.fetch_all(
@@ -797,7 +823,14 @@ class ToolQueries:
             if not data:
                 return None
             row = data[0]
-            return (row["names"], row["node_topics"], row["evidence_refs"])
+            return (
+                row["names"],
+                row["node_topics"],
+                await self._relationship_evidence_refs(
+                    row["relationship_ids"],
+                    visible_project_ids,
+                ),
+            )
         except Exception as e:
             self._raise_storage_read("find_active_only_path", e)
 

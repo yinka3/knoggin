@@ -237,7 +237,6 @@ class EntityReclassificationWriter:
 
             if updated_entities:
                 await self.projection.project_entity_domain(cur, updated_entities)
-                await self.projection.project_entity_topics(cur, updated_entities)
 
         return ReclassificationBatchResult(
             scanned=len(planned),

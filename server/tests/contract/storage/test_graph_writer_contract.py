@@ -117,7 +117,7 @@ def test_graph_writer_merges_evidence_refs_without_duplicates():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_writer_save_message_logs_writes_canonical_and_graph_rows(
+async def test_graph_writer_save_message_logs_writes_canonical_rows(
     monkeypatch,
 ):
     client = RecordingPostgresClient(fetch_one_results=[{"message_id": 7}])
@@ -138,34 +138,14 @@ async def test_graph_writer_save_message_logs_writes_canonical_and_graph_rows(
     )
 
     assert saved is True
-    assert len(client.calls) == 2
-    canonical_call, graph_call = client.calls
+    assert len(client.calls) == 1
+    canonical_call = client.calls[0]
 
     assert canonical_call[0] == "execute"
     assert "INSERT INTO messages" in canonical_call[1]
     assert "ON CONFLICT (user_name, session_id, message_id)" in canonical_call[1]
     assert "messages.content = EXCLUDED.content" in canonical_call[1]
     assert canonical_call[2] == MESSAGE_SQL_PARAMS
-
-    assert graph_call[0] == "execute"
-    assert "MERGE (m:Message" in graph_call[1]
-    graph_params = json.loads(graph_call[2][0])
-    assert set(graph_params["batch"][0]) == MESSAGE_GRAPH_FIELDS
-    assert graph_params == {
-        "batch": [
-            {
-                "id": 7,
-                "content": "hello graph",
-                "role": "user",
-                "user_name": "ada",
-                "session_id": "session-1",
-                "project_id": "project-1",
-                "user_msg_id": 7,
-                "metadata": "{}",
-                "timestamp": 123456,
-            }
-        ]
-    }
 
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
@@ -426,10 +406,17 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         for call in client.calls
         if "UNWIND $batch AS rel" in call[1]
         and "r.project_id = rel.project_id" in call[1]
-        and "r.weight = rel.weight" in call[1]
+        and "r.symmetric = rel.symmetric" in call[1]
     )
     rel_params = json.loads(relationship_projection_call[2][0])
-    assert set(rel_params["batch"][0]) == MERGE_RELATIONSHIP_PROJECTION_FIELDS
+    assert set(rel_params["batch"][0]) == {
+        "relationship_id",
+        "project_id",
+        "entity_a_id",
+        "entity_b_id",
+        "relationship_type",
+        "symmetric",
+    }
     assert rel_params["batch"] == [
         {
             "relationship_id": "project-1:2:9:works with",
@@ -437,29 +424,9 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
             "entity_a_id": 2,
             "entity_b_id": 9,
             "relationship_type": "works with",
-            "weight": 5,
-            "confidence": 0.9,
-            "context": "works with",
-            "last_seen": 200,
-            "message_ids": [
-                '{"message_id": 1, "session_id": "session-1", "user_name": "ada"}',
-                '{"message_id": 2, "session_id": "session-1", "user_name": "ada"}',
-            ],
+            "symmetric": False,
         }
     ]
-    topic_projection_call = next(
-        call
-        for call in client.calls
-        if "OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)" in call[1]
-    )
-    assert json.loads(topic_projection_call[2][0])["batch"] == [
-        {"id": 2, "topic": "Projects"}
-    ]
-    assert not any(
-        "MATCH (s:Entity {id: $secondary_id})-[r:BELONGS_TO]" in call[1]
-        for call in client.calls
-    )
-
     assert not any(
         call[0] == "execute" and "DELETE FROM entity_search" in call[1]
         for call in client.calls

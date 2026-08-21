@@ -69,7 +69,6 @@ async def test_project_deletion_removes_all_relational_and_age_state_atomically(
     queries = [query for query, _ in client.cursor.calls]
     assert queries[0].startswith("SELECT project_id FROM public.projects")
     assert any("DETACH DELETE n" in query for query in queries)
-    assert any("MATCH (t:Topic)" in query for query in queries)
     for table in writer._PROJECT_TABLES:
         assert any(f"DELETE FROM public.{table}" in query for query in queries)
     assert queries[-1].startswith("DELETE FROM public.projects")

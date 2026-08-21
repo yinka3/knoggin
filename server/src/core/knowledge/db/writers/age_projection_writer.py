@@ -27,25 +27,6 @@ class AgeProjectionWriter:
             graph_name=self.graph_name,
         )
 
-    async def project_messages(self, cur, messages: List[Dict]) -> None:
-        cypher = """
-        UNWIND $batch AS msg
-        MERGE (m:Message {
-            user_name: msg.user_name,
-            session_id: msg.session_id,
-            id: msg.id
-        })
-        SET m.content = msg.content,
-            m.role = msg.role,
-            m.timestamp = msg.timestamp,
-            m.project_id = msg.project_id
-        RETURN count(m)
-        """
-        await cur.execute(
-            self._build_cypher(cypher),
-            (json.dumps({"batch": messages}),),
-        )
-
     async def project_entities(self, cur, entities: List[Dict]) -> None:
         cypher = """
         UNWIND $batch AS data
@@ -53,7 +34,8 @@ class AgeProjectionWriter:
         SET e.user_name = data.user_name,
             e.project_id = data.project_id,
             e.canonical_name = data.canonical_name,
-            e.type = coalesce(e.type, data.type),
+            e.type = data.type,
+            e.topic = data.topic,
             e.last_mentioned = data.now
 
         WITH e, data,
@@ -84,13 +66,8 @@ class AgeProjectionWriter:
             e.canonical_name = $canonical_name,
             e.aliases = $aliases,
             e.type = $type,
+            e.topic = $topic,
             e.last_mentioned = $now
-        WITH e
-        OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)
-        DELETE old
-        WITH e
-        MERGE (t:Topic {name: $topic})
-        MERGE (e)-[:BELONGS_TO]->(t)
         RETURN e.id
         """
         await cur.execute(
@@ -108,74 +85,14 @@ class AgeProjectionWriter:
                 }
             ),
         )
-        for label in ("Entity", "Message"):
-            cypher = f"""
-            MATCH (n:{label})
-            WHERE n.project_id = $project_id
-              AND coalesce(n.id, -1) <> $identity_entity_id
-            DETACH DELETE n
-            RETURN count(n)
-            """
-            await cur.execute(self._build_cypher(cypher), params)
-
-        orphan_topic_cypher = """
-        MATCH (t:Topic)
-        OPTIONAL MATCH (owner)-[:BELONGS_TO]->(t)
-        WITH t, count(owner) AS owner_count
-        WHERE owner_count = 0
-        DELETE t
-        RETURN count(t)
-        """
-        await cur.execute(
-            self._build_cypher(orphan_topic_cypher),
-            (json.dumps({}),),
-        )
-
-    async def delete_session_message_projection(
-        self,
-        cur,
-        user_name: str,
-        session_id: str,
-    ) -> None:
-        """Remove AGE message nodes for one deleted canonical session."""
         cypher = """
-        MATCH (m:Message)
-        WHERE m.user_name = $user_name
-          AND m.session_id = $session_id
-        DETACH DELETE m
-        RETURN count(m)
+        MATCH (n:Entity)
+        WHERE n.project_id = $project_id
+          AND coalesce(n.id, -1) <> $identity_entity_id
+        DETACH DELETE n
+        RETURN count(n)
         """
-        await cur.execute(
-            self._build_cypher(cypher),
-            (json.dumps({"user_name": user_name, "session_id": session_id}),),
-        )
-
-    async def project_entity_topics(self, cur, topics: List[Dict]) -> None:
-        canonical_topics = {}
-        for topic in topics:
-            if topic.get("topic"):
-                canonical_topics[int(topic["id"])] = {
-                    "id": int(topic["id"]),
-                    "topic": topic["topic"],
-                }
-
-        if not canonical_topics:
-            return
-
-        cypher = """
-        UNWIND $batch AS data
-        MATCH (e:Entity {id: data.id})
-        OPTIONAL MATCH (e)-[old:BELONGS_TO]->(:Topic)
-        DELETE old
-        WITH e, data
-        MERGE (t:Topic {name: data.topic})
-        MERGE (e)-[:BELONGS_TO]->(t)
-        RETURN count(e)
-        """
-        await cur.execute(
-            self._build_cypher(cypher),
-            (json.dumps({"batch": list(canonical_topics.values())}),),
-        )
+        await cur.execute(self._build_cypher(cypher), params)
 
     async def project_entity_domain(self, cur, entities: List[Dict]) -> None:
         """Update type and timestamp properties for explicit reclassification."""
@@ -223,22 +140,7 @@ class AgeProjectionWriter:
         MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
             r.relationship_type = rel.relationship_type,
-            r.canonical_relationship_type = rel.canonical_relationship_type,
-            r.observed_relationship_label = rel.observed_relationship_label,
-            r.domain_status = rel.domain_status,
-            r.symmetric = rel.symmetric,
-            r.weight = coalesce(r.weight, 0) + 1,
-            r.confidence = CASE
-                WHEN r.confidence IS NULL THEN rel.confidence
-                WHEN rel.confidence > r.confidence THEN rel.confidence
-                ELSE r.confidence
-            END,
-            r.last_seen = rel.now,
-            r.context = CASE
-                WHEN r.context IS NULL THEN rel.context
-                WHEN rel.context IS NOT NULL THEN rel.context
-                ELSE r.context
-            END
+            r.symmetric = rel.symmetric
         RETURN count(r)
         """
         await cur.execute(
@@ -299,14 +201,7 @@ class AgeProjectionWriter:
         MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
             r.relationship_type = rel.relationship_type,
-            r.canonical_relationship_type = rel.canonical_relationship_type,
-            r.observed_relationship_label = rel.observed_relationship_label,
-            r.domain_status = rel.domain_status,
-            r.symmetric = rel.symmetric,
-            r.weight = rel.weight,
-            r.confidence = rel.confidence,
-            r.last_seen = rel.last_seen,
-            r.context = rel.context
+            r.symmetric = rel.symmetric
         RETURN count(r)
         """
         await cur.execute(
