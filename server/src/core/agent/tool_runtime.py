@@ -104,18 +104,10 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return "Loaded folder upload summary", 1
         return "No results", 0
 
-    if tool_name == "request_replanning":
-        return "Requested a new plan", 1
-
     return "Completed", 1
 
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
-
-    if name == "request_clarification":
-        return {"clarification": args.get("question", "Could you clarify?")}
-    if name == "request_replanning":
-        return {"replanning": args.get("reason", "No reason provided")}
 
     dispatch_entry = TOOL_DISPATCH.get(name)
     if dispatch_entry is None:
@@ -225,16 +217,16 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 error="Tool execution was rejected.",
             )
         raise
-    except Exception as e:
+    except Exception:
         if audit_id:
             await _safe_finish_tool_audit(
                 tools,
                 audit_id,
                 status="failed",
-                error=str(e),
+                error="Tool execution failed.",
             )
-        logger.error(f"Tool {name} failed: {e}")
-        raise ToolExecutionError(name, str(e))
+        logger.exception("Tool {} failed", name)
+        raise ToolExecutionError(name, "Tool execution failed")
 
 
 def _redact_audit_value(value):

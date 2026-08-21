@@ -23,7 +23,7 @@ from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 SPECIAL_TOOL_NAMES = frozenset(
-    {"request_clarification", "request_replanning", "submit_answer"}
+    {"request_clarification", "submit_answer"}
 )
 
 CORE_TOOL_LAYERS = frozenset({"core_memory", "core_brain"})
@@ -82,60 +82,6 @@ class ToolDefinition:
     default_limit: Optional[int] = None
 
 
-async def _maintenance_after_tool_result(
-    ctx,
-    tools,
-    tool_name: str,
-    result: Dict,
-) -> None:
-    candidate = _maintenance_candidate_for_tool(ctx, tool_name)
-    if not candidate:
-        return
-
-    data = result.get("data")
-    if isinstance(data, dict) and data.get("error"):
-        await _record_maintenance_failure(ctx, tools, candidate)
-        return
-
-    if tool_name == "check_graph_health" and isinstance(data, dict):
-        if not data.get("suggestions"):
-            await _mark_maintenance_handled(ctx, tools, candidate)
-
-
-async def _maintenance_after_tool_error(ctx, tools, tool_name: str) -> bool:
-    candidate = _maintenance_candidate_for_tool(ctx, tool_name)
-    if not candidate:
-        return False
-    await _record_maintenance_failure(ctx, tools, candidate)
-    return True
-
-
-def _maintenance_runtime_instructions(ctx, active_tool_names: frozenset[str]) -> str:
-    candidates = [
-        candidate
-        for candidate in ctx.maintenance_candidates
-        if candidate.suggested_tool in active_tool_names
-    ]
-    if not candidates:
-        return ""
-
-    lines = [
-        "[SYSTEM NOTICE: Optional maintenance is available. "
-        "The system has already checked eligibility and tool availability. "
-        "You may handle one candidate if it is relevant, but do not block "
-        "the user's response if maintenance is not useful right now.",
-        "Maintenance candidates:",
-    ]
-    for candidate in candidates:
-        lines.append(
-            "- "
-            f"{candidate.kind} via `{candidate.suggested_tool}` "
-            f"({candidate.priority} priority): {candidate.reason}"
-        )
-    lines.append("]")
-    return "\n".join(lines)
-
-
 def _health_runtime_instructions(ctx, active_tool_names: frozenset[str]) -> str:
     del ctx
     health_tools = sorted(
@@ -157,64 +103,6 @@ def _health_runtime_instructions(ctx, active_tool_names: frozenset[str]) -> str:
         "Health results may describe runtime state but do not authorize any "
         "administrative or mutating action.]"
     )
-
-
-def _maintenance_candidate_for_tool(ctx, tool_name: str):
-    from core.agent.maintenance import find_candidate_for_tool
-
-    return find_candidate_for_tool(ctx.maintenance_candidates, tool_name)
-
-
-async def _mark_maintenance_handled(ctx, tools, candidate) -> None:
-    from loguru import logger
-
-    from core.agent.maintenance import mark_maintenance_handled
-
-    redis = getattr(tools, "redis", None)
-    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
-    if redis is not None and project_id:
-        try:
-            await mark_maintenance_handled(
-                redis,
-                candidate,
-                user_name=ctx.user_name,
-                project_id=project_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to clear maintenance state for "
-                f"{candidate.id}: {exc}"
-            )
-    _remove_maintenance_candidate(ctx, candidate)
-
-
-async def _record_maintenance_failure(ctx, tools, candidate) -> None:
-    from loguru import logger
-
-    from core.agent.maintenance import record_maintenance_failure
-
-    redis = getattr(tools, "redis", None)
-    project_id = ctx.project_id or str(getattr(tools, "project_id", ""))
-    if redis is not None and project_id:
-        try:
-            await record_maintenance_failure(
-                redis,
-                candidate,
-                user_name=ctx.user_name,
-                project_id=project_id,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to record maintenance failure for "
-                f"{candidate.id}: {exc}"
-            )
-    _remove_maintenance_candidate(ctx, candidate)
-
-
-def _remove_maintenance_candidate(ctx, candidate) -> None:
-    ctx.maintenance_candidates = [
-        item for item in ctx.maintenance_candidates if item.id != candidate.id
-    ]
 
 
 TOOL_MODULES = {
@@ -320,15 +208,11 @@ TOOL_MODULES = {
                 "report_relationship_conflict",
             }
         ),
-        after_tool_result=_maintenance_after_tool_result,
-        after_tool_error=_maintenance_after_tool_error,
-        runtime_instructions=_maintenance_runtime_instructions,
     ),
     "runtime_special": ToolModule(
         name="runtime_special",
         layer="runtime_special",
         tools=SPECIAL_TOOL_NAMES,
-        default_limits=(("request_replanning", 2),),
     ),
     "runtime_health": ToolModule(
         name="runtime_health",

@@ -6,7 +6,6 @@ from common.conf.domain_config import DomainConfig
 from common.schema.agent.identity import AgentConfig
 from core.agent.orchestrator import AgentOrchestrator
 from core.agent.services.agent_manager import AgentManager
-from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeResources
 
 FAKE_RESPONSE_EVENT = {
@@ -372,12 +371,11 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_orchestrator_forwards_python_selected_maintenance_candidates(
+async def test_orchestrator_does_not_inject_maintenance_candidates(
     monkeypatch,
 ):
     context = FakeSession()
     tools = FakeTools()
-    await context.redis_client.sadd(RedisKeys.merge_queue("ada", "project-1"), "1")
     agent = AgentConfig(
         id="agent-1",
         name="Researcher",
@@ -407,10 +405,7 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
     ]
 
     assert events == [FAKE_RESPONSE_EVENT]
-    candidate = FakeExecutor.instances[0].ctx.maintenance_candidates[0]
-    assert candidate.kind == "graph_merge_scan"
-    assert candidate.suggested_tool == "check_graph_health"
-    assert "Merge queue has 1" in candidate.reason
+    assert not hasattr(FakeExecutor.instances[0].ctx, "maintenance_candidates")
 
 
 @pytest.mark.runtime

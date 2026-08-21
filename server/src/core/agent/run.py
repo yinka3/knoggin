@@ -16,7 +16,6 @@ from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
-from core.agent.maintenance import MaintenanceCandidate
 from core.agent.tools.registry import (
     get_default_tool_limits,
     get_registered_tool_names,
@@ -110,7 +109,6 @@ class AgentRun:
     hot_topics: List[str] = field(default_factory=list)
     active_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
-    maintenance_candidates: List[MaintenanceCandidate] = field(default_factory=list)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
     initial_source_candidates: List[SourceReferenceCandidate] = field(
@@ -262,7 +260,7 @@ class AgentRun:
         """Apply one tool result to the aggregate's owned evidence buffers."""
 
         self._require_active()
-        # Kept as a local import to avoid the run/internals import cycle.
+        # Kept local to avoid a run/prompt-context import cycle.
         from core.agent.prompt_context import update_accumulators
 
         update_accumulators(self, tool_name, result)
@@ -347,7 +345,6 @@ class AgentRun:
         self.short_uuid_references.clear()
         self.history.clear()
         self.initial_source_candidates.clear()
-        self.maintenance_candidates.clear()
         self.messages.clear()
         self.profiles.clear()
         self.graph.clear()

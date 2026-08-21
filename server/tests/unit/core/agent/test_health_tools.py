@@ -88,7 +88,7 @@ def test_health_tools_are_registered_with_low_limits_and_runtime_guidance():
     )
     names = {schema["function"]["name"] for schema in schemas}
     instructions = get_runtime_instructions(
-        SimpleNamespace(maintenance_candidates=[]),
+        SimpleNamespace(),
         frozenset({"get_engine_health", "get_resource_health"}),
     )
 

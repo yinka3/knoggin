@@ -609,7 +609,7 @@ class CommunityManager:
             project_context=project_context,
             documents_context="",
             is_community=False,
-            current_mode="Architect",
+            phase="PLAN",
         )
 
         seeding_instructions = """

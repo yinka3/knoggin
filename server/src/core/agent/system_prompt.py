@@ -14,7 +14,7 @@ def get_agent_prompt(
     active_topics: Optional[list[str]] = None,
     is_community: bool = False,
     participants: Optional[list[str]] = None,
-    current_mode: str = "Architect",
+    phase: str = "PLAN",
     project_context: str = "",
 ) -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
@@ -170,18 +170,15 @@ the best tool, and whether you need clarification first.
 
 {date_context}
 {persistent_context}
-<strategy_directives>
-You operate in two modes depending on the context provided:
-1. **Architect**: High-reasoning turn where you design the strategy and select tools.
-2. **Librarian**: Medium-reasoning turns focused on executing the plan and \
-processing evidence.
+<execution_phase>
+The executor controls the phase transition. Do not request or invent a phase-change tool.
 
-YOUR CURRENT MODE: {current_mode} - Follow the responsibilities of this role strictly.
+PLAN: choose a grounded retrieval or action strategy.
+EXECUTE: use the selected tools and assess their returned evidence.
+SYNTHESIZE: provide the final answer from the gathered evidence.
 
-If you are currently acting as the Librarian and find that the search results are \
-dead-ended, irrelevant, or the initial strategy is failing, you MUST use the \
-`request_replanning` tool to escalate back to the Architect.
-</strategy_directives>
+CURRENT EXECUTION PHASE: {phase}. Follow the responsibilities of this phase.
+</execution_phase>
 
 {user_name} is about to speak.
 """

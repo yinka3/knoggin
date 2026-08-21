@@ -17,7 +17,6 @@ from common.schema.document import (
     parse_document_focus,
 )
 from core.agent.executor import AgentExecutor
-from core.agent.maintenance import build_maintenance_candidates
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.sources.pasted_text import build_pasted_text_candidates
@@ -123,13 +122,6 @@ class AgentOrchestrator:
                     else agent_cfg.enabled_tools
                 )
             )
-            maintenance_candidates = await build_maintenance_candidates(
-                redis=context.redis_client,
-                user_name=context.user_name,
-                project_id=context.project_id,
-                enabled_tools=effective_enabled_tools,
-            )
-
             # One aggregate owns all mutable state for this execution.
             requested_hot_topics = hot_topics or []
             effective_hot_topics = []
@@ -165,7 +157,6 @@ class AgentOrchestrator:
                 active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
                 history=conversation_history or [],
-                maintenance_candidates=maintenance_candidates,
                 document_focus=effective_document_focus,
                 initial_source_candidates=(
                     build_pasted_text_candidates(

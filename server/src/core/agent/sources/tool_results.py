@@ -9,8 +9,8 @@ from loguru import logger
 from common.schema.source.references import SourceReferenceCandidate
 
 if TYPE_CHECKING:
+    from core.agent.executor import _ToolCall
     from core.agent.run import AgentRun
-    from core.agent.tool_call import ToolCall
 
 
 _TOOL_SOURCE_ENCOUNTERS = {
@@ -23,7 +23,7 @@ _TOOL_SOURCE_ENCOUNTERS = {
 
 def capture_tool_source_candidates(
     ctx: AgentRun,
-    call: ToolCall,
+    call: _ToolCall,
     result: Mapping,
 ) -> list[SourceReferenceCandidate]:
     """Validate source contexts from one successful tool call for this run.

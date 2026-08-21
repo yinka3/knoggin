@@ -747,26 +747,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "request_replanning",
-            "description": (
-                "Escalate back to the Architect for a new strategy. Use this when the current plan has failed or search results are dead-ended."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional explanation of why you are escalating or what failed.",
-                    }
-                },
-                "required": [],
-            },
-            "tags": ["core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "submit_answer",
             "description": "Submit your final synthesized answer to the user. You MUST call this tool when you are finished gathering evidence and are ready to respond.",
             "parameters": {
@@ -1254,7 +1234,7 @@ def get_filtered_schemas(
 
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
-        if name in ("request_clarification", "request_replanning", "submit_answer"):
+        if name in ("request_clarification", "submit_answer"):
             filtered.append(schema)
             continue
 

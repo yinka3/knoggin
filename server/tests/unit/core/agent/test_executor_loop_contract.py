@@ -6,8 +6,8 @@ import pytest
 from common.exceptions import LLMProviderError
 from common.schema.agent.identity import AgentConfig
 from core.agent.executor import AgentExecutor
+from core.agent.executor import _ToolCall as ToolCall
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
-from core.agent.tool_call import ToolCall
 
 
 def make_run(*, limits=None):
@@ -132,20 +132,28 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
             }
         return {"data": [{"source": "Knoggin", "target": "Profile"}]}
 
-    async def no_hooks(*_args):
-        return None
-
     monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
-    monkeypatch.setattr(
-        "core.agent.executor.apply_tool_result_hooks",
-        no_hooks,
-    )
 
     events = [event async for event in executor._execute_run()]
 
     assert events[-1]["event"] == "response"
     assert events[-1]["data"]["content"] == "The profile changed."
     assert len(llm.calls) == 4
+    assert [call["model"] for call in llm.calls] == [
+        "architect",
+        "librarian",
+        "librarian",
+        "architect",
+    ]
+    assert [call["reasoning"] for call in llm.calls] == [
+        "high",
+        "medium",
+        "medium",
+        "high",
+    ]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
+    assert "CURRENT EXECUTION PHASE: EXECUTE" in llm.calls[1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
     assert run.attempt_count == 4
     assert run.call_count == 2
     assert run.messages == [
@@ -156,6 +164,41 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert run.sealed is True
     run.release()
     assert run.released is True
+
+
+@pytest.mark.no_network
+async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [tool_call_event("search_messages", '{"query": "missing"}', "search-1"), completed_event()],
+            [tool_call_event("submit_answer", '{"content": "Still looking."}', "submit-1"), completed_event()],
+            [tool_call_event("submit_answer", '{"content": "No matching evidence."}', "submit-2"), completed_event()],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(
+            max_attempts=3,
+            max_calls=2,
+            empty_result_replan_threshold=1,
+        )
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def empty_result(*_args):
+        return {"data": []}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", empty_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["data"]["content"] == "No matching evidence."
+    assert [call["model"] for call in llm.calls] == [
+        "architect",
+        "architect",
+        "architect",
+    ]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
 
 
 @pytest.mark.no_network
@@ -173,11 +216,7 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     async def fake_execute(_tools, _name, args):
         return {"data": [{"id": args["query"], "message": args["query"]}]}
 
-    async def no_hooks(*_args):
-        return None
-
     monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
-    monkeypatch.setattr("core.agent.executor.apply_tool_result_hooks", no_hooks)
 
     results = []
     events = [
@@ -216,11 +255,7 @@ async def test_executor_loop_recovers_from_invalid_arguments_and_tool_exceptions
             raise RuntimeError("backend exploded")
         return {"data": [{"id": "ok", "message": "usable"}]}
 
-    async def no_hooks(*_args):
-        return False
-
     monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
-    monkeypatch.setattr("core.agent.executor.apply_tool_result_hooks", no_hooks)
 
     invalid = executor._parse_tool_calls(
         [{"name": "search_messages", "arguments": "{bad", "id": "bad"}],
@@ -363,7 +398,9 @@ async def test_executor_provider_failure_reaches_terminal_error_and_releases():
     events = [event async for event in executor.execute()]
 
     assert events[-1]["event"] == "error"
-    assert "provider unavailable" in events[-1]["data"]["message"]
+    assert events[-1]["data"]["message"] == (
+        "The agent couldn't complete this request. Please try again."
+    )
     assert run.sealed is True
     assert run.released is True
 
@@ -388,7 +425,9 @@ async def test_executor_no_response_terminal_state_emits_error():
     events = [event async for event in executor.execute()]
 
     assert events[-1]["event"] == "error"
-    assert "must either call" in events[-1]["data"]["message"]
+    assert events[-1]["data"]["message"] == (
+        "The agent couldn't complete this request. Please try again."
+    )
     assert run.final_content is None
     assert run.sealed is True
     assert run.released is True

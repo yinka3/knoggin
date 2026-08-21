@@ -4,7 +4,6 @@ import pytest
 
 from common.exceptions import LLMProviderError
 from core.agent.executor import AgentExecutor
-from core.agent.maintenance import MaintenanceCandidate
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
 
@@ -142,7 +141,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
             date="2026-02-03 04:05 UTC",
             model="test-model",
             reasoning="high",
-            current_mode="Architect",
+            phase="PLAN",
             documents_context="- file.md",
             document_focus_context="",
             last_result=None,
@@ -184,110 +183,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
     assert prompt_kwargs["documents_context"] == "- file.md"
     assert prompt_kwargs["agent_directives"] == "Required:\n- stay grounded"
     assert prompt_kwargs["agent_brain"] == "Use citations"
-    assert prompt_kwargs["current_mode"] == "Architect"
-
-
-@pytest.mark.no_network
-async def test_step_presents_maintenance_as_optional_when_tool_is_enabled(
-    monkeypatch,
-):
-    llm = StreamingLLM(
-        [
-            {
-                "event": "tool_calls",
-                "data": {"content": "I can answer.", "calls": []},
-            }
-        ]
-    )
-    executor = make_executor(llm)
-    executor.ctx.maintenance_candidates = [
-        MaintenanceCandidate(
-            id="graph_merge_scan:project-1",
-            kind="graph_merge_scan",
-            reason="Merge queue has 2 candidate entities.",
-            suggested_tool="check_graph_health",
-        )
-    ]
-    prompt_calls = []
-
-    def fake_agent_prompt(*args, **kwargs):
-        prompt_calls.append(kwargs)
-        return "SYSTEM PROMPT"
-
-    monkeypatch.setattr(
-        "core.agent.executor.get_agent_prompt",
-        fake_agent_prompt,
-    )
-    executor.ctx.enabled_tools = ("check_graph_health",)
-
-    events = [
-        event
-        async for event in executor._step(
-            date="now",
-            model="model",
-            reasoning="high",
-            current_mode="Architect",
-            documents_context="",
-            document_focus_context="",
-            last_result=None,
-        )
-    ]
-
-    instruction = prompt_calls[0]["runtime_instructions"]
-    assert "Optional maintenance is available" in instruction
-    assert "You may handle one candidate" in instruction
-    assert "MUST" not in instruction
-    assert "`check_graph_health`" in instruction
-    assert events[0]["event"] == "tool_calls"
-
-
-@pytest.mark.no_network
-async def test_step_does_not_auto_add_disabled_maintenance_tool(monkeypatch):
-    llm = StreamingLLM(
-        [
-            {
-                "event": "tool_calls",
-                "data": {"content": "I can answer.", "calls": []},
-            }
-        ]
-    )
-    executor = make_executor(llm)
-    executor.ctx.maintenance_candidates = [
-        MaintenanceCandidate(
-            id="graph_merge_scan:project-1",
-            kind="graph_merge_scan",
-            reason="Merge queue has 2 candidate entities.",
-            suggested_tool="check_graph_health",
-        )
-    ]
-    prompt_calls = []
-
-    def fake_agent_prompt(*args, **kwargs):
-        prompt_calls.append(kwargs)
-        return "SYSTEM PROMPT"
-
-    monkeypatch.setattr(
-        "core.agent.executor.get_agent_prompt",
-        fake_agent_prompt,
-    )
-    executor.ctx.enabled_tools = ("search_messages",)
-
-    await anext(
-        executor._step(
-            date="now",
-            model="model",
-            reasoning="high",
-            current_mode="Architect",
-            documents_context="",
-            document_focus_context="",
-            last_result=None,
-        )
-    )
-
-    tool_names = [schema["function"]["name"] for schema in llm.calls[0]["tools"]]
-    assert "search_messages" in tool_names
-    assert "check_graph_health" not in tool_names
-    assert prompt_calls[0]["runtime_instructions"] == ""
+    assert prompt_kwargs["phase"] == "PLAN"
 
 
 @pytest.mark.no_network
@@ -335,7 +231,7 @@ async def test_step_completed_without_tool_calls_yields_formatting_step_error():
             date="now",
             model="model",
             reasoning="high",
-            current_mode="Architect",
+            phase="PLAN",
             documents_context="",
             document_focus_context="",
             last_result=None,
@@ -366,7 +262,7 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             date="now",
             model="model",
             reasoning="high",
-            current_mode="Architect",
+            phase="PLAN",
             documents_context="",
             document_focus_context="",
             last_result=None,
@@ -378,7 +274,7 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             date="now",
             model="model",
             reasoning="high",
-            current_mode="Architect",
+            phase="PLAN",
             documents_context="",
             document_focus_context="",
             last_result=None,
@@ -396,7 +292,7 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             "event": "step_error",
             "data": {
                 "kind": "provider",
-                "message": "LLM API failure: stream broke",
+                "message": "LLM provider unavailable",
             },
         }
     ]
