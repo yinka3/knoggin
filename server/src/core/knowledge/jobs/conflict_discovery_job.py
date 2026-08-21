@@ -47,13 +47,9 @@ class ConflictDiscoveryJob(BaseJob):
         return self._interval_seconds
 
     async def should_run(self, ctx: JobContext) -> bool:
-        # Normal discovery remains cadence-based. Once a packet discovers an
-        # oversized neighborhood, however, continue its durable pages on the
-        # scheduler's next check instead of waiting another two days.
-        return await self.knowledge_store.has_conflict_discovery_continuation(
-            user_name=ctx.user_name,
-            project_id=ctx.project_id,
-        )
+        # The scheduler's normal cadence drives this bounded maintenance pass.
+        # Failures leave the durable cursor unchanged for the next scheduled run.
+        return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
         if self.llm is None:
@@ -62,83 +58,51 @@ class ConflictDiscoveryJob(BaseJob):
                 summary="Conflict discovery requires an LLM",
             )
 
-        lease = await self.knowledge_store.claim_conflict_discovery(
+        package = await self.knowledge_store.build_conflict_discovery_package(
             user_name=ctx.user_name,
             project_id=ctx.project_id,
+            max_seed_span_days=self.max_seed_span_days,
+            max_package_tokens=self.max_package_tokens,
+            token_counter=getattr(self.llm, "count_tokens", None),
         )
-        if lease is None:
-            return JobResult(
-                success=True,
-                summary="Conflict discovery is already running",
-            )
+        if package is None:
+            return JobResult(success=True, summary="No relationship evidence to review")
 
-        completed = False
-        try:
-            package = await self.knowledge_store.build_conflict_discovery_package(
-                lease,
-                max_seed_span_days=self.max_seed_span_days,
-                max_package_tokens=self.max_package_tokens,
-                token_counter=getattr(self.llm, "count_tokens", None),
-            )
-            if package is None:
-                return JobResult(success=True, summary="No relationship evidence to review")
-
-            if not package.observations:
-                completed = await self.knowledge_store.complete_conflict_discovery(package)
-                if not completed:
-                    raise RuntimeError("Conflict-discovery cursor lease was lost")
-                return JobResult(success=True, summary="Cleared stale discovery continuation")
-
-            result = await self.llm.generate_structured(
-                response_model=LLMConflictDiscoveryResult,
-                system=CONFLICT_DISCOVERY_SYSTEM_PROMPT,
-                user=package.prompt,
-                temperature=0.0,
-            )
-            available_ids = {
-                int(observation["observation_id"])
-                for observation in package.observations
-            }
-            written = 0
-            skipped = 0
-            for candidate in result.candidates:
-                if not set(candidate.evidence_ids).issubset(available_ids):
-                    skipped += 1
-                    logger.warning(
-                        "Ignoring conflict candidate with observation IDs outside "
-                        "the discovery packet for project {}",
-                        ctx.project_id,
-                    )
-                    continue
-                write_result = await self.knowledge_store.record_conflict_detection(
-                    user_name=ctx.user_name,
-                    project_id=ctx.project_id,
-                    origin="background_discovery",
-                    kind=candidate.kind,
-                    rationale=candidate.rationale,
-                    confidence=candidate.confidence,
-                    evidence_ids=candidate.evidence_ids,
-                    metadata={
-                        "discovery_packet_tokens": package.estimated_tokens,
-                        "packet_compacted": package.compacted,
-                    },
+        result = await self.llm.generate_structured(
+            response_model=LLMConflictDiscoveryResult,
+            system=CONFLICT_DISCOVERY_SYSTEM_PROMPT,
+            user=package.prompt,
+            temperature=0.0,
+        )
+        available_ids = {
+            int(observation["observation_id"])
+            for observation in package.observations
+        }
+        candidates = []
+        skipped = 0
+        for candidate in result.candidates:
+            if not set(candidate.evidence_ids).issubset(available_ids):
+                skipped += 1
+                logger.warning(
+                    "Ignoring conflict candidate with observation IDs outside "
+                    "the discovery packet for project {}",
+                    ctx.project_id,
                 )
-                written += int(write_result.should_notify)
+                continue
+            candidates.append(candidate)
 
-            completed = await self.knowledge_store.complete_conflict_discovery(package)
-            if not completed:
-                raise RuntimeError("Conflict-discovery cursor lease was lost")
-            return JobResult(
-                success=True,
-                summary=(
-                    f"Reviewed {len(package.observations)} relationship observations; "
-                    f"opened or updated {written} conflict groups"
-                    + (f"; ignored {skipped} invalid candidates" if skipped else "")
-                ),
-            )
-        finally:
-            if not completed:
-                await self.knowledge_store.release_conflict_discovery(lease)
+        written = await self.knowledge_store.complete_conflict_discovery(
+            package,
+            candidates=candidates,
+        )
+        return JobResult(
+            success=True,
+            summary=(
+                f"Reviewed {len(package.observations)} relationship observations; "
+                f"opened or updated {written} conflict groups"
+                + (f"; ignored {skipped} invalid candidates" if skipped else "")
+            ),
+        )
 
     def update_settings(self, settings: ConflictDiscoverySettings) -> None:
         self.enabled = settings.enabled

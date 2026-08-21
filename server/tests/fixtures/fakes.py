@@ -1091,6 +1091,7 @@ def make_turn_payload(role="user", content="hello", timestamp=None, user_msg_id=
 class RecordingCursor:
     def __init__(self, client):
         self.client = client
+        self.rowcount = 1
 
     async def execute(self, query, params=None):
         self.client.calls.append(("execute", query, params))

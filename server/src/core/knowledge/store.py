@@ -1,6 +1,6 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -25,7 +25,6 @@ from core.community.community_store import CommunityStore
 from core.knowledge.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflict_service import ConflictService
 from core.knowledge.conflicts import (
-    ConflictDiscoveryLease,
     ConflictDiscoveryPackage,
     ConflictGroup,
     ConflictOrigin,
@@ -1014,28 +1013,24 @@ class KnowledgeStore:
             project_id=project_id,
         )
 
-    async def claim_conflict_discovery(
-        self, *, user_name: str, project_id: str, lease_seconds: int = 900
-    ) -> ConflictDiscoveryLease | None:
-        return await self._conflict_discovery_reader.claim(
-            user_name=user_name,
-            project_id=project_id,
-            lease_seconds=lease_seconds,
-        )
-
     async def build_conflict_discovery_package(
         self,
-        lease: ConflictDiscoveryLease,
         *,
+        user_name: str,
+        project_id: str,
         max_seed_span_days: int,
         max_package_tokens: int,
         token_counter: Callable[[str], int] | None = None,
     ) -> ConflictDiscoveryPackage | None:
+        cursor = await self._conflict_discovery_reader.get_cursor(
+            user_name=user_name,
+            project_id=project_id,
+        )
         return await ConflictPacketBuilder(
             self._conflict_discovery_reader,
             token_counter=token_counter,
         ).build(
-            lease,
+            cursor,
             max_span_days=max_seed_span_days,
             max_tokens=max_package_tokens,
         )
@@ -1043,24 +1038,43 @@ class KnowledgeStore:
     async def complete_conflict_discovery(
         self,
         package: ConflictDiscoveryPackage,
-    ) -> bool:
-        return await self._conflict_discovery_reader.complete(
-            package.lease,
-            cursor_observed_at_ms=package.next_observed_at_ms,
-            cursor_observation_id=package.next_observation_id,
-            continuation=package.continuation,
-        )
+        *,
+        candidates: Iterable[Any],
+    ) -> int:
+        """Persist grounded conflict groups and advance the cursor atomically."""
 
-    async def release_conflict_discovery(self, lease: ConflictDiscoveryLease) -> None:
-        await self._conflict_discovery_reader.release(lease)
+        results = []
+        async with self._postgres_client.transaction() as cur:
+            for candidate in candidates:
+                result = await self._conflict_writer.record_detection(
+                    user_name=package.cursor.user_name,
+                    project_id=package.cursor.project_id,
+                    origin="background_discovery",
+                    kind=candidate.kind,
+                    rationale=candidate.rationale,
+                    confidence=candidate.confidence,
+                    evidence_ids=candidate.evidence_ids,
+                    metadata={
+                        "discovery_packet_tokens": package.estimated_tokens,
+                        "packet_compacted": package.compacted,
+                    },
+                    cur=cur,
+                )
+                results.append(result)
+            await self._conflict_discovery_reader.advance(
+                package.cursor,
+                last_reviewed_observation_id=package.next_observation_id,
+                cur=cur,
+            )
 
-    async def has_conflict_discovery_continuation(
-        self, *, user_name: str, project_id: str
-    ) -> bool:
-        return await self._conflict_discovery_reader.has_continuation(
-            user_name=user_name,
-            project_id=project_id,
-        )
+        for result in results:
+            await self._conflict_service.notify_detection(
+                user_name=package.cursor.user_name,
+                project_id=package.cursor.project_id,
+                origin="background_discovery",
+                result=result,
+            )
+        return sum(int(result.should_notify) for result in results)
 
     async def record_conflict_detection(
         self,

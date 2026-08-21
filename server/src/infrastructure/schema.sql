@@ -576,11 +576,7 @@ CREATE TABLE IF NOT EXISTS public.conflict_discovery_checkpoints (
     user_name TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id)
         ON DELETE CASCADE,
-    cursor_observed_at_ms BIGINT NOT NULL DEFAULT 0,
-    cursor_observation_id BIGINT NOT NULL DEFAULT 0,
-    continuation JSONB NOT NULL DEFAULT '{}'::jsonb,
-    lease_token TEXT,
-    lease_expires_at TIMESTAMPTZ,
+    last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0,
     last_completed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_name, project_id)
@@ -611,7 +607,31 @@ ON public.llm_budget_reservations(reset_key, expires_at)
 WHERE status = 'active';
 
 ALTER TABLE public.conflict_discovery_checkpoints
-ADD COLUMN IF NOT EXISTS continuation JSONB NOT NULL DEFAULT '{}'::jsonb;
+ADD COLUMN IF NOT EXISTS last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'conflict_discovery_checkpoints'
+          AND column_name = 'cursor_observation_id'
+    ) THEN
+        UPDATE public.conflict_discovery_checkpoints
+        SET last_reviewed_observation_id = GREATEST(
+            last_reviewed_observation_id,
+            cursor_observation_id
+        );
+    END IF;
+END $$;
+
+ALTER TABLE public.conflict_discovery_checkpoints
+    DROP COLUMN IF EXISTS cursor_observed_at_ms,
+    DROP COLUMN IF EXISTS cursor_observation_id,
+    DROP COLUMN IF EXISTS continuation,
+    DROP COLUMN IF EXISTS lease_token,
+    DROP COLUMN IF EXISTS lease_expires_at;
 
 DO $$
 BEGIN

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Iterable
 
 from common.scoping import require_scope_value
@@ -24,6 +25,14 @@ class ConflictWriter:
         self.client = client
         self.reviews = reviews or HumanReviewWriter(client)
 
+    @asynccontextmanager
+    async def _cursor_context(self, cur=None):
+        if cur is not None:
+            yield cur
+            return
+        async with self.client.transaction() as transaction_cursor:
+            yield transaction_cursor
+
     async def record_detection(
         self,
         *,
@@ -36,6 +45,7 @@ class ConflictWriter:
         evidence_ids: Iterable[int],
         metadata: dict[str, Any] | None = None,
         existing_conflict_id: str | None = None,
+        cur=None,
     ) -> ConflictWriteResult:
         user_name = require_scope_value(user_name, "user_name", "record_conflict")
         project_id = require_scope_value(
@@ -65,7 +75,7 @@ class ConflictWriter:
                 existing_conflict_id, "existing_conflict_id", "record_conflict"
             )
 
-        async with self.client.transaction() as cur:
+        async with self._cursor_context(cur) as cur:
             evidence = await self._load_evidence(
                 cur,
                 user_name=user_name,
