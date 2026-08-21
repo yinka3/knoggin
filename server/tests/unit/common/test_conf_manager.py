@@ -64,7 +64,9 @@ def test_config_manager_subscription_and_update(mock_config_paths, reset_config_
     def callback(val):
         received_updates.append(val)
 
-    unsubscribe = mgr.subscribe(callback, path="developer_settings.jobs.cleaner.stale_junk_days")
+    unsubscribe = mgr.subscribe(
+        callback, path="developer_settings.jobs.merge_rollback.retention_hours"
+    )
 
     # Subscription fires immediately with current value
     assert len(received_updates) == 1
@@ -76,13 +78,17 @@ def test_config_manager_subscription_and_update(mock_config_paths, reset_config_
     assert len(received_updates) == 1
 
     # Update related setting (should fire)
-    mgr.update_settings({"developer_settings": {"jobs": {"cleaner": {"stale_junk_days": 42}}}})
+    mgr.update_settings(
+        {"developer_settings": {"jobs": {"merge_rollback": {"retention_hours": 8}}}}
+    )
     assert len(received_updates) == 2
-    assert received_updates[-1] == 42
+    assert received_updates[-1] == 8
 
     # Unsubscribe
     unsubscribe()
-    mgr.update_settings({"developer_settings": {"jobs": {"cleaner": {"stale_junk_days": 100}}}})
+    mgr.update_settings(
+        {"developer_settings": {"jobs": {"merge_rollback": {"retention_hours": 12}}}}
+    )
     assert len(received_updates) == 2  # Did not fire again
 
 

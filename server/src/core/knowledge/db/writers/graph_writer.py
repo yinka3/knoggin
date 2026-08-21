@@ -976,27 +976,6 @@ class GraphWriter:
         )
         return deleted_ids
 
-    @_storage_write("cleanup_null_entities")
-    async def cleanup_null_entities(self, *, project_id: str) -> List[int]:
-        project_id = self._require_project_id(project_id, "cleanup_null_entities")
-        async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                SELECT entity_id
-                FROM entities
-                WHERE type IS NULL
-                  AND project_id = %s
-                """,
-                (project_id,),
-            )
-            rows = await cur.fetchall()
-            entity_ids = [row["entity_id"] for row in rows]
-            return await self._delete_entity_aggregate_with_cursor(
-                cur,
-                entity_ids,
-                project_id,
-            )
-
     @_storage_write("delete_entity")
     async def delete_entity(
         self,

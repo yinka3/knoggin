@@ -104,13 +104,6 @@ class DocumentIndexingSettings(ConfigModel):
     recovery_batch_size: int = Field(16, ge=1, le=100)
 
 
-class CleanerSettings(ConfigModel):
-    enabled: bool = Field(True)
-    interval_hours: int = Field(24, ge=1)
-    orphan_age_hours: int = Field(24, ge=1)
-    stale_junk_days: int = Field(30, ge=1)
-
-
 class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
@@ -144,7 +137,6 @@ class ConflictDiscoverySettings(ConfigModel):
 
 
 class JobSettings(ConfigModel):
-    cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
     audit_retention: AuditRetentionSettings = Field(

@@ -14,7 +14,6 @@ from common.scoping import (
     require_visible_project_ids,
 )
 from core.community.community_job import AACJob
-from core.ingestion.jobs.cleaner_job import EntityCleanupJob
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.documents import DocumentService
@@ -236,21 +235,6 @@ class ProjectRuntimeFactory:
             config_manager.subscribe(
                 document_index_job.update_settings,
                 "developer_settings.jobs.document_indexing",
-            )
-        )
-
-        cleaner_job = EntityCleanupJob(
-            user_name=self.user_name,
-            knowledge_store=self.resources.knowledge_store,
-            entities=entities,
-            redis_client=self.resources.redis,
-            settings=jobs.cleaner,
-        )
-        scheduler.register(cleaner_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                cleaner_job.update_settings,
-                "developer_settings.jobs.cleaner",
             )
         )
 

@@ -761,9 +761,6 @@ class KnowledgeStore:
             cur=cur,
         )
 
-    async def cleanup_null_entities(self, *, project_id: str) -> List[int]:
-        return await self._graph_writer.cleanup_null_entities(project_id=project_id)
-
     async def preview_historical_reclassification(
         self,
         *,
@@ -1168,18 +1165,6 @@ class KnowledgeStore:
         return await self._entity_reader.validate_existing_ids(
             ids,
             visible_project_ids=visible_project_ids,
-        )
-
-    async def get_orphan_entities(
-        self,
-        protected_id: int = 1,
-        orphan_cutoff_ms: int = 0,
-        stale_junk_cutoff_ms: int = 0,
-        *,
-        project_id: str,
-    ) -> List[int]:
-        return await self._entity_reader.get_orphan_entities(
-            protected_id, orphan_cutoff_ms, stale_junk_cutoff_ms, project_id=project_id
         )
 
     async def get_neighbor_ids(
