@@ -118,7 +118,7 @@ class MergeAuditReader:
                     '[]'
                 ) AS evidence_refs
             FROM relationships r
-            LEFT JOIN relationship_evidence_refs ref
+            LEFT JOIN relationship_observations ref
               ON ref.relationship_id = r.relationship_id
              AND ref.project_id = r.project_id
              AND ref.user_name = %s

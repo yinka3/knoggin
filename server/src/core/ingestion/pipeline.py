@@ -347,7 +347,14 @@ class IngestionPipeline:
                     verbose_only=True,
                 )
 
-                batch.set_relationship_observations(observations)
+                batch.set_relationship_observations(
+                    [
+                        observation.model_copy(
+                            update={"domain_version": batch.policy.domain.version}
+                        )
+                        for observation in observations
+                    ]
+                )
                 batch.work_unit.issues = list(batch.issues)
 
                 await emit(

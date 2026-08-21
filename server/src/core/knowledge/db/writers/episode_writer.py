@@ -315,7 +315,7 @@ class EpisodeWriter:
         await cur.execute(
             """
             SELECT rer.message_id, rer.relationship_id
-            FROM relationship_evidence_refs rer
+            FROM relationship_observations rer
             JOIN relationships r ON r.relationship_id = rer.relationship_id AND r.project_id = rer.project_id
             WHERE rer.message_id = ANY(%s) AND rer.project_id = %s
             """,
@@ -622,7 +622,7 @@ class EpisodeWriter:
         await cur.execute(
             """
             SELECT rer.message_id, rer.relationship_id
-            FROM relationship_evidence_refs rer
+            FROM relationship_observations rer
             JOIN relationships r
               ON r.relationship_id = rer.relationship_id
              AND r.project_id = rer.project_id

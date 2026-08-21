@@ -829,7 +829,7 @@ class EntityReader:
               WHEN r.entity_a_id = %s THEN r.entity_b_id
               ELSE r.entity_a_id
           END
-        LEFT JOIN relationship_evidence_refs ref
+        LEFT JOIN relationship_observations ref
           ON ref.relationship_id = r.relationship_id
          AND ref.project_id = r.project_id
         WHERE %s IN (r.entity_a_id, r.entity_b_id)

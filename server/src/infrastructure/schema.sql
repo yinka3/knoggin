@@ -343,8 +343,7 @@ ON public.relationships(entity_b_id);
 
 -- One row per extracted relationship phrase and message. This preserves
 -- source wording and endpoint types without turning advisories into graph
--- authority; relationship_evidence_refs remains the aggregate edge's compact
--- message-reference index.
+-- authority. This is the only canonical relationship-evidence record.
 CREATE TABLE IF NOT EXISTS public.relationship_observations (
     observation_id BIGSERIAL PRIMARY KEY,
     relationship_id TEXT NOT NULL,
@@ -363,6 +362,8 @@ CREATE TABLE IF NOT EXISTS public.relationship_observations (
     canonical_relationship_type TEXT,
     domain_status TEXT NOT NULL DEFAULT 'unrecognized'
         CHECK (domain_status IN ('recognized', 'unrecognized')),
+    domain_version INTEGER NOT NULL DEFAULT 0 CHECK (domain_version >= 0),
+    "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
     confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     context TEXT,
     observed_at_ms BIGINT NOT NULL,
@@ -405,6 +406,9 @@ ON public.relationship_observations(
 
 CREATE INDEX IF NOT EXISTS relationship_observations_relationship_idx
 ON public.relationship_observations(relationship_id, project_id);
+
+CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
+ON public.relationship_observations(project_id, user_name, session_id, message_id);
 
 -- Durable advisory disposition. Evidence remains in relationship_observations;
 -- this table stores only the current user decision for each pattern.
@@ -605,41 +609,7 @@ WHERE status = 'active';
 ALTER TABLE public.conflict_discovery_checkpoints
 ADD COLUMN IF NOT EXISTS continuation JSONB NOT NULL DEFAULT '{}'::jsonb;
 
-CREATE TABLE IF NOT EXISTS public.relationship_evidence_refs (
-    relationship_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id BIGINT NOT NULL,
-    PRIMARY KEY (relationship_id, user_name, session_id, message_id),
-    CONSTRAINT relationship_evidence_refs_relationship_project_fk
-        FOREIGN KEY (relationship_id, project_id)
-        REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT relationship_evidence_refs_message_scope_project_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS relationship_evidence_refs_message_idx
-ON public.relationship_evidence_refs(user_name, session_id, message_id);
-
-ALTER TABLE public.relationship_evidence_refs
-ADD COLUMN IF NOT EXISTS project_id TEXT;
-
-UPDATE public.relationship_evidence_refs ref
-SET project_id = relationship.project_id
-FROM public.relationships relationship
-WHERE relationship.relationship_id = ref.relationship_id
-  AND ref.project_id IS NULL;
-
-ALTER TABLE public.relationship_evidence_refs
-ALTER COLUMN project_id SET NOT NULL;
-
-ALTER TABLE public.relationship_evidence_refs
-DROP CONSTRAINT IF EXISTS relationship_evidence_refs_relationship_id_fkey,
-DROP CONSTRAINT IF EXISTS relationship_evidence_refs_message_scope_fk;
+DROP TABLE IF EXISTS public.relationship_evidence_refs;
 
 DO $$
 BEGIN
@@ -663,30 +633,11 @@ BEGIN
         UNIQUE (relationship_id, project_id);
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationship_evidence_refs_relationship_project_fk'
-          AND conrelid = 'public.relationship_evidence_refs'::regclass
-    ) THEN
-        ALTER TABLE public.relationship_evidence_refs
-        ADD CONSTRAINT relationship_evidence_refs_relationship_project_fk
-        FOREIGN KEY (relationship_id, project_id)
-        REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationship_evidence_refs_message_scope_project_fk'
-          AND conrelid = 'public.relationship_evidence_refs'::regclass
-    ) THEN
-        ALTER TABLE public.relationship_evidence_refs
-        ADD CONSTRAINT relationship_evidence_refs_message_scope_project_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
 END $$;
+
+ALTER TABLE public.relationship_observations
+    ADD COLUMN IF NOT EXISTS domain_version INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS "symmetric" BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS public.episodes (
     episode_id TEXT PRIMARY KEY,

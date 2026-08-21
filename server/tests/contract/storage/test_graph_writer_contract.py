@@ -339,11 +339,8 @@ async def test_graph_writer_delete_relationship_uses_project_and_identity_scope(
         project_id="project-1",
     ) is True
 
-    assert len(client.calls) == 3
-    evidence_call, canonical_call, projection_call = client.calls
-    assert evidence_call[0] == "execute"
-    assert "DELETE FROM relationship_evidence_refs" in evidence_call[1]
-    assert evidence_call[2] == ("project-1:2:3:works_with",)
+    assert len(client.calls) == 2
+    canonical_call, projection_call = client.calls
     assert canonical_call[0] == "execute"
     assert "DELETE FROM relationships" in canonical_call[1]
     assert canonical_call[2] == ("project-1:2:3:works_with",)

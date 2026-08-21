@@ -467,13 +467,6 @@ class GraphWriter:
             async with self.client.transaction() as cur:
                 await cur.execute(
                     """
-                    DELETE FROM relationship_evidence_refs
-                    WHERE relationship_id = %s
-                    """,
-                    (relationship_id,),
-                )
-                await cur.execute(
-                    """
                     DELETE FROM relationships
                     WHERE relationship_id = %s
                     RETURNING relationship_id
@@ -826,13 +819,6 @@ class GraphWriter:
                     if target_id == primary_id:
                         await cur.execute(
                             """
-                            DELETE FROM relationship_evidence_refs
-                            WHERE relationship_id = %s
-                            """,
-                            (old_relationship_id,),
-                        )
-                        await cur.execute(
-                            """
                             DELETE FROM relationship_observations
                             WHERE relationship_id = %s
                               AND project_id = %s
@@ -930,27 +916,6 @@ class GraphWriter:
                             rel["context"],
                             rel["last_seen_ms"],
                         ),
-                    )
-                    await cur.execute(
-                        """
-                        INSERT INTO relationship_evidence_refs (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        )
-                        SELECT %s, %s, user_name, session_id, message_id
-                        FROM relationship_evidence_refs
-                        WHERE relationship_id = %s
-                        ON CONFLICT (
-                            relationship_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        ) DO NOTHING
-                        """,
-                        (new_relationship_id, project_id, old_relationship_id),
                     )
                     await cur.execute(
                         """
@@ -1107,7 +1072,7 @@ class GraphWriter:
                                     0.0
                                 ) AS prominence_weight
                             FROM episode_messages em
-                            JOIN relationship_evidence_refs rer
+                            JOIN relationship_observations rer
                               ON rer.message_id = em.message_id
                              AND rer.project_id = em.project_id
                              AND rer.session_id = em.session_id
@@ -1129,13 +1094,6 @@ class GraphWriter:
                         (new_relationship_id, project_id, new_relationship_id),
                     )
                     if new_relationship_id != old_relationship_id:
-                        await cur.execute(
-                            """
-                            DELETE FROM relationship_evidence_refs
-                            WHERE relationship_id = %s
-                            """,
-                            (old_relationship_id,),
-                        )
                         await cur.execute(
                             """
                             DELETE FROM relationship_observations
@@ -1253,7 +1211,7 @@ class GraphWriter:
                             '[]'
                         ) AS evidence_refs
                     FROM relationships rel
-                    LEFT JOIN relationship_evidence_refs ref
+                    LEFT JOIN relationship_observations ref
                       ON ref.relationship_id = rel.relationship_id
                      AND ref.project_id = rel.project_id
                     WHERE rel.project_id = %s

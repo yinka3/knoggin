@@ -253,18 +253,6 @@ class MergeAuditWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM relationship_evidence_refs
-                WHERE relationship_id IN (
-                    SELECT relationship_id
-                    FROM relationships
-                    WHERE project_id = %s
-                      AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
-                )
-                """,
-                (project_id, ids, ids),
-            )
-            await cur.execute(
-                """
                 DELETE FROM relationships
                 WHERE project_id = %s
                   AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
@@ -433,33 +421,6 @@ class MergeAuditWriter:
                         relationship.get("last_seen_ms"),
                     ),
                 )
-                for ref in self._json_value(relationship.get("evidence_refs") or []):
-                    await cur.execute(
-                        """
-                        INSERT INTO relationship_evidence_refs (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        )
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (
-                            relationship_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        ) DO NOTHING
-                        """,
-                        (
-                            relationship["relationship_id"],
-                            relationship["project_id"],
-                            ref["user_name"],
-                            ref["session_id"],
-                            int(ref["message_id"]),
-                        ),
-                    )
-
             for observation in before_state.get("relationship_observations", []):
                 await cur.execute(
                     """

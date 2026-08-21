@@ -29,7 +29,6 @@ class ProjectDeletionWriter:
         "document_folder_uploads",
         "document_workspace_sources",
         "project_document_scan_settings",
-        "relationship_evidence_refs",
         "message_entity_refs",
         "message_search",
         "hierarchy_edges",
@@ -118,17 +117,6 @@ class ProjectDeletionWriter:
                 DELETE FROM public.document_chunks
                 WHERE document_id IN (
                     SELECT document_id FROM public.project_documents
-                    WHERE project_id = %s
-                )
-                """,
-                (project_id,),
-            )
-        if table == "relationship_evidence_refs":
-            return (
-                """
-                DELETE FROM public.relationship_evidence_refs
-                WHERE relationship_id IN (
-                    SELECT relationship_id FROM public.relationships
                     WHERE project_id = %s
                 )
                 """,

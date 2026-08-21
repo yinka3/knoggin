@@ -308,20 +308,6 @@ class RelationshipReclassificationWriter:
                     ),
                 )
                 await cur.execute(
-                    """
-                    INSERT INTO public.relationship_evidence_refs (
-                        relationship_id, project_id, user_name, session_id, message_id
-                    )
-                    SELECT %s, project_id, user_name, session_id, message_id
-                    FROM public.relationship_evidence_refs
-                    WHERE relationship_id = %s AND project_id = %s
-                    ON CONFLICT (
-                        relationship_id, user_name, session_id, message_id
-                    ) DO NOTHING
-                    """,
-                    (change.new_relationship_id, change.relationship_id, project_id),
-                )
-                await cur.execute(
                     self._observation_sql(),
                     (
                         change.relationship_id,
@@ -359,11 +345,6 @@ class RelationshipReclassificationWriter:
                     (change.new_relationship_id, change.relationship_id, project_id),
                 )
                 if change.new_relationship_id != change.relationship_id:
-                    await cur.execute(
-                        "DELETE FROM public.relationship_evidence_refs "
-                        "WHERE relationship_id = %s AND project_id = %s",
-                        (change.relationship_id, project_id),
-                    )
                     await cur.execute(
                         "DELETE FROM public.relationship_observations "
                         "WHERE relationship_id = %s AND project_id = %s",

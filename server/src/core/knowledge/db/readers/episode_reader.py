@@ -896,7 +896,7 @@ class EpisodeReader:
         rows = await self.client.fetch_all(
             """
             SELECT rer.message_id, rer.relationship_id
-            FROM relationship_evidence_refs rer
+            FROM relationship_observations rer
             JOIN relationships r
               ON r.relationship_id = rer.relationship_id
              AND r.project_id = rer.project_id
@@ -988,7 +988,7 @@ class EpisodeReader:
                 r.context,
                 array_agg(DISTINCT rer.message_id ORDER BY rer.message_id)
                     AS evidence_message_ids
-            FROM relationship_evidence_refs rer
+            FROM relationship_observations rer
             JOIN relationships r
               ON r.relationship_id = rer.relationship_id
              AND r.project_id = rer.project_id

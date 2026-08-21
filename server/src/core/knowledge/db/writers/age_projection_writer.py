@@ -227,23 +227,13 @@ class AgeProjectionWriter:
             r.observed_relationship_label = rel.observed_relationship_label,
             r.domain_status = rel.domain_status,
             r.symmetric = rel.symmetric,
-            r.weight = CASE
-                WHEN rel.evidence_ref IN coalesce(r.message_ids, [])
-                    THEN coalesce(r.weight, 0)
-                ELSE coalesce(r.weight, 0) + 1
-            END,
+            r.weight = coalesce(r.weight, 0) + 1,
             r.confidence = CASE
                 WHEN r.confidence IS NULL THEN rel.confidence
                 WHEN rel.confidence > r.confidence THEN rel.confidence
                 ELSE r.confidence
             END,
             r.last_seen = rel.now,
-            r.message_ids = CASE
-                WHEN r.message_ids IS NULL THEN [rel.evidence_ref]
-                WHEN rel.evidence_ref IN coalesce(r.message_ids, [])
-                    THEN r.message_ids
-                ELSE coalesce(r.message_ids, []) + [rel.evidence_ref]
-            END,
             r.context = CASE
                 WHEN r.context IS NULL THEN rel.context
                 WHEN rel.context IS NOT NULL THEN rel.context
@@ -316,7 +306,6 @@ class AgeProjectionWriter:
             r.weight = rel.weight,
             r.confidence = rel.confidence,
             r.last_seen = rel.last_seen,
-            r.message_ids = rel.message_ids,
             r.context = rel.context
         RETURN count(r)
         """

@@ -280,7 +280,7 @@ class GraphBuilder:
                     '[]'
                 ) AS evidence_refs
             FROM relationships rel
-            LEFT JOIN relationship_evidence_refs ref
+            LEFT JOIN relationship_observations ref
               ON ref.relationship_id = rel.relationship_id
              AND ref.project_id = rel.project_id
             WHERE rel.project_id = %s

@@ -74,6 +74,7 @@ class RelationshipObservation(BaseModel):
     source_type: Optional[str] = None
     target_type: Optional[str] = None
     symmetric: bool = False
+    domain_version: int = Field(0, ge=0)
     confidence: float = Field(1.0, ge=0.0, le=1.0)
     context: Optional[str] = None
     identity_rooted: bool = False
@@ -253,6 +254,7 @@ class RelationshipWrite:
     source_type: Optional[str] = None
     target_type: Optional[str] = None
     symmetric: bool = False
+    domain_version: int = 0
 
     def __post_init__(self) -> None:
         _require_positive_id(self.entity_a_id, "RelationshipWrite.entity_a_id")
@@ -283,6 +285,8 @@ class RelationshipWrite:
         else:
             object.__setattr__(self, "domain_status", "unrecognized")
         object.__setattr__(self, "confidence", _require_confidence(self.confidence))
+        if not isinstance(self.domain_version, int) or isinstance(self.domain_version, bool) or self.domain_version < 0:
+            raise ValueError("RelationshipWrite.domain_version must be a non-negative integer")
         if self.context is not None:
             if not isinstance(self.context, str):
                 raise ValueError("RelationshipWrite.context must be a string or None")

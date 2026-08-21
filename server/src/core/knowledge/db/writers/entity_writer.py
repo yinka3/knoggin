@@ -374,10 +374,8 @@ class EntityWriter:
                             weight = relationships.weight + CASE
                                 WHEN EXISTS (
                                     SELECT 1
-                                    FROM relationship_evidence_refs
-                                        AS existing_evidence
-                                    WHERE existing_evidence.relationship_id =
-                                        relationships.relationship_id
+                                    FROM relationship_observations AS existing_evidence
+                                    WHERE existing_evidence.relationship_id = relationships.relationship_id
                                       AND existing_evidence.project_id = %s
                                       AND existing_evidence.user_name = %s
                                       AND existing_evidence.session_id = %s
@@ -455,32 +453,6 @@ class EntityWriter:
 
                     await cur.execute(
                         """
-                        INSERT INTO relationship_evidence_refs (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        )
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (
-                            relationship_id,
-                            user_name,
-                            session_id,
-                            message_id
-                        ) DO NOTHING
-                        """,
-                        (
-                            relationship_id,
-                            project_id,
-                            user_name,
-                            session_id,
-                            evidence_ref["message_id"],
-                        ),
-                    )
-
-                    await cur.execute(
-                        """
                         INSERT INTO relationship_observations (
                             relationship_id,
                             project_id,
@@ -494,13 +466,15 @@ class EntityWriter:
                             observed_relationship_label,
                             canonical_relationship_type,
                             domain_status,
+                            domain_version,
+                            "symmetric",
                             confidence,
                             context,
                             observed_at_ms
                         )
                         VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s
                         )
                         ON CONFLICT (
                             project_id,
@@ -516,6 +490,8 @@ class EntityWriter:
                                 relationship_observations.canonical_relationship_type
                             ),
                             domain_status = EXCLUDED.domain_status,
+                            domain_version = EXCLUDED.domain_version,
+                            "symmetric" = EXCLUDED."symmetric",
                             confidence = GREATEST(
                                 relationship_observations.confidence,
                                 EXCLUDED.confidence
@@ -542,6 +518,8 @@ class EntityWriter:
                             relationship.observed_label,
                             relationship.canonical_type,
                             relationship.domain_status,
+                            relationship.domain_version,
+                            relationship.symmetric,
                             relationship.confidence,
                             relationship.context,
                             now_ms,
@@ -559,7 +537,6 @@ class EntityWriter:
                             "observed_relationship_label": relationship.observed_label,
                             "domain_status": relationship.domain_status,
                             "symmetric": relationship.symmetric,
-                            "evidence_ref": json.dumps(evidence_ref),
                             "confidence": relationship.confidence,
                             "context": relationship.context,
                             "now": now_ms,

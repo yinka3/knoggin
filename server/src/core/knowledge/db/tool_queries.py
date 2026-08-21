@@ -107,7 +107,7 @@ class ToolQueries:
                           AND r.project_id = ANY(%s)
                         LIMIT 10
                     ) rels
-                    JOIN relationship_evidence_refs rer
+                    JOIN relationship_observations rer
                       ON rer.relationship_id = rels.relationship_id
                      AND rer.project_id = rels.project_id
                 ),
@@ -366,7 +366,7 @@ class ToolQueries:
                                 'message_id', rer.message_id
                             )
                         )
-                        FROM relationship_evidence_refs rer
+                        FROM relationship_observations rer
                         WHERE rer.relationship_id = r.relationship_id
                           AND rer.project_id = r.project_id
                     ),
@@ -465,7 +465,7 @@ class ToolQueries:
                             'message_id', rer.message_id
                         )
                     )
-                    FROM relationship_evidence_refs rer
+                    FROM relationship_observations rer
                     WHERE rer.relationship_id = r.relationship_id
                       AND rer.project_id = r.project_id
                 ),
@@ -497,7 +497,7 @@ class ToolQueries:
             ) AS observation_refs,
             (
                 SELECT COUNT(*)::INTEGER
-                FROM relationship_evidence_refs rer
+                FROM relationship_observations rer
                 WHERE rer.relationship_id = r.relationship_id
                   AND rer.project_id = r.project_id
             ) AS evidence_message_count,
@@ -623,7 +623,7 @@ class ToolQueries:
                             'message_id', rer.message_id
                         )
                     )
-                    FROM relationship_evidence_refs rer
+                    FROM relationship_observations rer
                     WHERE rer.relationship_id = r.relationship_id
                       AND rer.project_id = r.project_id
                 ),

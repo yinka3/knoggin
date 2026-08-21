@@ -192,6 +192,7 @@ async def prepare_ingestion_batch_graph_writes(
                 source_type=observation.source_type,
                 target_type=observation.target_type,
                 symmetric=observation.symmetric,
+                domain_version=observation.domain_version,
             )
         )
 
