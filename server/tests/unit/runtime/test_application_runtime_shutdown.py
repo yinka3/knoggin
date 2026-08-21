@@ -87,6 +87,8 @@ async def test_application_runtime_delegates_shutdown_to_the_coordinator():
         resources=RecordingOwner("resources", calls),
         projects=RecordingOwner("projects", calls),
         sessions=RecordingOwner("sessions", calls),
+        agent_manager=SimpleNamespace(),
+        agent_orchestrator=SimpleNamespace(),
     )
 
     await runtime.shutdown()
@@ -104,6 +106,8 @@ async def test_application_runtime_owns_and_explicitly_attaches_health_service()
         resources=resources,
         projects=RecordingOwner("projects", calls),
         sessions=sessions,
+        agent_manager=SimpleNamespace(),
+        agent_orchestrator=SimpleNamespace(),
     )
 
     assert sessions.health_service is runtime.health_service
@@ -154,6 +158,25 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
     projects = RecordingOwner("projects", calls)
     sessions = RecordingSessions("sessions", calls)
 
+    class RecordingAgentManager:
+        def __init__(self, received_resources, received_user_name):
+            assert received_resources is resources
+            assert received_user_name == "ada"
+            calls.append("agent_manager")
+
+        async def ensure_default_agent(self):
+            calls.append("ensure_default_agent")
+
+    class RecordingAgentOrchestrator:
+        def __init__(self, manager):
+            assert isinstance(manager, RecordingAgentManager)
+            calls.append("agent_orchestrator")
+
+    def create_sessions(**kwargs):
+        assert isinstance(kwargs["agent_orchestrator"], RecordingAgentOrchestrator)
+        calls.append("sessions")
+        return sessions
+
     async def create_resources(cls, *, num_workers=None):
         return resources
 
@@ -163,7 +186,9 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
         classmethod(create_resources),
     )
     monkeypatch.setattr(application_module, "ProjectManager", lambda **_kwargs: projects)
-    monkeypatch.setattr(application_module, "SessionManager", lambda **_kwargs: sessions)
+    monkeypatch.setattr(application_module, "AgentManager", RecordingAgentManager)
+    monkeypatch.setattr(application_module, "AgentOrchestrator", RecordingAgentOrchestrator)
+    monkeypatch.setattr(application_module, "SessionManager", create_sessions)
     monkeypatch.setattr(
         application_module.ConfigManager,
         "get",
@@ -172,5 +197,13 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
 
     runtime = await application_module.ApplicationRuntime.start(user_name="ada")
 
-    assert calls == [("identity", "ada", ["Ada"])]
+    assert calls == [
+        ("identity", "ada", ["Ada"]),
+        "agent_manager",
+        "ensure_default_agent",
+        "agent_orchestrator",
+        "sessions",
+    ]
+    assert isinstance(runtime.agent_manager, RecordingAgentManager)
+    assert isinstance(runtime.agent_orchestrator, RecordingAgentOrchestrator)
     await runtime.shutdown()

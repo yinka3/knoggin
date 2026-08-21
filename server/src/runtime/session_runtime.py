@@ -55,9 +55,11 @@ class SessionRuntime:
         user_name: str,
         resources: RuntimeResources,
         health_service: Any | None = None,
+        agent_orchestrator: Any | None = None,
     ):
         self.resources = resources
         self.health_service = health_service
+        self.agent_orchestrator = agent_orchestrator
         self.user_name: str = user_name
         self.model: Optional[str] = None
         self.agent_id: Optional[str] = None
@@ -227,25 +229,18 @@ class SessionRuntime:
                 self.current_config.developer_settings.limits.conversation_context_turns,
                 up_to_msg_id=accepted.id - 1,
             )
+            orchestrator = orchestrator or self.agent_orchestrator
             if orchestrator is None:
-                from core.agent.orchestrator import Orchestrator
-
-                orchestrator = Orchestrator()
+                raise RuntimeError("Session has no application-owned AgentOrchestrator")
 
             response_seen = False
             async for event in orchestrator.run_stream(
                 user_query=accepted.content.strip(),
-                user_name=self.user_name,
-                session_id=self.session_id,
                 context=self,
                 user_timezone=user_timezone,
-                model=model or self.model,
-                agent_id=agent_id or self.agent_id,
-                enabled_tools=(
-                    enabled_tools
-                    if enabled_tools is not None
-                    else self.enabled_tools
-                ),
+                model=model,
+                agent_id=agent_id,
+                enabled_tools=enabled_tools,
                 request_document_focus=document_focus,
                 conversation_history=history,
                 user_message_id=accepted.id,

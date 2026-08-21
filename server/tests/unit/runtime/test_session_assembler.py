@@ -101,13 +101,19 @@ def assembler_harness(monkeypatch):
         "runtime.session_runtime_factory.IngestionWorker",
         RecordingIngestionWorker,
     )
+    agent_orchestrator = object()
     return SimpleNamespace(
-        assembler=SessionRuntimeFactory("ada", resources),
+        assembler=SessionRuntimeFactory(
+            "ada",
+            resources,
+            agent_orchestrator=agent_orchestrator,
+        ),
         config_manager=config_manager,
         project_state=project_state,
         resources=resources,
         batch_processor=shared_processor,
         get_next_ent_id=get_next_ent_id,
+        agent_orchestrator=agent_orchestrator,
     )
 
 
@@ -133,6 +139,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.model == "model-a"
     assert ctx.agent_id == "agent-1"
     assert ctx.enabled_tools == []
+    assert ctx.agent_orchestrator is harness.agent_orchestrator
 
     assert harness.resources.redis.evals == []
 

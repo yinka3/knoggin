@@ -763,7 +763,7 @@ async def test_cancelling_one_session_run_does_not_cancel_another(context):
     release_second = asyncio.Event()
 
     async def handler(kwargs):
-        if kwargs["session_id"] == "session-1":
+        if kwargs["context"].session_id == "session-1":
             first_started.set()
             await asyncio.Event().wait()
         second_started.set()

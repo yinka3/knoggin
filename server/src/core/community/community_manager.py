@@ -147,16 +147,16 @@ class CommunityManager:
         return [IDENTITY_SCOPE, *projects] if projects else []
 
     async def _agent_exists(self, agent_id: str) -> bool:
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         return await manager.get_agent(agent_id) is not None
 
     async def _get_default_agent_id(self) -> str:
         """Get the default agent ID for fallback."""
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         return await manager.get_default_agent_id()
 
     async def _get_agent_config(self, agent_id: str) -> Optional[AgentConfig]:
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         return await manager.get_agent(agent_id)
 
     def _track_discussion_task(self, task: asyncio.Task) -> None:
@@ -832,7 +832,7 @@ class CommunityManager:
     ) -> tuple[dict[str, str], str]:
         """Build the model-facing agent pool with one local-reference map."""
 
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         agents = await manager.list_agents()
         pool_ids = set(
             ConfigManager.get().config.developer_settings.community.agent_pool_ids

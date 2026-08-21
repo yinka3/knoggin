@@ -23,10 +23,12 @@ class SessionRuntimeFactory:
         resources: RuntimeResources,
         *,
         health_service=None,
+        agent_orchestrator=None,
     ):
         self.user_name = user_name
         self.resources = resources
         self.health_service = health_service
+        self.agent_orchestrator = agent_orchestrator
 
     @property
     def config(self):
@@ -81,6 +83,7 @@ class SessionRuntimeFactory:
             self.user_name,
             self.resources,
             health_service=self.health_service,
+            agent_orchestrator=self.agent_orchestrator,
         )
         ctx.session_id = session_id
         ctx.project_id = project_state.project_id

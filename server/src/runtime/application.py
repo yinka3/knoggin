@@ -11,6 +11,8 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.utils.time_utils import get_now
+from core.agent.orchestrator import AgentOrchestrator
+from core.agent.services.agent_manager import AgentManager
 from core.health.service import RuntimeHealthService
 from core.project.project_manager import ProjectManager
 from core.session.session_manager import SessionManager
@@ -95,6 +97,8 @@ class ApplicationRuntime:
     resources: RuntimeResources
     projects: ProjectManager
     sessions: SessionManager
+    agent_manager: AgentManager
+    agent_orchestrator: AgentOrchestrator
     shutdown_coordinator: ApplicationShutdownCoordinator = field(init=False)
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
@@ -135,12 +139,22 @@ class ApplicationRuntime:
                 ConfigManager.get().config.user_aliases,
             )
             projects = ProjectManager(resources=resources, user_name=user_name)
+            agent_manager = AgentManager(resources, user_name)
+            await agent_manager.ensure_default_agent()
+            agent_orchestrator = AgentOrchestrator(agent_manager)
             sessions = SessionManager(
                 resources=resources,
                 user_name=user_name,
                 project_manager=projects,
+                agent_orchestrator=agent_orchestrator,
             )
-            return cls(resources=resources, projects=projects, sessions=sessions)
+            return cls(
+                resources=resources,
+                projects=projects,
+                sessions=sessions,
+                agent_manager=agent_manager,
+                agent_orchestrator=agent_orchestrator,
+            )
         except Exception:
             try:
                 await resources.shutdown()
