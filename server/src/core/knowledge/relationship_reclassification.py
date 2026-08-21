@@ -12,8 +12,9 @@ from common.schema.ingestion.contracts import relationship_identity
 
 @dataclass(frozen=True, slots=True)
 class RelationshipReclassification:
-    """One persisted relationship aggregate that can be normalized."""
+    """One persisted relationship observation that can be reinterpreted."""
 
+    observation_id: int
     relationship_id: str
     project_id: str
     entity_a_id: int
@@ -21,6 +22,7 @@ class RelationshipReclassification:
     old_relationship_type: str
     old_canonical_relationship_type: str | None
     old_domain_status: str
+    old_domain_version: int
     old_symmetric: bool
     observed_relationship_label: str
     source_type: str | None
@@ -33,6 +35,7 @@ class RelationshipReclassification:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "observation_id": self.observation_id,
             "relationship_id": self.relationship_id,
             "project_id": self.project_id,
             "entity_a_id": self.entity_a_id,
@@ -40,6 +43,7 @@ class RelationshipReclassification:
             "old_relationship_type": self.old_relationship_type,
             "old_canonical_relationship_type": self.old_canonical_relationship_type,
             "old_domain_status": self.old_domain_status,
+            "old_domain_version": self.old_domain_version,
             "old_symmetric": self.old_symmetric,
             "observed_relationship_label": self.observed_relationship_label,
             "source_type": self.source_type,
@@ -109,17 +113,24 @@ def plan_relationship_reclassification(
     for row in rows:
         scanned += 1
         try:
+            observation_id = int(row["observation_id"])
             relationship_id = _text(row["relationship_id"])
             project_id = _text(row["project_id"])
             entity_a_id = int(row["entity_a_id"])
             entity_b_id = int(row["entity_b_id"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                "Relationship rows require relationship_id, project_id, "
-                "and numeric endpoint IDs"
+                "Relationship observations require observation_id, relationship_id, "
+                "project_id, and numeric endpoint IDs"
             ) from exc
-        if not relationship_id or not project_id or entity_a_id <= 0 or entity_b_id <= 0:
-            raise ValueError("Relationship rows contain invalid identity fields")
+        if (
+            observation_id <= 0
+            or not relationship_id
+            or not project_id
+            or entity_a_id <= 0
+            or entity_b_id <= 0
+        ):
+            raise ValueError("Relationship observations contain invalid identity fields")
 
         observed = _text(row.get("observed_relationship_label")) or _text(
             row.get("relationship_type")
@@ -159,12 +170,14 @@ def plan_relationship_reclassification(
         old_type = _text(row.get("relationship_type"))
         old_canonical = _text(row.get("canonical_relationship_type")) or None
         old_status = _text(row.get("domain_status")) or "unrecognized"
+        old_domain_version = int(row.get("domain_version") or 0)
         old_symmetric = bool(row.get("symmetric", False))
         if (
             relationship_id == new_relationship_id
             and old_type == canonical_type
             and old_canonical == canonical_type
             and old_status == "recognized"
+            and old_domain_version == domain.version
             and old_symmetric == normalization.symmetric
         ):
             unchanged += 1
@@ -172,6 +185,7 @@ def plan_relationship_reclassification(
 
         changes.append(
             RelationshipReclassification(
+                observation_id=observation_id,
                 relationship_id=relationship_id,
                 project_id=project_id,
                 entity_a_id=entity_a_id,
@@ -179,6 +193,7 @@ def plan_relationship_reclassification(
                 old_relationship_type=old_type,
                 old_canonical_relationship_type=old_canonical,
                 old_domain_status=old_status,
+                old_domain_version=old_domain_version,
                 old_symmetric=old_symmetric,
                 observed_relationship_label=normalization.observed_label,
                 source_type=normalization.source_type,

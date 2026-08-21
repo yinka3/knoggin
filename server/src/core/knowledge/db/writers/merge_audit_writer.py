@@ -381,19 +381,9 @@ class MergeAuditWriter:
                         entity_a_id,
                         entity_b_id,
                         relationship_type,
-                        canonical_relationship_type,
-                        observed_relationship_label,
-                        domain_status,
-                        symmetric,
-                        weight,
-                        confidence,
-                        context,
-                        last_seen_ms
+                        symmetric
                     )
-                    VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s
-                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         relationship["relationship_id"],
@@ -401,16 +391,8 @@ class MergeAuditWriter:
                         relationship["project_id"],
                         int(relationship["entity_a_id"]),
                         int(relationship["entity_b_id"]),
-                        relationship.get("relationship_type"),
-                        relationship.get("canonical_relationship_type"),
-                        relationship.get("observed_relationship_label")
-                        or relationship.get("relationship_type"),
-                        relationship.get("domain_status") or "unrecognized",
+                        relationship["relationship_type"],
                         bool(relationship.get("symmetric", False)),
-                        int(relationship.get("weight") or 1),
-                        float(relationship.get("confidence") or 1.0),
-                        relationship.get("context"),
-                        relationship.get("last_seen_ms"),
                     ),
                 )
             for observation in before_state.get("relationship_observations", []):
@@ -429,13 +411,15 @@ class MergeAuditWriter:
                         observed_relationship_label,
                         canonical_relationship_type,
                         domain_status,
+                        domain_version,
+                        "symmetric",
                         confidence,
                         context,
                         observed_at_ms
                     )
                     VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (
                         project_id,
@@ -449,6 +433,8 @@ class MergeAuditWriter:
                         relationship_id = EXCLUDED.relationship_id,
                         canonical_relationship_type = EXCLUDED.canonical_relationship_type,
                         domain_status = EXCLUDED.domain_status,
+                        domain_version = EXCLUDED.domain_version,
+                        "symmetric" = EXCLUDED."symmetric",
                         confidence = EXCLUDED.confidence,
                         context = EXCLUDED.context,
                         observed_at_ms = EXCLUDED.observed_at_ms
@@ -466,6 +452,8 @@ class MergeAuditWriter:
                         observation["observed_relationship_label"],
                         observation.get("canonical_relationship_type"),
                         observation.get("domain_status") or "unrecognized",
+                        int(observation.get("domain_version") or 0),
+                        bool(observation.get("symmetric", False)),
                         float(observation.get("confidence") or 1.0),
                         observation.get("context"),
                         int(observation["observed_at_ms"]),

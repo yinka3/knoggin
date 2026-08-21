@@ -316,17 +316,10 @@ class EntityWriter:
                             entity_a_id,
                             entity_b_id,
                             relationship_type,
-                            canonical_relationship_type,
-                            observed_relationship_label,
-                            domain_status,
-                            "symmetric",
-                            weight,
-                            confidence,
-                            context,
-                            last_seen_ms
+                            "symmetric"
                         )
                         SELECT
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s
                         WHERE EXISTS (
                             SELECT 1
                             FROM entities
@@ -346,45 +339,7 @@ class EntityWriter:
                               )
                         )
                         ON CONFLICT (relationship_id) DO UPDATE SET
-                            user_name = EXCLUDED.user_name,
-                            project_id = EXCLUDED.project_id,
-                            entity_a_id = EXCLUDED.entity_a_id,
-                            entity_b_id = EXCLUDED.entity_b_id,
-                            relationship_type = COALESCE(
-                                EXCLUDED.relationship_type,
-                                relationships.relationship_type
-                            ),
-                            canonical_relationship_type = COALESCE(
-                                EXCLUDED.canonical_relationship_type,
-                                relationships.canonical_relationship_type
-                            ),
-                            observed_relationship_label = COALESCE(
-                                EXCLUDED.observed_relationship_label,
-                                relationships.observed_relationship_label
-                            ),
-                            domain_status = EXCLUDED.domain_status,
-                            "symmetric" = EXCLUDED."symmetric",
-                            weight = relationships.weight + CASE
-                                WHEN EXISTS (
-                                    SELECT 1
-                                    FROM relationship_observations AS existing_evidence
-                                    WHERE existing_evidence.relationship_id = relationships.relationship_id
-                                      AND existing_evidence.project_id = %s
-                                      AND existing_evidence.user_name = %s
-                                      AND existing_evidence.session_id = %s
-                                      AND existing_evidence.message_id = %s
-                                ) THEN 0
-                                ELSE 1
-                            END,
-                            confidence = GREATEST(
-                                relationships.confidence,
-                                EXCLUDED.confidence
-                            ),
-                            context = COALESCE(
-                                EXCLUDED.context,
-                                relationships.context
-                            ),
-                            last_seen_ms = EXCLUDED.last_seen_ms
+                            relationship_id = EXCLUDED.relationship_id
                         RETURNING relationship_id
                         """,
                         (
@@ -394,23 +349,13 @@ class EntityWriter:
                             relationship.entity_a_id,
                             relationship.entity_b_id,
                             relationship.relationship_type,
-                            relationship.canonical_type,
-                            relationship.observed_label,
-                            relationship.domain_status,
                             relationship.symmetric,
-                            relationship.confidence,
-                            relationship.context,
-                            now_ms,
                             relationship.entity_a_id,
                             project_id,
                             IDENTITY_ENTITY_ID,
                             relationship.entity_b_id,
                             project_id,
                             IDENTITY_ENTITY_ID,
-                            project_id,
-                            user_name,
-                            session_id,
-                            relationship.message_id,
                         ),
                     )
                     record = await cur.fetchone()
@@ -526,13 +471,7 @@ class EntityWriter:
                             "entity_a_id": relationship.entity_a_id,
                             "entity_b_id": relationship.entity_b_id,
                             "relationship_type": relationship.relationship_type,
-                            "canonical_relationship_type": relationship.canonical_type,
-                            "observed_relationship_label": relationship.observed_label,
-                            "domain_status": relationship.domain_status,
                             "symmetric": relationship.symmetric,
-                            "confidence": relationship.confidence,
-                            "context": relationship.context,
-                            "now": now_ms,
                         }
                     )
 

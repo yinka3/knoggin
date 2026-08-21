@@ -329,8 +329,19 @@ class ToolQueries:
             SELECT
                 CASE WHEN r.entity_a_id = ANY(%s) THEN r.entity_a_id ELSE r.entity_b_id END as source_id,
                 conn.canonical_name as conn_name,
-                r.weight as conn_weight,
-                r.context as conn_context,
+                (
+                    SELECT COUNT(*)
+                    FROM relationship_observations rer
+                    WHERE rer.relationship_id = r.relationship_id
+                      AND rer.project_id = r.project_id
+                ) AS conn_weight,
+                (
+                    SELECT (array_agg(rer.context ORDER BY rer.observed_at_ms DESC)
+                        FILTER (WHERE rer.context IS NOT NULL))[1]
+                    FROM relationship_observations rer
+                    WHERE rer.relationship_id = r.relationship_id
+                      AND rer.project_id = r.project_id
+                ) AS conn_context,
                 COALESCE(
                     (SELECT array_agg(alias) FROM entity_aliases ea WHERE ea.entity_id = conn.entity_id),
                     '{}'::text[]
@@ -357,7 +368,12 @@ class ToolQueries:
             WHERE (r.entity_a_id = ANY(%s) OR r.entity_b_id = ANY(%s))
               AND r.project_id = ANY(%s)
               AND (conn.project_id = ANY(%s) OR conn.entity_id = %s)
-            ORDER BY r.weight DESC
+            ORDER BY (
+                SELECT COUNT(*)
+                FROM relationship_observations rer
+                WHERE rer.relationship_id = r.relationship_id
+                  AND rer.project_id = r.project_id
+            ) DESC
             """
 
             valid_ids = list(entities.keys())
@@ -429,11 +445,13 @@ class ToolQueries:
             target.canonical_name as target,
             r.relationship_id,
             r.relationship_type,
-            r.canonical_relationship_type,
-            r.observed_relationship_label,
-            r.domain_status,
             r."symmetric",
-            r.weight as connection_strength,
+            (
+                SELECT COUNT(*)::INTEGER
+                FROM relationship_observations observation
+                WHERE observation.relationship_id = r.relationship_id
+                  AND observation.project_id = r.project_id
+            ) AS connection_strength,
             COALESCE(
                 (
                     SELECT jsonb_agg(
@@ -491,18 +509,12 @@ class ToolQueries:
                 WHERE observation.relationship_id = r.relationship_id
                   AND observation.project_id = r.project_id
             ) AS first_observed,
-            COALESCE(
-                (
-                    SELECT MAX(observation.observed_at_ms)
-                    FROM relationship_observations observation
-                    WHERE observation.relationship_id = r.relationship_id
-                      AND observation.project_id = r.project_id
-                ),
-                r.last_seen_ms
-            ) AS last_observed,
-            r.confidence as confidence,
-            r.last_seen_ms as last_seen,
-            r.context as context
+            (
+                SELECT MAX(observation.observed_at_ms)
+                FROM relationship_observations observation
+                WHERE observation.relationship_id = r.relationship_id
+                  AND observation.project_id = r.project_id
+            ) AS last_observed
         FROM entities source
         JOIN relationships r ON (r.entity_a_id = source.entity_id OR r.entity_b_id = source.entity_id)
         JOIN entities target ON (
@@ -535,7 +547,7 @@ class ToolQueries:
                 visible_project_ids,
             )
 
-        query += " ORDER BY r.weight DESC, r.last_seen_ms DESC LIMIT %s"
+        query += " ORDER BY connection_strength DESC, last_observed DESC LIMIT %s"
         params = (*params, limit)
 
         try:
@@ -546,13 +558,6 @@ class ToolQueries:
                     "target": r["target"],
                     "relationship_id": r["relationship_id"],
                     "relationship_type": r["relationship_type"],
-                    "canonical_relationship_type": r.get(
-                        "canonical_relationship_type"
-                    ),
-                    "observed_relationship_label": r[
-                        "observed_relationship_label"
-                    ],
-                    "domain_status": r["domain_status"],
                     "symmetric": bool(r["symmetric"]),
                     "relationship_semantics": "observed_evidence",
                     "connection_strength": float(r["connection_strength"] or 1.0),
@@ -564,9 +569,6 @@ class ToolQueries:
                     "observation_count": int(r["observation_count"] or 0),
                     "first_observed": r["first_observed"],
                     "last_observed": r["last_observed"],
-                    "confidence": float(r["confidence"] or 1.0),
-                    "last_seen": r["last_seen"],
-                    "context": r["context"],
                 }
                 for r in data
             ]
@@ -607,14 +609,24 @@ class ToolQueries:
                 ),
                 '[]'::jsonb
             ) as evidence_refs,
-            r.last_seen_ms as time
+            (
+                SELECT MAX(rer.observed_at_ms)
+                FROM relationship_observations rer
+                WHERE rer.relationship_id = r.relationship_id
+                  AND rer.project_id = r.project_id
+            ) AS time
         FROM entities source
         JOIN relationships r ON (r.entity_a_id = source.entity_id OR r.entity_b_id = source.entity_id)
         JOIN entities target ON (
             target.entity_id = (CASE WHEN r.entity_a_id = source.entity_id THEN r.entity_b_id ELSE r.entity_a_id END)
         )
         WHERE source.canonical_name = %s
-          AND r.last_seen_ms > %s
+          AND (
+              SELECT MAX(rer.observed_at_ms)
+              FROM relationship_observations rer
+              WHERE rer.relationship_id = r.relationship_id
+                AND rer.project_id = r.project_id
+          ) > %s
           AND (source.project_id = ANY(%s) OR source.entity_id = %s)
           AND (target.project_id = ANY(%s) OR target.entity_id = %s)
           AND r.project_id = ANY(%s)
@@ -641,7 +653,7 @@ class ToolQueries:
                 visible_project_ids,
             )
 
-        query += " ORDER BY r.last_seen_ms DESC LIMIT 50"
+        query += " ORDER BY time DESC LIMIT 50"
 
         try:
             data = await self.client.fetch_all(query, params)

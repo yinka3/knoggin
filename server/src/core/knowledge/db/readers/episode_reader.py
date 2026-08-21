@@ -982,8 +982,9 @@ class EpisodeReader:
                 entity_b.canonical_name AS entity_b_name,
                 entity_b.type AS entity_b_type,
                 r.relationship_type,
-                r.confidence,
-                r.context,
+                MAX(rer.confidence) AS confidence,
+                (array_agg(rer.context ORDER BY rer.observed_at_ms DESC)
+                    FILTER (WHERE rer.context IS NOT NULL))[1] AS context,
                 array_agg(DISTINCT rer.message_id ORDER BY rer.message_id)
                     AS evidence_message_ids
             FROM relationship_observations rer
@@ -1012,9 +1013,7 @@ class EpisodeReader:
                 r.entity_b_id,
                 entity_b.canonical_name,
                 entity_b.type,
-                r.relationship_type,
-                r.confidence,
-                r.context
+                r.relationship_type
             ORDER BY r.relationship_id
             """,
             (

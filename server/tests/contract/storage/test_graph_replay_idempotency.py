@@ -135,12 +135,9 @@ async def test_replaying_graph_batch_does_not_duplicate_semantic_effects(
         "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'"
     ) == {"count": 2}
     assert await real_postgres_client.fetch_one(
-        "SELECT weight FROM relationships WHERE relationship_id = 'project-1:101:102:met'"
-    ) == {"weight": 1}
-    assert await real_postgres_client.fetch_one(
         """
         SELECT count(*) AS count
-        FROM relationship_evidence_refs
+        FROM relationship_observations
         WHERE relationship_id = 'project-1:101:102:met'
         """
     ) == {"count": 1}
@@ -409,12 +406,13 @@ async def test_age_projection_failure_rolls_back_relational_graph_writes(
         ),
     ]
     relationships = [
-        RelationshipWrite(
-            entity_a_id=303,
-            entity_b_id=304,
-            relationship_type="met",
-            message_id=302,
-            context="Ada met Grace.",
+            RelationshipWrite(
+                entity_a_id=303,
+                entity_b_id=304,
+                relationship_type="met",
+                message_id=302,
+                confidence=1.0,
+                context="Ada met Grace.",
         )
     ]
     writer = EntityWriter(real_postgres_client)
@@ -440,7 +438,7 @@ async def test_age_projection_failure_rolls_back_relational_graph_writes(
         "entities",
         "entity_aliases",
         "relationships",
-        "relationship_evidence_refs",
+        "relationship_observations",
         "message_entity_refs",
     ):
         assert await real_postgres_client.fetch_one(
@@ -473,7 +471,7 @@ async def test_age_projection_failure_rolls_back_relational_graph_writes(
         "SELECT count(*) AS count FROM relationships"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM relationship_evidence_refs"
+        "SELECT count(*) AS count FROM relationship_observations"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM message_entity_refs"
@@ -485,7 +483,7 @@ async def test_age_projection_failure_rolls_back_relational_graph_writes(
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_replay_rejects_relationship_evidence_from_a_different_session(
+async def test_replay_rejects_relationship_observation_from_a_different_session(
     real_postgres_client,
 ):
     """A replay cannot attach a project entity change to another session's message."""
@@ -539,7 +537,7 @@ async def test_replay_rejects_relationship_evidence_from_a_different_session(
         "SELECT count(*) AS count FROM relationships"
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM relationship_evidence_refs"
+        "SELECT count(*) AS count FROM relationship_observations"
     ) == {"count": 0}
 
 
@@ -630,10 +628,7 @@ async def test_concurrent_identical_graph_replays_apply_evidence_once(
         "SELECT count(*) AS count FROM entity_aliases"
     ) == {"count": 2}
     assert await real_postgres_client.fetch_one(
-        "SELECT weight FROM relationships WHERE relationship_id = 'project-1:309:310:met'"
-    ) == {"weight": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM relationship_evidence_refs"
+        "SELECT count(*) AS count FROM relationship_observations"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM message_entity_refs"

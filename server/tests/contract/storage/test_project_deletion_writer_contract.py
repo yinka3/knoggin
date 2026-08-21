@@ -215,36 +215,44 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         )
         await cur.execute(
             """
-            INSERT INTO relationships (
-                relationship_id, user_name, project_id, entity_a_id, entity_b_id,
-                relationship_type, observed_relationship_label, context
-            ) VALUES
-                ('project-1:42:43:related', 'ada', 'project-1', 42, 43, 'related', 'related', 'P1 context'),
-                ('project-2:52:53:related', 'ada', 'project-2', 52, 53, 'related', 'related', 'P2 context')
+        INSERT INTO relationships (
+            relationship_id, user_name, project_id, entity_a_id, entity_b_id,
+            relationship_type
+        ) VALUES
+            ('project-1:42:43:related', 'ada', 'project-1', 42, 43, 'related'),
+            ('project-2:52:53:related', 'ada', 'project-2', 52, 53, 'related')
             """
         )
         await cur.execute(
             """
-            INSERT INTO relationship_evidence_refs (
-                relationship_id, project_id, user_name, session_id, message_id
+            INSERT INTO relationship_observations (
+                relationship_id, project_id, user_name, session_id, message_id,
+                source_entity_id, target_entity_id, observed_relationship_label,
+                observed_at_ms
             ) VALUES
-                ('project-1:42:43:related', 'project-1', 'ada', 'session-1', 101),
-                ('project-2:52:53:related', 'project-2', 'ada', 'session-2', 201)
+                (
+                    'project-1:42:43:related', 'project-1', 'ada', 'session-1',
+                    101, 42, 43, 'related to', 1000
+                ),
+                (
+                    'project-2:52:53:related', 'project-2', 'ada', 'session-2',
+                    201, 52, 53, 'related to', 2000
+                )
             """
         )
         await cur.execute(
             """
             INSERT INTO episodes (
-                episode_id, project_id, session_id, summary, source_message_count,
+                episode_id, project_id, summary, source_message_count,
                 first_message_at, last_message_at, created_at, updated_at
             ) VALUES
                 (
-                    'episode-1', 'project-1', 'session-1', 'Delete project one episode', 1,
+                    'episode-1', 'project-1', 'Delete project one episode', 1,
                     TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00',
                     TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00'
                 ),
                 (
-                    'episode-2', 'project-2', 'session-2', 'Keep project two episode', 1,
+                    'episode-2', 'project-2', 'Keep project two episode', 1,
                     TIMESTAMPTZ '2026-01-02 00:00:01+00', TIMESTAMPTZ '2026-01-02 00:00:01+00',
                     TIMESTAMPTZ '2026-01-02 00:00:01+00', TIMESTAMPTZ '2026-01-02 00:00:01+00'
                 )
@@ -371,7 +379,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-1'",
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-1'",
-        "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-1'",
+        "relationship_observations": "SELECT count(*) AS count FROM relationship_observations WHERE project_id = 'project-1'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-1'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-1'",
         "chunks": (
@@ -407,7 +415,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-2'",
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-2'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-2'",
-        "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-2'",
+        "relationship_observations": "SELECT count(*) AS count FROM relationship_observations WHERE project_id = 'project-2'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-2'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-2'",
         "chunks": (

@@ -467,7 +467,7 @@ async def test_episode_reader_loads_relationship_evidence_for_source_messages():
         12: [],
     }
     query, params = client.calls[0][1], client.calls[0][2]
-    assert "FROM relationship_evidence_refs" in query
+    assert "FROM relationship_observations" in query
     assert params == (
         [11, 12],
         "ada",

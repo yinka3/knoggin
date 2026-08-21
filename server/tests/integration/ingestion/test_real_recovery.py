@@ -242,7 +242,7 @@ async def _assert_graph_state(scope, postgres, message_id):
         (scope["project_id"],),
     ) == {"count": 1}
     assert await postgres.fetch_one(
-        "SELECT count(*) AS count FROM relationship_evidence_refs "
+        "SELECT count(*) AS count FROM relationship_observations "
         "WHERE message_id = %s",
         (message_id,),
     ) == {"count": 1}

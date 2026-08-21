@@ -309,21 +309,7 @@ CREATE TABLE IF NOT EXISTS public.relationships (
     entity_b_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
         ON DELETE CASCADE,
     relationship_type TEXT NOT NULL CHECK (btrim(relationship_type) <> ''),
-    canonical_relationship_type TEXT,
-    observed_relationship_label TEXT NOT NULL
-        CHECK (btrim(observed_relationship_label) <> ''),
-    domain_status TEXT NOT NULL DEFAULT 'unrecognized'
-        CHECK (domain_status IN ('recognized', 'unrecognized')),
-    CONSTRAINT relationships_domain_status_consistent
-        CHECK (
-            (domain_status = 'recognized')
-            = (canonical_relationship_type IS NOT NULL)
-        ),
     "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
-    weight INTEGER NOT NULL DEFAULT 1,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-    context TEXT,
-    last_seen_ms BIGINT,
     CONSTRAINT relationships_distinct_entities
         CHECK (entity_a_id <> entity_b_id),
     CONSTRAINT relationships_identity_matches_fields
@@ -342,6 +328,16 @@ CREATE TABLE IF NOT EXISTS public.relationships (
         UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type),
     CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id)
 );
+
+ALTER TABLE public.relationships
+    DROP CONSTRAINT IF EXISTS relationships_domain_status_consistent,
+    DROP COLUMN IF EXISTS canonical_relationship_type,
+    DROP COLUMN IF EXISTS observed_relationship_label,
+    DROP COLUMN IF EXISTS domain_status,
+    DROP COLUMN IF EXISTS weight,
+    DROP COLUMN IF EXISTS confidence,
+    DROP COLUMN IF EXISTS context,
+    DROP COLUMN IF EXISTS last_seen_ms;
 
 CREATE INDEX IF NOT EXISTS relationships_pair_type_idx
 ON public.relationships(project_id, entity_a_id, entity_b_id, relationship_type);
@@ -375,7 +371,8 @@ CREATE TABLE IF NOT EXISTS public.relationship_observations (
         CHECK (domain_status IN ('recognized', 'unrecognized')),
     domain_version INTEGER NOT NULL DEFAULT 0 CHECK (domain_version >= 0),
     "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0
+        CHECK (confidence >= 0.0 AND confidence <= 1.0),
     context TEXT,
     observed_at_ms BIGINT NOT NULL,
     CONSTRAINT relationship_observations_distinct_entities
@@ -420,6 +417,12 @@ ON public.relationship_observations(relationship_id, project_id);
 
 CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
 ON public.relationship_observations(project_id, user_name, session_id, message_id);
+
+ALTER TABLE public.relationship_observations
+    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_range_check;
+ALTER TABLE public.relationship_observations
+    ADD CONSTRAINT relationship_observations_confidence_range_check
+        CHECK (confidence >= 0.0 AND confidence <= 1.0);
 
 -- Durable advisory disposition. Evidence remains in relationship_observations;
 -- this table stores only the current user decision for each pattern.
@@ -620,8 +623,6 @@ WHERE status = 'active';
 ALTER TABLE public.conflict_discovery_checkpoints
 ADD COLUMN IF NOT EXISTS continuation JSONB NOT NULL DEFAULT '{}'::jsonb;
 
-DROP TABLE IF EXISTS public.relationship_evidence_refs;
-
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -680,79 +681,6 @@ CREATE TABLE IF NOT EXISTS public.episodes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT episodes_id_project_key UNIQUE (episode_id, project_id)
 );
-
-ALTER TABLE public.relationships
-ADD COLUMN IF NOT EXISTS relationship_type TEXT;
-
-ALTER TABLE public.relationships
-ADD COLUMN IF NOT EXISTS canonical_relationship_type TEXT,
-ADD COLUMN IF NOT EXISTS observed_relationship_label TEXT,
-ADD COLUMN IF NOT EXISTS domain_status TEXT NOT NULL DEFAULT 'unrecognized',
-ADD COLUMN IF NOT EXISTS "symmetric" BOOLEAN NOT NULL DEFAULT FALSE;
-
-UPDATE public.relationships
-SET observed_relationship_label = relationship_type
-WHERE observed_relationship_label IS NULL;
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM public.relationships
-        WHERE relationship_type IS NULL
-           OR btrim(relationship_type) = ''
-           OR observed_relationship_label IS NULL
-           OR btrim(observed_relationship_label) = ''
-           OR relationship_id <> format(
-               '%s:%s:%s:%s',
-               project_id,
-               CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
-                    ELSE entity_a_id END,
-               CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
-                    ELSE entity_b_id END,
-               lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
-           )
-    ) THEN
-        RAISE EXCEPTION
-            'Relationships use the retired pair-only identity. Reinitialize and reindex this unreleased database before applying the typed relationship schema.';
-    END IF;
-
-    ALTER TABLE public.relationships
-    ALTER COLUMN relationship_type SET NOT NULL;
-
-    ALTER TABLE public.relationships
-    DROP CONSTRAINT IF EXISTS relationships_ordered_endpoints;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationships_identity_matches_fields'
-          AND conrelid = 'public.relationships'::regclass
-    ) THEN
-        ALTER TABLE public.relationships
-        ADD CONSTRAINT relationships_identity_matches_fields
-        CHECK (
-            relationship_id = format(
-                '%s:%s:%s:%s',
-                project_id,
-                CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
-                     ELSE entity_a_id END,
-                CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
-                     ELSE entity_b_id END,
-                lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
-            )
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationships_project_pair_type_key'
-          AND conrelid = 'public.relationships'::regclass
-    ) THEN
-        ALTER TABLE public.relationships
-        ADD CONSTRAINT relationships_project_pair_type_key
-        UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type);
-    END IF;
-END $$;
 
 ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS embedding vector(1024);
@@ -1172,14 +1100,6 @@ ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
 -- ==============================================================================
 -- DOMAIN INVARIANTS
 -- ==============================================================================
-
-ALTER TABLE public.relationships
-    DROP CONSTRAINT IF EXISTS relationships_weight_positive_check,
-    DROP CONSTRAINT IF EXISTS relationships_confidence_range_check;
-ALTER TABLE public.relationships
-    ADD CONSTRAINT relationships_weight_positive_check CHECK (weight >= 1),
-    ADD CONSTRAINT relationships_confidence_range_check
-        CHECK (confidence >= 0.0 AND confidence <= 1.0);
 
 ALTER TABLE public.entity_merge_audits
     DROP CONSTRAINT IF EXISTS entity_merge_audits_status_check,

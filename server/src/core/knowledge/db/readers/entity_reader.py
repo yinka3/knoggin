@@ -809,7 +809,7 @@ class EntityReader:
                 ELSE r.entity_a_id
             END AS neighbor_id,
             neighbor.canonical_name AS neighbor_name,
-            r.weight,
+            COUNT(ref.observation_id) AS evidence_count,
             COALESCE(
                 json_agg(
                     json_build_object(
@@ -821,8 +821,9 @@ class EntityReader:
                 ) FILTER (WHERE ref.message_id IS NOT NULL),
                 '[]'::json
             ) AS message_refs,
-            r.context,
-            r.confidence
+            (array_agg(ref.context ORDER BY ref.observed_at_ms DESC)
+                FILTER (WHERE ref.context IS NOT NULL))[1] AS context,
+            MAX(ref.confidence) AS confidence
         FROM relationships r
         JOIN entities neighbor
           ON neighbor.entity_id = CASE
@@ -839,12 +840,8 @@ class EntityReader:
             r.relationship_id,
             r.entity_a_id,
             r.entity_b_id,
-            neighbor.canonical_name,
-            r.weight,
-            r.context,
-            r.confidence,
-            r.last_seen_ms
-        ORDER BY r.last_seen_ms DESC NULLS LAST
+            neighbor.canonical_name
+        ORDER BY MAX(ref.observed_at_ms) DESC NULLS LAST
         """
         try:
             res = await self.client.fetch_all(
@@ -862,7 +859,7 @@ class EntityReader:
                 {
                     "neighbor_id": int(r["neighbor_id"]),
                     "neighbor_name": self._clean_string(r["neighbor_name"]),
-                    "weight": float(r["weight"] or 1.0),
+                    "evidence_count": int(r["evidence_count"] or 0),
                     "message_refs": r["message_refs"] or [],
                     "context": self._clean_string(r["context"]),
                     "confidence": float(r["confidence"] or 1.0),

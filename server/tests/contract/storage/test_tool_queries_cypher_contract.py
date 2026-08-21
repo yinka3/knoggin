@@ -109,9 +109,6 @@ async def test_related_entities_exposes_observed_evidence_metadata():
             "target": "Acme",
             "relationship_id": "project-1:1:2:works_at",
             "relationship_type": "works_at",
-            "canonical_relationship_type": "works_at",
-            "observed_relationship_label": "works at",
-            "domain_status": "recognized",
             "symmetric": False,
             "relationship_semantics": "observed_evidence",
             "connection_strength": 2.0,
@@ -130,9 +127,6 @@ async def test_related_entities_exposes_observed_evidence_metadata():
             "observation_count": 2,
             "first_observed": 100,
             "last_observed": 200,
-            "confidence": 0.9,
-            "last_seen": 200,
-            "context": "Ade joined Acme.",
         }
     ]
     query = client.calls[0][1]

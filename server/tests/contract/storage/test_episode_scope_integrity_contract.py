@@ -165,12 +165,11 @@ async def test_episode_derived_attachments_must_share_project_scope(
         """
         INSERT INTO relationships (
             relationship_id, user_name, project_id,
-            entity_a_id, entity_b_id, relationship_type,
-            observed_relationship_label
+            entity_a_id, entity_b_id, relationship_type
         )
         VALUES (
             'project-2:3:4:related', 'ada', 'project-2', 3, 4,
-            'related', 'related'
+            'related'
         )
         """
     )

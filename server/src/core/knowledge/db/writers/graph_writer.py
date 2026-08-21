@@ -471,47 +471,10 @@ class GraphWriter:
                             entity_a_id,
                             entity_b_id,
                             relationship_type,
-                            canonical_relationship_type,
-                            observed_relationship_label,
-                            domain_status,
-                            "symmetric",
-                            weight,
-                            confidence,
-                            context,
-                            last_seen_ms
+                            "symmetric"
                         )
-                        VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s
-                        )
-                        ON CONFLICT (relationship_id) DO UPDATE SET
-                            weight = relationships.weight + EXCLUDED.weight,
-                            confidence = GREATEST(
-                                relationships.confidence,
-                                EXCLUDED.confidence
-                            ),
-                            relationship_type = COALESCE(
-                                EXCLUDED.relationship_type,
-                                relationships.relationship_type
-                            ),
-                            canonical_relationship_type = COALESCE(
-                                EXCLUDED.canonical_relationship_type,
-                                relationships.canonical_relationship_type
-                            ),
-                            observed_relationship_label = COALESCE(
-                                EXCLUDED.observed_relationship_label,
-                                relationships.observed_relationship_label
-                            ),
-                            domain_status = EXCLUDED.domain_status,
-                            "symmetric" = EXCLUDED."symmetric",
-                            context = COALESCE(
-                                EXCLUDED.context,
-                                relationships.context
-                            ),
-                            last_seen_ms = GREATEST(
-                                COALESCE(relationships.last_seen_ms, 0),
-                                COALESCE(EXCLUDED.last_seen_ms, 0)
-                            )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (relationship_id) DO NOTHING
                         """,
                         (
                             new_relationship_id,
@@ -519,16 +482,8 @@ class GraphWriter:
                             project_id,
                             new_a,
                             new_b,
-                            rel.get("relationship_type"),
-                            rel.get("canonical_relationship_type"),
-                            rel.get("observed_relationship_label")
-                            or rel.get("relationship_type"),
-                            rel.get("domain_status") or "unrecognized",
+                            rel["relationship_type"],
                             bool(rel.get("symmetric", False)),
-                            rel["weight"],
-                            rel["confidence"],
-                            rel["context"],
-                            rel["last_seen_ms"],
                         ),
                     )
                     await cur.execute(
@@ -552,6 +507,8 @@ class GraphWriter:
                                 observed_relationship_label,
                                 canonical_relationship_type,
                                 domain_status,
+                                domain_version,
+                                "symmetric",
                                 confidence,
                                 context,
                                 observed_at_ms
@@ -572,6 +529,8 @@ class GraphWriter:
                             observed_relationship_label,
                             canonical_relationship_type,
                             domain_status,
+                            domain_version,
+                            "symmetric",
                             confidence,
                             context,
                             observed_at_ms
@@ -595,6 +554,8 @@ class GraphWriter:
                             observed_relationship_label,
                             canonical_relationship_type,
                             domain_status,
+                            domain_version,
+                            "symmetric",
                             confidence,
                             context,
                             observed_at_ms
@@ -614,6 +575,8 @@ class GraphWriter:
                                 relationship_observations.canonical_relationship_type
                             ),
                             domain_status = EXCLUDED.domain_status,
+                            domain_version = EXCLUDED.domain_version,
+                            "symmetric" = EXCLUDED."symmetric",
                             confidence = GREATEST(
                                 relationship_observations.confidence,
                                 EXCLUDED.confidence
@@ -733,38 +696,13 @@ class GraphWriter:
                         rel.entity_a_id,
                         rel.entity_b_id,
                         rel.relationship_type,
-                        rel.canonical_relationship_type,
-                        rel.observed_relationship_label,
-                        rel.domain_status,
-                        rel.symmetric,
-                        rel.weight,
-                        rel.confidence,
-                        rel.context,
-                        rel.last_seen_ms,
-                        COALESCE(
-                            json_agg(
-                                json_build_object(
-                                    'project_id', ref.project_id,
-                                    'user_name', ref.user_name,
-                                    'session_id', ref.session_id,
-                                    'message_id', ref.message_id
-                                )
-                            )
-                            FILTER (
-                                WHERE ref.relationship_id IS NOT NULL
-                            ),
-                            '[]'
-                        ) AS evidence_refs
+                        rel."symmetric" AS symmetric
                     FROM relationships rel
-                    LEFT JOIN relationship_observations ref
-                      ON ref.relationship_id = rel.relationship_id
-                     AND ref.project_id = rel.project_id
                     WHERE rel.project_id = %s
                       AND (
                           rel.entity_a_id = %s
                           OR rel.entity_b_id = %s
                       )
-                    GROUP BY rel.relationship_id
                     """,
                     (project_id, primary_id, primary_id),
                 )

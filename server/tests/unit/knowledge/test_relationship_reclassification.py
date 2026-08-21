@@ -37,6 +37,7 @@ def compiled_domain():
 
 def relationship_row(**overrides):
     row = {
+        "observation_id": 1,
         "relationship_id": "demo:10:20:deploys to",
         "project_id": "demo",
         "entity_a_id": 10,
@@ -45,6 +46,7 @@ def relationship_row(**overrides):
         "canonical_relationship_type": None,
         "observed_relationship_label": "deploys to",
         "domain_status": "unrecognized",
+        "domain_version": 0,
         "symmetric": False,
         "source_type": "Project",
         "target_type": "Technology",
@@ -76,6 +78,7 @@ def test_relationship_reclassification_leaves_unknown_and_incompatible_rows():
             relationship_row(observed_relationship_label="invented relation"),
             relationship_row(
                 relationship_id="demo:10:30:deploys to",
+                observation_id=2,
                 entity_b_id=30,
                 source_type="Technology",
                 target_type="Project",
@@ -119,6 +122,7 @@ def test_relationship_reclassification_counts_already_normalized_rows_unchanged(
                 relationship_type="DEPLOYS_TO",
                 canonical_relationship_type="DEPLOYS_TO",
                 domain_status="recognized",
+                domain_version=11,
             )
         ],
         compiled_domain(),
