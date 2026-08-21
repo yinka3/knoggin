@@ -13,7 +13,6 @@ from infrastructure.job.base import JobContext
 class RecordingKnowledgeStore:
     def __init__(self, result=None):
         self.result = result or {
-            "candidate_suggestions": 1,
             "tool_audits": 2,
             "merge_audits": 3,
             "merge_proposals": 4,
@@ -32,7 +31,6 @@ async def test_audit_retention_cleanup_uses_each_configured_window():
         store,
         AuditRetentionSettings(
             interval_hours=2,
-            candidate_suggestion_days=30,
             tool_audit_days=180,
             merge_history_days=365,
         ),
@@ -43,7 +41,7 @@ async def test_audit_retention_cleanup_uses_each_configured_window():
         now = get_now()
         result = await job.execute(ctx)
 
-    assert result.summary == "Purged 10 expired operational records"
+    assert result.summary == "Purged 9 expired operational records"
     assert job.cadence_seconds == 7200
     assert store.calls == [
         {

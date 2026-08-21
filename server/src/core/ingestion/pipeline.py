@@ -12,15 +12,10 @@ from wordfreq import word_frequency
 from common.conf.domain_config import CompiledDomain
 from common.conf.relationship_config import normalize_relationship
 from common.exceptions import ConfigurationError, LLMBudgetExceededError, LLMError
-from common.schema.ingestion.contracts import (
-    CandidateSuggestion,
-    RelationshipObservation,
-    ValidationIssue,
-)
+from common.schema.ingestion.contracts import RelationshipObservation, ValidationIssue
 from common.schema.ingestion.extraction import RelationshipExtraction
 from common.schema.settings import (
     EntityResolutionSettings,
-    IngestionSettings,
     TextProcessorSettings,
 )
 from common.utils.core_utils import format_vp02_input
@@ -165,11 +160,10 @@ class IngestionPipeline:
     def _normalize_name(name: str) -> str:
         return (name or "").strip().casefold()
 
-    def capture_policy(self, ingestion: IngestionSettings) -> IngestionPolicy:
+    def capture_policy(self) -> IngestionPolicy:
         """Freeze all current ingestion rules for one newly opened batch."""
 
         return IngestionPolicy.capture(
-            ingestion=ingestion,
             text_processor=TextProcessorSettings(
                 gliner_threshold=self.processor.gliner_threshold,
                 vp01_min_confidence=self.processor.vp01_min_confidence,
@@ -583,7 +577,6 @@ class IngestionPipeline:
                 alias_updated_ids=alias_ids,
                 entity_message_map=entity_msg_map,
                 alias_updates=alias_updates,
-                candidate_suggestions=(),
                 pending_entity_writes=pending_entity_writes,
             )
 
@@ -740,45 +733,6 @@ class IngestionPipeline:
             return "medium"
 
         return "weak"
-
-    def _build_candidate_suggestion(
-        self,
-        *,
-        msg_id: int,
-        mention: str,
-        mention_type: str,
-        mention_topic: str,
-        candidate_id: int,
-        profile: EntityProfile,
-        base_score: float,
-        compatibility: str,
-        message_text: str,
-        policy: IngestionPolicy,
-    ) -> CandidateSuggestion:
-        reasons = ["candidate_rejected"]
-        if base_score < policy.resolution_threshold:
-            reasons.append("below_resolution_threshold")
-        if compatibility == "compatible":
-            reasons.append("schema_compatible")
-        elif compatibility == "incompatible":
-            reasons.append("schema_incompatible")
-        elif compatibility == "neutral":
-            reasons.append("schema_neutral")
-        if self._is_sparse_context(mention, message_text, mention_type, policy):
-            reasons.append("sparse_context_risk")
-        if self._is_common_word_mention(mention, policy):
-            reasons.append("common_word_risk")
-
-        return CandidateSuggestion(
-            msg_id=msg_id,
-            mention=mention.strip(),
-            mention_type=mention_type or "",
-            mention_topic=mention_topic or "",
-            candidate_id=candidate_id,
-            candidate_name=profile.canonical_name or "",
-            base_score=base_score,
-            reasons=list(dict.fromkeys(reasons)),
-        )
 
     def _label_topics(self, label: str, policy: IngestionPolicy) -> Set[str]:
         entity_type = policy.domain.canonical_entity_type(label) or (

@@ -21,7 +21,7 @@ from common.utils.core_utils import (
 from common.utils.events import emit
 from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.graph_commit import write_batch_callback
+from core.ingestion.graph_commit import write_ingestion_batch_to_graph
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.documents import DocumentService
@@ -777,15 +777,11 @@ class SessionRuntime:
 
     async def _write_to_graph_callback(
         self, batch: IngestionBatch
-    ) -> tuple[bool, str | None]:
-        return await write_batch_callback(
+    ):
+        return await write_ingestion_batch_to_graph(
             batch,
             knowledge_store=self.knowledge_store,
             entities=self.project.entities,
-            session_id=self.session_id,
-            project_id=self.project_id,
-            user_name=self.user_name,
-            redis_client=self.redis_client,
         )
 
     async def refresh_session_ttls(self):

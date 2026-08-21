@@ -15,7 +15,7 @@ from common.schema.episode.generation import (
     LLMEpisodeDecision,
     LLMEpisodeWindowDecision,
 )
-from common.schema.ingestion.contracts import EpisodeEligibility
+from common.schema.ingestion.contracts import IngestionCommit
 from common.schema.primitives import Message
 from common.schema.settings import (
     EpisodeSettings,
@@ -35,7 +35,6 @@ from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.store import KnowledgeStore
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
-from infrastructure.work_record import WorkRecord
 from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
 from tests.fixtures.ingestion import ingestion_policy
@@ -133,7 +132,7 @@ class _NoEntityProcessor:
         self.user_name = user_name
         self.knowledge_store = object()
 
-    def capture_policy(self, _settings):
+    def capture_policy(self):
         return ingestion_policy()
 
     def open_batch(self, messages, session_text, *, session_id, policy, batch_id=None):
@@ -156,7 +155,6 @@ class _NoEntityProcessor:
             alias_updated_ids=[],
             entity_message_map={},
             alias_updates={},
-            candidate_suggestions=[],
         )
         batch.set_relationship_observations([])
         batch.complete()
@@ -239,34 +237,13 @@ def _session(resources, *, user_name, project_id, session_id):
 
 def _prepared_graph_callback(store):
     async def write_graph(batch: IngestionBatch):
-        eligible_messages = [
-            EpisodeEligibility(message_id=int(message["id"]))
-            for message in batch.messages
-        ]
-        graph_work = WorkRecord.for_graph_write(batch.scope)
-        graph_work.mark_running()
-        batch.set_graph_write_buffers(
-            graph_work_unit=graph_work,
-            safe_entity_ids=set(),
-            graph_alias_updates=[],
-            entity_writes=[],
-            relationship_writes=[],
-            message_entity_refs=[],
-            eligible_messages=eligible_messages,
-            skipped_relationships=[],
-            zombie_entity_ids=set(),
-            dirty_entity_ids=set(),
+        return await store.commit_ingestion(
+            IngestionCommit(
+                scope=batch.scope,
+                batch_id=batch.batch_id,
+                message_ids=tuple(int(message["id"]) for message in batch.messages),
+            )
         )
-        batch.seal_for_commit()
-        await store.write_batch(
-            [],
-            [],
-            eligible_messages=batch.eligible_messages,
-            scope=batch.scope,
-        )
-        graph_work.mark_succeeded("Prepared graph write persisted")
-        batch.mark_graph_committed()
-        return True, None
 
     return write_graph
 
@@ -324,7 +301,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             batch_debounce_seconds=0,
             batch_timeout=10,
             ingestion_batch_settle_delay_seconds=0,
-            checkpoint_interval=1,
         ),
     )
     context.consumer = worker
@@ -591,7 +567,6 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
             batch_debounce_seconds=0,
             batch_timeout=10,
             ingestion_batch_settle_delay_seconds=0,
-            checkpoint_interval=1,
         ),
     )
     context.consumer = worker

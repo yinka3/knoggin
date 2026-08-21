@@ -33,10 +33,7 @@ class IngestionWorker:
         processor: IngestionPipeline,
         redis: aioredis.Redis,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
-        write_to_graph: Callable[
-            [IngestionBatch],
-            Awaitable[tuple[bool, Optional[str]]],
-        ],
+        write_to_graph: Callable[[IngestionBatch], Awaitable[object]],
         settings: IngestionSettings,
     ):
         self.user_name, self.session_id = user_name, session_id
@@ -211,15 +208,13 @@ class IngestionWorker:
                     messages,
                     self._format_session_text(context),
                     session_id=self.session_id,
-                    policy=self.processor.capture_policy(self.settings),
+                    policy=self.processor.capture_policy(),
                     batch_id=claim.batch_id,
                 )
                 await self.processor.process(batch)
                 if not batch.success:
                     raise RuntimeError(batch.error or "ingestion processing failed")
-                success, error = await self.write_to_graph(batch)
-                if not success:
-                    raise RuntimeError(error or "atomic ingestion commit failed")
+                await self.write_to_graph(batch)
                 if batch.work_unit.status is WorkStatus.PENDING:
                     batch.work_unit.mark_running()
                 if batch.work_unit.status is WorkStatus.RUNNING:

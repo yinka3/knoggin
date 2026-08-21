@@ -96,7 +96,6 @@ class IngestionSettings(ConfigModel):
     ingestion_batch_settle_delay_seconds: float = Field(120.0, ge=0.0, le=3_600.0)
     message_lifecycle_poll_seconds: float = Field(15.0, ge=1.0, le=300.0)
     ingestion_max_attempts: int = Field(3, ge=1, le=20)
-    checkpoint_interval: int = Field(32, ge=1)
     session_window: int = Field(24, ge=1)
 
 
@@ -138,7 +137,6 @@ class AuditRetentionSettings(ConfigModel):
 
     enabled: bool = Field(True)
     interval_hours: float = Field(24.0, ge=0.25)
-    candidate_suggestion_days: int = Field(30, ge=1)
     tool_audit_days: int = Field(180, ge=1)
     merge_history_days: int = Field(180, ge=1)
 

@@ -33,7 +33,7 @@ class _Store:
 class _Processor:
     project_id = "project-1"
 
-    def capture_policy(self, _settings):
+    def capture_policy(self):
         return ingestion_policy()
 
     def open_batch(self, messages, session_text, **kwargs):
@@ -75,7 +75,7 @@ async def test_durable_worker_claims_and_completes_without_redis_recovery():
 
     async def write(batch):
         assert batch.batch_id == "claim-1"
-        return True, None
+        return None
 
     worker = _worker(store, _Processor(), write)
     await worker._drain_durable_queue()
@@ -91,7 +91,7 @@ async def test_durable_worker_records_failure_on_the_claim():
     store = _Store()
 
     async def write(_batch):
-        return False, "graph unavailable"
+        raise RuntimeError("graph unavailable")
 
     worker = _worker(store, _Processor(), write)
     await worker._drain_durable_queue()
