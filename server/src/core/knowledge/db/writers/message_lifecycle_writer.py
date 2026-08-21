@@ -510,22 +510,6 @@ class MessageLifecycleWriter:
             )
             return [int(row["message_id"]) for row in await cur.fetchall()]
 
-    async def finish_ingestion_claim(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        batch_id: str,
-    ) -> None:
-        await self._set_claim_state(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            batch_id=batch_id,
-            state="processed",
-        )
-
     async def release_ingestion_claim(
         self,
         *,
@@ -546,6 +530,8 @@ class MessageLifecycleWriter:
     async def _set_claim_state(
         self, *, user_name: str, project_id: str, session_id: str, batch_id: str, state: str
     ) -> None:
+        if state not in {"ready", "blocked"}:
+            raise ValueError("Ingestion claims may only be released or blocked")
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
@@ -570,25 +556,5 @@ class MessageLifecycleWriter:
                 """,
                 (state, user_name, project_id, session_id, batch_id),
             )
-            message_ids = [int(row["message_id"]) for row in await cur.fetchall()]
-            if not message_ids:
+            if not await cur.fetchall():
                 raise RuntimeError("Ingestion claim no longer belongs to this worker")
-            if state == "processed":
-                await cur.execute(
-                    """
-                    UPDATE public.messages
-                    SET episode_eligible = TRUE,
-                        ingestion_last_failure_stage = NULL,
-                        ingestion_last_failure_code = NULL,
-                        ingestion_last_failure_at_ms = NULL,
-                        ingestion_last_error_summary = NULL
-                    WHERE user_name = %s
-                      AND project_id = %s
-                      AND session_id = %s
-                      AND message_id = ANY(%s)
-                      AND role = 'user'
-                      AND lifecycle_state = 'sealed'
-                      AND ingestion_state = 'processed'
-                    """,
-                    (user_name, project_id, session_id, message_ids),
-                )

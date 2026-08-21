@@ -220,7 +220,6 @@ class _DurableQueueStore:
                 },
             )()
         ]
-        self.finished = []
         self.released = []
         self.failures = []
 
@@ -230,9 +229,6 @@ class _DurableQueueStore:
 
     async def claim_next_ingestion_batch(self, **_kwargs):
         return self.claims.pop(0) if self.claims else None
-
-    async def finish_ingestion_claim(self, **kwargs):
-        self.finished.append(kwargs["batch_id"])
 
     async def release_ingestion_claim(self, **kwargs):
         self.released.append(kwargs)
@@ -263,7 +259,6 @@ async def test_consumer_uses_durable_fifo_claim_and_never_rewrites_messages(
     await worker._drain_durable_queue()
 
     assert store.seal_calls[0]["settle_delay_seconds"] == 120.0
-    assert store.finished == ["claim-1"]
     assert store.released == []
     assert processor.batch.batch_id == "claim-1"
     assert IngestionMilestone.MESSAGE_LOGS_HANDLED in processor.batch.milestones
@@ -286,7 +281,6 @@ async def test_consumer_records_a_retryable_durable_failure_on_the_claim(
 
     await worker._drain_durable_queue()
 
-    assert store.finished == []
     assert store.released == []
     assert store.failures == [
         {

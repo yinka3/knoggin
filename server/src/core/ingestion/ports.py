@@ -14,6 +14,8 @@ from common.schema.ingestion.contracts import (
     EntityWrite,
     EpisodeEligibility,
     ExecutionScope,
+    GraphWriteSummary,
+    IngestionCommit,
     MessageEntityRef,
     RelationshipWrite,
 )
@@ -44,6 +46,8 @@ class IngestionGraphPersistence(Protocol):
         *,
         visible_project_ids: list[str],
     ) -> set[int] | None: ...
+
+    async def commit_ingestion(self, commit: IngestionCommit) -> GraphWriteSummary: ...
 
     async def update_entity_aliases(
         self,

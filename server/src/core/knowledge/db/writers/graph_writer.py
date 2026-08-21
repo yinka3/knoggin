@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 from functools import wraps
 from typing import Dict, List, Optional, Sequence
 
@@ -7,9 +8,12 @@ from psycopg import Error as PsycopgError
 
 from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
+    AliasUpdate,
     EntityWrite,
     EpisodeEligibility,
     ExecutionScope,
+    GraphWriteSummary,
+    IngestionCommit,
     MessageEntityRef,
     RelationshipWrite,
     relationship_identity,
@@ -68,6 +72,14 @@ class GraphWriter:
     @staticmethod
     def _normalized_identity_value(value: object) -> str:
         return str(value or "").strip().strip('"').casefold()
+
+    @asynccontextmanager
+    async def _cursor_context(self, cur=None):
+        if cur is not None:
+            yield cur
+            return
+        async with self.client.transaction() as transaction_cursor:
+            yield transaction_cursor
 
     @_storage_write("ensure_identity_entity")
     async def ensure_identity_entity(
@@ -183,6 +195,7 @@ class GraphWriter:
         message_entity_refs: Sequence[MessageEntityRef] = (),
         eligible_messages: Sequence[EpisodeEligibility] = (),
         scope: ExecutionScope,
+        cur=None,
     ) -> bool:
         """Persist typed graph commands inside one explicit execution scope."""
 
@@ -193,7 +206,7 @@ class GraphWriter:
         project_id = self._require_project_id(scope.project_id, "graph write")
         now_ms = self._current_time_ms()
 
-        async with self.client.transaction() as cur:
+        async with self._cursor_context(cur) as cur:
             if entities:
                 entity_params = []
                 for entity in entities:
@@ -510,6 +523,135 @@ class GraphWriter:
 
         return True
 
+    @_storage_write("commit_ingestion")
+    async def commit_ingestion(self, commit: IngestionCommit) -> GraphWriteSummary:
+        """Persist one claimed ingestion result and complete its messages atomically."""
+
+        if not isinstance(commit, IngestionCommit):
+            raise TypeError("commit_ingestion requires an IngestionCommit")
+        scope = commit.scope
+        user_name = require_scope_value(
+            scope.user_name, "user_name", "ingestion commit"
+        )
+        session_id = require_scope_value(
+            scope.session_id, "session_id", "ingestion commit"
+        )
+        project_id = self._require_project_id(scope.project_id, "ingestion commit")
+
+        async with self.client.transaction() as cur:
+            await self._verify_ingestion_claim(
+                cur,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                batch_id=commit.batch_id,
+                message_ids=commit.message_ids,
+            )
+            await self.write_batch(
+                commit.entity_writes,
+                commit.relationship_writes,
+                message_entity_refs=commit.message_entity_refs,
+                scope=scope,
+                cur=cur,
+            )
+            await self.update_entity_aliases(
+                self._alias_update_map(commit.alias_updates),
+                project_id=project_id,
+                cur=cur,
+            )
+            await self._complete_ingestion_claim(
+                cur,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                batch_id=commit.batch_id,
+                message_ids=commit.message_ids,
+            )
+
+        return GraphWriteSummary(
+            entities_written=len(commit.entity_writes),
+            relationships_written=len(commit.relationship_writes),
+            aliases_updated=len(self._alias_update_map(commit.alias_updates)),
+        )
+
+    @staticmethod
+    def _alias_update_map(alias_updates: Sequence[AliasUpdate]) -> Dict[int, List[str]]:
+        merged: Dict[int, List[str]] = {}
+        for update in alias_updates:
+            aliases = merged.setdefault(update.entity_id, [])
+            for alias in update.aliases:
+                if alias not in aliases:
+                    aliases.append(alias)
+        return merged
+
+    async def _verify_ingestion_claim(
+        self,
+        cur,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_id: str,
+        message_ids: Sequence[int],
+    ) -> None:
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM public.messages AS message
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND role = 'user'
+              AND ingestion_state = 'claimed'
+              AND ingestion_claim_id = %s
+            FOR UPDATE
+            """,
+            (user_name, project_id, session_id, batch_id),
+        )
+        claimed_ids = {int(row["message_id"]) for row in await cur.fetchall()}
+        if claimed_ids != set(message_ids):
+            raise ValueError("Ingestion commit no longer owns the exact claimed messages")
+
+    async def _complete_ingestion_claim(
+        self,
+        cur,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_id: str,
+        message_ids: Sequence[int],
+    ) -> None:
+        await cur.execute(
+            """
+            UPDATE public.messages
+            SET ingestion_state = 'processed',
+                ingestion_claim_id = NULL,
+                ingestion_claimed_at_ms = NULL,
+                ingestion_last_failure_stage = NULL,
+                ingestion_last_failure_code = NULL,
+                ingestion_last_failure_at_ms = NULL,
+                ingestion_last_error_summary = NULL,
+                episode_eligible = TRUE
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND role = 'user'
+              AND message_id = ANY(%s)
+              AND ingestion_state = 'claimed'
+              AND ingestion_claim_id = %s
+            """,
+            (
+                user_name,
+                project_id,
+                session_id,
+                list(message_ids),
+                batch_id,
+            ),
+        )
+        if cur.rowcount != len(message_ids):
+            raise RuntimeError("Ingestion claim no longer belongs to this worker")
+
     async def _write_message_entity_refs(
         self,
         cur,
@@ -712,7 +854,7 @@ class GraphWriter:
             )
     @_storage_write("update_entity_aliases")
     async def update_entity_aliases(
-        self, alias_updates: Dict[int, List[str]], *, project_id: str
+        self, alias_updates: Dict[int, List[str]], *, project_id: str, cur=None
     ) -> None:
         project_id = self._require_project_id(project_id, "update_entity_aliases")
         if not alias_updates:
@@ -726,7 +868,7 @@ class GraphWriter:
         if not params:
             return
 
-        async with self.client.transaction() as cur:
+        async with self._cursor_context(cur) as cur:
             for item in params:
                 for alias in item["aliases"]:
                     await cur.execute(

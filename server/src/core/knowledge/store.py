@@ -11,6 +11,8 @@ from common.schema.ingestion.contracts import (
     EntityWrite,
     EpisodeEligibility,
     ExecutionScope,
+    GraphWriteSummary,
+    IngestionCommit,
     MessageEntityRef,
     RelationshipWrite,
 )
@@ -243,16 +245,6 @@ class KnowledgeStore:
             batch_size=batch_size,
         )
 
-    async def finish_ingestion_claim(
-        self, *, user_name: str, project_id: str, session_id: str, batch_id: str
-    ) -> None:
-        await self._message_lifecycle_writer.finish_ingestion_claim(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            batch_id=batch_id,
-        )
-
     async def release_ingestion_claim(
         self,
         *,
@@ -429,6 +421,9 @@ class KnowledgeStore:
             eligible_messages=eligible_messages or (),
             scope=scope,
         )
+
+    async def commit_ingestion(self, commit: IngestionCommit) -> GraphWriteSummary:
+        return await self._graph_writer.commit_ingestion(commit)
 
     async def get_project_episode_source_refs(
         self, episode_id: str, *, user_name: str, project_id: str

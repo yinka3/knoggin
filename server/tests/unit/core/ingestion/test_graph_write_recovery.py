@@ -8,7 +8,6 @@ from common.schema.ingestion.contracts import (
 )
 from core.ingestion import graph_commit as write_graph_db
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.graph_commit import GraphWritePostgresCommittedError
 from infrastructure.work_record import WorkRecord
 from tests.fixtures.ingestion import ingestion_policy
 
@@ -40,6 +39,18 @@ class _Store:
         self.events.append(("graph", args, kwargs))
         if self.fail_graph:
             raise RuntimeError("graph persistence unavailable")
+
+
+class _CommitStore:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+        self.commits = []
+
+    async def commit_ingestion(self, commit):
+        self.commits.append(commit)
+        if self.fail:
+            raise RuntimeError("graph persistence unavailable")
+        return GraphWriteSummary(aliases_updated=1)
 
 
 class _Redis:
@@ -101,11 +112,11 @@ async def test_graph_write_applies_staged_aliases_after_durable_success(monkeypa
     async def prepare(_batch, _store, _entities):
         return None
 
-    async def execute(**_kwargs):
+    async def commit(**_kwargs):
         return GraphWriteSummary(aliases_updated=1)
 
     monkeypatch.setattr(write_graph_db, "prepare_ingestion_batch_graph_writes", prepare)
-    monkeypatch.setattr(write_graph_db, "_execute_graph_write_buffers", execute)
+    monkeypatch.setattr(write_graph_db, "_commit_ingestion_buffers", commit)
     resolver = _Resolver()
 
     await write_graph_db.write_ingestion_batch_to_graph(
@@ -125,11 +136,11 @@ async def test_graph_write_does_not_apply_staged_aliases_when_persistence_fails(
     async def prepare(_batch, _store, _entities):
         return None
 
-    async def execute(**_kwargs):
+    async def commit(**_kwargs):
         raise RuntimeError("graph unavailable")
 
     monkeypatch.setattr(write_graph_db, "prepare_ingestion_batch_graph_writes", prepare)
-    monkeypatch.setattr(write_graph_db, "_execute_graph_write_buffers", execute)
+    monkeypatch.setattr(write_graph_db, "_commit_ingestion_buffers", commit)
     resolver = _Resolver()
 
     with pytest.raises(RuntimeError, match="graph unavailable"):
@@ -144,27 +155,30 @@ async def test_graph_write_does_not_apply_staged_aliases_when_persistence_fails(
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_graph_callback_preserves_cache_after_postgres_commit(monkeypatch):
+async def test_graph_callback_keeps_durable_success_when_redis_signaling_fails(
+    monkeypatch,
+):
     async def prepare(_batch, _store, _entities):
         return None
 
-    async def execute(**_kwargs):
-        raise GraphWritePostgresCommittedError("dirty marking unavailable")
+    async def emit_nothing(*_args, **_kwargs):
+        return None
 
     monkeypatch.setattr(write_graph_db, "prepare_ingestion_batch_graph_writes", prepare)
-    monkeypatch.setattr(write_graph_db, "_execute_graph_write_buffers", execute)
+    monkeypatch.setattr(write_graph_db, "emit", emit_nothing)
     resolver = _Resolver()
 
     success, error = await write_graph_db.write_batch_callback(
         _prepared_batch(),
-        knowledge_store=object(),
+        knowledge_store=_CommitStore(),
         entities=resolver,
         session_id="session-1",
         project_id="project-1",
+        redis_client=_Redis(fail_dirty=True),
     )
 
-    assert (success, error) == (False, "dirty marking unavailable")
-    assert resolver.removed_entities == []
+    assert (success, error) == (True, None)
+    assert resolver.committed_aliases == [(101, ["Bobby"])]
 
 
 @pytest.mark.ingestion
@@ -173,16 +187,12 @@ async def test_graph_callback_removes_phantom_cache_after_graph_failure(monkeypa
     async def prepare(_batch, _store, _entities):
         return None
 
-    async def execute(**_kwargs):
-        raise RuntimeError("graph persistence unavailable")
-
     monkeypatch.setattr(write_graph_db, "prepare_ingestion_batch_graph_writes", prepare)
-    monkeypatch.setattr(write_graph_db, "_execute_graph_write_buffers", execute)
     resolver = _Resolver()
 
     success, error = await write_graph_db.write_batch_callback(
         _prepared_batch(),
-        knowledge_store=object(),
+        knowledge_store=_CommitStore(fail=True),
         entities=resolver,
         session_id="session-1",
         project_id="project-1",

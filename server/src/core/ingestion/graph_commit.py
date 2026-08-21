@@ -11,6 +11,7 @@ from common.schema.ingestion.contracts import (
     EpisodeEligibility,
     ExecutionScope,
     GraphWriteSummary,
+    IngestionCommit,
     MessageEntityRef,
     RelationshipWrite,
     SkippedRelationship,
@@ -231,6 +232,67 @@ def _attach_graph_work_summary(
     batch.work_unit.metadata["graph_write_work_record"] = graph_work.snapshot()
 
 
+async def _commit_ingestion_buffers(
+    *,
+    batch: IngestionBatch,
+    knowledge_store: IngestionGraphPersistence,
+    redis_client: aioredis.Redis = None,
+) -> GraphWriteSummary:
+    """Commit graph writes and their claimed messages as one durable change."""
+
+    commit = IngestionCommit(
+        scope=batch.scope,
+        batch_id=batch.batch_id,
+        message_ids=tuple(int(message["id"]) for message in batch.messages),
+        entity_writes=tuple(batch.entity_writes),
+        alias_updates=tuple(batch.graph_alias_updates),
+        message_entity_refs=tuple(batch.message_entity_refs),
+        relationship_writes=tuple(batch.relationship_writes),
+    )
+    summary = await knowledge_store.commit_ingestion(commit)
+    summary.zombies_filtered = len(batch.zombie_entity_ids)
+    summary.relationships_skipped = len(batch.skipped_relationships)
+
+    if redis_client is None or not batch.dirty_entity_ids:
+        return summary
+
+    try:
+        dirty_key = RedisKeys.dirty_entities(
+            batch.scope.user_name, batch.scope.project_id
+        )
+        summary.dirty_entities_marked = await redis_client.sadd(
+            dirty_key,
+            *[str(entity_id) for entity_id in sorted(batch.dirty_entity_ids)],
+        )
+        await redis_client.delete(
+            RedisKeys.project_profile_complete(
+                batch.scope.user_name,
+                batch.scope.project_id,
+            )
+        )
+        await emit(
+            batch.scope.project_id,
+            "job",
+            "dirty_entities_marked",
+            {
+                "user_name": batch.scope.user_name,
+                "project_id": batch.scope.project_id,
+                "dirty_key": dirty_key,
+                "entity_ids": sorted(batch.dirty_entity_ids),
+                "marked_count": summary.dirty_entities_marked,
+                "reason": "graph_write",
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "Ingestion commit {} succeeded but Redis projection signaling failed: {}",
+            batch.batch_id,
+            exc,
+        )
+
+    return summary
+
+
 async def _execute_graph_write_buffers(
     *,
     scope: ExecutionScope,
@@ -357,33 +419,9 @@ async def _write_ingestion_batch_to_graph(
     if graph_work is None:
         raise RuntimeError("Prepared IngestionBatch requires graph work telemetry")
     graph_work.mark_running()
-    if not (
-        batch.entity_writes
-        or batch.relationship_writes
-        or batch.message_entity_refs
-        or batch.eligible_messages
-        or batch.graph_alias_updates
-    ):
-        summary = GraphWriteSummary(
-            zombies_filtered=len(batch.zombie_entity_ids),
-            relationships_skipped=len(batch.skipped_relationships),
-        )
-        graph_work.mark_skipped("No graph writes")
-        _attach_graph_work_summary(batch, graph_work, summary)
-        batch.mark_graph_committed()
-        return summary
-
     try:
-        summary = await _execute_graph_write_buffers(
-            scope=batch.scope,
-            alias_updates=batch.graph_alias_updates,
-            entity_writes=batch.entity_writes,
-            relationship_writes=batch.relationship_writes,
-            message_entity_refs=batch.message_entity_refs,
-            eligible_messages=batch.eligible_messages,
-            dirty_entity_ids=batch.dirty_entity_ids,
-            zombie_entity_ids=batch.zombie_entity_ids,
-            skipped_relationships=batch.skipped_relationships,
+        summary = await _commit_ingestion_buffers(
+            batch=batch,
             knowledge_store=knowledge_store,
             redis_client=redis_client,
         )
@@ -398,11 +436,26 @@ async def _write_ingestion_batch_to_graph(
         graph_work.mark_failed(str(exc))
         raise
 
-    graph_work.mark_succeeded(
-        f"{summary.entities_written} entities, {summary.relationships_written} relationships"
-    )
+    if summary.entities_written or summary.relationships_written or summary.aliases_updated:
+        graph_work.mark_succeeded(
+            f"{summary.entities_written} entities, "
+            f"{summary.relationships_written} relationships"
+        )
+    else:
+        graph_work.mark_skipped("No graph writes")
     for alias_update in batch.graph_alias_updates:
-        entities.commit_new_aliases(alias_update.entity_id, list(alias_update.aliases))
+        try:
+            entities.commit_new_aliases(
+                alias_update.entity_id, list(alias_update.aliases)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ingestion commit {} succeeded but resolver alias refresh failed "
+                "for entity {}: {}",
+                batch.batch_id,
+                alias_update.entity_id,
+                exc,
+            )
     _attach_graph_work_summary(batch, graph_work, summary)
     batch.mark_graph_committed()
     return summary

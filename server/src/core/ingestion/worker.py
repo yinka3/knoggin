@@ -438,12 +438,6 @@ class IngestionWorker:
                 can_continue, dlq_written = await self._write_graph_or_dlq(batch)
                 if not can_continue or dlq_written:
                     raise RuntimeError("graph persistence failed")
-                await self.knowledge_store.finish_ingestion_claim(
-                    user_name=self.user_name,
-                    project_id=self.processor.project_id,
-                    session_id=self.session_id,
-                    batch_id=claim.batch_id,
-                )
                 try:
                     # Postgres remains the queue owner, but Redis retains the
                     # operational cursor used by checkpoint observers and DLQ
