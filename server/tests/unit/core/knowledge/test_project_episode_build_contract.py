@@ -9,8 +9,8 @@ from common.schema.episode.models import (
     MessageEpisode,
 )
 from common.schema.settings import EpisodeSettings
-from core.ingestion.episode_policy import EpisodeGenerationPolicy
-from core.ingestion.project_episode_build import ProjectEpisodeBuild
+from core.knowledge.episodes.build import ProjectEpisodeBuild
+from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 
 
 def _build(*, prior=None):

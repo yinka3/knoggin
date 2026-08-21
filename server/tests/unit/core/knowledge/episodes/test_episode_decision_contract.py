@@ -6,7 +6,7 @@ from common.schema.episode.generation import (
     EpisodeDecision,
     LLMEpisodeDecision,
 )
-from core.ingestion.prompts import (
+from core.knowledge.episodes.prompts import (
     get_episode_generation_prompt,
     get_episode_narrative_repair_prompt,
 )

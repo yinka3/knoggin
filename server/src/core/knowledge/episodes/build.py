@@ -22,7 +22,7 @@ from common.schema.episode.models import (
     RelationshipEpisode,
 )
 from common.utils.local_references import build_local_id_maps, resolve_local_id
-from core.ingestion.episode_policy import EpisodeGenerationPolicy
+from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 
 
 @dataclass(slots=True)

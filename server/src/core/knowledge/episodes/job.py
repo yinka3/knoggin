@@ -12,14 +12,18 @@ from common.schema.episode.models import EpisodeNarrativeLimitError
 from common.schema.settings import EpisodeSettings
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
-from core.ingestion.episode_policy import EpisodeGenerationPolicy
-from core.ingestion.ports import EmbeddingEncoder, EpisodeStore, StructuredGenerator
-from core.ingestion.project_episode_build import ProjectEpisodeBuild
-from core.ingestion.prompts import (
+from core.knowledge.episodes.build import ProjectEpisodeBuild
+from core.knowledge.episodes.embedding import build_episode_embedding_text
+from core.knowledge.episodes.policy import EpisodeGenerationPolicy
+from core.knowledge.episodes.ports import (
+    EmbeddingEncoder,
+    EpisodeStore,
+    StructuredGenerator,
+)
+from core.knowledge.episodes.prompts import (
     get_episode_generation_prompt,
     get_episode_narrative_repair_prompt,
 )
-from core.knowledge.episodes.embedding import build_episode_embedding_text
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 
 
