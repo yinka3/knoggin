@@ -5,14 +5,14 @@ import re
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 from cachetools import LRUCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
 from wordfreq import word_frequency
 
-from common.schema.ingestion.contracts import EntityWrite
+from common.schema.ingestion.contracts import EntityWrite, ValidationIssue
 from common.schema.settings import EntityResolutionSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.core_utils import is_substring_match
@@ -167,7 +167,7 @@ class EntityResolver:
         *,
         policy: IngestionPolicy,
         parent_work_record=None,
-    ) -> List[Optional[Tuple[str, object]]]:
+    ) -> List[Optional[Tuple[str, Any]]]:
         """Build reusable candidate searches under one batch policy snapshot."""
 
         unique_names = list({name for _, name, _, _ in mentions if name})
@@ -205,6 +205,154 @@ class EntityResolver:
                 )
             entries.append(seen_by_dedupe_key[dedupe_key])
         return entries
+
+    async def resolve_mentions(
+        self,
+        mentions: List[Tuple[int, str, str, str]],
+        *,
+        messages: Iterable[Any],
+        policy: IngestionPolicy,
+        parent_work_record=None,
+        allocate_entity_id,
+        issues: Optional[List[ValidationIssue]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve mentions and prepare the durable entity changes for a batch.
+
+        The resolver owns the identity decision: candidate acceptance, in-batch
+        deduplication, alias staging, and pending entity allocation.  The caller
+        only applies the returned aggregate state after this decision completes.
+        """
+
+        async with self.resolution_lock:
+            msg_text_map = {
+                message["id"]: message["message"] for message in messages
+            }
+            entity_ids: List[int] = []
+            new_ids: set[int] = set()
+            alias_ids: set[int] = set()
+            entity_msg_map: Dict[int, List[int]] = {}
+            created_in_batch: Dict[Tuple[str, str, str], int] = {}
+            alias_updates: Dict[int, List[str]] = {}
+            pending_entity_writes: Dict[int, EntityWrite] = {}
+
+            mention_candidates = await self.candidate_entries_for_mentions(
+                mentions,
+                policy=policy,
+                parent_work_record=parent_work_record,
+            )
+
+            for index, (msg_id, name, mention_type, topic) in enumerate(mentions):
+                if not name:
+                    continue
+
+                entry = mention_candidates[index]
+                if entry is None:
+                    continue
+
+                dedupe_key = self.mention_dedupe_key(
+                    name, mention_type, topic, policy
+                )
+                entity_id = None
+
+                if entry[0] == "candidates":
+                    message_text = msg_text_map.get(msg_id, "")
+                    for candidate in entry[1]:
+                        candidate_id = candidate.entity_id
+                        profile = await self.get_profile(candidate_id)
+                        compatibility = (
+                            self.schema_compatibility(
+                                mention_type,
+                                topic,
+                                profile,
+                                policy,
+                            )
+                            if profile
+                            else "missing_profile"
+                        )
+                        if (
+                            candidate.score < policy.resolution_threshold
+                            or profile is None
+                            or not self.is_profile_visible(profile)
+                        ):
+                            continue
+
+                        if self.should_accept_candidate(
+                            name,
+                            mention_type,
+                            topic,
+                            message_text,
+                            profile,
+                            candidate_id,
+                            policy=policy,
+                            compatibility=compatibility,
+                            candidate=candidate,
+                        ):
+                            entity_id = candidate_id
+                            existing_id, aliases_added, new_aliases = (
+                                self.validate_existing(
+                                    profile.canonical_name,
+                                    [name.strip()],
+                                )
+                            )
+                            if existing_id and aliases_added:
+                                alias_ids.add(existing_id)
+                                alias_updates.setdefault(existing_id, []).extend(
+                                    new_aliases
+                                )
+                            break
+
+                if entity_id is None:
+                    if dedupe_key in created_in_batch:
+                        entity_id = created_in_batch[dedupe_key]
+                    else:
+                        try:
+                            entity_id = await allocate_entity_id()
+                            pending_entity_writes[
+                                entity_id
+                            ] = await self.prepare_pending_entity(
+                                entity_id,
+                                name.strip(),
+                                [name.strip()],
+                                mention_type,
+                                topic,
+                            )
+                            new_ids.add(entity_id)
+                            created_in_batch[dedupe_key] = entity_id
+                        except Exception as exc:
+                            if issues is not None:
+                                issues.append(
+                                    ValidationIssue(
+                                        stage="resolution",
+                                        code="entity_registration_failed",
+                                        message=(
+                                            f"Failed to register entity '{name}': "
+                                            f"{exc}"
+                                        ),
+                                        severity="error",
+                                        item_ref=name,
+                                        metadata={
+                                            "msg_id": msg_id,
+                                            "type": mention_type,
+                                            "topic": topic,
+                                        },
+                                    )
+                                )
+                            entity_id = None
+
+                if entity_id is not None:
+                    if entity_id not in entity_msg_map:
+                        entity_msg_map[entity_id] = []
+                        entity_ids.append(entity_id)
+                    entity_msg_map[entity_id].append(msg_id)
+
+            return {
+                "entity_ids": entity_ids,
+                "new_entity_ids": new_ids,
+                "alias_updated_ids": alias_ids,
+                "entity_message_map": entity_msg_map,
+                "alias_updates": alias_updates,
+                "pending_entity_writes": pending_entity_writes,
+            }
 
     def is_profile_visible(self, profile: EntityProfile) -> bool:
         return profile.project_id in set(self.readable_project_ids)

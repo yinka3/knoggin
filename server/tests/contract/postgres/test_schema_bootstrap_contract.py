@@ -20,6 +20,11 @@ SCHEMA_SQL = (
 ).read_text(encoding="utf-8")
 
 
+def test_schema_drops_obsolete_ingestion_tables():
+    assert "DROP TABLE IF EXISTS public.ingestion_candidate_suggestions;" in SCHEMA_SQL
+    assert "DROP TABLE IF EXISTS public.parked_dlq_items;" in SCHEMA_SQL
+
+
 def _conninfo_for_database(database: str) -> str:
     params = conninfo_to_dict(DB_URL)
     params["dbname"] = database

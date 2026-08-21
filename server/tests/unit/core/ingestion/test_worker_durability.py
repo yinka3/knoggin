@@ -51,6 +51,11 @@ class _Processor:
         batch.success = True
 
 
+class _InvalidProcessor(_Processor):
+    async def process(self, batch):
+        batch.fail(ValueError("invalid extraction"))
+
+
 async def _context(*_args):
     return [{"role_label": "USER", "content": "Ada met Grace."}]
 
@@ -97,3 +102,16 @@ async def test_durable_worker_records_failure_on_the_claim():
 
     assert store.failed[0]["batch_id"] == "claim-1"
     assert store.failed[0]["retryable"] is True
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_durable_worker_preserves_pipeline_failure_classification():
+    store = _Store()
+    worker = _worker(store, _InvalidProcessor(), lambda _batch: None)
+
+    await worker._drain_durable_queue()
+
+    assert store.failed[0]["retryable"] is False
+    assert store.failed[0]["failure_stage"] == "pipeline"
+    assert store.failed[0]["failure_code"] == "ValueError"

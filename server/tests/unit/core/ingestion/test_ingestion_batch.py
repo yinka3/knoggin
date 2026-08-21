@@ -75,11 +75,13 @@ def test_ingestion_batch_records_failure_from_any_active_stage():
     batch = open_batch()
     batch.validate_input()
 
-    batch.fail(RuntimeError("resolver unavailable"))
+    failure = ValueError("invalid entity type")
+    batch.fail(failure)
 
     assert batch.stage is IngestionStage.FAILED
     assert batch.success is False
-    assert batch.error == "resolver unavailable"
+    assert batch.error == "invalid entity type"
+    assert batch.failure is failure
 
 
 @pytest.mark.ingestion
@@ -153,6 +155,20 @@ async def test_resolution_handoff_keeps_new_entities_batch_local():
         def __init__(self):
             self.resolution_lock = asyncio.Lock()
 
+        async def resolve_mentions(self, *_args, **kwargs):
+            return {
+                "entity_ids": [2],
+                "new_entity_ids": {2},
+                "alias_updated_ids": set(),
+                "entity_message_map": {2: [7]},
+                "alias_updates": {},
+                "pending_entity_writes": {
+                    2: await self.prepare_pending_entity(
+                        2, "Ada", ["Ada"], "person", "People"
+                    )
+                },
+            }
+
         async def candidate_entries_for_mentions(self, _mentions, **_kwargs):
             return [("candidates", [])]
 
@@ -198,6 +214,16 @@ async def test_resolution_stages_existing_alias_until_durable_commit():
             self.resolution_lock = asyncio.Lock()
             self.committed_aliases = []
 
+        async def resolve_mentions(self, *_args, **_kwargs):
+            return {
+                "entity_ids": [101],
+                "new_entity_ids": set(),
+                "alias_updated_ids": {101},
+                "entity_message_map": {101: [7]},
+                "alias_updates": {101: ["Bobby"]},
+                "pending_entity_writes": {},
+            }
+
         async def get_profile(self, _entity_id):
             return EntityProfile(
                 canonical_name="Robert Chen",
@@ -239,6 +265,11 @@ async def test_resolution_stages_existing_alias_until_durable_commit():
     resolver = Resolver()
     pipeline = object.__new__(IngestionPipeline)
     pipeline.entities = resolver
+
+    async def next_entity_id():
+        return 2
+
+    pipeline._get_next_ent_id = next_entity_id
     batch = open_batch()
     batch.validate_input()
     batch.mark_extracted()

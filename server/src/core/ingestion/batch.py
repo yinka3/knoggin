@@ -88,6 +88,7 @@ class IngestionBatch:
     released: bool = False
     success: bool = True
     error: Optional[str] = None
+    failure: Optional[Exception] = None
 
     @classmethod
     def open(
@@ -219,6 +220,9 @@ class IngestionBatch:
         self._require_active()
         self.success = False
         self.error = str(error)
+        self.failure = (
+            error if isinstance(error, Exception) else RuntimeError(str(error))
+        )
         if self.stage is not IngestionStage.FAILED:
             self.stage = IngestionStage.FAILED
 

@@ -25,7 +25,7 @@ class _GraphStore(_IngestionStore):
         _ids: list[int],
         *,
         visible_project_ids: list[str],
-    ) -> set[int] | None:
+    ) -> set[int]:
         return set(visible_project_ids and _ids)
 
     async def commit_ingestion(self, _commit: IngestionCommit) -> GraphWriteSummary:

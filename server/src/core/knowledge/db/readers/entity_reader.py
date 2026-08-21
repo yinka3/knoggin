@@ -671,7 +671,7 @@ class EntityReader:
         ids: List[int],
         *,
         visible_project_ids: List[str],
-    ) -> Optional[Set[int]]:
+    ) -> Set[int]:
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
             "validate_existing_ids",

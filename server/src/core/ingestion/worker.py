@@ -207,7 +207,9 @@ class IngestionWorker:
                 )
                 await self.processor.process(batch)
                 if not batch.success:
-                    raise RuntimeError(batch.error or "ingestion processing failed")
+                    raise batch.failure or RuntimeError(
+                        batch.error or "ingestion processing failed"
+                    )
                 await self.write_to_graph(batch)
                 if batch.work_unit.status is WorkStatus.PENDING:
                     batch.work_unit.mark_running()

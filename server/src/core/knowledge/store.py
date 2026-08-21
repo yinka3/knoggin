@@ -1191,7 +1191,7 @@ class KnowledgeStore:
 
     async def validate_existing_ids(
         self, ids: List[int], *, visible_project_ids: List[str]
-    ) -> Optional[Set[int]]:
+    ) -> Set[int]:
         return await self._entity_reader.validate_existing_ids(
             ids,
             visible_project_ids=visible_project_ids,

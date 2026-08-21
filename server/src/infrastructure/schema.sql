@@ -1286,6 +1286,8 @@ ALTER TABLE public.agent_tool_audits
 DROP TABLE IF EXISTS public.entity_search;
 DROP TABLE IF EXISTS public.message_search;
 DROP TABLE IF EXISTS public.hierarchy_edges;
+DROP TABLE IF EXISTS public.ingestion_candidate_suggestions;
+DROP TABLE IF EXISTS public.parked_dlq_items;
 DROP FUNCTION IF EXISTS public.enforce_hierarchy_edge_invariants();
 
 DO $$

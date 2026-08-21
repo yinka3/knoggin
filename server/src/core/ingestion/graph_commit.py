@@ -56,20 +56,13 @@ async def build_ingestion_commit(
             existing_candidates,
             visible_project_ids=[scope.project_id],
         )
-        if validation_result is None:
+        valid_existing_ids = validation_result
+        missing_existing_ids = set(existing_candidates) - valid_existing_ids
+        if missing_existing_ids:
             logger.warning(
-                "Could not validate {} existing entities before ingestion commit",
-                len(existing_candidates),
+                "Skipping {} entity references absent from durable graph state",
+                len(missing_existing_ids),
             )
-            valid_existing_ids = set(existing_candidates)
-        else:
-            valid_existing_ids = validation_result
-            missing_existing_ids = set(existing_candidates) - valid_existing_ids
-            if missing_existing_ids:
-                logger.warning(
-                    "Skipping {} entity references absent from durable graph state",
-                    len(missing_existing_ids),
-                )
 
     writable_entity_ids = valid_existing_ids | new_entity_ids
     alias_updates = tuple(

@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
-from common.schema.ingestion.contracts import ValidationIssue
 from common.schema.settings import (
     EntityResolutionSettings,
     TextProcessorSettings,
@@ -26,10 +25,9 @@ class IngestionPipeline:
     """
     Runs the message ingestion pipeline for one project/session scope.
 
-    IngestionPipeline coordinates mention extraction, safe entity reuse/new entity
-    creation, entity resolution, and relationship extraction. It owns the
-    batch-level orchestration contract while dedicated components perform their
-    specialized extraction and normalization work.
+    IngestionPipeline coordinates mention extraction, entity resolution, and
+    relationship extraction. It owns the batch-level orchestration contract while
+    dedicated components perform identity policy, extraction, and normalization.
 
     Entity reuse is intentionally conservative: deterministic evidence must be
     strong enough to reuse an existing profile. LLM use is limited to configured
@@ -130,35 +128,6 @@ class IngestionPipeline:
 
         if hasattr(self.processor, "update_settings"):
             self.processor.update_settings(config)
-
-    @staticmethod
-    def _record_issue(
-        issues: Optional[List[ValidationIssue]],
-        *,
-        stage: str,
-        code: str,
-        message: str,
-        severity: str = "warning",
-        item_ref: Optional[str] = None,
-        metadata: Optional[Dict] = None,
-    ) -> None:
-        if issues is None:
-            return
-
-        issues.append(
-            ValidationIssue(
-                stage=stage,
-                code=code,
-                message=message,
-                severity=severity,
-                item_ref=item_ref,
-                metadata=metadata or {},
-            )
-        )
-
-    @staticmethod
-    def _normalize_name(name: str) -> str:
-        return (name or "").strip().casefold()
 
     def capture_policy(self) -> IngestionPolicy:
         """Freeze all current ingestion rules for one newly opened batch."""
@@ -400,182 +369,23 @@ class IngestionPipeline:
         self,
         batch: IngestionBatch,
     ) -> List[Tuple[int, str, str, str]]:
-        """Run NER and derive each accepted mention's topic from its type."""
+        """Run NER; TextProcessor returns canonical domain mentions."""
 
-        mentions = await self.processor.extract_mentions(batch)
-        domain = batch.policy.domain
-
-        normalized_mentions = []
-        for msg_id, text, typ, topic in mentions:
-            canonical_type = domain.canonical_entity_type(
-                typ
-            ) or domain.resolve_entity_type(typ)
-            norm_topic = domain.topic_for_entity_type(canonical_type or "")
-            if canonical_type is None or norm_topic is None:
-                self._record_issue(
-                    batch.issues,
-                    stage="mentions",
-                    code="invalid_entity_type",
-                    message="Mention entity type is not active in the domain",
-                    item_ref=text,
-                    metadata={
-                        "type": typ,
-                        "topic": topic,
-                        "msg_id": msg_id,
-                    },
-                )
-                continue
-
-            if topic and topic.strip().casefold() != norm_topic.casefold():
-                self._record_issue(
-                    batch.issues,
-                    stage="mentions",
-                    code="derived_topic_override",
-                    message="Mention topic was replaced by the domain-derived topic",
-                    severity="info",
-                    item_ref=text,
-                    metadata={
-                        "type": canonical_type,
-                        "supplied_topic": topic,
-                        "derived_topic": norm_topic,
-                        "msg_id": msg_id,
-                    },
-                )
-
-            normalized_mentions.append((msg_id, text, canonical_type, norm_topic))
-
-        return normalized_mentions
+        return await self.processor.extract_mentions(batch)
 
     async def _resolve_mentions(
         self,
         batch: IngestionBatch,
         mentions: List[Tuple[int, str, str, str]],
     ) -> None:
-        """Resolve mentions and apply the resulting state to one aggregate."""
+        """Ask the resolver for identity decisions and apply them to the batch."""
 
-        messages = batch.messages
-        policy = batch.policy
-        async with self.entities.resolution_lock:
-            msg_text_map = {m["id"]: m["message"] for m in messages}
-
-            entity_ids = []
-            new_ids = set()
-            alias_ids = set()
-            entity_msg_map: Dict[int, List[int]] = {}
-            created_in_batch: Dict[Tuple[str, str, str], int] = {}
-            alias_updates: Dict[int, List[str]] = {}
-            pending_entity_writes = {}
-
-            mention_candidates = await self.entities.candidate_entries_for_mentions(
-                mentions,
-                policy=policy,
-                parent_work_record=batch.work_unit,
-            )
-
-            for i, (msg_id, name, typ, topic) in enumerate(mentions):
-                if not name:
-                    continue
-
-                entry = mention_candidates[i]
-                if entry is None:
-                    continue
-
-                dedupe_key = self.entities.mention_dedupe_key(name, typ, topic, policy)
-                ent_id = None
-
-                # Candidate match
-                if entry[0] == "candidates":
-                    message_text = msg_text_map.get(msg_id, "")
-                    for candidate in entry[1]:
-                        candidate_id = candidate.entity_id
-                        base_score = candidate.score
-                        profile = await self.entities.get_profile(candidate_id)
-                        compatibility = (
-                            self.entities.schema_compatibility(
-                                typ,
-                                topic,
-                                profile,
-                                policy,
-                            )
-                            if profile
-                            else "missing_profile"
-                        )
-                        can_consider = (
-                            base_score >= policy.resolution_threshold
-                            and profile
-                            and self.entities.is_profile_visible(profile)
-                        )
-
-                        if can_consider and self.entities.should_accept_candidate(
-                            name,
-                            typ,
-                            topic,
-                            message_text,
-                            profile,
-                            candidate_id,
-                            policy=policy,
-                            compatibility=compatibility,
-                            candidate=candidate,
-                        ):
-                            ent_id = candidate_id
-
-                            existing_id, aliases_added, new_aliases = (
-                                self.entities.validate_existing(
-                                    profile.canonical_name, [name.strip()]
-                                )
-                            )
-                            if existing_id and aliases_added:
-                                alias_ids.add(existing_id)
-                                if existing_id not in alias_updates:
-                                    alias_updates[existing_id] = []
-                                alias_updates[existing_id].extend(new_aliases)
-                            break
-
-                if ent_id is None:
-                    if dedupe_key in created_in_batch:
-                        ent_id = created_in_batch[dedupe_key]
-                    else:
-                        try:
-                            ent_id = await self.get_next_ent_id()
-
-                            pending_entity_writes[
-                                ent_id
-                            ] = await self.entities.prepare_pending_entity(
-                                ent_id,
-                                name.strip(),
-                                [name.strip()],
-                                typ,
-                                topic,
-                            )
-                            new_ids.add(ent_id)
-                            created_in_batch[dedupe_key] = ent_id
-                        except Exception as e:
-                            self._record_issue(
-                                batch.issues,
-                                stage="resolution",
-                                code="entity_registration_failed",
-                                message=f"Failed to register entity '{name}': {e}",
-                                severity="error",
-                                item_ref=name,
-                                metadata={
-                                    "msg_id": msg_id,
-                                    "type": typ,
-                                    "topic": topic,
-                                },
-                            )
-                            ent_id = None
-
-                if ent_id is not None:
-                    if ent_id not in entity_msg_map:
-                        entity_msg_map[ent_id] = []
-                        entity_ids.append(ent_id)
-                    entity_msg_map[ent_id].append(msg_id)
-
-            batch.set_resolution(
-                entity_ids=entity_ids,
-                new_entity_ids=new_ids,
-                alias_updated_ids=alias_ids,
-                entity_message_map=entity_msg_map,
-                alias_updates=alias_updates,
-                pending_entity_writes=pending_entity_writes,
-            )
+        resolution = await self.entities.resolve_mentions(
+            mentions,
+            messages=batch.messages,
+            policy=batch.policy,
+            parent_work_record=batch.work_unit,
+            allocate_entity_id=self.get_next_ent_id,
+            issues=batch.issues,
+        )
+        batch.set_resolution(**resolution)
