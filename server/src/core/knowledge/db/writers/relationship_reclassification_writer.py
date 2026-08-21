@@ -3,15 +3,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any, Iterable
 
+from loguru import logger
+from psycopg import Error as PsycopgError
+
 from common.conf.domain_config import CompiledDomain
+from common.exceptions import StorageWriteError
 from common.scoping import require_scope_value
 from core.knowledge.relationship_reclassification import (
     RelationshipReclassification,
     RelationshipReclassificationPlan,
     plan_relationship_reclassification,
 )
+
+
+def _storage_write(operation: str):
+    """Translate database failures without hiding domain decisions."""
+
+    def decorate(method):
+        @wraps(method)
+        async def wrapped(self, *args, **kwargs):
+            try:
+                return await method(self, *args, **kwargs)
+            except PsycopgError as exc:
+                self._raise_storage_write(operation, exc)
+
+        return wrapped
+
+    return decorate
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +76,14 @@ class RelationshipReclassificationWriter:
         self.client = client
 
     @staticmethod
+    def _raise_storage_write(operation: str, exc: Exception) -> None:
+        logger.error("Storage write failed for {}: {}", operation, exc)
+        raise StorageWriteError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
+
+    @staticmethod
     def _scope(user_name: str, project_id: str, operation: str) -> tuple[str, str]:
         return (
             require_scope_value(user_name, "user_name", operation),
@@ -68,6 +97,7 @@ class RelationshipReclassificationWriter:
         ):
             raise ValueError("limit must be a positive integer when provided")
 
+    @_storage_write("fetch_relationship_reclassification_observations")
     async def fetch_observations(
         self,
         *,
@@ -122,6 +152,7 @@ class RelationshipReclassificationWriter:
             params.append(limit)
         return list(await self.client.fetch_all(query, tuple(params)))
 
+    @_storage_write("preview_relationship_reclassification")
     async def preview(
         self,
         *,
@@ -371,6 +402,7 @@ class RelationshipReclassificationWriter:
             (project_id, relationship_ids),
         )
 
+    @_storage_write("apply_relationship_reclassification")
     async def apply(
         self,
         *,
@@ -472,6 +504,7 @@ class RelationshipReclassificationWriter:
             scanned=len(planned), updated=updated, conflicts=conflicts
         )
 
+    @_storage_write("reclassify_relationships")
     async def reclassify(
         self,
         *,

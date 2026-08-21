@@ -1,6 +1,7 @@
 import pytest
 from psycopg import OperationalError
 
+from common.conf.domain_config import DomainConfig
 from common.exceptions import StorageReadError, StorageWriteError
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
@@ -10,7 +11,29 @@ from core.knowledge.db.writers.entity_merge_writer import (
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter as IngestionGraphWriter
 from core.knowledge.db.writers.message_writer import MessageWriter
+from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
+from core.knowledge.db.writers.relationship_reclassification_writer import (
+    RelationshipReclassificationWriter,
+)
 from tests.fixtures.fakes import RecordingPostgresClient
+
+
+def _reclassification_domain():
+    return DomainConfig.from_mapping(
+        {
+            "version": 1,
+            "topics": {"General": {"active": True}},
+            "entity_types": {
+                "Concept": {"topic": "General", "labels": ["concept"]},
+            },
+            "relationships": {
+                "RELATED_TO": {
+                    "source_types": ["Concept"],
+                    "target_types": ["Concept"],
+                },
+            },
+        }
+    ).compile()
 
 
 @pytest.mark.storage
@@ -68,7 +91,9 @@ async def test_message_search_failure_is_not_reported_as_empty_search():
 @pytest.mark.no_network
 async def test_graph_write_failure_is_not_reported_as_false_result():
     writer = GraphWriter(
-        RecordingPostgresClient(cursor_execute_exceptions=[RuntimeError("database down")])
+        RecordingPostgresClient(
+            cursor_execute_exceptions=[OperationalError("database down")]
+        )
     )
 
     with pytest.raises(StorageWriteError) as error:
@@ -146,3 +171,39 @@ async def test_project_episode_write_failure_is_standardized():
         )
 
     assert error.value.details["operation"] == "write_project_episode_window"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_deletion_write_failure_is_standardized():
+    writer = ProjectDeletionWriter(
+        RecordingPostgresClient(
+            cursor_execute_exceptions=[OperationalError("database down")]
+        )
+    )
+
+    with pytest.raises(StorageWriteError) as error:
+        await writer.delete_project(user_name="ada", project_id="project-1")
+
+    assert error.value.details["operation"] == "delete_project"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_relationship_reclassification_write_failure_is_standardized():
+    writer = RelationshipReclassificationWriter(
+        RecordingPostgresClient(
+            fetch_all_exceptions=[OperationalError("database down")]
+        )
+    )
+
+    with pytest.raises(StorageWriteError) as error:
+        await writer.reclassify(
+            user_name="ada",
+            project_id="project-1",
+            domain=_reclassification_domain(),
+        )
+
+    assert error.value.details["operation"] == (
+        "fetch_relationship_reclassification_observations"
+    )

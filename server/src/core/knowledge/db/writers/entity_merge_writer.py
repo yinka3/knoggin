@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Dict, List, Optional
 
 from loguru import logger
+from psycopg import Error as PsycopgError
 
 from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
@@ -157,8 +158,8 @@ class EntityMergeWriter:
                 )
 
             return bool(canonical_record or projected_deleted)
-        except Exception as e:
-            self._raise_storage_write("delete_relationship", e)
+        except PsycopgError as exc:
+            self._raise_storage_write("delete_relationship", exc)
 
     async def merge_entities(
         self,
@@ -179,7 +180,6 @@ class EntityMergeWriter:
             )
             return False
 
-        using_existing_cursor = cur is not None
         try:
             async with self._merge_cursor(cur) as cur:
                 await cur.execute(
@@ -789,7 +789,5 @@ class EntityMergeWriter:
 
                 logger.info(f"Merged entity {secondary_id} into {primary_id}")
                 return True
-        except Exception as e:
-            if using_existing_cursor:
-                raise
-            self._raise_storage_write("merge_entities", e)
+        except PsycopgError as exc:
+            self._raise_storage_write("merge_entities", exc)

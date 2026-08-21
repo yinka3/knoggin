@@ -72,3 +72,16 @@ async def test_writer_compare_and_updates_relationship_dependents_transactionall
     assert '"symmetric"' in executed[2]
     assert "episode_relationships" in executed[3]
     assert "DELETE FROM public.relationships" in executed[-1]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_writer_preserves_invalid_observation_cursor_error():
+    writer = RelationshipReclassificationWriter(RecordingPostgresClient())
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        await writer.fetch_observations(
+            user_name="ada",
+            project_id="demo",
+            after_observation_id=-1,
+        )

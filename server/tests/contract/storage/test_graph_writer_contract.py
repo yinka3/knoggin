@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from psycopg import OperationalError
 
 from common.exceptions import StorageWriteError
 from common.scoping import IDENTITY_ENTITY_ID
@@ -556,7 +557,7 @@ async def test_graph_writer_merge_aborts_when_secondary_dependencies_remain():
     )
     writer = GraphWriter(client)
 
-    with pytest.raises(StorageWriteError, match="merge_entities"):
+    with pytest.raises(RuntimeError, match="Merge left canonical dependencies"):
         await writer.merge_entities(2, 3, project_id="project-1")
     assert not any(
         call[0] == "execute" and "DELETE FROM entities" in call[1]
@@ -580,7 +581,7 @@ async def test_graph_writer_merge_entities_raises_on_transaction_error():
             None,
             None,
             None,
-            RuntimeError("update failed"),
+            OperationalError("update failed"),
         ],
     )
     writer = GraphWriter(client)
