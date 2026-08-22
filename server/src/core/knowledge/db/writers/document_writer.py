@@ -1089,53 +1089,12 @@ class DocumentWriter:
         content_hash: str,
         content: bytes,
         created_at: str,
-        replaces_document_id: Optional[str] = None,
     ) -> None:
         """
         Insert one manual-upload document row and its raw bytes in a single
         transaction.
         """
         async with self._client.transaction() as cur:
-            version_number = 1
-            if replaces_document_id is not None:
-                await cur.execute(
-                    """
-                    SELECT document_id, version_number
-                    FROM public.project_documents
-                    WHERE document_id = %s
-                      AND project_id = %s
-                      AND status = 'deleted'
-                      AND visibility_scope = %s
-                      AND (visibility_scope = 'project' OR session_id = %s)
-                    FOR UPDATE
-                    """,
-                    (
-                        replaces_document_id,
-                        self._project_id,
-                        visibility_scope,
-                        session_id,
-                    ),
-                )
-                replaced = await cur.fetchone()
-                if replaced is None:
-                    raise ValueError(
-                        "replacement document must be a visible deleted document"
-                    )
-                await cur.execute(
-                    """
-                    SELECT document_id
-                    FROM public.project_documents
-                    WHERE replaces_document_id = %s
-                    LIMIT 1
-                    """,
-                    (replaces_document_id,),
-                )
-                if await cur.fetchone() is not None:
-                    raise ValueError(
-                        "replacement document already has a replacement; "
-                        "choose its latest deleted version instead"
-                    )
-                version_number = int(replaced["version_number"]) + 1
             await cur.execute(
                 """
                 INSERT INTO public.project_documents (
@@ -1151,14 +1110,12 @@ class DocumentWriter:
                     size_bytes,
                     content_hash,
                     status,
-                    replaces_document_id,
-                    version_number,
                     created_at,
                     updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, NULL, 'manual_upload',
-                    %s, %s, %s, %s, %s, 'uploaded', %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, 'queued', %s, %s
                 )
                 """,
                 (
@@ -1171,8 +1128,6 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
-                    replaces_document_id,
-                    version_number,
                     created_at,
                     created_at,
                 ),
@@ -1228,8 +1183,6 @@ class DocumentWriter:
                 updated_at,
                 indexed_at,
                 error_message,
-                replaces_document_id,
-                version_number,
                 deleted_at
                 """,
                 (document_id, self._project_id, session_id),

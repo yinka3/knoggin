@@ -303,55 +303,6 @@ class DocumentReader:
             (selector_value, self._project_id, session_id),
         )
 
-    async def find_deleted_replacement_candidates(
-        self,
-        *,
-        original_name: str,
-        relative_path: str,
-        session_id: Optional[str],
-        visibility_scope: str,
-    ) -> List[Dict]:
-        """Return deleted visible files that may be explicitly replaced."""
-
-        return await self._client.fetch_all(
-            """
-            SELECT
-                document_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                original_name,
-                relative_path,
-                content_hash,
-                version_number,
-                deleted_at
-            FROM public.project_documents
-            WHERE project_id = %s
-              AND status = 'deleted'
-              AND visibility_scope = %s
-              AND (
-                  relative_path = %s
-                  OR lower(original_name) = lower(%s)
-              )
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
-            ORDER BY deleted_at DESC NULLS LAST, document_id DESC
-            LIMIT 5
-            """,
-            (
-                self._project_id,
-                visibility_scope,
-                relative_path,
-                original_name,
-                session_id,
-            ),
-        )
-
     async def fetch_document_content(
         self,
         *,

@@ -76,7 +76,7 @@ class DocumentIndexer:
             document_id=document_id,
             session_id=session_id,
             status="indexing",
-            allowed_statuses=("uploaded", "queued", "failed"),
+            allowed_statuses=("queued", "failed"),
             updated_at=get_now_iso(),
         )
         if claimed is None:

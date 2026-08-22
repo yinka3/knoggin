@@ -687,50 +687,6 @@ class MemoryCursor:
             ]
             return
 
-        if (
-            normalized.startswith("SELECT document_id, version_number")
-            and "FOR UPDATE" in normalized
-        ):
-            document_id, project_id, visibility_scope, session_id = params
-            row = next(
-                (
-                    row
-                    for row in self.postgres.rows
-                    if row["document_id"] == document_id
-                    and row["project_id"] == project_id
-                    and row["visibility_scope"] == visibility_scope
-                    and (
-                        visibility_scope == "project"
-                        or row["session_id"] == session_id
-                    )
-                ),
-                None,
-            )
-            self.result = (
-                None
-                if row is None
-                else {
-                    "document_id": row["document_id"],
-                    "version_number": row.get("version_number", 1),
-                }
-            )
-            return
-
-        if (
-            normalized.startswith("SELECT document_id")
-            and "WHERE replaces_document_id = %s" in normalized
-        ):
-            predecessor_id = params[0]
-            self.result = next(
-                (
-                    {"document_id": row["document_id"]}
-                    for row in self.postgres.rows
-                    if row.get("replaces_document_id") == predecessor_id
-                ),
-                None,
-            )
-            return
-
         if normalized.startswith("SELECT") and "FOR UPDATE" in normalized:
             document_id, project_id, session_id = params
             row = next(
@@ -1059,7 +1015,7 @@ class MemoryCursor:
                     )
                 self.result = None
                 return
-            if "'manual_upload'" in normalized and "'uploaded'" in normalized:
+            if "'manual_upload'" in normalized and "'queued'" in normalized:
                 (
                     document_id,
                     project_id,
@@ -1070,8 +1026,6 @@ class MemoryCursor:
                     extension,
                     size_bytes,
                     content_hash,
-                    replaces_document_id,
-                    version_number,
                     created_at,
                     updated_at,
                 ) = params
@@ -1088,9 +1042,7 @@ class MemoryCursor:
                         "extension": extension,
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
-                        "status": "uploaded",
-                        "replaces_document_id": replaces_document_id,
-                        "version_number": version_number,
+                        "status": "queued",
                         "deleted_at": None,
                         "indexed_at": None,
                         "error_message": None,
@@ -1876,7 +1828,7 @@ async def test_add_document_stores_bytes_and_persists_metadata(document_harness)
     assert metadata["extension"] == ".md"
     assert metadata["size_bytes"] == len(content)
     assert metadata["content_hash"] == hashlib.sha256(content).hexdigest()
-    assert metadata["status"] == "uploaded"
+    assert metadata["status"] == "queued"
     assert metadata["folder_root_id"] is None
     assert metadata["source_kind"] == "manual_upload"
     assert metadata["chunk_count"] == 0
@@ -2048,7 +2000,7 @@ async def test_list_documents_normalizes_database_timestamps(document_harness):
             "extension": ".md",
             "size_bytes": 5,
             "content_hash": "hash",
-            "status": "uploaded",
+            "status": "queued",
             "created_at": timestamp,
             "updated_at": timestamp,
             "chunk_count": 0,
@@ -2078,7 +2030,7 @@ async def test_get_document_info_resolves_visible_document_without_storage_key(
 
     assert info["document_id"] == uploaded["document_id"]
     assert info["relative_path"] == "docs/notes.txt"
-    assert info["status"] == "uploaded"
+    assert info["status"] == "queued"
     assert "storage_key" not in info
 
 
@@ -2318,7 +2270,7 @@ async def test_delete_document_enforces_project_and_session_visibility():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_reupload_requires_explicit_replacement_or_separate_confirmation(
+async def test_reupload_after_delete_creates_a_new_independent_document(
     document_harness,
 ):
     service, postgres = document_harness
@@ -2328,74 +2280,13 @@ async def test_reupload_requires_explicit_replacement_or_separate_confirmation(
     )
     await service.delete_document(document_id=original["document_id"])
 
-    confirmation = await service.add_document(
-        content=b"second version",
-        original_name="notes.txt",
-    )
-    assert confirmation["confirmation_required"] is True
-    assert confirmation["replacement_candidates"][0]["document_id"] == original[
-        "document_id"
-    ]
-    assert len(postgres.rows) == 1
-
     replacement = await service.add_document(
         content=b"second version",
         original_name="notes.txt",
-        replace_document_id=original["document_id"],
     )
-    assert replacement["replaces_document_id"] == original["document_id"]
-    assert replacement["version_number"] == 2
-
-    separate = await service.add_document(
-        content=b"third version",
-        original_name="notes.txt",
-        confirm_as_separate=True,
-    )
-    assert separate["replaces_document_id"] is None
-    assert separate["version_number"] == 1
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_reupload_cannot_fork_a_document_replacement_chain(document_harness):
-    service, _ = document_harness
-    original = await service.add_document(content=b"first", original_name="notes.txt")
-    await service.delete_document(document_id=original["document_id"])
-    await service.add_document(
-        content=b"second",
-        original_name="notes.txt",
-        replace_document_id=original["document_id"],
-    )
-
-    with pytest.raises(ValueError, match="already has a replacement"):
-        await service.add_document(
-            content=b"another second",
-            original_name="notes.txt",
-            replace_document_id=original["document_id"],
-        )
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_replacement_candidates_do_not_cross_visibility_scopes(document_harness):
-    service, _ = document_harness
-    original = await service.add_document(
-        content=b"private",
-        original_name="notes.txt",
-        session_id="session-1",
-        visibility_scope="session",
-    )
-    await service.delete_document(
-        document_id=original["document_id"],
-        session_id="session-1",
-    )
-
-    project_upload = await service.add_document(
-        content=b"project version",
-        original_name="notes.txt",
-        visibility_scope="project",
-    )
-    assert project_upload["replaces_document_id"] is None
+    assert replacement["document_id"] != original["document_id"]
+    assert replacement["status"] == "queued"
+    assert len(postgres.rows) == 2
 
 
 @pytest.mark.storage

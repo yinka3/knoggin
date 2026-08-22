@@ -1476,10 +1476,7 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     extension TEXT NOT NULL DEFAULT '',
     size_bytes BIGINT NOT NULL,
     content_hash TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'uploaded',
-    replaces_document_id UUID REFERENCES public.project_documents(document_id)
-        ON DELETE SET NULL,
-    version_number INTEGER NOT NULL DEFAULT 1 CHECK (version_number >= 1),
+    status TEXT NOT NULL DEFAULT 'queued',
     deleted_at TIMESTAMPTZ,
     indexed_at TIMESTAMPTZ,
     error_message TEXT,
@@ -1490,7 +1487,7 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     CONSTRAINT project_documents_session_visibility_check
         CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
     CONSTRAINT project_documents_status_check
-        CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed', 'deleted')),
+        CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted')),
     CONSTRAINT project_documents_source_kind_check
         CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace')),
     CONSTRAINT project_documents_folder_source_check
@@ -1529,12 +1526,6 @@ ALTER TABLE public.project_documents
     ADD COLUMN IF NOT EXISTS source_id UUID
         REFERENCES public.document_workspace_sources(source_id) ON DELETE CASCADE;
 ALTER TABLE public.project_documents
-    ADD COLUMN IF NOT EXISTS replaces_document_id UUID
-        REFERENCES public.project_documents(document_id) ON DELETE SET NULL;
-ALTER TABLE public.project_documents
-    ADD COLUMN IF NOT EXISTS version_number INTEGER NOT NULL DEFAULT 1
-        CHECK (version_number >= 1);
-ALTER TABLE public.project_documents
     ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_status_check;
@@ -1543,8 +1534,19 @@ ALTER TABLE public.project_documents
 ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_folder_source_check;
 ALTER TABLE public.project_documents
+    ALTER COLUMN status SET DEFAULT 'queued';
+UPDATE public.project_documents
+SET status = 'queued'
+WHERE status = 'uploaded';
+DROP INDEX IF EXISTS project_documents_one_replacement_per_version_idx;
+DROP INDEX IF EXISTS project_documents_replacement_candidates_idx;
+ALTER TABLE public.project_documents
+    DROP COLUMN IF EXISTS replaces_document_id;
+ALTER TABLE public.project_documents
+    DROP COLUMN IF EXISTS version_number;
+ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_status_check
-    CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed', 'deleted'));
+    CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted'));
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_source_kind_check
     CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace'));
@@ -1595,16 +1597,6 @@ ON public.project_documents(folder_root_id, relative_path);
 
 CREATE INDEX IF NOT EXISTS project_documents_source_idx
 ON public.project_documents(source_id, relative_path);
-
-CREATE INDEX IF NOT EXISTS project_documents_replacement_candidates_idx
-ON public.project_documents(project_id, visibility_scope, session_id, relative_path)
-WHERE status = 'deleted';
-
--- A document version has at most one direct successor.  Later uploads replace
--- that successor after it is deleted, creating a linear provenance chain.
-CREATE UNIQUE INDEX IF NOT EXISTS project_documents_one_replacement_per_version_idx
-ON public.project_documents(replaces_document_id)
-WHERE replaces_document_id IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS project_documents_workspace_path_unique
 ON public.project_documents(source_id, relative_path)
