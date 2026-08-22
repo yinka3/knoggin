@@ -121,9 +121,17 @@ class DocumentIndexer:
                     embeddings=embeddings,
                     extracted_text=extraction.text,
                     indexed_at=get_now_iso(),
+                    expected_content_hash=claimed["content_hash"],
                 )
                 if row is None:
-                    raise FileNotFoundError("Document not found")
+                    refreshed = await self._reader.fetch_documents_by_reference(
+                        document_id=document_id,
+                        relative_path=None,
+                        session_id=session_id,
+                    )
+                    if not refreshed:
+                        raise FileNotFoundError("Document not found")
+                    return refreshed[0]
                 return row
         except asyncio.CancelledError:
             raise

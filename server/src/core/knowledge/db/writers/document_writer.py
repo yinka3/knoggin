@@ -1003,6 +1003,7 @@ class DocumentWriter:
                 FROM public.project_documents
                 WHERE project_id = %s
                   AND document_id = ANY(%s)
+                  AND status = 'indexing'
                 FOR UPDATE
                 """,
                 (self._project_id, document_ids),
@@ -1152,6 +1153,8 @@ class DocumentWriter:
                 """
             UPDATE public.project_documents
             SET status = 'deleted',
+                source_id = NULL,
+                folder_root_id = NULL,
                 deleted_at = COALESCE(deleted_at, now()),
                 indexed_at = NULL,
                 error_message = NULL,
@@ -1498,6 +1501,8 @@ class DocumentWriter:
                 return None
             if locked["status"] == "indexed":
                 return dict(locked)
+            if locked["status"] != "indexing":
+                return None
 
             await cur.execute(
                 """

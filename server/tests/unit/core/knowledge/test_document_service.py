@@ -763,6 +763,8 @@ class MemoryCursor:
             row.update(
                 {
                     "status": "deleted",
+                    "source_id": None,
+                    "folder_root_id": None,
                     "deleted_at": row.get("deleted_at") or "deleted-now",
                     "indexed_at": None,
                     "error_message": None,
@@ -2228,6 +2230,8 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
     assert tombstone["status"] == "deleted"
     assert tombstone["deleted_at"]
     assert tombstone["content_hash"] == first["content_hash"]
+    assert tombstone["source_id"] is None
+    assert tombstone["folder_root_id"] is None
     assert second["document_id"] in [row["document_id"] for row in postgres.rows]
     assert all(
         chunk["document_id"] != first["document_id"] for chunk in postgres.chunks
@@ -2811,6 +2815,28 @@ async def test_index_document_is_idempotent_after_success(document_harness):
     assert second["chunk_count"] == first["chunk_count"]
     assert service._embedding.calls == calls_after_first
     assert postgres.chunks == chunks_after_first
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_index_document_does_not_publish_after_content_changes(document_harness):
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
+    original_encode = service._embedding.encode
+
+    async def change_content_hash(values):
+        embeddings = await original_encode(values)
+        postgres.rows[0]["content_hash"] = "b" * 64
+        postgres.rows[0]["status"] = "queued"
+        return embeddings
+
+    service._embedding.encode = change_content_hash
+
+    result = await service.index_document(document_id=uploaded["document_id"])
+
+    assert result["status"] == "queued"
+    assert result["content_hash"] == "b" * 64
+    assert postgres.chunks == []
 
 
 @pytest.mark.storage

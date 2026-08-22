@@ -276,6 +276,35 @@ async def test_reader_marks_a_deleted_document_source_unavailable():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_reader_marks_a_replaced_document_version_unavailable():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                persisted_row(
+                    candidate,
+                    document_status="indexed",
+                    document_content_hash="a" * 64,
+                )
+            ]
+        ]
+    )
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].source_status == "unavailable"
+    assert references[0].excerpt == candidate.excerpt
+    assert "document.content_hash AS document_content_hash" in client.calls[0][1]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_reader_marks_web_results_as_search_result_snippets():
     candidate = web_candidate()
     client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
@@ -484,6 +513,37 @@ async def test_real_postgres_document_tombstone_preserves_message_provenance(
         session_id="session-1",
     )
     assert sources[0].source_status == "unavailable"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_marks_replaced_document_provenance_unavailable(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    document = document_candidate()
+    await SourceReferenceWriter(real_postgres_client).write_for_assistant_message(
+        101,
+        [document],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET content_hash = %s WHERE document_id = %s",
+        ("a" * 64, DOCUMENT_ID),
+    )
+
+    sources = await SourceReferenceReader(real_postgres_client).get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert sources[0].source_status == "unavailable"
+    assert sources[0].excerpt == document.excerpt
 
 
 @pytest.mark.storage
