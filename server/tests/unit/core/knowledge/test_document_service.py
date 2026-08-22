@@ -19,6 +19,7 @@ from core.knowledge.documents import (
     storage as storage_module,
 )
 from core.knowledge.documents.constants import document_extension
+from infrastructure.background_work import BackgroundWorkRejected
 
 
 class MemoryPostgres:
@@ -299,7 +300,9 @@ class MemoryPostgres:
             return [
                 deepcopy(row)
                 for row in self.rows
-                if row["project_id"] == project_id and row["status"] == "queued"
+                if row["project_id"] == project_id
+                and row["status"] == "queued"
+                and row.get("source_id") is None
             ][:limit]
         if "FROM public.project_document_scan_settings" in query:
             row = self.scan_settings.get(params[0])
@@ -2352,6 +2355,115 @@ async def test_indexer_recovery_requeues_interrupted_document_indexing(document_
     assert recovered == 1
     assert postgres.rows[0]["status"] == "indexed"
     assert service.indexer.indexing_snapshot()["last_recovery_requeued"] == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_start_drains_more_than_one_recovery_batch(document_harness):
+    service, postgres = document_harness
+    for index in range(17):
+        await service.add_document(
+            content=f"document {index}".encode(),
+            original_name=f"notes-{index}.md",
+        )
+
+    await service.indexer.start()
+    for _ in range(100):
+        if {row["status"] for row in postgres.rows} == {"indexed"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert {row["status"] for row in postgres.rows} == {"indexed"}
+    await service.shutdown()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_retries_document_admission_after_temporary_rejection(
+    document_harness,
+):
+    class RejectOnceBackgroundWork:
+        def __init__(self):
+            self.calls = 0
+            self.admitted = asyncio.Event()
+
+        async def submit(self, project_id, operation, *, name, coalesce_key):
+            self.calls += 1
+            if self.calls == 1:
+                raise BackgroundWorkRejected(
+                    project_id=project_id,
+                    name=name,
+                    reason="global_queue_full",
+                    limit=1,
+                    queued=1,
+                )
+            self.admitted.set()
+            return await operation()
+
+    service, postgres = document_harness
+    background_work = RejectOnceBackgroundWork()
+    service.indexer._background_work = background_work
+    service.indexer.update_policy(DocumentIndexPolicy.capture(inline_index_max_bytes=1))
+    await service.indexer.start()
+    document = await service.add_document(
+        content=b"this document must be admitted in the background",
+        original_name="notes.md",
+    )
+
+    await service.schedule_document_index(document_id=document["document_id"])
+    await asyncio.wait_for(background_work.admitted.wait(), timeout=1)
+    for _ in range(100):
+        if postgres.rows[0]["status"] == "indexed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert background_work.calls >= 2
+    assert postgres.rows[0]["status"] == "indexed"
+    await service.shutdown()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_retries_workspace_admission_after_temporary_rejection(
+    document_harness,
+):
+    class RejectOnceBackgroundWork:
+        def __init__(self):
+            self.calls = 0
+            self.admitted = asyncio.Event()
+
+        async def submit(self, project_id, operation, *, name, coalesce_key):
+            self.calls += 1
+            if self.calls == 1:
+                raise BackgroundWorkRejected(
+                    project_id=project_id,
+                    name=name,
+                    reason="global_queue_full",
+                    limit=1,
+                    queued=1,
+                )
+            self.admitted.set()
+            return await operation()
+
+    service, postgres = document_harness
+    background_work = RejectOnceBackgroundWork()
+    service.indexer._background_work = background_work
+    await service.indexer.start()
+    source = await service.create_workspace_source(display_name="knoggin")
+
+    await service.sync_workspace_source(
+        source_id=source["source_id"],
+        entries=[FolderUploadEntry(relative_path="src/main.py", content=b"pass")],
+    )
+    await asyncio.wait_for(background_work.admitted.wait(), timeout=1)
+    for _ in range(100):
+        if postgres.rows and postgres.rows[0]["status"] == "indexed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert background_work.calls >= 2
+    assert postgres.rows[0]["status"] == "indexed"
+    await service.shutdown()
 
 
 @pytest.mark.storage

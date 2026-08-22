@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
-from common.conf.manager import ConfigManager
 from common.schema.agent.stream import (
     AgentExecutionEvent,
     validate_agent_execution_event,
@@ -37,9 +36,9 @@ class AgentOrchestrator:
     It prepares the environment and delegates the reasoning loop to AgentExecutor.
     """
 
-    def __init__(self, agent_manager: AgentManager, *, config_manager=ConfigManager):
+    def __init__(self, agent_manager: AgentManager, *, config_provider):
         self._agent_manager = agent_manager
-        self._config_manager = config_manager
+        self._config_provider = config_provider
 
     async def run_stream(
         self,
@@ -73,7 +72,7 @@ class AgentOrchestrator:
                 request_document_focus = parse_document_focus(request_document_focus)
 
             # Configuration
-            config = self._config_manager.get().config
+            config = self._config_provider.get().config
             limits = config.developer_settings.limits
             run_limits = AgentRunLimits.from_settings(limits)
 
@@ -225,7 +224,7 @@ class AgentOrchestrator:
         document_focus: Optional[DocumentFocus] = None,
     ) -> Tools:
         """Retrieve context services and instantiate the agent tool suite."""
-        config = self._config_manager.get().config
+        config = self._config_provider.get().config
         search_cfg = {
             **config.developer_settings.search.model_dump(),
             **config.search.model_dump(),

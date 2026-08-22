@@ -30,6 +30,9 @@ from infrastructure.background_work import (
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 
+_DRAIN_BATCH_SIZE = 16
+_DRAIN_RETRY_SECONDS = 0.1
+
 
 class DocumentIndexer:
     """Owns extraction and atomic derived-data publication for one project."""
@@ -53,7 +56,10 @@ class DocumentIndexer:
         self._run_blocking = blocking_runner
         self._background_work = background_work
         self._background_tasks: set[asyncio.Task] = set()
+        self._document_tasks: dict[str, asyncio.Task] = {}
         self._workspace_source_tasks: dict[str, asyncio.Task] = {}
+        self._drain_task: asyncio.Task | None = None
+        self._drain_wakeup = asyncio.Event()
         self._recovered_count = 0
         self._last_recovery_requeued = 0
         self._started = False
@@ -256,6 +262,10 @@ class DocumentIndexer:
                 policy=self._policy,
             )
 
+        existing = self._document_tasks.get(document_id)
+        if existing is not None and not existing.done():
+            return queued
+
         task = asyncio.create_task(
             self._background_work.submit(
                 self.project_id,
@@ -270,7 +280,13 @@ class DocumentIndexer:
             name=f"document-index:{self.project_id}:{document_id}",
         )
         self._background_tasks.add(task)
-        task.add_done_callback(self._observe_background_task)
+        self._document_tasks[document_id] = task
+        task.add_done_callback(
+            lambda completed: self._observe_background_task(
+                completed,
+                document_id=document_id,
+            )
+        )
         return queued
 
     def queue_workspace_source_indexing(
@@ -481,6 +497,7 @@ class DocumentIndexer:
                     session_id=session_id,
                     policy=policy,
                 )
+        self._request_drain()
 
     async def _record_workspace_index_failure(
         self,
@@ -519,8 +536,15 @@ class DocumentIndexer:
                 exc,
             )
 
-    def _observe_background_task(self, task: asyncio.Task) -> None:
+    def _observe_background_task(
+        self,
+        task: asyncio.Task,
+        *,
+        document_id: str,
+    ) -> None:
         self._background_tasks.discard(task)
+        if self._document_tasks.get(document_id) is task:
+            del self._document_tasks[document_id]
         if task.cancelled():
             return
         try:
@@ -529,6 +553,76 @@ class DocumentIndexer:
             logger.warning("Document indexing remains queued: {}", exc.message)
         except Exception as exc:
             logger.error("Background document indexing failed: {}", exc)
+        self._request_drain()
+
+    def _request_drain(self) -> None:
+        """Wake the project-local durable admission loop when runtime work changes."""
+        if not self._started or self._stopping:
+            return
+        self._drain_wakeup.set()
+        if self._drain_task is None or self._drain_task.done():
+            self._drain_task = asyncio.create_task(
+                self._drain_durable_work(),
+                name=f"document-index-drain:{self.project_id}",
+            )
+
+    async def _drain_durable_work(self) -> None:
+        """Admit queued durable work in bounded batches until the project is clear."""
+        try:
+            while not self._stopping:
+                await self._drain_wakeup.wait()
+                self._drain_wakeup.clear()
+
+                while not self._stopping:
+                    await self._admit_durable_work(_DRAIN_BATCH_SIZE)
+                    if await self.pending_index_count() == 0:
+                        break
+                    try:
+                        await asyncio.wait_for(
+                            self._drain_wakeup.wait(),
+                            timeout=_DRAIN_RETRY_SECONDS,
+                        )
+                    except TimeoutError:
+                        pass
+                    self._drain_wakeup.clear()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Document index admission loop failed: {}", exc)
+
+    async def _admit_durable_work(self, limit: int) -> int:
+        """Submit one bounded durable slice, looking past local in-flight work."""
+        pending = await self._reader.list_documents_for_index_recovery(
+            limit + len(self._document_tasks)
+        )
+        submitted = 0
+        for document in pending:
+            document_id = str(document["document_id"])
+            if document_id in self._document_tasks:
+                continue
+            await self.schedule_document_index(
+                document_id=document_id,
+                session_id=document.get("session_id"),
+            )
+            submitted += 1
+            if submitted >= limit:
+                break
+
+        workspace_sources = await self._reader.list_workspace_sources_for_index_recovery(
+            limit + len(self._workspace_source_tasks)
+        )
+        for source in workspace_sources:
+            source_id = str(source["source_id"])
+            if source_id in self._workspace_source_tasks:
+                continue
+            self.queue_workspace_source_indexing(
+                source_id=source_id,
+                session_id=source.get("session_id"),
+            )
+            submitted += 1
+            if submitted >= limit:
+                break
+        return submitted
 
     async def start(self) -> None:
         """Recover durable index work when this project runtime becomes active."""
@@ -537,16 +631,23 @@ class DocumentIndexer:
         self._stopping = False
         await self.recover_pending_indexes()
         self._started = True
+        self._request_drain()
 
     async def shutdown(self) -> None:
         """Cancel local submitters; cancellation requeues active durable claims."""
         self._stopping = True
+        drain_task = self._drain_task
+        self._drain_task = None
+        self._drain_wakeup.set()
         tasks = [task for task in self._background_tasks if not task.done()]
+        if drain_task is not None and not drain_task.done():
+            tasks.append(drain_task)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
+        self._document_tasks.clear()
         self._workspace_source_tasks.clear()
         self._started = False
 
@@ -555,21 +656,7 @@ class DocumentIndexer:
         self._last_recovery_requeued = await self._writer.requeue_interrupted_indexes(
             updated_at=get_now_iso()
         )
-        pending = await self._reader.list_documents_for_index_recovery(limit)
-        for document in pending:
-            await self.schedule_document_index(
-                document_id=str(document["document_id"]),
-                session_id=document.get("session_id"),
-            )
-        workspace_sources = await self._reader.list_workspace_sources_for_index_recovery(
-            limit
-        )
-        for source in workspace_sources:
-            self.queue_workspace_source_indexing(
-                source_id=str(source["source_id"]),
-                session_id=source.get("session_id"),
-            )
-        recovered = len(pending) + len(workspace_sources)
+        recovered = await self._admit_durable_work(limit)
         self._recovered_count += recovered
         if recovered or self._last_recovery_requeued:
             logger.info(
@@ -593,6 +680,9 @@ class DocumentIndexer:
             "workspace_prepare_concurrency": self._policy.workspace_prepare_concurrency,
             "local_submission_tasks": len(
                 [task for task in self._background_tasks if not task.done()]
+            ),
+            "admission_loop_active": bool(
+                self._drain_task is not None and not self._drain_task.done()
             ),
             "recovered_count": self._recovered_count,
             "last_recovery_requeued": self._last_recovery_requeued,

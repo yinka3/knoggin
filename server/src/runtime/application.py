@@ -141,7 +141,10 @@ class ApplicationRuntime:
             projects = ProjectManager(resources=resources, user_name=user_name)
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
-            agent_orchestrator = AgentOrchestrator(agent_manager)
+            agent_orchestrator = AgentOrchestrator(
+                agent_manager,
+                config_provider=ConfigManager,
+            )
             sessions = SessionManager(
                 resources=resources,
                 user_name=user_name,

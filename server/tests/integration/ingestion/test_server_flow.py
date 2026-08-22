@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.conf.manager import ConfigManager
 from common.schema.agent.identity import AgentConfig
 from common.schema.episode.generation import (
     LLMEpisodeDecision,
@@ -595,7 +596,10 @@ async def test_real_document_request_persists_document_source_provenance(
         },
         enabled_tools=["search_documents"],
     )
-    orchestrator = AgentOrchestrator(_StaticAgentManager(agent))
+    orchestrator = AgentOrchestrator(
+        _StaticAgentManager(agent),
+        config_provider=ConfigManager,
+    )
 
     events = [
         event

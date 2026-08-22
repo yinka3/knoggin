@@ -1834,10 +1834,6 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
         FOREIGN KEY (source_message_id, project_id, session_id)
         REFERENCES public.messages(message_id, project_id, session_id)
         ON DELETE CASCADE,
-    CONSTRAINT message_source_refs_document_project_fk
-        FOREIGN KEY (document_id, source_project_id)
-        REFERENCES public.project_documents(document_id, project_id)
-        ON DELETE CASCADE,
     CONSTRAINT message_source_refs_kind_check
         CHECK (source_kind IN (
             'pdf_document',
@@ -1953,7 +1949,9 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
 
 -- Existing unreleased databases may still scope document references to the
 -- answer project. Retain their history while moving document identity to the
--- actual source project, then replace the composite foreign key accordingly.
+-- actual source project. Source identity is validated when written, but cannot
+-- retain an FK: deleting a source project must not delete another project's
+-- historical answer provenance.
 ALTER TABLE public.message_source_refs
 ADD COLUMN IF NOT EXISTS source_project_id TEXT;
 
@@ -1963,24 +1961,9 @@ WHERE document_id IS NOT NULL
   AND source_project_id IS NULL;
 
 DO $$
-DECLARE
-    document_fk_is_current BOOLEAN;
 BEGIN
-    SELECT pg_get_constraintdef(oid) LIKE '%source_project_id%'
-    INTO document_fk_is_current
-    FROM pg_constraint
-    WHERE conname = 'message_source_refs_document_project_fk'
-      AND conrelid = 'public.message_source_refs'::regclass;
-
-    IF NOT COALESCE(document_fk_is_current, FALSE) THEN
-        ALTER TABLE public.message_source_refs
-        DROP CONSTRAINT IF EXISTS message_source_refs_document_project_fk;
-        ALTER TABLE public.message_source_refs
-        ADD CONSTRAINT message_source_refs_document_project_fk
-        FOREIGN KEY (document_id, source_project_id)
-        REFERENCES public.project_documents(document_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
+    ALTER TABLE public.message_source_refs
+    DROP CONSTRAINT IF EXISTS message_source_refs_document_project_fk;
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint

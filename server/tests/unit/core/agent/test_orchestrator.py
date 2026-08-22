@@ -47,6 +47,10 @@ class FakeConfig:
 class FakeConfigManager:
     config = FakeConfig()
 
+    @staticmethod
+    def get():
+        return FakeConfigManager()
+
 
 class FakeTools:
     def __init__(self):
@@ -111,7 +115,10 @@ class FakeSession:
 
 
 def make_orchestrator(context):
-    return AgentOrchestrator(AgentManager(context.resources, context.user_name))
+    return AgentOrchestrator(
+        AgentManager(context.resources, context.user_name),
+        config_provider=FakeConfigManager,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -186,10 +193,6 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     )
     context.resources.postgres.upsert_agent(agent)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
@@ -251,10 +254,6 @@ async def test_orchestrator_resolves_request_then_session_then_agent_config(
         )
     )
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
@@ -300,11 +299,6 @@ async def test_orchestrator_resolves_request_then_session_then_agent_config(
 async def test_orchestrator_hides_unexpected_error_details(monkeypatch):
     context = FakeSession()
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
-
     async def fail_bootstrap_services(*_args):
         raise RuntimeError("postgres://internal-host/knoggin")
 
@@ -343,10 +337,6 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
     )
     context.resources.postgres.upsert_agent(agent)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
@@ -384,10 +374,6 @@ async def test_orchestrator_does_not_inject_maintenance_candidates(
     )
     context.resources.postgres.upsert_agent(agent)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
@@ -424,10 +410,6 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
         )
     )
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
@@ -542,10 +524,6 @@ async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
     excerpt = "revenue increased 18%"
     start_char = user_query.index(excerpt)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
     async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):

@@ -6,6 +6,7 @@ from psycopg.errors import CheckViolation, ForeignKeyViolation
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -618,6 +619,65 @@ async def test_real_postgres_provenance_uses_captured_cross_project_document_sco
             session_id="session-1",
             readable_project_ids=["project-1"],
         )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_preserves_cross_project_provenance_after_source_deletion(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-2', 'ada', 'project-2')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, visibility_scope, source_kind,
+            original_name, relative_path, extension, size_bytes, content_hash
+        ) VALUES (
+            %s, 'project-2', 'project', 'manual_upload',
+            'shared.pdf', '/shared.pdf', '.pdf', 10, %s
+        )
+        """,
+        (CROSS_PROJECT_DOCUMENT_ID, "e" * 64),
+    )
+    candidate = document_candidate(
+        document_id=CROSS_PROJECT_DOCUMENT_ID,
+        source_project_id="project-2",
+        content_hash="e" * 64,
+    )
+    writer = SourceReferenceWriter(real_postgres_client)
+    await writer.write_for_assistant_message(
+        101,
+        [candidate],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        readable_project_ids=["project-1", "project-2"],
+    )
+
+    deleted = await ProjectDeletionWriter(real_postgres_client).delete_project(
+        user_name="ada",
+        project_id="project-2",
+    )
+    sources = await SourceReferenceReader(real_postgres_client).get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert deleted == {"entities": 0, "projects": 1}
+    assert len(sources) == 1
+    assert sources[0].document_id == CROSS_PROJECT_DOCUMENT_ID
+    assert sources[0].source_project_id == "project-2"
+    assert sources[0].excerpt == candidate.excerpt
+    assert sources[0].source_status == "unavailable"
 
 
 @pytest.mark.storage
