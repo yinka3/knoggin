@@ -1813,6 +1813,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
     message_id BIGINT NOT NULL,
     source_kind TEXT NOT NULL,
     document_id UUID,
+    source_project_id TEXT,
     canonical_url TEXT,
     source_message_id BIGINT,
     content_hash TEXT NOT NULL,
@@ -1834,7 +1835,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
         REFERENCES public.messages(message_id, project_id, session_id)
         ON DELETE CASCADE,
     CONSTRAINT message_source_refs_document_project_fk
-        FOREIGN KEY (document_id, project_id)
+        FOREIGN KEY (document_id, source_project_id)
         REFERENCES public.project_documents(document_id, project_id)
         ON DELETE CASCADE,
     CONSTRAINT message_source_refs_kind_check
@@ -1859,11 +1860,19 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
         CHECK (content_hash ~ '^[0-9a-f]{64}$'),
     CONSTRAINT message_source_refs_excerpt_check
         CHECK (length(btrim(excerpt)) > 0),
+    CONSTRAINT message_source_refs_source_project_shape_check
+        CHECK (
+            (source_kind IN ('pdf_document', 'text_document')
+                AND source_project_id IS NOT NULL)
+            OR (source_kind NOT IN ('pdf_document', 'text_document')
+                AND source_project_id IS NULL)
+        ),
     CONSTRAINT message_source_refs_source_shape_check
         CHECK (
             (
                 source_kind = 'pdf_document'
                 AND document_id IS NOT NULL
+                AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
                 AND tool_call_id IS NOT NULL
@@ -1876,6 +1885,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             OR (
                 source_kind = 'text_document'
                 AND document_id IS NOT NULL
+                AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
                 AND tool_call_id IS NOT NULL
@@ -1908,6 +1918,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             OR (
                 source_kind = 'user_pasted_text'
                 AND document_id IS NULL
+                AND source_project_id IS NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NOT NULL
                 AND tool_call_id IS NULL
@@ -1921,6 +1932,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             OR (
                 source_kind IN ('web_search_result', 'news_search_result')
                 AND document_id IS NULL
+                AND source_project_id IS NULL
                 AND source_message_id IS NULL
                 AND canonical_url ~ '^https?://[^[:space:]#]+$'
                 AND tool_call_id IS NOT NULL
@@ -1938,6 +1950,53 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             )
         )
 );
+
+-- Existing unreleased databases may still scope document references to the
+-- answer project. Retain their history while moving document identity to the
+-- actual source project, then replace the composite foreign key accordingly.
+ALTER TABLE public.message_source_refs
+ADD COLUMN IF NOT EXISTS source_project_id TEXT;
+
+UPDATE public.message_source_refs
+SET source_project_id = project_id
+WHERE document_id IS NOT NULL
+  AND source_project_id IS NULL;
+
+DO $$
+DECLARE
+    document_fk_is_current BOOLEAN;
+BEGIN
+    SELECT pg_get_constraintdef(oid) LIKE '%source_project_id%'
+    INTO document_fk_is_current
+    FROM pg_constraint
+    WHERE conname = 'message_source_refs_document_project_fk'
+      AND conrelid = 'public.message_source_refs'::regclass;
+
+    IF NOT COALESCE(document_fk_is_current, FALSE) THEN
+        ALTER TABLE public.message_source_refs
+        DROP CONSTRAINT IF EXISTS message_source_refs_document_project_fk;
+        ALTER TABLE public.message_source_refs
+        ADD CONSTRAINT message_source_refs_document_project_fk
+        FOREIGN KEY (document_id, source_project_id)
+        REFERENCES public.project_documents(document_id, project_id)
+        ON DELETE CASCADE;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'message_source_refs_source_project_shape_check'
+          AND conrelid = 'public.message_source_refs'::regclass
+    ) THEN
+        ALTER TABLE public.message_source_refs
+        ADD CONSTRAINT message_source_refs_source_project_shape_check
+        CHECK (
+            (source_kind IN ('pdf_document', 'text_document')
+                AND source_project_id IS NOT NULL)
+            OR (source_kind NOT IN ('pdf_document', 'text_document')
+                AND source_project_id IS NULL)
+        );
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS message_source_refs_message_scope_idx
 ON public.message_source_refs(message_id, project_id, session_id);

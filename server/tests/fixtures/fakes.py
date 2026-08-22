@@ -480,7 +480,9 @@ class FakeKnowledgeStore:
         )
         return []
 
-    async def save_assistant_message_with_source_refs(self, message, candidates):
+    async def save_assistant_message_with_source_refs(
+        self, message, candidates, *, readable_project_ids
+    ):
         self.saved_message_logs.append([message])
         return list(candidates)
 

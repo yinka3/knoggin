@@ -49,6 +49,7 @@ class SourceReferenceCandidate(BaseModel):
     session_id: str = Field(min_length=1)
     source_kind: SourceKind
     document_id: str | None = None
+    source_project_id: str | None = None
     canonical_url: str | None = None
     source_message_id: int | None = Field(default=None, gt=0)
     content_hash: str = Field(min_length=64, max_length=64)
@@ -64,6 +65,7 @@ class SourceReferenceCandidate(BaseModel):
         "project_id",
         "session_id",
         "document_id",
+        "source_project_id",
         "agent_run_id",
         "tool_call_id",
     )
@@ -112,6 +114,8 @@ class SourceReferenceCandidate(BaseModel):
         if self.source_kind in document_kinds:
             if not self.document_id:
                 raise ValueError("document sources require document_id")
+            if not self.source_project_id:
+                raise ValueError("document sources require source_project_id")
             if self.canonical_url is not None or self.source_message_id is not None:
                 raise ValueError(
                     "document sources cannot include URL or source message"
@@ -132,7 +136,11 @@ class SourceReferenceCandidate(BaseModel):
             self._require_text_metadata("document_name")
 
         elif self.source_kind == "user_pasted_text":
-            if self.document_id is not None or self.canonical_url is not None:
+            if (
+                self.document_id is not None
+                or self.source_project_id is not None
+                or self.canonical_url is not None
+            ):
                 raise ValueError("pasted text cannot include document or URL identity")
             if self.source_message_id is None:
                 raise ValueError("pasted text requires source_message_id")
@@ -149,7 +157,11 @@ class SourceReferenceCandidate(BaseModel):
                 if self.source_kind == "web_search_result"
                 else "news_search"
             )
-            if self.document_id is not None or self.source_message_id is not None:
+            if (
+                self.document_id is not None
+                or self.source_project_id is not None
+                or self.source_message_id is not None
+            ):
                 raise ValueError(
                     "search results cannot include document or source message"
                 )
@@ -216,6 +228,7 @@ class SourceConsulted(BaseModel):
     locator: SourceLocator
     excerpt: str = Field(min_length=1)
     document_id: str | None = None
+    source_project_id: str | None = None
     canonical_url: str | None = None
     source_message_id: int | None = Field(default=None, gt=0)
     source_status: SourceStatus

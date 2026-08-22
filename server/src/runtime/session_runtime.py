@@ -719,9 +719,12 @@ class SessionRuntime:
                 ]
 
                 if source_candidates:
+                    if self.project is None:
+                        raise RuntimeError("Session project runtime is unavailable")
                     return await self.knowledge_store.save_assistant_message_with_source_refs(
                         agent_msg_batch[0],
                         source_candidates,
+                        readable_project_ids=self.project.readable_project_ids,
                     )
                 else:
                     await self.knowledge_store.save_message_logs(agent_msg_batch)

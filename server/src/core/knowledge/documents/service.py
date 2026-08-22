@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from loguru import logger
 
@@ -67,6 +67,7 @@ class DocumentService:
         postgres_client: PostgresClient,
         embedding_service: EmbeddingService,
         background_work: Optional[BackgroundWorkCoordinator] = None,
+        readable_project_ids: Optional[Iterable[str]] = None,
         inline_index_max_bytes: int = INLINE_INDEX_MAX_BYTES,
         blocking_runner: BlockingRunner = _run_in_worker,
         document_rerank_enabled: bool = True,
@@ -75,7 +76,11 @@ class DocumentService:
     ):
         self.project_id = project_id
         self._embedding = embedding_service
-        self._reader = DocumentReader(postgres_client, project_id)
+        self._reader = DocumentReader(
+            postgres_client,
+            project_id,
+            readable_project_ids=readable_project_ids,
+        )
         self._writer = DocumentWriter(postgres_client, project_id)
         self._run_blocking = blocking_runner
         indexing_policy = DocumentIndexPolicy.capture(

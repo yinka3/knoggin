@@ -330,6 +330,8 @@ class KnowledgeStore:
         self,
         message: Dict,
         candidates: List[SourceReferenceCandidate],
+        *,
+        readable_project_ids: List[str],
     ) -> List[SourceReference]:
         """Persist one assistant message and its source audit trail together."""
 
@@ -349,6 +351,7 @@ class KnowledgeStore:
                 user_name=message["user_name"],
                 project_id=message["project_id"],
                 session_id=message["session_id"],
+                readable_project_ids=readable_project_ids,
                 cursor=cur,
             )
 
@@ -360,6 +363,7 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
         session_id: str,
+        readable_project_ids: List[str],
     ) -> List[SourceReference]:
         return await self._source_reference_writer.write_for_assistant_message(
             message_id,
@@ -367,6 +371,7 @@ class KnowledgeStore:
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
+            readable_project_ids=readable_project_ids,
         )
 
     async def get_message_source_refs(

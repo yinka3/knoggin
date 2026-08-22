@@ -54,6 +54,17 @@ class MemoryPostgres:
             )
         )
 
+    @staticmethod
+    def _read_visible(row, readable_project_ids, project_id, session_id):
+        return row["project_id"] in readable_project_ids and (
+            row["visibility_scope"] == "project"
+            or (
+                row["project_id"] == project_id
+                and row["visibility_scope"] == "session"
+                and row["session_id"] == session_id
+            )
+        )
+
     async def execute(self, query, params=None):
         self.calls.append(("execute", query, params))
         if self.write_error:
@@ -295,14 +306,19 @@ class MemoryPostgres:
             return [deepcopy(row)] if row else []
         if "FROM public.document_folder_uploads" in query:
             if "folder_root_id = %s" in query:
-                folder_root_id, project_id, session_id = params
+                folder_root_id, readable_project_ids, project_id, session_id = params
                 return [
                     deepcopy(folder)
                     for folder in self.folders
                     if folder["folder_root_id"] == folder_root_id
-                    and self._visible(folder, project_id, session_id)
+                    and self._read_visible(
+                        folder,
+                        readable_project_ids,
+                        project_id,
+                        session_id,
+                    )
                 ]
-            project_id, session_id, *filters = params
+            readable_project_ids, project_id, session_id, *filters = params
             scope = None
             if "visibility_scope = %s" in query:
                 scope = filters.pop(0)
@@ -310,18 +326,28 @@ class MemoryPostgres:
             folders = [
                 deepcopy(folder)
                 for folder in reversed(self.folders)
-                if self._visible(folder, project_id, session_id)
+                if self._read_visible(
+                    folder,
+                    readable_project_ids,
+                    project_id,
+                    session_id,
+                )
                 and (scope is None or folder["visibility_scope"] == scope)
             ]
             return folders[:limit]
         if "dc.extracted_text" in query:
-            document_id, content_hash, project_id, session_id = params
+            document_id, content_hash, readable_project_ids, project_id, session_id = params
             document = next(
                 (
                     row
                     for row in self.rows
                     if row["document_id"] == document_id
-                    and self._visible(row, project_id, session_id)
+                    and self._read_visible(
+                        row,
+                        readable_project_ids,
+                        project_id,
+                        session_id,
+                    )
                 ),
                 None,
             )
@@ -332,13 +358,18 @@ class MemoryPostgres:
                 return []
             return [{"extracted_text": cached[1]}]
         if "FROM public.document_content" in query:
-            document_id, project_id, session_id = params
+            document_id, readable_project_ids, project_id, session_id = params
             document = next(
                 (
                     row
                     for row in self.rows
                     if row["document_id"] == document_id
-                    and self._visible(row, project_id, session_id)
+                    and self._read_visible(
+                        row,
+                        readable_project_ids,
+                        project_id,
+                        session_id,
+                    )
                 ),
                 None,
             )
@@ -354,13 +385,17 @@ class MemoryPostgres:
             and "pd.original_name" in query
             and "pd.content_hash" not in query
         ):
-            project_id, folder_root_id, session_id, *path_filters = params
+            folder_root_id, readable_project_ids, project_id, session_id, *path_filters = params
             rows = [
                 row
                 for row in self.rows
-                if row["project_id"] == project_id
-                and row.get("folder_root_id") == folder_root_id
-                and self._visible(row, project_id, session_id)
+                if row.get("folder_root_id") == folder_root_id
+                and self._read_visible(
+                    row,
+                    readable_project_ids,
+                    project_id,
+                    session_id,
+                )
             ]
             if path_filters:
                 prefix = path_filters[0]
@@ -394,14 +429,17 @@ class MemoryPostgres:
         if "LIMIT 2" in query and (
             "pd.document_id = %s" in query or "pd.relative_path = %s" in query
         ):
-            selector_value, project_id, session_id = params
+            selector_value, readable_project_ids, project_id, session_id = params
             selector_key = (
                 "document_id" if "pd.document_id = %s" in query else "relative_path"
             )
             results = []
             for row in reversed(self.rows):
-                if row[selector_key] == selector_value and self._visible(
-                    row, project_id, session_id
+                if row[selector_key] == selector_value and self._read_visible(
+                    row,
+                    readable_project_ids,
+                    project_id,
+                    session_id,
                 ):
                     result = dict(row)
                     result["chunk_count"] = sum(
@@ -411,7 +449,7 @@ class MemoryPostgres:
                     results.append(result)
             return results[:2]
 
-        project_id, session_id, *filters = params
+        readable_project_ids, project_id, session_id, *filters = params
         scope = None
         if "pd.visibility_scope = %s" in query:
             scope = filters.pop(0)
@@ -425,7 +463,12 @@ class MemoryPostgres:
         rows = [
             row
             for row in self.rows
-            if self._visible(row, project_id, session_id)
+            if self._read_visible(
+                row,
+                readable_project_ids,
+                project_id,
+                session_id,
+            )
             and (scope is None or row["visibility_scope"] == scope)
             and (folder_root_id is None or row.get("folder_root_id") == folder_root_id)
             and (
@@ -2378,9 +2421,10 @@ async def test_document_service_search_embeds_query_and_enforces_visibility(
     assert "websearch_to_tsquery('simple', %s)" in sql
     assert "ts_rank_cd(vc.search_vector, sq.terms)" in sql
     assert "1.0 / (60 + sc.semantic_rank)" in sql
-    assert params[0:4] == (
+    assert params[0:5] == (
         "alpha question",
         json.dumps([0.1] * 1024),
+        ["project-1"],
         "project-1",
         "session-1",
     )
@@ -2449,7 +2493,7 @@ async def test_document_service_search_applies_document_filter(document_harness)
 
     _, sql, params = postgres.calls[-1]
     assert "AND pd.document_id = %s" in sql
-    assert params[4] == "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
+    assert params[5] == "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
 
 
 @pytest.mark.storage

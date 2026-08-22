@@ -288,6 +288,7 @@ class SearchTools:
         """Build a small, exact source payload from stored document result data."""
         content = result.get("content")
         document_id = result.get("document_id")
+        source_project_id = result.get("project_id")
         content_hash = result.get("content_hash")
         document_name = result.get("document_name") or result.get("original_name")
         relative_path = result.get("relative_path")
@@ -297,6 +298,8 @@ class SearchTools:
             or not content.strip()
             or not isinstance(document_id, str)
             or not document_id.strip()
+            or not isinstance(source_project_id, str)
+            or not source_project_id.strip()
             or not isinstance(content_hash, str)
             or cls._CONTENT_HASH_RE.fullmatch(content_hash) is None
             or not isinstance(document_name, str)
@@ -327,6 +330,7 @@ class SearchTools:
         return {
             "source_kind": source_kind,
             "document_id": document_id,
+            "source_project_id": source_project_id,
             "content_hash": content_hash,
             "locator": locator,
             "excerpt": content,

@@ -26,6 +26,7 @@ def _candidate(**overrides):
         "session_id": "session-1",
         "source_kind": "pdf_document",
         "document_id": "document-1",
+        "source_project_id": "project-1",
         "content_hash": CONTENT_HASH,
         "locator": {"kind": "pdf_page", "page": 2},
         "excerpt": "The second page's retrieved passage.",
@@ -36,6 +37,8 @@ def _candidate(**overrides):
         "result_position": 0,
     }
     payload.update(overrides)
+    if payload["source_kind"] not in {"pdf_document", "text_document"}:
+        payload["source_project_id"] = None
     return payload
 
 

@@ -44,6 +44,7 @@ class SourceReferenceReader:
                 ref.message_id,
                 ref.source_kind,
                 ref.document_id,
+                ref.source_project_id,
                 ref.canonical_url,
                 ref.source_message_id,
                 ref.content_hash,
@@ -68,7 +69,7 @@ class SourceReferenceReader:
              AND session.project_id = message.project_id
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
-             AND document.project_id = ref.project_id
+             AND document.project_id = ref.source_project_id
             WHERE ref.message_id = %s
               AND ref.project_id = %s
               AND ref.session_id = %s
@@ -161,6 +162,7 @@ class SourceReferenceReader:
                 ref.message_id,
                 ref.source_kind,
                 ref.document_id,
+                ref.source_project_id,
                 ref.canonical_url,
                 ref.source_message_id,
                 ref.content_hash,
@@ -188,7 +190,7 @@ class SourceReferenceReader:
              AND ref.session_id = attachment.session_id
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
-             AND document.project_id = ref.project_id
+             AND document.project_id = ref.source_project_id
             WHERE attachment.episode_id = %s
               AND episode.project_id = %s
               AND attachment.session_id = %s
@@ -236,7 +238,7 @@ class SourceReferenceReader:
              AND ref.session_id = attachment.session_id
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
-             AND document.project_id = ref.project_id
+             AND document.project_id = ref.source_project_id
             WHERE attachment.episode_id = %s AND episode.project_id = %s
               AND project.user_name = %s
             ORDER BY attachment.message_position, ref.created_at,
@@ -315,6 +317,7 @@ class SourceReferenceReader:
             locator=reference.locator,
             excerpt=reference.excerpt,
             document_id=reference.document_id,
+            source_project_id=reference.source_project_id,
             canonical_url=reference.canonical_url,
             source_message_id=reference.source_message_id,
             source_status=source_status,

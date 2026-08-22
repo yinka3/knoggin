@@ -23,6 +23,7 @@ def test_source_reference_metadata_is_recursively_immutable_and_serializable():
             "session_id": "session-1",
             "source_kind": "pdf_document",
             "document_id": "document-1",
+            "source_project_id": "project-1",
             "content_hash": "a" * 64,
             "locator": {"kind": "pdf_page", "page": 1},
             "excerpt": "A retrieved passage.",

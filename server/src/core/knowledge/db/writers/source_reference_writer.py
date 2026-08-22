@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Sequence
 
 from common.schema.source.references import SourceReference, SourceReferenceCandidate
-from common.scoping import require_scope_value
+from common.scoping import require_scope_value, require_visible_project_ids
 
 
 class SourceReferenceWriter:
@@ -32,6 +32,7 @@ class SourceReferenceWriter:
         user_name: str,
         project_id: str,
         session_id: str,
+        readable_project_ids: Sequence[str],
         cursor=None,
     ) -> list[SourceReference]:
         """Write candidates only for an assistant message in the given scope.
@@ -57,7 +58,18 @@ class SourceReferenceWriter:
         session_id = require_scope_value(
             session_id, "session_id", "write_for_assistant_message"
         )
-        self._validate_candidates(candidates, project_id, session_id)
+        readable_project_ids = require_visible_project_ids(
+            readable_project_ids,
+            "write_for_assistant_message",
+        )
+        if project_id not in readable_project_ids:
+            raise ValueError("readable_project_ids must include project_id")
+        self._validate_candidates(
+            candidates,
+            project_id,
+            session_id,
+            readable_project_ids,
+        )
 
         references: list[SourceReference] = []
         async with self._cursor(cursor) as cur:
@@ -74,6 +86,7 @@ class SourceReferenceWriter:
                         user_name=user_name,
                         project_id=project_id,
                         session_id=session_id,
+                        readable_project_ids=readable_project_ids,
                     ),
                 )
                 row = await cur.fetchone()
@@ -105,6 +118,7 @@ class SourceReferenceWriter:
         candidates: Sequence[SourceReferenceCandidate],
         project_id: str,
         session_id: str,
+        readable_project_ids: Sequence[str],
     ) -> None:
         for candidate in candidates:
             if not isinstance(candidate, SourceReferenceCandidate):
@@ -112,6 +126,13 @@ class SourceReferenceWriter:
             if candidate.project_id != project_id or candidate.session_id != session_id:
                 raise ValueError(
                     "source candidate scope must match assistant message scope"
+                )
+            if (
+                candidate.source_kind in {"pdf_document", "text_document"}
+                and candidate.source_project_id not in readable_project_ids
+            ):
+                raise ValueError(
+                    "document source project must be in captured readable scope"
                 )
 
     @staticmethod
@@ -124,6 +145,7 @@ class SourceReferenceWriter:
             message_id,
             source_kind,
             document_id,
+            source_project_id,
             canonical_url,
             source_message_id,
             content_hash,
@@ -138,7 +160,7 @@ class SourceReferenceWriter:
             created_at
         )
         SELECT
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb,
             %s, %s, %s, %s, %s, clock_timestamp()
         FROM public.messages AS message
         JOIN public.sessions AS session
@@ -157,10 +179,14 @@ class SourceReferenceWriter:
                   FROM public.project_documents AS document
                   WHERE document.document_id = %s
                     AND document.project_id = %s
+                    AND document.content_hash = %s
+                    AND document.status <> 'deleted'
+                    AND document.project_id = ANY(%s)
                     AND (
                         document.visibility_scope = 'project'
                         OR (
-                            document.visibility_scope = 'session'
+                            document.project_id = %s
+                            AND document.visibility_scope = 'session'
                             AND document.session_id = %s
                         )
                     )
@@ -175,6 +201,7 @@ class SourceReferenceWriter:
             message_id,
             source_kind,
             document_id,
+            source_project_id,
             canonical_url,
             source_message_id,
             content_hash,
@@ -199,6 +226,7 @@ class SourceReferenceWriter:
         user_name: str,
         project_id: str,
         session_id: str,
+        readable_project_ids: Sequence[str],
     ) -> tuple:
         return (
             source_ref_id,
@@ -207,6 +235,7 @@ class SourceReferenceWriter:
             message_id,
             candidate.source_kind,
             candidate.document_id,
+            candidate.source_project_id,
             candidate.canonical_url,
             candidate.source_message_id,
             candidate.content_hash,
@@ -224,6 +253,9 @@ class SourceReferenceWriter:
             user_name,
             candidate.document_id,
             candidate.document_id,
+            candidate.source_project_id,
+            candidate.content_hash,
+            list(readable_project_ids),
             project_id,
             session_id,
         )

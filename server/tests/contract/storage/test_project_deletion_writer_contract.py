@@ -333,19 +333,19 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             """
             INSERT INTO message_source_refs (
                 source_ref_id, project_id, session_id, message_id, source_kind,
-                document_id, content_hash, locator, excerpt, metadata, encounter_kind,
+                document_id, source_project_id, content_hash, locator, excerpt, metadata, encounter_kind,
                 agent_run_id, tool_call_id, result_position, idempotency_key
             ) VALUES
                 (
                     'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'project-1', 'session-1', 101,
-                    'text_document', '77777777-7777-4777-8777-777777777777', repeat('1', 64),
+                    'text_document', '77777777-7777-4777-8777-777777777777', 'project-1', repeat('1', 64),
                     '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
                     'delete', '{"document_name":"delete.md"}'::jsonb, 'document_search',
                     'run-delete', 'tool-delete', 0, 'source-delete'
                 ),
                 (
                     'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'project-2', 'session-2', 201,
-                    'text_document', '88888888-8888-4888-8888-888888888888', repeat('2', 64),
+                    'text_document', '88888888-8888-4888-8888-888888888888', 'project-2', repeat('2', 64),
                     '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
                     'keep', '{"document_name":"keep.md"}'::jsonb, 'document_search',
                     'run-keep', 'tool-keep', 0, 'source-keep'

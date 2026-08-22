@@ -138,7 +138,10 @@ class ProjectRuntimeFactory:
             project_id,
             background_work=self.resources.background_work,
         )
-        document_service = self._create_document_service(project_id)
+        document_service = self._create_document_service(
+            project_id,
+            readable_project_ids=readable_project_ids,
+        )
         runtime = ProjectRuntime(
             project_id=project_id,
             entities=entities,
@@ -170,7 +173,12 @@ class ProjectRuntimeFactory:
             raise
         return runtime
 
-    def _create_document_service(self, project_id: str) -> DocumentService:
+    def _create_document_service(
+        self,
+        project_id: str,
+        *,
+        readable_project_ids: list[str],
+    ) -> DocumentService:
         resource_profile = self.resources.resource_profile
         if resource_profile is None:
             raise RuntimeError("Runtime resource profile is unavailable")
@@ -179,6 +187,7 @@ class ProjectRuntimeFactory:
             postgres_client=self.resources.postgres,
             embedding_service=self.resources.embedding,
             background_work=self.resources.background_work,
+            readable_project_ids=readable_project_ids,
             document_rerank_enabled=os.getenv("KNOGGIN_DOCUMENT_RERANK_ENABLED", "true")
             .strip()
             .lower()
