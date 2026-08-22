@@ -110,10 +110,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
     )
     monkeypatch.setattr(
-        "runtime.project_factory.DocumentIndexingRecoveryJob",
-        lambda *args, **kwargs: RecordingJob("document_index_recovery", **kwargs),
-    )
-    monkeypatch.setattr(
         "runtime.project_factory.AACJob",
         lambda state, deps: RecordingJob(
             "aac_discussion",
@@ -131,7 +127,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
 
     assert list(project_state.scheduler._jobs) == [
         "episode",
-        "document_index_recovery",
         "merge_rollback_cleanup",
         "audit_retention_cleanup",
         "conflict_discovery",
@@ -141,12 +136,11 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
         "developer_settings.jobs.episode",
-        "developer_settings.jobs.document_indexing",
         "developer_settings.jobs.merge_rollback",
         "developer_settings.jobs.audit_retention",
         "developer_settings.jobs.conflict_discovery",
     ]
-    assert len(project_state.unsubscribers) == 7
+    assert len(project_state.unsubscribers) == 6
 
 
 @pytest.mark.runtime
@@ -190,10 +184,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
     )
     monkeypatch.setattr(
-        "runtime.project_factory.DocumentIndexingRecoveryJob",
-        lambda *args, **kwargs: RecordingJob("document_index_recovery", **kwargs),
-    )
-    monkeypatch.setattr(
         "runtime.project_factory.AACJob",
         lambda *_: RecordingJob("aac_discussion"),
     )
@@ -208,7 +198,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     config_manager.emit("developer_settings.entity_resolution", marker)
     config_manager.emit("developer_settings.nlp_pipeline", marker)
     config_manager.emit("developer_settings.jobs.episode", marker)
-    config_manager.emit("developer_settings.jobs.document_indexing", marker)
     config_manager.emit("developer_settings.jobs.merge_rollback", marker)
     config_manager.emit("developer_settings.jobs.audit_retention", marker)
     config_manager.emit("developer_settings.jobs.conflict_discovery", marker)
@@ -216,7 +205,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
     assert episode.updates[-1] is marker
-    assert state.scheduler._jobs["document_index_recovery"].updates[-1] is marker
     assert state.scheduler._jobs["merge_rollback_cleanup"].updates[-1] is marker
     assert state.scheduler._jobs["audit_retention_cleanup"].updates[-1] is marker
     assert state.scheduler._jobs["conflict_discovery"].updates[-1] is marker

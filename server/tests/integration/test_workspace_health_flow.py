@@ -52,7 +52,7 @@ async def test_project_workspace_context_is_readable_before_indexing_and_searcha
     assert created["status"] == "queued"
     assert await workspace.read_project_context() == content
 
-    pending_tasks = list(document_service._background_tasks)
+    pending_tasks = list(document_service.indexer._background_tasks)
     assert pending_tasks
     await asyncio.gather(*pending_tasks)
 

@@ -17,7 +17,6 @@ from core.community.community_job import AACJob
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.documents import DocumentService
-from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.jobs.audit_retention_cleanup_job import (
@@ -158,6 +157,7 @@ class ProjectRuntimeFactory:
         runtime.episode_job = episode_job
 
         try:
+            await runtime.document_indexer.start()
             self._register_background_jobs(
                 runtime,
                 entities=entities,
@@ -241,18 +241,6 @@ class ProjectRuntimeFactory:
             config_manager.subscribe(
                 episode_job.update_settings,
                 "developer_settings.jobs.episode",
-            )
-        )
-
-        document_index_job = DocumentIndexingRecoveryJob(
-            runtime.document_service,
-            jobs.document_indexing,
-        )
-        scheduler.register(document_index_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                document_index_job.update_settings,
-                "developer_settings.jobs.document_indexing",
             )
         )
 

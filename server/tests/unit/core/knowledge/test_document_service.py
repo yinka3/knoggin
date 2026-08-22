@@ -1677,7 +1677,7 @@ async def test_workspace_batch_embeds_chunks_across_files(document_harness):
         ],
     )
 
-    await service._index_workspace_source_batch(
+    await service.indexer._index_workspace_source_batch(
         source_id=source["source_id"],
         session_id=None,
     )
@@ -1713,9 +1713,10 @@ async def test_workspace_batch_prepares_files_with_bounded_concurrency(
             active -= 1
 
     service._run_blocking = tracked_to_thread
-    service._indexing_policy = DocumentIndexPolicy.capture(
+    service.indexer._run_blocking = tracked_to_thread
+    service.indexer.update_policy(DocumentIndexPolicy.capture(
         workspace_prepare_concurrency=2,
-    )
+    ))
     source = await service.create_workspace_source(display_name="knoggin")
     await service.sync_workspace_source(
         source_id=source["source_id"],
@@ -1727,7 +1728,7 @@ async def test_workspace_batch_prepares_files_with_bounded_concurrency(
     active = 0
     peak_active = 0
 
-    await service._index_workspace_source_batch(
+    await service.indexer._index_workspace_source_batch(
         source_id=source["source_id"],
         session_id=None,
     )
@@ -1761,7 +1762,7 @@ async def test_workspace_indexing_status_reports_manifest_and_live_progress(
     assert queued["last_manifest_excluded_count"] == 1
     assert queued["last_manifest_excluded_reason_counts"] == {"default_file_ignore": 1}
 
-    await service._index_workspace_source_batch(
+    await service.indexer._index_workspace_source_batch(
         source_id=source["source_id"],
         session_id=None,
     )
@@ -1786,7 +1787,7 @@ async def test_workspace_indexing_continues_in_fair_document_batches(
             return await operation()
 
     service, postgres = document_harness
-    service._background_work = ImmediateBackgroundWork()
+    service.indexer._background_work = ImmediateBackgroundWork()
     source = await service.create_workspace_source(display_name="knoggin")
     entries = [
         FolderUploadEntry(
@@ -1801,7 +1802,7 @@ async def test_workspace_indexing_continues_in_fair_document_batches(
         entries=entries,
     )
     for _ in range(10):
-        tasks = list(service._background_tasks)
+        tasks = list(service.indexer._background_tasks)
         if not tasks:
             break
         await asyncio.gather(*tasks)
@@ -2295,7 +2296,7 @@ async def test_reupload_after_delete_creates_a_new_independent_document(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_recovery_requeues_interrupted_document_indexing(document_harness):
+async def test_indexer_recovery_requeues_interrupted_document_indexing(document_harness):
     service, postgres = document_harness
     await service.add_document(
         content=b"alpha beta gamma",
@@ -2303,11 +2304,11 @@ async def test_recovery_requeues_interrupted_document_indexing(document_harness)
     )
     postgres.rows[0]["status"] = "indexing"
 
-    recovered = await service.recover_pending_indexes()
+    recovered = await service.indexer.recover_pending_indexes()
 
     assert recovered == 1
     assert postgres.rows[0]["status"] == "indexed"
-    assert service.indexing_snapshot()["last_recovery_requeued"] == 1
+    assert service.indexer.indexing_snapshot()["last_recovery_requeued"] == 1
 
 
 @pytest.mark.storage

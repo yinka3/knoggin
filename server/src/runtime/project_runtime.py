@@ -59,6 +59,7 @@ class ProjectRuntime:
         self.compiled_domain: CompiledDomain = domain_config.compile()
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
+        self.document_indexer = document_service.indexer
         self.workspace_service = ProjectWorkspaceService(self.document_service)
 
         self.episode_job: Optional[Any] = None
@@ -110,6 +111,7 @@ class ProjectRuntime:
 
             for phase, shutdown in (
                 ("scheduler", self.scheduler.stop if self.scheduler else None),
+                ("document indexing", self.document_indexer.shutdown),
                 (
                     "background work",
                     (
@@ -121,7 +123,6 @@ class ProjectRuntime:
                     ),
                 ),
                 ("community", self._stop_community_task),
-                ("documents", self.document_service.shutdown),
             ):
                 if shutdown is None:
                     continue

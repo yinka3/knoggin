@@ -70,23 +70,23 @@ async def test_project_runtime_shutdown_cancels_project_work_after_scheduler_sto
         async def cancel_project(self, project_id):
             calls.append(f"background:{project_id}")
 
-    class RecordingDocuments:
+    class RecordingIndexer:
         async def shutdown(self):
-            calls.append("documents")
+            calls.append("document-indexer")
 
     state = make_project_state(
         scheduler=RecordingScheduler(),
         background_work=RecordingBackgroundWork(),
     )
-    state.document_service = RecordingDocuments()
+    state.document_indexer = RecordingIndexer()
     state.add_config_unsubscriber(lambda: calls.append("unsubscribe"))
 
     await state.shutdown()
 
     assert calls == [
         "scheduler",
+        "document-indexer",
         "background:project-1",
-        "documents",
         "unsubscribe",
     ]
 
@@ -105,15 +105,15 @@ async def test_project_runtime_shutdown_finishes_cleanup_after_a_phase_failure()
         async def cancel_project(self, project_id):
             calls.append(f"background:{project_id}")
 
-    class RecordingDocuments:
+    class RecordingIndexer:
         async def shutdown(self):
-            calls.append("documents")
+            calls.append("document-indexer")
 
     state = make_project_state(
         scheduler=FailingScheduler(),
         background_work=RecordingBackgroundWork(),
     )
-    state.document_service = RecordingDocuments()
+    state.document_indexer = RecordingIndexer()
     state.add_config_unsubscriber(lambda: calls.append("unsubscribe"))
 
     with pytest.raises(RuntimeError, match="ProjectRuntime shutdown failed"):
@@ -121,7 +121,7 @@ async def test_project_runtime_shutdown_finishes_cleanup_after_a_phase_failure()
 
     assert calls == [
         "scheduler",
+        "document-indexer",
         "background:project-1",
-        "documents",
         "unsubscribe",
     ]
