@@ -1321,16 +1321,15 @@ class DocumentWriter:
         excluded_reason_counts: Dict,
         scan_settings: Dict,
         documents: List[Dict],
-        indexed_at: str,
+        created_at: str,
     ) -> None:
         """
-        Atomically insert one folder-upload batch record together with all of
-        its documents, raw bytes, and chunks.
+        Atomically insert one folder-upload batch record together with each
+        document's queued metadata and raw bytes.
 
         Each element of `documents` must contain:
             document_id, original_name, relative_path, extension,
-            size_bytes, content_hash, content (bytes),
-            chunks: List[Tuple[str, List[float]]]  (text, embedding)
+            size_bytes, content_hash, and content (bytes).
         """
         async with self._client.transaction() as cur:
             await cur.execute(
@@ -1350,13 +1349,11 @@ class DocumentWriter:
                             excluded_directory_count,
                             excluded_reason_counts,
                             scan_settings,
-                            created_at,
-                            indexed_at
+                            created_at
                         )
                         VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-                            %s, %s
+                            %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s
                         )
                         """,
                 (
@@ -1374,8 +1371,7 @@ class DocumentWriter:
                     excluded_directory_count,
                     json.dumps(excluded_reason_counts),
                     json.dumps(scan_settings),
-                    indexed_at,
-                    indexed_at,
+                    created_at,
                 ),
             )
 
@@ -1395,14 +1391,12 @@ class DocumentWriter:
                                 size_bytes,
                                 content_hash,
                                 status,
-                                indexed_at,
                                 created_at,
                                 updated_at
                             )
                             VALUES (
                                 %s, %s, %s, %s, %s, 'folder_upload',
-                                %s, %s, %s, %s, %s, 'indexed',
-                                %s, %s, %s
+                                %s, %s, %s, %s, %s, 'queued', %s, %s
                             )
                             """,
                     (
@@ -1416,42 +1410,21 @@ class DocumentWriter:
                         document["extension"],
                         document["size_bytes"],
                         document["content_hash"],
-                        indexed_at,
-                        indexed_at,
-                        indexed_at,
+                        created_at,
+                        created_at,
                     ),
                 )
                 await cur.execute(
                     """
                             INSERT INTO public.document_content (
-                                document_id,
-                                content,
-                                extracted_text,
-                                extracted_content_hash
+                                document_id, content
                             )
-                            VALUES (%s, %s, %s, %s)
+                            VALUES (%s, %s)
                             """,
                     (
                         document["document_id"],
                         document["content"],
-                        document["extracted_text"],
-                        document["content_hash"],
                     ),
-                )
-                await self._copy_chunk_rows(
-                    cur,
-                    [
-                        self._chunk_copy_row(
-                            document_id=document["document_id"],
-                            relative_path=document["relative_path"],
-                            chunk_index=chunk_index,
-                            chunk=chunk,
-                            embedding=embedding,
-                        )
-                        for chunk_index, (chunk, embedding) in enumerate(
-                            document["chunks"]
-                        )
-                    ],
                 )
 
     async def persist_indexed_chunks(

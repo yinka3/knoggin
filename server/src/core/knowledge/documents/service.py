@@ -1091,7 +1091,7 @@ class DocumentService:
         session_id: Optional[str] = None,
         visibility_scope: str = "project",
     ) -> Dict:
-        """Synchronously index and atomically persist a folder batch."""
+        """Durably admit a selected folder batch before indexing its files."""
         self._validate_visibility(visibility_scope, session_id)
         validated_entries = [
             entry
@@ -1148,37 +1148,22 @@ class DocumentService:
             )
 
         folder_root_id = str(uuid.uuid4())
-        indexed_at = get_now_iso()
+        created_at = get_now_iso()
         candidate_bytes = sum(len(entry.content) for entry in validated_entries)
         prepared_documents = []
 
         for relative_path in normalized_selected:
             content = entry_content[relative_path]
             preview_entry = included_by_path[relative_path]
-            document_id = str(uuid.uuid4())
-            extraction = await self._run_blocking(
-                extract_and_split_document,
-                content,
-                preview_entry.extension,
-            )
-            text = extraction.text
-            chunks = extraction.chunks
-            embeddings = await self._embedding.encode(
-                [embedding_text(chunk, relative_path) for chunk in chunks]
-            )
-            self._validate_embeddings(embeddings, chunks)
             prepared_documents.append(
                 {
-                    "document_id": document_id,
+                    "document_id": str(uuid.uuid4()),
                     "relative_path": relative_path,
                     "original_name": preview_entry.original_name,
                     "extension": preview_entry.extension,
                     "size_bytes": preview_entry.size_bytes,
                     "content_hash": preview_entry.content_hash,
                     "content": content,
-                    "extracted_text": text,
-                    "chunks": list(zip(chunks, embeddings)),
-                    "chunk_count": len(chunks),
                 }
             )
 
@@ -1195,29 +1180,14 @@ class DocumentService:
             excluded_reason_counts=preview.summary.reason_counts,
             scan_settings=preview.settings.model_dump(mode="json"),
             documents=prepared_documents,
-            indexed_at=indexed_at,
+            created_at=created_at,
         )
 
         documents = [
-            {
-                "document_id": document["document_id"],
-                "project_id": self.project_id,
-                "session_id": session_id,
-                "visibility_scope": visibility_scope,
-                "folder_root_id": folder_root_id,
-                "source_kind": "folder_upload",
-                "original_name": document["original_name"],
-                "relative_path": document["relative_path"],
-                "extension": document["extension"],
-                "size_bytes": document["size_bytes"],
-                "content_hash": document["content_hash"],
-                "status": "indexed",
-                "indexed_at": indexed_at,
-                "error_message": None,
-                "created_at": indexed_at,
-                "updated_at": indexed_at,
-                "chunk_count": document["chunk_count"],
-            }
+            await self.schedule_document_index(
+                document_id=document["document_id"],
+                session_id=session_id,
+            )
             for document in prepared_documents
         ]
         return {
@@ -1237,8 +1207,8 @@ class DocumentService:
             "excluded_directory_count": preview.summary.excluded_directory_count,
             "excluded_reason_counts": preview.summary.reason_counts,
             "scan_settings": preview.settings.model_dump(mode="json"),
-            "created_at": indexed_at,
-            "indexed_at": indexed_at,
+            "created_at": created_at,
+            "indexed_at": None,
             "documents": documents,
         }
 

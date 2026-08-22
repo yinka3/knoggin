@@ -1053,7 +1053,7 @@ class MemoryCursor:
                 )
                 self.result = None
                 return
-            if "'folder_upload'" in normalized and "'uploaded'" in normalized:
+            if "'folder_upload'" in normalized and "'queued'" in normalized:
                 (
                     document_id,
                     project_id,
@@ -1081,7 +1081,7 @@ class MemoryCursor:
                         "extension": extension,
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
-                        "status": "uploaded",
+                        "status": "queued",
                         "indexed_at": None,
                         "error_message": None,
                         "created_at": created_at,
@@ -3099,12 +3099,12 @@ async def test_accept_folder_rejects_unknown_and_excluded_selections(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_accept_folder_preparation_failure_leaves_no_state(
+async def test_accept_folder_indexing_failure_retains_admitted_state(
     document_harness,
 ):
     service, postgres = document_harness
 
-    with pytest.raises(ValueError, match="valid UTF-8"):
+    with pytest.raises(RuntimeError, match="valid UTF-8"):
         await service.accept_folder(
             folder_name="repo",
             entries=[
@@ -3116,15 +3116,16 @@ async def test_accept_folder_preparation_failure_leaves_no_state(
             selected_paths=["broken.txt"],
         )
 
-    assert postgres.folders == []
-    assert postgres.rows == []
+    assert len(postgres.folders) == 1
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["status"] == "failed"
     assert postgres.chunks == []
-    assert postgres.contents == {}
+    assert postgres.contents[postgres.rows[0]["document_id"]] == b"\xff"
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
+async def test_accept_folder_persists_all_raw_bytes_before_index_failure(
     monkeypatch,
     document_harness,
 ):
@@ -3154,10 +3155,11 @@ async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
             selected_paths=["a.txt", "b.txt"],
         )
 
-    assert postgres.folders == []
-    assert postgres.rows == []
-    assert postgres.chunks == []
-    assert postgres.contents == {}
+    assert len(postgres.folders) == 1
+    assert len(postgres.rows) == 2
+    assert len(postgres.chunks) == 1
+    assert {row["status"] for row in postgres.rows} == {"indexed", "failed"}
+    assert set(postgres.contents.values()) == {b"alpha", b"beta"}
 
 
 @pytest.mark.storage

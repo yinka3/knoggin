@@ -1334,7 +1334,7 @@ CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
     excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
     scan_settings JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    indexed_at TIMESTAMPTZ NOT NULL,
+    indexed_at TIMESTAMPTZ,
     CONSTRAINT document_folder_uploads_visibility_scope_check
         CHECK (visibility_scope IN ('project', 'session')),
     CONSTRAINT document_folder_uploads_session_visibility_check
@@ -1363,6 +1363,9 @@ ON public.document_folder_uploads(
     visibility_scope,
     session_id
 );
+
+ALTER TABLE public.document_folder_uploads
+    ALTER COLUMN indexed_at DROP NOT NULL;
 
 -- A durable identity for a synchronizable local workspace.  Folder uploads
 -- remain immutable snapshots; a workspace source will later own repeated
