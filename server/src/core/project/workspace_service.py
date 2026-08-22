@@ -9,13 +9,14 @@ optimistic content-hash check where applicable.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from common.utils.time_utils import get_now_iso
 from core.knowledge.documents.constants import (
-    ACCEPTED_EXTENSIONS,
+    MANAGED_WORKSPACE_WRITABLE_EXTENSIONS,
     MAX_DOCUMENT_SIZE,
     MAX_READ_CHARACTERS,
     MAX_READ_LINES,
@@ -24,7 +25,9 @@ from core.knowledge.documents.constants import (
 from core.knowledge.documents.scanning import normalize_relative_path
 
 if TYPE_CHECKING:
-    from core.knowledge.documents.service import DocumentService
+    from core.knowledge.db.readers.document_reader import DocumentReader
+    from core.knowledge.db.writers.document_writer import DocumentWriter
+    from core.knowledge.documents.indexer import DocumentIndexer
 
 
 MANAGED_WORKSPACE_MODE = "managed_project_workspace"
@@ -54,11 +57,18 @@ def build_project_markdown(name: str, description: Optional[str] = None) -> str:
 class ProjectWorkspaceService:
     """Access the one managed workspace owned by a project."""
 
-    def __init__(self, document_service: DocumentService) -> None:
-        self._documents = document_service
-        self.project_id = document_service.project_id
-        self._reader = document_service._reader
-        self._writer = document_service._writer
+    def __init__(
+        self,
+        *,
+        project_id: str,
+        reader: DocumentReader,
+        writer: DocumentWriter,
+        indexer: DocumentIndexer,
+    ) -> None:
+        self.project_id = project_id
+        self._reader = reader
+        self._writer = writer
+        self._indexer = indexer
 
     @staticmethod
     def _public_metadata(row: Dict) -> Dict:
@@ -90,10 +100,10 @@ class ProjectWorkspaceService:
             raise TypeError("path must be a string")
         normalized = normalize_relative_path(path, path)
         extension = document_extension(normalized)
-        if extension not in ACCEPTED_EXTENSIONS:
+        if extension not in MANAGED_WORKSPACE_WRITABLE_EXTENSIONS:
             raise ValueError(
                 f"Unsupported file type '{extension}'. "
-                "Managed workspace files must be text or supported documents."
+                "Managed workspace files must be text, code, or configuration."
             )
         return normalized
 
@@ -139,12 +149,25 @@ class ProjectWorkspaceService:
         if source is not None:
             return source
         try:
-            return await self._documents.create_workspace_source(
-                display_name=display_name,
-                visibility_scope="project",
-                session_id=None,
-                ownership_mode=MANAGED_WORKSPACE_MODE,
+            if not isinstance(display_name, str) or not display_name.strip():
+                raise ValueError("display_name must not be empty")
+            source_id = str(uuid.uuid4())
+            created_at = get_now_iso()
+            normalized_name = display_name.strip()
+            await self._writer.insert_managed_workspace_source(
+                source_id=source_id,
+                display_name=normalized_name,
+                created_at=created_at,
             )
+            return {
+                "source_id": source_id,
+                "project_id": self.project_id,
+                "session_id": None,
+                "visibility_scope": "project",
+                "ownership_mode": MANAGED_WORKSPACE_MODE,
+                "display_name": normalized_name,
+                "last_synced_at": None,
+            }
         except Exception:
             # A concurrent creator may have won the unique project-source
             # race.  Re-read before surfacing a genuine storage failure.
@@ -273,7 +296,7 @@ class ProjectWorkspaceService:
             content_hash=hashlib.sha256(payload).hexdigest(),
             updated_at=now,
         )
-        self._documents.queue_workspace_source_indexing(
+        self._indexer.queue_workspace_source_indexing(
             source_id=source["source_id"],
         )
         return self._public_metadata(result)
@@ -299,7 +322,7 @@ class ProjectWorkspaceService:
         )
         source = await self.get_source()
         if source is not None:
-            self._documents.queue_workspace_source_indexing(
+            self._indexer.queue_workspace_source_indexing(
                 source_id=source["source_id"],
             )
         return self._public_metadata(result)
@@ -324,7 +347,7 @@ class ProjectWorkspaceService:
         )
         source = await self.get_source()
         if source is not None:
-            self._documents.queue_workspace_source_indexing(
+            self._indexer.queue_workspace_source_indexing(
                 source_id=source["source_id"],
             )
         return self._public_metadata(result)

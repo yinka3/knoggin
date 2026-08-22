@@ -587,7 +587,6 @@ class DocumentIndexer:
 
     def indexing_snapshot(self) -> Dict:
         return {
-            "policy_version": self._policy.version,
             "inline_index_max_bytes": self._policy.inline_index_max_bytes,
             "embedding_chunk_batch_size": self._policy.embedding_chunk_batch_size,
             "workspace_document_batch_size": self._policy.workspace_document_batch_size,

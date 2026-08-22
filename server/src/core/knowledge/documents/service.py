@@ -68,6 +68,9 @@ class DocumentService:
         embedding_service: EmbeddingService,
         background_work: Optional[BackgroundWorkCoordinator] = None,
         readable_project_ids: Optional[Iterable[str]] = None,
+        reader: Optional[DocumentReader] = None,
+        writer: Optional[DocumentWriter] = None,
+        indexer: Optional[DocumentIndexer] = None,
         inline_index_max_bytes: int = INLINE_INDEX_MAX_BYTES,
         blocking_runner: BlockingRunner = _run_in_worker,
         document_rerank_enabled: bool = True,
@@ -76,26 +79,28 @@ class DocumentService:
     ):
         self.project_id = project_id
         self._embedding = embedding_service
-        self._reader = DocumentReader(
+        self._reader = reader or DocumentReader(
             postgres_client,
             project_id,
             readable_project_ids=readable_project_ids,
         )
-        self._writer = DocumentWriter(postgres_client, project_id)
+        self._writer = writer or DocumentWriter(postgres_client, project_id)
         self._run_blocking = blocking_runner
-        indexing_policy = DocumentIndexPolicy.capture(
-            inline_index_max_bytes=inline_index_max_bytes,
-            workspace_prepare_concurrency=workspace_prepare_concurrency,
-        )
-        self._indexer = DocumentIndexer(
-            project_id=project_id,
-            reader=self._reader,
-            writer=self._writer,
-            embedding_service=embedding_service,
-            policy=indexing_policy,
-            blocking_runner=blocking_runner,
-            background_work=background_work,
-        )
+        if indexer is None:
+            indexing_policy = DocumentIndexPolicy.capture(
+                inline_index_max_bytes=inline_index_max_bytes,
+                workspace_prepare_concurrency=workspace_prepare_concurrency,
+            )
+            indexer = DocumentIndexer(
+                project_id=project_id,
+                reader=self._reader,
+                writer=self._writer,
+                embedding_service=embedding_service,
+                policy=indexing_policy,
+                blocking_runner=blocking_runner,
+                background_work=background_work,
+            )
+        self._indexer = indexer
         if not isinstance(document_rerank_enabled, bool):
             raise ValueError("document_rerank_enabled must be a boolean")
         if (

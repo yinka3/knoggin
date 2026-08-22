@@ -32,6 +32,7 @@ class ProjectRuntime:
         readable_project_ids: list[str],
         domain_config: DomainConfig,
         document_service: DocumentService,
+        workspace_service: ProjectWorkspaceService,
         domain_config_store: DomainConfigStore,
         batch_processor: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
@@ -60,7 +61,7 @@ class ProjectRuntime:
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
         self.document_indexer = document_service.indexer
-        self.workspace_service = ProjectWorkspaceService(self.document_service)
+        self.workspace_service = workspace_service
 
         self.episode_job: Optional[Any] = None
         self._community_task: Optional[asyncio.Task] = None

@@ -104,6 +104,11 @@ class DocumentIndexingSettings(ConfigModel):
     recovery_batch_size: int = Field(16, ge=1, le=100)
 
 
+class DocumentSettings(ConfigModel):
+    rerank_enabled: bool = True
+    rerank_candidates: int = Field(15, ge=1, le=50)
+
+
 class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
@@ -251,6 +256,7 @@ class DeveloperSettings(ConfigModel):
     )
     nlp_pipeline: TextProcessorSettings = Field(default_factory=TextProcessorSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
+    documents: DocumentSettings = Field(default_factory=DocumentSettings)
     community: CommunitySettings = Field(default_factory=CommunitySettings)
     coordination_log: CoordinationLogSettings = Field(
         default_factory=CoordinationLogSettings

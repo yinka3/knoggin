@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 
 import pytest
 
@@ -66,6 +65,15 @@ class FakeWorkspaceWriter:
         self.reader.files[path] = row
         return {key: value for key, value in row.items() if not key.startswith("_")}
 
+    async def insert_managed_workspace_source(self, **kwargs):
+        self.reader.source = {
+            "source_id": kwargs["source_id"],
+            "project_id": "project-1",
+            "visibility_scope": "project",
+            "ownership_mode": "managed_project_workspace",
+            "display_name": kwargs["display_name"],
+        }
+
     async def update_managed_workspace_file(self, **kwargs):
         row = self.reader.files.get(kwargs["relative_path"])
         if row is None:
@@ -103,29 +111,25 @@ class FakeWorkspaceWriter:
         return {key: value for key, value in row.items() if not key.startswith("_")}
 
 
+class FakeWorkspaceIndexer:
+    def __init__(self):
+        self.queue_calls = []
+
+    def queue_workspace_source_indexing(self, **kwargs):
+        self.queue_calls.append(kwargs)
+
+
 @pytest.fixture
 def workspace():
     reader = FakeWorkspaceReader()
     writer = FakeWorkspaceWriter(reader)
-    document_service = SimpleNamespace(
+    indexer = FakeWorkspaceIndexer()
+    return ProjectWorkspaceService(
         project_id="project-1",
-        _reader=reader,
-        _writer=writer,
-        queue_calls=[],
+        reader=reader,
+        writer=writer,
+        indexer=indexer,
     )
-    document_service.queue_workspace_source_indexing = lambda **kwargs: document_service.queue_calls.append(kwargs)
-    document_service.create_workspace_source = _create_source
-    return ProjectWorkspaceService(document_service)
-
-
-async def _create_source(*, display_name, **kwargs):
-    return {
-        "source_id": "source-1",
-        "project_id": "project-1",
-        "visibility_scope": "project",
-        "ownership_mode": "managed_project_workspace",
-        "display_name": display_name,
-    }
 
 
 @pytest.mark.asyncio
@@ -137,7 +141,26 @@ async def test_managed_workspace_normalizes_paths_and_rejects_duplicates(workspa
     assert first["relative_path"] == "docs/README.md"
     with pytest.raises(FileExistsError):
         await workspace.create_file("docs/README.md", "two")
-    assert len(workspace._documents.queue_calls) == 1
+    assert len(workspace._indexer.queue_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_creates_its_managed_source_through_the_writer():
+    reader = FakeWorkspaceReader()
+    reader.source = None
+    writer = FakeWorkspaceWriter(reader)
+    workspace = ProjectWorkspaceService(
+        project_id="project-1",
+        reader=reader,
+        writer=writer,
+        indexer=FakeWorkspaceIndexer(),
+    )
+
+    source = await workspace.ensure_source(" Team Workspace ")
+
+    assert source["project_id"] == "project-1"
+    assert source["display_name"] == "Team Workspace"
+    assert reader.source["source_id"] == source["source_id"]
 
 
 @pytest.mark.asyncio
@@ -147,7 +170,7 @@ async def test_stale_update_does_not_queue_and_current_append_does(workspace):
         await workspace.update_file(
             "notes.md", "stale", expected_content_hash="wrong-hash"
         )
-    assert len(workspace._documents.queue_calls) == 1
+    assert len(workspace._indexer.queue_calls) == 1
 
     updated = await workspace.append_file(
         "notes.md",
@@ -155,7 +178,16 @@ async def test_stale_update_does_not_queue_and_current_append_does(workspace):
         expected_content_hash=created["content_hash"],
     )
     assert updated["size_bytes"] == len(b"one two")
-    assert len(workspace._documents.queue_calls) == 2
+    assert len(workspace._indexer.queue_calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["report.pdf", "image.png", "notes.docx"])
+async def test_managed_workspace_rejects_rich_document_and_image_writes(
+    workspace, path
+):
+    with pytest.raises(ValueError, match="text, code, or configuration"):
+        await workspace.create_file(path, "not writable workspace text")
 
 
 @pytest.mark.asyncio

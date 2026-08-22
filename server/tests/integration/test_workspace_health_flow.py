@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+from core.knowledge.db.readers.document_reader import DocumentReader
+from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents import DocumentService
 from core.project.workspace_service import (
     PROJECT_FILE_PATH,
@@ -34,6 +36,8 @@ async def run_inline(function, *args, **kwargs):
 @pytest.mark.no_network
 async def test_project_workspace_context_is_readable_before_indexing_and_searchable_after():
     postgres = MemoryPostgres()
+    reader = DocumentReader(postgres, "project-a", ["project-a"])
+    writer = DocumentWriter(postgres, "project-a")
     document_service = DocumentService(
         project_id="project-a",
         postgres_client=postgres,
@@ -41,8 +45,15 @@ async def test_project_workspace_context_is_readable_before_indexing_and_searcha
         background_work=InlineBackgroundWork(),
         blocking_runner=run_inline,
         document_rerank_enabled=False,
+        reader=reader,
+        writer=writer,
     )
-    workspace = ProjectWorkspaceService(document_service)
+    workspace = ProjectWorkspaceService(
+        project_id="project-a",
+        reader=reader,
+        writer=writer,
+        indexer=document_service.indexer,
+    )
     content = build_project_markdown(
         "Research",
         "Investigate bounded workspace indexing.",

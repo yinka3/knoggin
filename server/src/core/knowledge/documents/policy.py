@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 
 from .constants import (
@@ -18,7 +16,6 @@ from .constants import (
 class DocumentIndexPolicy:
     """Execution settings that must not change while an index operation runs."""
 
-    version: str
     inline_index_max_bytes: int
     embedding_chunk_batch_size: int
     workspace_document_batch_size: int
@@ -40,11 +37,7 @@ class DocumentIndexPolicy:
             "workspace_prepare_concurrency": workspace_prepare_concurrency,
         }
         cls._validate(values)
-        encoded = json.dumps(values, sort_keys=True, separators=(",", ":"))
-        return cls(
-            version=hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16],
-            **values,
-        )
+        return cls(**values)
 
     @staticmethod
     def _validate(values: dict[str, int]) -> None:

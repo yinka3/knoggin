@@ -70,7 +70,7 @@ def test_background_snapshot_for_health_without_scope_drops_project_state() -> N
 def test_document_indexing_snapshot_for_health_is_public_and_json_safe() -> None:
     service = object.__new__(DocumentService)
     raw = {
-        "policy_version": "v1",
+        "inline_index_max_bytes": 262_144,
         "recovered_count": 2,
         "document_id": "doc-1",
         "message": "document content",
@@ -79,5 +79,5 @@ def test_document_indexing_snapshot_for_health_is_public_and_json_safe() -> None
 
     safe = service.indexing_snapshot_for_health()
 
-    assert safe == {"policy_version": "v1", "recovered_count": 2}
+    assert safe == {"inline_index_max_bytes": 262_144, "recovered_count": 2}
     assert raw["document_id"] == "doc-1"

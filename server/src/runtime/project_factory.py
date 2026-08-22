@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from functools import partial
 from typing import Any, Callable
 
@@ -16,7 +15,13 @@ from common.scoping import (
 from core.community.community_job import AACJob
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.text_processor import TextProcessor
-from core.knowledge.documents import DocumentService
+from core.knowledge.db.readers.document_reader import DocumentReader
+from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.documents import (
+    DocumentIndexer,
+    DocumentIndexPolicy,
+    DocumentService,
+)
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.jobs.audit_retention_cleanup_job import (
@@ -26,6 +31,7 @@ from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
 from core.knowledge.jobs.merge_rollback_cleanup_job import MergeCleanupJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
+from core.project.workspace_service import ProjectWorkspaceService
 from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -138,7 +144,7 @@ class ProjectRuntimeFactory:
             project_id,
             background_work=self.resources.background_work,
         )
-        document_service = self._create_document_service(
+        document_service, workspace_service = self._create_document_services(
             project_id,
             readable_project_ids=readable_project_ids,
         )
@@ -152,6 +158,7 @@ class ProjectRuntimeFactory:
             readable_project_ids=readable_project_ids,
             domain_config=domain_config,
             document_service=document_service,
+            workspace_service=workspace_service,
             domain_config_store=domain_store,
             batch_processor=project_processor,
             background_work=self.resources.background_work,
@@ -173,30 +180,56 @@ class ProjectRuntimeFactory:
             raise
         return runtime
 
-    def _create_document_service(
+    def _create_document_services(
         self,
         project_id: str,
         *,
         readable_project_ids: list[str],
-    ) -> DocumentService:
+    ) -> tuple[DocumentService, ProjectWorkspaceService]:
         resource_profile = self.resources.resource_profile
         if resource_profile is None:
             raise RuntimeError("Runtime resource profile is unavailable")
-        return DocumentService(
+        runtime_config = ConfigManager.get().config
+        document_settings = runtime_config.developer_settings.documents
+        reader = DocumentReader(
+            self.resources.postgres,
+            project_id,
+            readable_project_ids=readable_project_ids,
+        )
+        writer = DocumentWriter(self.resources.postgres, project_id)
+        indexer = DocumentIndexer(
+            project_id=project_id,
+            reader=reader,
+            writer=writer,
+            embedding_service=self.resources.embedding,
+            policy=DocumentIndexPolicy.capture(
+                workspace_prepare_concurrency=(
+                    resource_profile.workspace_prepare_concurrency
+                )
+            ),
+            blocking_runner=asyncio.to_thread,
+            background_work=self.resources.background_work,
+        )
+        document_service = DocumentService(
             project_id=project_id,
             postgres_client=self.resources.postgres,
             embedding_service=self.resources.embedding,
             background_work=self.resources.background_work,
             readable_project_ids=readable_project_ids,
-            document_rerank_enabled=os.getenv("KNOGGIN_DOCUMENT_RERANK_ENABLED", "true")
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"},
-            document_rerank_candidates=int(
-                os.getenv("KNOGGIN_DOCUMENT_RERANK_CANDIDATES", "15")
-            ),
-            workspace_prepare_concurrency=resource_profile.workspace_prepare_concurrency,
+            reader=reader,
+            writer=writer,
+            indexer=indexer,
+            blocking_runner=asyncio.to_thread,
+            document_rerank_enabled=document_settings.rerank_enabled,
+            document_rerank_candidates=document_settings.rerank_candidates,
         )
+        workspace_service = ProjectWorkspaceService(
+            project_id=project_id,
+            reader=reader,
+            writer=writer,
+            indexer=indexer,
+        )
+        return document_service, workspace_service
 
     async def _verify_user_entity(self, entities: EntityResolver) -> None:
         user_id = await entities.get_id(self.user_name)
