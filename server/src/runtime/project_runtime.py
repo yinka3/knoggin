@@ -25,12 +25,14 @@ class ProjectRuntime:
         self,
         project_id: str,
         entities: EntityResolver,
+        knowledge_retrieval: Any,
         pipeline: TextProcessor,
         scheduler: Scheduler,
         user_name: str,
         readable_project_ids: list[str],
         domain_config: DomainConfig,
         document_service: DocumentService,
+        workspace_service: ProjectWorkspaceService,
         domain_config_store: DomainConfigStore,
         batch_processor: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
@@ -47,6 +49,7 @@ class ProjectRuntime:
         if not isinstance(domain_config, DomainConfig):
             raise TypeError("ProjectRuntime requires a DomainConfig")
         self.entities = entities
+        self.knowledge_retrieval = knowledge_retrieval
         self.pipeline = pipeline
         self.scheduler = scheduler
         self.user_name = user_name
@@ -57,10 +60,10 @@ class ProjectRuntime:
         self.compiled_domain: CompiledDomain = domain_config.compile()
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
-        self.workspace_service = ProjectWorkspaceService(self.document_service)
+        self.document_indexer = document_service.indexer
+        self.workspace_service = workspace_service
 
         self.episode_job: Optional[Any] = None
-        self.dlq_job: Optional[Any] = None
         self._community_task: Optional[asyncio.Task] = None
         self.config_unsubscribers: list[Any] = []
         self._shutdown_lock = asyncio.Lock()
@@ -109,16 +112,18 @@ class ProjectRuntime:
 
             for phase, shutdown in (
                 ("scheduler", self.scheduler.stop if self.scheduler else None),
+                ("document indexing", self.document_indexer.shutdown),
                 (
                     "background work",
                     (
-                        lambda: self.background_work.cancel_project(self.project_id)
-                        if self.background_work is not None
-                        else None
+                        lambda: (
+                            self.background_work.cancel_project(self.project_id)
+                            if self.background_work is not None
+                            else None
+                        )
                     ),
                 ),
                 ("community", self._stop_community_task),
-                ("documents", self.document_service.shutdown),
             ):
                 if shutdown is None:
                     continue
@@ -174,6 +179,9 @@ class ProjectRuntime:
             setter = getattr(component, "set_compiled_domain", None)
             if setter is not None:
                 setter(compiled_domain)
+        set_active_topics = getattr(self.knowledge_retrieval, "set_active_topics", None)
+        if callable(set_active_topics):
+            set_active_topics(compiled_domain.active_topics)
 
     async def capture_domain(self) -> CompiledDomain:
         """Return a stable domain snapshot for one admitted runtime operation."""

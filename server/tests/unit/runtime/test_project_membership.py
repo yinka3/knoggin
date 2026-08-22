@@ -346,6 +346,46 @@ async def test_delete_project_uses_cascading_postgres_boundary():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_delete_project_commits_durable_state_before_best_effort_redis_cleanup():
+    events = []
+
+    class EventWriter:
+        async def delete_project(self, *, user_name, project_id):
+            events.append(("durable", user_name, project_id))
+            return {"projects": 1}
+
+    manager = ProjectManager(
+        resources=SimpleNamespace(
+            postgres=RecordingPostgres([[project_row()]]),
+            redis=object(),
+        ),
+        user_name="ada",
+    )
+    manager._project_deletion_writer = EventWriter()
+
+    async def member_ids(project_id):
+        events.append(("snapshot", project_id))
+        return ["session-1"], ["agent-1"]
+
+    async def fail_redis_cleanup(project_id, *, session_ids, agent_ids):
+        events.append(("redis", project_id, session_ids, agent_ids))
+        raise RuntimeError("redis unavailable")
+
+    manager._project_runtime_member_ids = member_ids
+    manager._delete_project_redis_state = fail_redis_cleanup
+
+    deleted = await manager.delete_project("project-1")
+
+    assert deleted["status"] == ProjectStatus.DELETED.value
+    assert events == [
+        ("snapshot", "project-1"),
+        ("durable", "ada", "project-1"),
+        ("redis", "project-1", ["session-1"], ["agent-1"]),
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_delete_project_clears_project_session_and_agent_redis_state():
     postgres = RecordingPostgres(
         [
@@ -367,7 +407,6 @@ async def test_delete_project_clears_project_session_and_agent_redis_state():
         RedisKeys.last_profile_update("ada", "project-1", 2),
         "done",
     )
-    await redis.set(RedisKeys.buffer("ada", "session-1"), "buffered")
     await redis.set(
         RedisKeys.message_dedup("ada", "session-1", "digest"),
         "accepted:1",
@@ -389,7 +428,6 @@ async def test_delete_project_clears_project_session_and_agent_redis_state():
     assert writer.calls == [("ada", "project-1")]
     assert await redis.get(RedisKeys.dirty_entities("ada", "project-1")) is None
     assert await redis.get(RedisKeys.last_profile_update("ada", "project-1", 2)) is None
-    assert await redis.get(RedisKeys.buffer("ada", "session-1")) is None
     assert (
         await redis.get(RedisKeys.message_dedup("ada", "session-1", "digest")) is None
     )

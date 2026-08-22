@@ -100,6 +100,7 @@ def make_resources(*, redis=None, llm_service=None):
 def make_project_state():
     return SimpleNamespace(
         project_id="project-1",
+        knowledge_retrieval=SimpleNamespace(),
         entities=SimpleNamespace(
             embedding_service=object(),
             project_id="project-1",
@@ -595,18 +596,18 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
     agent_ctx = captured["ctx"]
     assert agent_ctx.is_community is True
     assert agent_ctx.user_query == "Community Discussion Topic: Profile stability"
-    assert agent_ctx.scope.session_id == "aac-disc-1"
+    assert agent_ctx.session_id == "aac-disc-1"
     assert agent_ctx.agent.config.id == "agent-1"
     assert agent_ctx.agent.name == "Analyst"
     assert "Careful analyst" in agent_ctx.agent.persona
     assert agent_ctx.current_participants == ["agent-1", "agent-2"]
     assert agent_ctx.history == [{"role": "assistant", "content": "previous"}]
 
-    execute_kwargs = captured["execute_kwargs"]
-    assert execute_kwargs["model"] == "agent-model"
-    assert execute_kwargs["agent_temperature"] == 0.2
-    assert execute_kwargs["agent_brain"] == "Use evidence."
-    assert execute_kwargs["agent_directives"] == (
+    assert captured["execute_kwargs"] == {}
+    assert agent_ctx.model == "agent-model"
+    assert agent_ctx.temperature == 0.2
+    assert agent_ctx.brain == "Use evidence."
+    assert agent_ctx.directives == (
         "Required:\n"
         "- Stay grounded\n\n"
         "Preferred:\n"
@@ -614,12 +615,12 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
         "Avoid:\n"
         "- Vague claims"
     )
-    assert execute_kwargs["enabled_tools"] == ["search_entity"]
-    assert execute_kwargs["additional_tool_schemas"] == [
+    assert agent_ctx.enabled_tools == ("search_entity",)
+    assert agent_ctx.additional_tool_schemas == tuple(
         schema
         for schema in AAC_SPECIFIC_SCHEMAS
         if schema["function"]["name"] == "save_insight"
-    ]
+    )
 
     assert captured["tools"].discussion_id == "disc-1"
     assert captured["tools"].agent_id == "agent-1"

@@ -40,13 +40,51 @@ def make_run(**overrides) -> AgentRun:
 
 
 @pytest.mark.no_network
-def test_agent_run_owns_scope_limits_and_identity():
-    run = make_run()
+def test_agent_run_owns_scope_limits_identity_and_effective_policy():
+    run = make_run(
+        model="run-model",
+        temperature=0.2,
+        brain="Use evidence.",
+        directives="Be concise.",
+        enabled_tools=["search_messages"],
+        additional_tool_schemas=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "community_tool",
+                    "capability": "read",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+    )
 
-    assert run.scope.user_name == "ada"
-    assert run.scope.project_id == "project-1"
+    assert run.user_name == "ada"
+    assert run.project_id == "project-1"
+    assert run.session_id == "session-1"
     assert run.limits.max_calls == 2
     assert run.agent.config.id == "agent-1"
+    assert run.model == "run-model"
+    assert run.temperature == 0.2
+    assert run.brain == "Use evidence."
+    assert run.directives == "Be concise."
+    assert run.enabled_tools == ("search_messages",)
+    assert run.additional_tool_schemas == (
+        {
+            "type": "function",
+            "function": {
+                "name": "community_tool",
+                "capability": "read",
+                "parameters": {"type": "object"},
+            },
+        },
+    )
+    assert run.tool_runtime.permissions.allowed_tools >= {
+        "search_messages",
+        "request_clarification",
+        "submit_answer",
+        "community_tool",
+    }
     with pytest.raises(AttributeError):
         run.limits.max_calls = 4
 
@@ -66,6 +104,23 @@ def test_agent_run_enforces_attempt_and_tool_call_invariants():
     assert not run.can_call_tool("search_messages", {"query": "Ada"})
     with pytest.raises(ValueError, match="not permitted"):
         run.record_tool_call("search_messages", {"query": "Ada"})
+
+
+@pytest.mark.no_network
+def test_agent_run_snapshots_tool_runtime_once_at_construction():
+    run = make_run(enabled_tools=["search_messages"])
+    runtime = run.tool_runtime
+
+    run.enabled_tools = ("search_entity",)
+    run.additional_tool_schemas = ()
+
+    assert run.tool_runtime is runtime
+    assert runtime.permissions.allowed_tools >= {
+        "search_messages",
+        "request_clarification",
+        "submit_answer",
+    }
+    assert "search_entity" not in runtime.permissions.allowed_tools
 
 
 @pytest.mark.no_network
@@ -147,7 +202,9 @@ async def test_executor_finalizes_an_agent_run():
     assert run.final_content == "Done"
     assert run.sealed is True
     assert run.released is True
-    assert run.usage["total_tokens"] == 5
+    # The executor performs a dedicated final synthesis after the first
+    # structured answer, so both model turns contribute usage.
+    assert run.usage["total_tokens"] == 10
 
 
 @pytest.mark.no_network

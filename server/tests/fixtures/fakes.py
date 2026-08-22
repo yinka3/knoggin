@@ -291,30 +291,6 @@ class FakeRedis:
 
     async def eval(self, script, numkeys, *args):
         self.evals.append((script, args))
-        if numkeys == 4 and len(args) >= 8:
-            (
-                checkpoint_key,
-                session_last_processed_key,
-                project_last_processed_key,
-                commit_key,
-                batch_size,
-                checkpoint_interval,
-                last_id,
-                ttl,
-            ) = args[:8]
-            self._purge_expired(commit_key)
-            previous = self.strings.get(commit_key)
-            if previous:
-                count, reached = previous.split(":", 1)
-                return [int(count), int(reached)]
-            count = int(self.strings.get(checkpoint_key, 0)) + int(batch_size)
-            reached = int(count >= int(checkpoint_interval))
-            self.strings[checkpoint_key] = "0" if reached else str(count)
-            self.strings[session_last_processed_key] = str(last_id)
-            self.strings[project_last_processed_key] = str(last_id)
-            self.strings[commit_key] = f"{count}:{reached}"
-            await self.expire(commit_key, int(ttl))
-            return [count, reached]
         if numkeys == 1 and len(args) >= 3:
             key, expected_value, ttl = args[0], str(args[1]), args[2]
             self._purge_expired(key)
@@ -445,13 +421,12 @@ class FakeRedis:
 class FakeKnowledgeStore:
     def __init__(self):
         self.saved_message_logs = []
-        self.saved_candidate_suggestions = []
         self.recent_project_messages = []
         self.identity_calls = []
         self.next_entity_id = 2
         self.next_message_id = 1
-        self.search_rebuild_calls = []
-        self.parked_dlq_items = {}
+        self.embedding_rebuild_calls = []
+        self.reset_claimed_ingestion_calls = []
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -463,18 +438,12 @@ class FakeKnowledgeStore:
         self.next_message_id += 1
         return message_id
 
-    async def rebuild_project_search_indexes(
-        self,
-        project_id,
-        user_name,
-        identity_project_ids,
-    ):
+    async def rebuild_project_embeddings(self, project_id, user_name):
         call = {
             "project_id": project_id,
             "user_name": user_name,
-            "identity_project_ids": list(identity_project_ids),
         }
-        self.search_rebuild_calls.append(call)
+        self.embedding_rebuild_calls.append(call)
         return {"messages": 0, "entities": 0, "episodes": 0, "identity": 1}
 
     async def ensure_identity_entity(self, user_name, aliases=None):
@@ -501,46 +470,21 @@ class FakeKnowledgeStore:
         }
         self.saved_message_logs.append([row])
 
-    async def save_assistant_message_with_source_refs(self, message, candidates):
+    async def reset_claimed_ingestion(self, *, user_name, project_id, session_id):
+        self.reset_claimed_ingestion_calls.append(
+            {
+                "user_name": user_name,
+                "project_id": project_id,
+                "session_id": session_id,
+            }
+        )
+        return []
+
+    async def save_assistant_message_with_source_refs(
+        self, message, candidates, *, readable_project_ids
+    ):
         self.saved_message_logs.append([message])
         return list(candidates)
-
-    async def save_candidate_suggestions(self, scope, suggestions):
-        self.saved_candidate_suggestions.append((scope, list(suggestions)))
-        return len(suggestions)
-
-    async def park_dlq_item(self, *, dlq_id, user_name, project_id, entry):
-        self.parked_dlq_items[(user_name, project_id, dlq_id)] = {
-            **dict(entry),
-            "dlq_id": dlq_id,
-            "user_name": user_name,
-            "project_id": project_id,
-            "status": "parked",
-        }
-
-    async def get_parked_dlq_item(self, *, dlq_id, user_name, project_id):
-        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
-        if entry is None or entry["status"] != "parked":
-            return None
-        return dict(entry)
-
-    async def mark_parked_dlq_item_requeued(
-        self, *, dlq_id, user_name, project_id
-    ):
-        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
-        if entry is None or entry["status"] != "parked":
-            return False
-        entry["status"] = "requeued"
-        return True
-
-    async def mark_parked_dlq_item_completed_if_requeued(
-        self, *, dlq_id, user_name, project_id
-    ):
-        entry = self.parked_dlq_items.get((user_name, project_id, dlq_id))
-        if entry is None or entry["status"] != "requeued":
-            return False
-        entry["status"] = "completed"
-        return True
 
     async def get_recent_project_messages(
         self, user_name, project_id, limit, before_message_id=None
@@ -1149,6 +1093,7 @@ def make_turn_payload(role="user", content="hello", timestamp=None, user_msg_id=
 class RecordingCursor:
     def __init__(self, client):
         self.client = client
+        self.rowcount = 1
 
     async def execute(self, query, params=None):
         self.client.calls.append(("execute", query, params))

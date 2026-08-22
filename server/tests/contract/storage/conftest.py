@@ -64,16 +64,12 @@ async def _reset_storage_db(client: PostgresClient):
             conflict_evidence_refs,
             conflict_groups,
             conflict_discovery_checkpoints,
-            parked_dlq_items,
-            relationship_evidence_refs,
             relationship_observations,
             message_entity_refs,
             relationships,
             entity_aliases,
             entities,
             messages,
-            project_search_revisions,
-            identity_search_revisions,
             sessions,
             projects
         RESTART IDENTITY CASCADE;

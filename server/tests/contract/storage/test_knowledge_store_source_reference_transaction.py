@@ -71,6 +71,7 @@ async def test_assistant_message_and_source_refs_share_one_transaction():
     references = await store.save_assistant_message_with_source_refs(
         message,
         [_candidate()],
+        readable_project_ids=["project-1"],
     )
 
     assert references == ["reference"]
@@ -84,6 +85,7 @@ async def test_assistant_message_and_source_refs_share_one_transaction():
                 "user_name": "ada",
                 "project_id": "project-1",
                 "session_id": "session-1",
+                "readable_project_ids": ["project-1"],
                 "cursor": client.cursor,
             },
         )

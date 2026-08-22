@@ -177,3 +177,9 @@ ACCEPTED_EXTENSIONS = (
     # Config / data
     | {".cfg", ".conf", ".dockerfile", ".env", ".ini", ".toml"}
 )
+
+# Managed project workspaces are editable text/code/config files. Rich binary
+# documents and images remain supported for general document ingestion only.
+MANAGED_WORKSPACE_WRITABLE_EXTENSIONS = (
+    ACCEPTED_EXTENSIONS - {".pdf", ".docx"} - IMAGE_EXTENSIONS
+)

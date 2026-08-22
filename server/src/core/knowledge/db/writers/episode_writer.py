@@ -1,7 +1,12 @@
 import json
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set
+from functools import wraps
+from typing import Dict, List, Set
 
+from loguru import logger
+from psycopg import Error as PsycopgError
+
+from common.exceptions import StorageWriteError
 from common.schema.episode.models import (
     EntityEpisode,
     Episode,
@@ -16,137 +21,39 @@ from infrastructure.postgres_client import PostgresClient
 EPISODE_VERSION_HISTORY_LIMIT = 10
 
 
+def _storage_write(operation: str):
+    """Translate infrastructure failures without hiding contract violations."""
+
+    def decorate(method):
+        @wraps(method)
+        async def wrapped(self, *args, **kwargs):
+            try:
+                return await method(self, *args, **kwargs)
+            except (StorageWriteError, TypeError, ValueError):
+                raise
+            except PsycopgError as exc:
+                self._raise_storage_write(operation, exc)
+
+        return wrapped
+
+    return decorate
+
+
 class EpisodeWriter:
     """Persists an episode with all graph context derived from source messages."""
 
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
 
-    async def create_episode(self, episode: Episode, *, user_name: str) -> None:
-        """Create or retry an episode without duplicating any attachment rows."""
+    @staticmethod
+    def _raise_storage_write(operation: str, exc: Exception) -> None:
+        logger.error("Storage write failed for {}: {}", operation, exc)
+        raise StorageWriteError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
 
-        user_name = require_scope_value(user_name, "user_name", "create_episode")
-        project_id = require_scope_value(
-            episode.project_id, "project_id", "create_episode"
-        )
-        if not episode.messages:
-            raise ValueError("create_episode requires at least one source message")
-
-        source_messages = sorted(
-            episode.messages,
-            key=lambda message: message.message_position,
-        )
-        source_message_ids = [message.message_id for message in source_messages]
-        source_sessions = {message.session_id for message in source_messages}
-        if len(source_sessions) != 1:
-            raise ValueError("create_episode requires one source session; use project window")
-
-        async with self.client.transaction() as cur:
-            await self._write_episode(
-                cur,
-                episode,
-                source_message_ids,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=source_sessions.pop(),
-            )
-
-    async def write_episode_window(
-        self,
-        episode: Optional[Episode],
-        window_message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> bool:
-        """Atomically persist an episode decision and advance its checkpoint.
-
-        A ``None`` episode represents a validated skip. Returning ``False``
-        means a retry found that this window had already been checkpointed.
-        """
-
-        user_name = require_scope_value(user_name, "user_name", "write_episode_window")
-        project_id = require_scope_value(
-            project_id, "project_id", "write_episode_window"
-        )
-        session_id = require_scope_value(
-            session_id, "session_id", "write_episode_window"
-        )
-        normalized_window_ids = [int(message_id) for message_id in window_message_ids]
-        if not normalized_window_ids or any(
-            message_id <= 0 for message_id in normalized_window_ids
-        ):
-            raise ValueError("Episode window requires positive source message IDs")
-        if len(normalized_window_ids) != len(set(normalized_window_ids)):
-            raise ValueError("Episode window must not contain duplicate message IDs")
-        if episode and episode.project_id != project_id:
-            raise ValueError("Episode scope must match its checkpoint scope")
-        if episode:
-            episode_message_ids = {message.message_id for message in episode.messages}
-            if not set(normalized_window_ids).issubset(episode_message_ids):
-                raise ValueError(
-                    "Episode must include every message in its checkpoint window"
-                )
-
-        async with self.client.transaction() as cur:
-            checkpoint = await self._lock_checkpoint(
-                cur,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=session_id,
-            )
-            if await self._window_is_checkpointed(
-                cur,
-                normalized_window_ids,
-                checkpoint=checkpoint,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=session_id,
-            ):
-                return False
-            next_checkpoint = await self._validate_next_eligible_window(
-                cur,
-                normalized_window_ids,
-                checkpoint=checkpoint,
-                user_name=user_name,
-                project_id=project_id,
-                session_id=session_id,
-            )
-            if episode:
-                source_message_ids = [
-                    message.message_id
-                    for message in sorted(
-                        episode.messages,
-                        key=lambda message: message.message_position,
-                    )
-                ]
-                await self._write_episode(
-                    cur,
-                    episode,
-                    source_message_ids,
-                    user_name=user_name,
-                    project_id=project_id,
-                    session_id=session_id,
-                )
-            await cur.execute(
-                """
-                UPDATE episode_processing_checkpoints
-                SET last_evaluated_message_id = %s,
-                    last_evaluated_timestamp_ms = %s,
-                    updated_at = NOW()
-                WHERE project_id = %s
-                  AND session_id = %s
-                """,
-                (
-                    next_checkpoint.last_evaluated_message_id,
-                    next_checkpoint.last_evaluated_timestamp_ms,
-                    project_id,
-                    session_id,
-                ),
-            )
-        return True
-
+    @_storage_write("write_project_episode_window")
     async def write_project_episode_window(
         self,
         episodes: List[Episode],
@@ -323,55 +230,6 @@ class EpisodeWriter:
             values[int(row["message_id"])].add(str(row["relationship_id"]))
         return values
 
-    async def _write_episode(
-        self,
-        cur,
-        episode: Episode,
-        source_message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> None:
-        source_message_timestamps = await self._validate_source_messages(
-            cur,
-            source_message_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-        entities_by_message = await self._load_entities_by_message(
-            cur,
-            source_message_ids,
-            project_id=project_id,
-        )
-        relationships_by_message = await self._load_relationships_by_message(
-            cur,
-            source_message_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-        self._validate_ranked_context(
-            episode.entities,
-            episode.relationships,
-            entities_by_message,
-            relationships_by_message,
-        )
-        await self._upsert_episode(
-            cur,
-            episode,
-            source_message_timestamps,
-        )
-        await self._upsert_messages(cur, episode)
-        await self._upsert_entities(
-            cur,
-            episode,
-            entities_by_message,
-            source_message_timestamps,
-        )
-        await self._upsert_relationships(cur, episode, relationships_by_message)
-
     @staticmethod
     async def _lock_checkpoint(
         cur,
@@ -473,118 +331,6 @@ class EpisodeWriter:
         return int(message["message_id"]) <= checkpoint.last_evaluated_message_id
 
     @staticmethod
-    async def _validate_next_eligible_window(
-        cur,
-        window_message_ids: List[int],
-        *,
-        checkpoint: EpisodeCheckpoint,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> EpisodeCheckpoint:
-        await cur.execute(
-            """
-            SELECT message_id, timestamp_ms
-            FROM messages
-            WHERE user_name = %s
-              AND project_id = %s
-              AND session_id = %s
-              AND (
-                    (%s = 0 AND %s::BIGINT IS NULL)
-                 OR (
-                        %s::BIGINT IS NOT NULL
-                    AND (
-                           timestamp_ms > %s
-                        OR (timestamp_ms = %s AND message_id > %s)
-                        OR timestamp_ms IS NULL
-                    )
-                 )
-                 OR (
-                        %s::BIGINT IS NULL
-                    AND %s > 0
-                    AND timestamp_ms IS NULL
-                    AND message_id > %s
-                 )
-              )
-            ORDER BY timestamp_ms ASC NULLS LAST, message_id
-            LIMIT %s
-            """,
-            (
-                user_name,
-                project_id,
-                session_id,
-                checkpoint.last_evaluated_message_id,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_message_id,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_message_id,
-                checkpoint.last_evaluated_message_id,
-                len(window_message_ids),
-            ),
-        )
-        next_messages = await cur.fetchall()
-        next_message_ids = [int(row["message_id"]) for row in next_messages]
-        if next_message_ids != window_message_ids:
-            raise ValueError(
-                "Episode window is not the next chronological message range"
-            )
-
-        await cur.execute(
-            """
-            SELECT m.message_id
-            FROM messages m
-            WHERE m.message_id = ANY(%s)
-              AND m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-              AND m.episode_eligible = TRUE
-            """,
-            (window_message_ids, user_name, project_id, session_id),
-        )
-        eligible_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
-        if eligible_message_ids != set(window_message_ids):
-            raise ValueError("Episode window includes messages that are not eligible")
-        final_message = next_messages[-1]
-        return EpisodeCheckpoint(
-            last_evaluated_message_id=int(final_message["message_id"]),
-            last_evaluated_timestamp_ms=final_message["timestamp_ms"],
-        )
-
-    @staticmethod
-    async def _validate_source_messages(
-        cur,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Dict[int, int | None]:
-        await cur.execute(
-            """
-            SELECT message_id, timestamp_ms
-            FROM messages
-            WHERE message_id = ANY(%s)
-              AND user_name = %s
-              AND project_id = %s
-              AND session_id = %s
-            """,
-            (message_ids, user_name, project_id, session_id),
-        )
-        message_timestamps = {
-            int(row["message_id"]): row.get("timestamp_ms")
-            for row in await cur.fetchall()
-        }
-        if set(message_timestamps) != set(message_ids):
-            raise ValueError("Episode source messages must exist in the episode scope")
-        return {
-            message_id: int(timestamp) if timestamp is not None else None
-            for message_id, timestamp in message_timestamps.items()
-        }
-
-    @staticmethod
     async def _load_entities_by_message(
         cur,
         message_ids: List[int],
@@ -605,36 +351,6 @@ class EpisodeWriter:
         for row in await cur.fetchall():
             entities_by_message[int(row["message_id"])].add(int(row["entity_id"]))
         return entities_by_message
-
-    @staticmethod
-    async def _load_relationships_by_message(
-        cur,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Dict[int, Set[str]]:
-        await cur.execute(
-            """
-            SELECT rer.message_id, rer.relationship_id
-            FROM relationship_observations rer
-            JOIN relationships r
-              ON r.relationship_id = rer.relationship_id
-             AND r.project_id = rer.project_id
-            WHERE rer.message_id = ANY(%s)
-              AND rer.user_name = %s
-              AND rer.session_id = %s
-              AND r.project_id = %s
-            """,
-            (message_ids, user_name, session_id, project_id),
-        )
-        relationships_by_message = {message_id: set() for message_id in message_ids}
-        for row in await cur.fetchall():
-            relationships_by_message[int(row["message_id"])].add(
-                str(row["relationship_id"])
-            )
-        return relationships_by_message
 
     @staticmethod
     def _validate_ranked_context(

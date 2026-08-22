@@ -171,6 +171,7 @@ MINVALUE 1;
 
 CREATE TABLE IF NOT EXISTS public.messages (
     user_name TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     message_id BIGINT NOT NULL UNIQUE,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
     role TEXT NOT NULL,
@@ -193,6 +194,12 @@ CREATE TABLE IF NOT EXISTS public.messages (
     ingestion_not_before_ms BIGINT,
     ingestion_claim_id TEXT,
     ingestion_claimed_at_ms BIGINT,
+    ingestion_attempt_count INTEGER NOT NULL DEFAULT 0
+        CHECK (ingestion_attempt_count >= 0),
+    ingestion_last_failure_stage TEXT,
+    ingestion_last_failure_code TEXT,
+    ingestion_last_failure_at_ms BIGINT,
+    ingestion_last_error_summary TEXT,
     episode_eligible BOOLEAN NOT NULL DEFAULT FALSE,
     episode_type TEXT,
     PRIMARY KEY (user_name, session_id, message_id),
@@ -210,6 +217,13 @@ ALTER TABLE public.messages
     ADD COLUMN IF NOT EXISTS search_tsvector TSVECTOR GENERATED ALWAYS AS (
         to_tsvector('english', content)
     ) STORED;
+
+ALTER TABLE public.messages
+    ADD COLUMN IF NOT EXISTS ingestion_attempt_count INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS ingestion_last_failure_stage TEXT,
+    ADD COLUMN IF NOT EXISTS ingestion_last_failure_code TEXT,
+    ADD COLUMN IF NOT EXISTS ingestion_last_failure_at_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS ingestion_last_error_summary TEXT;
 
 CREATE INDEX IF NOT EXISTS messages_project_idx
 ON public.messages(user_name, project_id, message_id);
@@ -308,21 +322,7 @@ CREATE TABLE IF NOT EXISTS public.relationships (
     entity_b_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
         ON DELETE CASCADE,
     relationship_type TEXT NOT NULL CHECK (btrim(relationship_type) <> ''),
-    canonical_relationship_type TEXT,
-    observed_relationship_label TEXT NOT NULL
-        CHECK (btrim(observed_relationship_label) <> ''),
-    domain_status TEXT NOT NULL DEFAULT 'unrecognized'
-        CHECK (domain_status IN ('recognized', 'unrecognized')),
-    CONSTRAINT relationships_domain_status_consistent
-        CHECK (
-            (domain_status = 'recognized')
-            = (canonical_relationship_type IS NOT NULL)
-        ),
     "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
-    weight INTEGER NOT NULL DEFAULT 1,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-    context TEXT,
-    last_seen_ms BIGINT,
     CONSTRAINT relationships_distinct_entities
         CHECK (entity_a_id <> entity_b_id),
     CONSTRAINT relationships_identity_matches_fields
@@ -341,6 +341,16 @@ CREATE TABLE IF NOT EXISTS public.relationships (
         UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type),
     CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id)
 );
+
+ALTER TABLE public.relationships
+    DROP CONSTRAINT IF EXISTS relationships_domain_status_consistent,
+    DROP COLUMN IF EXISTS canonical_relationship_type,
+    DROP COLUMN IF EXISTS observed_relationship_label,
+    DROP COLUMN IF EXISTS domain_status,
+    DROP COLUMN IF EXISTS weight,
+    DROP COLUMN IF EXISTS confidence,
+    DROP COLUMN IF EXISTS context,
+    DROP COLUMN IF EXISTS last_seen_ms;
 
 CREATE INDEX IF NOT EXISTS relationships_pair_type_idx
 ON public.relationships(project_id, entity_a_id, entity_b_id, relationship_type);
@@ -374,7 +384,8 @@ CREATE TABLE IF NOT EXISTS public.relationship_observations (
         CHECK (domain_status IN ('recognized', 'unrecognized')),
     domain_version INTEGER NOT NULL DEFAULT 0 CHECK (domain_version >= 0),
     "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0
+        CHECK (confidence >= 0.0 AND confidence <= 1.0),
     context TEXT,
     observed_at_ms BIGINT NOT NULL,
     CONSTRAINT relationship_observations_distinct_entities
@@ -419,6 +430,12 @@ ON public.relationship_observations(relationship_id, project_id);
 
 CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
 ON public.relationship_observations(project_id, user_name, session_id, message_id);
+
+ALTER TABLE public.relationship_observations
+    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_range_check;
+ALTER TABLE public.relationship_observations
+    ADD CONSTRAINT relationship_observations_confidence_range_check
+        CHECK (confidence >= 0.0 AND confidence <= 1.0);
 
 -- Durable advisory disposition. Evidence remains in relationship_observations;
 -- this table stores only the current user decision for each pattern.
@@ -472,29 +489,6 @@ CREATE INDEX IF NOT EXISTS relationship_advisory_decisions_pattern_idx
 ON public.relationship_advisory_decisions(
     user_name, project_id, pattern_key, created_at
 );
-
--- Redis remains the operational DLQ queue. Once an item is parked for human
--- inspection, this row is the durable subject that a review inbox can link to.
-CREATE TABLE IF NOT EXISTS public.parked_dlq_items (
-    dlq_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    session_id TEXT,
-    stage TEXT NOT NULL,
-    attempt INTEGER NOT NULL CHECK (attempt >= 0),
-    error_message TEXT,
-    payload JSONB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'parked'
-        CHECK (status IN ('parked', 'requeued', 'completed')),
-    parked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    requeued_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS parked_dlq_items_inbox_idx
-ON public.parked_dlq_items(user_name, project_id, status, parked_at DESC);
 
 -- A unified inbox points to workflow-owned subjects. It deliberately has no
 -- resolution payload: the subject workflow owns its state and mutations.
@@ -582,11 +576,7 @@ CREATE TABLE IF NOT EXISTS public.conflict_discovery_checkpoints (
     user_name TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id)
         ON DELETE CASCADE,
-    cursor_observed_at_ms BIGINT NOT NULL DEFAULT 0,
-    cursor_observation_id BIGINT NOT NULL DEFAULT 0,
-    continuation JSONB NOT NULL DEFAULT '{}'::jsonb,
-    lease_token TEXT,
-    lease_expires_at TIMESTAMPTZ,
+    last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0,
     last_completed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_name, project_id)
@@ -617,9 +607,31 @@ ON public.llm_budget_reservations(reset_key, expires_at)
 WHERE status = 'active';
 
 ALTER TABLE public.conflict_discovery_checkpoints
-ADD COLUMN IF NOT EXISTS continuation JSONB NOT NULL DEFAULT '{}'::jsonb;
+ADD COLUMN IF NOT EXISTS last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0;
 
-DROP TABLE IF EXISTS public.relationship_evidence_refs;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'conflict_discovery_checkpoints'
+          AND column_name = 'cursor_observation_id'
+    ) THEN
+        UPDATE public.conflict_discovery_checkpoints
+        SET last_reviewed_observation_id = GREATEST(
+            last_reviewed_observation_id,
+            cursor_observation_id
+        );
+    END IF;
+END $$;
+
+ALTER TABLE public.conflict_discovery_checkpoints
+    DROP COLUMN IF EXISTS cursor_observed_at_ms,
+    DROP COLUMN IF EXISTS cursor_observation_id,
+    DROP COLUMN IF EXISTS continuation,
+    DROP COLUMN IF EXISTS lease_token,
+    DROP COLUMN IF EXISTS lease_expires_at;
 
 DO $$
 BEGIN
@@ -679,79 +691,6 @@ CREATE TABLE IF NOT EXISTS public.episodes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT episodes_id_project_key UNIQUE (episode_id, project_id)
 );
-
-ALTER TABLE public.relationships
-ADD COLUMN IF NOT EXISTS relationship_type TEXT;
-
-ALTER TABLE public.relationships
-ADD COLUMN IF NOT EXISTS canonical_relationship_type TEXT,
-ADD COLUMN IF NOT EXISTS observed_relationship_label TEXT,
-ADD COLUMN IF NOT EXISTS domain_status TEXT NOT NULL DEFAULT 'unrecognized',
-ADD COLUMN IF NOT EXISTS "symmetric" BOOLEAN NOT NULL DEFAULT FALSE;
-
-UPDATE public.relationships
-SET observed_relationship_label = relationship_type
-WHERE observed_relationship_label IS NULL;
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM public.relationships
-        WHERE relationship_type IS NULL
-           OR btrim(relationship_type) = ''
-           OR observed_relationship_label IS NULL
-           OR btrim(observed_relationship_label) = ''
-           OR relationship_id <> format(
-               '%s:%s:%s:%s',
-               project_id,
-               CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
-                    ELSE entity_a_id END,
-               CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
-                    ELSE entity_b_id END,
-               lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
-           )
-    ) THEN
-        RAISE EXCEPTION
-            'Relationships use the retired pair-only identity. Reinitialize and reindex this unreleased database before applying the typed relationship schema.';
-    END IF;
-
-    ALTER TABLE public.relationships
-    ALTER COLUMN relationship_type SET NOT NULL;
-
-    ALTER TABLE public.relationships
-    DROP CONSTRAINT IF EXISTS relationships_ordered_endpoints;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationships_identity_matches_fields'
-          AND conrelid = 'public.relationships'::regclass
-    ) THEN
-        ALTER TABLE public.relationships
-        ADD CONSTRAINT relationships_identity_matches_fields
-        CHECK (
-            relationship_id = format(
-                '%s:%s:%s:%s',
-                project_id,
-                CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
-                     ELSE entity_a_id END,
-                CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
-                     ELSE entity_b_id END,
-                lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
-            )
-        );
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationships_project_pair_type_key'
-          AND conrelid = 'public.relationships'::regclass
-    ) THEN
-        ALTER TABLE public.relationships
-        ADD CONSTRAINT relationships_project_pair_type_key
-        UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type);
-    END IF;
-END $$;
 
 ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS embedding vector(1024);
@@ -1104,7 +1043,10 @@ CREATE TABLE IF NOT EXISTS public.entity_merge_proposals (
                 'rejected',
                 'failed'
             )
-        )
+        ),
+    CONSTRAINT entity_merge_proposals_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS entity_merge_proposals_project_idx
@@ -1134,7 +1076,10 @@ CREATE TABLE IF NOT EXISTS public.entity_merge_audits (
     rolled_back_at TIMESTAMPTZ,
     rolled_back_by TEXT,
     rollback_failure_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT entity_merge_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 ALTER TABLE public.entity_merge_proposals
@@ -1171,20 +1116,6 @@ ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
 -- ==============================================================================
 -- DOMAIN INVARIANTS
 -- ==============================================================================
-
-ALTER TABLE public.entities
-    DROP CONSTRAINT IF EXISTS entities_confidence_range_check;
-ALTER TABLE public.entities
-    ADD CONSTRAINT entities_confidence_range_check
-    CHECK (confidence >= 0.0 AND confidence <= 1.0);
-
-ALTER TABLE public.relationships
-    DROP CONSTRAINT IF EXISTS relationships_weight_positive_check,
-    DROP CONSTRAINT IF EXISTS relationships_confidence_range_check;
-ALTER TABLE public.relationships
-    ADD CONSTRAINT relationships_weight_positive_check CHECK (weight >= 1),
-    ADD CONSTRAINT relationships_confidence_range_check
-        CHECK (confidence >= 0.0 AND confidence <= 1.0);
 
 ALTER TABLE public.entity_merge_audits
     DROP CONSTRAINT IF EXISTS entity_merge_audits_status_check,
@@ -1298,32 +1229,6 @@ BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id
 ON public.relationships
 FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
 
-CREATE TABLE IF NOT EXISTS public.ingestion_candidate_suggestions (
-    suggestion_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    msg_id BIGINT NOT NULL,
-    mention TEXT NOT NULL,
-    mention_type TEXT NOT NULL,
-    mention_topic TEXT NOT NULL,
-    candidate_id BIGINT NOT NULL,
-    candidate_name TEXT NOT NULL,
-    base_score DOUBLE PRECISION NOT NULL,
-    reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_entity_id BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_project_idx
-ON public.ingestion_candidate_suggestions(user_name, project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_candidate_idx
-ON public.ingestion_candidate_suggestions(user_name, project_id, candidate_id);
-
-CREATE INDEX IF NOT EXISTS ingestion_candidate_suggestions_created_entity_idx
-ON public.ingestion_candidate_suggestions(user_name, project_id, created_entity_id);
-
 -- Durable authorization and outcome trail for every model-initiated write.
 CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     audit_id UUID PRIMARY KEY,
@@ -1334,7 +1239,6 @@ CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     run_id TEXT NOT NULL,
     tool_name TEXT NOT NULL,
     capability TEXT NOT NULL,
-    confirmation_state TEXT NOT NULL DEFAULT 'not_confirmed',
     arguments JSONB NOT NULL DEFAULT '{}'::jsonb,
     result JSONB,
     status TEXT NOT NULL,
@@ -1345,13 +1249,15 @@ CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
         capability IN (
             'reversible_write',
             'configuration_write',
-            'identity_write',
-            'destructive_write'
+            'identity_write'
         )
     ),
     CONSTRAINT agent_tool_audits_status_check CHECK (
         status IN ('started', 'succeeded', 'rejected', 'failed')
-    )
+    ),
+    CONSTRAINT agent_tool_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS agent_tool_audits_scope_idx
@@ -1365,10 +1271,17 @@ CREATE INDEX IF NOT EXISTS agent_tool_audits_run_idx
 ON public.agent_tool_audits(run_id, created_at);
 
 ALTER TABLE public.agent_tool_audits
-    DROP CONSTRAINT IF EXISTS agent_tool_audits_confirmation_state_check;
+    DROP CONSTRAINT IF EXISTS agent_tool_audits_capability_check;
 ALTER TABLE public.agent_tool_audits
-    ADD CONSTRAINT agent_tool_audits_confirmation_state_check
-        CHECK (confirmation_state IN ('not_confirmed', 'confirmed'));
+    ADD CONSTRAINT agent_tool_audits_capability_check CHECK (
+        capability IN (
+            'reversible_write',
+            'configuration_write',
+            'identity_write'
+        )
+    );
+ALTER TABLE public.agent_tool_audits
+    DROP COLUMN IF EXISTS confirmation_state;
 
 -- 4. Message full-text search projection.
 -- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
@@ -1378,6 +1291,8 @@ ALTER TABLE public.agent_tool_audits
 DROP TABLE IF EXISTS public.entity_search;
 DROP TABLE IF EXISTS public.message_search;
 DROP TABLE IF EXISTS public.hierarchy_edges;
+DROP TABLE IF EXISTS public.ingestion_candidate_suggestions;
+DROP TABLE IF EXISTS public.parked_dlq_items;
 DROP FUNCTION IF EXISTS public.enforce_hierarchy_edge_invariants();
 
 DO $$
@@ -1394,69 +1309,13 @@ BEGIN
 
 END $$;
 
--- Search rebuilds generate embeddings outside a transaction.  These revisions
--- let the publisher reject a snapshot when its canonical inputs changed while
--- embedding was in progress, instead of overwriting the newer derived index.
-CREATE TABLE IF NOT EXISTS public.project_search_revisions (
-    project_id TEXT PRIMARY KEY,
-    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)
-);
-
-CREATE TABLE IF NOT EXISTS public.identity_search_revisions (
-    user_name TEXT PRIMARY KEY,
-    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0)
-);
-
-CREATE OR REPLACE FUNCTION public.bump_search_index_revision()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    changed_project_id TEXT;
-    changed_user_name TEXT;
-    changed_entity_id BIGINT;
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        changed_project_id := OLD.project_id;
-        IF TG_TABLE_NAME = 'entities' THEN
-            changed_entity_id := OLD.entity_id;
-            changed_user_name := OLD.user_name;
-        END IF;
-    ELSE
-        changed_project_id := NEW.project_id;
-        IF TG_TABLE_NAME = 'entities' THEN
-            changed_entity_id := NEW.entity_id;
-            changed_user_name := NEW.user_name;
-        END IF;
-    END IF;
-
-    -- The reserved identity entity is shared by every project search rebuild.
-    IF TG_TABLE_NAME = 'entities' AND changed_entity_id = 1 THEN
-        INSERT INTO public.identity_search_revisions (user_name, revision)
-        VALUES (changed_user_name, 1)
-        ON CONFLICT (user_name) DO UPDATE
-        SET revision = identity_search_revisions.revision + 1;
-        RETURN NULL;
-    END IF;
-
-    INSERT INTO public.project_search_revisions (project_id, revision)
-    VALUES (changed_project_id, 1)
-    ON CONFLICT (project_id) DO UPDATE
-    SET revision = project_search_revisions.revision + 1;
-    RETURN NULL;
-END;
-$$;
-
 DROP TRIGGER IF EXISTS entities_search_revision_trigger ON public.entities;
-CREATE TRIGGER entities_search_revision_trigger
-AFTER INSERT OR DELETE OR UPDATE OF canonical_name, type ON public.entities
-FOR EACH ROW EXECUTE FUNCTION public.bump_search_index_revision();
-
+DROP TRIGGER IF EXISTS messages_search_revision_trigger ON public.messages;
 DROP TRIGGER IF EXISTS episodes_search_revision_trigger ON public.episodes;
-CREATE TRIGGER episodes_search_revision_trigger
-AFTER INSERT OR DELETE
-    OR UPDATE OF summary, new_developments, updates, unresolved ON public.episodes
-FOR EACH ROW EXECUTE FUNCTION public.bump_search_index_revision();
+DROP FUNCTION IF EXISTS public.bump_search_index_revision() CASCADE;
+DROP FUNCTION IF EXISTS public.sync_entity_search_canonical_name() CASCADE;
+DROP TABLE IF EXISTS public.project_search_revisions;
+DROP TABLE IF EXISTS public.identity_search_revisions;
 
 -- Project-owned folder upload batches.
 CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
@@ -1475,7 +1334,7 @@ CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
     excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
     scan_settings JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    indexed_at TIMESTAMPTZ NOT NULL,
+    indexed_at TIMESTAMPTZ,
     CONSTRAINT document_folder_uploads_visibility_scope_check
         CHECK (visibility_scope IN ('project', 'session')),
     CONSTRAINT document_folder_uploads_session_visibility_check
@@ -1489,7 +1348,10 @@ CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
             AND excluded_count >= 0
             AND excluded_bytes >= 0
             AND excluded_directory_count >= 0
-        )
+        ),
+    CONSTRAINT document_folder_uploads_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS document_folder_uploads_project_idx
@@ -1501,6 +1363,9 @@ ON public.document_folder_uploads(
     visibility_scope,
     session_id
 );
+
+ALTER TABLE public.document_folder_uploads
+    ALTER COLUMN indexed_at DROP NOT NULL;
 
 -- A durable identity for a synchronizable local workspace.  Folder uploads
 -- remain immutable snapshots; a workspace source will later own repeated
@@ -1536,7 +1401,10 @@ CREATE TABLE IF NOT EXISTS public.document_workspace_sources (
             last_manifest_candidate_count >= 0
             AND last_manifest_included_count >= 0
             AND last_manifest_excluded_count >= 0
-        )
+        ),
+    CONSTRAINT document_workspace_sources_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE
 );
 
 ALTER TABLE public.document_workspace_sources
@@ -1587,7 +1455,8 @@ ON public.document_workspace_sources(project_id)
 WHERE ownership_mode = 'managed_project_workspace';
 
 CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
-    project_id TEXT PRIMARY KEY,
+    project_id TEXT PRIMARY KEY REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
     settings JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1596,7 +1465,8 @@ CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
 -- Project-owned source documents and their derived retrieval chunks.
 CREATE TABLE IF NOT EXISTS public.project_documents (
     document_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
     session_id TEXT,
     visibility_scope TEXT NOT NULL,
     folder_root_id UUID REFERENCES public.document_folder_uploads(folder_root_id)
@@ -1609,10 +1479,7 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     extension TEXT NOT NULL DEFAULT '',
     size_bytes BIGINT NOT NULL,
     content_hash TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'uploaded',
-    replaces_document_id UUID REFERENCES public.project_documents(document_id)
-        ON DELETE SET NULL,
-    version_number INTEGER NOT NULL DEFAULT 1 CHECK (version_number >= 1),
+    status TEXT NOT NULL DEFAULT 'queued',
     deleted_at TIMESTAMPTZ,
     indexed_at TIMESTAMPTZ,
     error_message TEXT,
@@ -1623,7 +1490,7 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     CONSTRAINT project_documents_session_visibility_check
         CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
     CONSTRAINT project_documents_status_check
-        CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed', 'deleted')),
+        CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted')),
     CONSTRAINT project_documents_source_kind_check
         CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace')),
     CONSTRAINT project_documents_folder_source_check
@@ -1662,12 +1529,6 @@ ALTER TABLE public.project_documents
     ADD COLUMN IF NOT EXISTS source_id UUID
         REFERENCES public.document_workspace_sources(source_id) ON DELETE CASCADE;
 ALTER TABLE public.project_documents
-    ADD COLUMN IF NOT EXISTS replaces_document_id UUID
-        REFERENCES public.project_documents(document_id) ON DELETE SET NULL;
-ALTER TABLE public.project_documents
-    ADD COLUMN IF NOT EXISTS version_number INTEGER NOT NULL DEFAULT 1
-        CHECK (version_number >= 1);
-ALTER TABLE public.project_documents
     ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_status_check;
@@ -1676,8 +1537,19 @@ ALTER TABLE public.project_documents
 ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_folder_source_check;
 ALTER TABLE public.project_documents
+    ALTER COLUMN status SET DEFAULT 'queued';
+UPDATE public.project_documents
+SET status = 'queued'
+WHERE status = 'uploaded';
+DROP INDEX IF EXISTS project_documents_one_replacement_per_version_idx;
+DROP INDEX IF EXISTS project_documents_replacement_candidates_idx;
+ALTER TABLE public.project_documents
+    DROP COLUMN IF EXISTS replaces_document_id;
+ALTER TABLE public.project_documents
+    DROP COLUMN IF EXISTS version_number;
+ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_status_check
-    CHECK (status IN ('uploaded', 'queued', 'indexing', 'indexed', 'failed', 'deleted'));
+    CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted'));
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_source_kind_check
     CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace'));
@@ -1728,16 +1600,6 @@ ON public.project_documents(folder_root_id, relative_path);
 
 CREATE INDEX IF NOT EXISTS project_documents_source_idx
 ON public.project_documents(source_id, relative_path);
-
-CREATE INDEX IF NOT EXISTS project_documents_replacement_candidates_idx
-ON public.project_documents(project_id, visibility_scope, session_id, relative_path)
-WHERE status = 'deleted';
-
--- A document version has at most one direct successor.  Later uploads replace
--- that successor after it is deleted, creating a linear provenance chain.
-CREATE UNIQUE INDEX IF NOT EXISTS project_documents_one_replacement_per_version_idx
-ON public.project_documents(replaces_document_id)
-WHERE replaces_document_id IS NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS project_documents_workspace_path_unique
 ON public.project_documents(source_id, relative_path)
@@ -1951,6 +1813,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
     message_id BIGINT NOT NULL,
     source_kind TEXT NOT NULL,
     document_id UUID,
+    source_project_id TEXT,
     canonical_url TEXT,
     source_message_id BIGINT,
     content_hash TEXT NOT NULL,
@@ -1970,10 +1833,6 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
     CONSTRAINT message_source_refs_source_message_scope_fk
         FOREIGN KEY (source_message_id, project_id, session_id)
         REFERENCES public.messages(message_id, project_id, session_id)
-        ON DELETE CASCADE,
-    CONSTRAINT message_source_refs_document_project_fk
-        FOREIGN KEY (document_id, project_id)
-        REFERENCES public.project_documents(document_id, project_id)
         ON DELETE CASCADE,
     CONSTRAINT message_source_refs_kind_check
         CHECK (source_kind IN (
@@ -1997,11 +1856,19 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
         CHECK (content_hash ~ '^[0-9a-f]{64}$'),
     CONSTRAINT message_source_refs_excerpt_check
         CHECK (length(btrim(excerpt)) > 0),
+    CONSTRAINT message_source_refs_source_project_shape_check
+        CHECK (
+            (source_kind IN ('pdf_document', 'text_document')
+                AND source_project_id IS NOT NULL)
+            OR (source_kind NOT IN ('pdf_document', 'text_document')
+                AND source_project_id IS NULL)
+        ),
     CONSTRAINT message_source_refs_source_shape_check
         CHECK (
             (
                 source_kind = 'pdf_document'
                 AND document_id IS NOT NULL
+                AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
                 AND tool_call_id IS NOT NULL
@@ -2014,6 +1881,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             OR (
                 source_kind = 'text_document'
                 AND document_id IS NOT NULL
+                AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
                 AND tool_call_id IS NOT NULL
@@ -2046,6 +1914,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             OR (
                 source_kind = 'user_pasted_text'
                 AND document_id IS NULL
+                AND source_project_id IS NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NOT NULL
                 AND tool_call_id IS NULL
@@ -2059,6 +1928,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             OR (
                 source_kind IN ('web_search_result', 'news_search_result')
                 AND document_id IS NULL
+                AND source_project_id IS NULL
                 AND source_message_id IS NULL
                 AND canonical_url ~ '^https?://[^[:space:]#]+$'
                 AND tool_call_id IS NOT NULL
@@ -2076,6 +1946,40 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             )
         )
 );
+
+-- Existing unreleased databases may still scope document references to the
+-- answer project. Retain their history while moving document identity to the
+-- actual source project. Source identity is validated when written, but cannot
+-- retain an FK: deleting a source project must not delete another project's
+-- historical answer provenance.
+ALTER TABLE public.message_source_refs
+ADD COLUMN IF NOT EXISTS source_project_id TEXT;
+
+UPDATE public.message_source_refs
+SET source_project_id = project_id
+WHERE document_id IS NOT NULL
+  AND source_project_id IS NULL;
+
+DO $$
+BEGIN
+    ALTER TABLE public.message_source_refs
+    DROP CONSTRAINT IF EXISTS message_source_refs_document_project_fk;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'message_source_refs_source_project_shape_check'
+          AND conrelid = 'public.message_source_refs'::regclass
+    ) THEN
+        ALTER TABLE public.message_source_refs
+        ADD CONSTRAINT message_source_refs_source_project_shape_check
+        CHECK (
+            (source_kind IN ('pdf_document', 'text_document')
+                AND source_project_id IS NOT NULL)
+            OR (source_kind NOT IN ('pdf_document', 'text_document')
+                AND source_project_id IS NULL)
+        );
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS message_source_refs_message_scope_idx
 ON public.message_source_refs(message_id, project_id, session_id);
@@ -2223,6 +2127,76 @@ CREATE TRIGGER episode_entities_focus_limit_trigger
 AFTER INSERT OR UPDATE OF episode_id, is_focus_entity
 ON public.episode_entities
 FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();
+
+-- Existing unreleased databases may predate the direct project foreign keys
+-- above.  Make project deletion one cascade root rather than a handwritten
+-- list of every descendant table.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'agent_tool_audits_project_fk'
+    ) THEN
+        ALTER TABLE public.agent_tool_audits
+        ADD CONSTRAINT agent_tool_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entity_merge_proposals_project_fk'
+    ) THEN
+        ALTER TABLE public.entity_merge_proposals
+        ADD CONSTRAINT entity_merge_proposals_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entity_merge_audits_project_fk'
+    ) THEN
+        ALTER TABLE public.entity_merge_audits
+        ADD CONSTRAINT entity_merge_audits_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'document_folder_uploads_project_fk'
+    ) THEN
+        ALTER TABLE public.document_folder_uploads
+        ADD CONSTRAINT document_folder_uploads_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'document_workspace_sources_project_fk'
+    ) THEN
+        ALTER TABLE public.document_workspace_sources
+        ADD CONSTRAINT document_workspace_sources_project_fk
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'project_document_scan_settings_project_id_fkey'
+    ) THEN
+        ALTER TABLE public.project_document_scan_settings
+        ADD CONSTRAINT project_document_scan_settings_project_id_fkey
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'project_documents_project_id_fkey'
+    ) THEN
+        ALTER TABLE public.project_documents
+        ADD CONSTRAINT project_documents_project_id_fkey
+        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+        ON DELETE CASCADE;
+    END IF;
+END $$;
 
 -- Preserve the session-owned episode shape while adding the current user-edit
 -- marker to databases created before that field was introduced.

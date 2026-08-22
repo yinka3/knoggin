@@ -76,7 +76,6 @@ def assembler_harness(monkeypatch):
 
     shared_processor = RecordingIngestionPipeline(
         project_id="project-1",
-        redis_client=resources.redis,
         llm=resources.llm_service,
         entities=entities,
         processor=pipeline,
@@ -102,13 +101,19 @@ def assembler_harness(monkeypatch):
         "runtime.session_runtime_factory.IngestionWorker",
         RecordingIngestionWorker,
     )
+    agent_orchestrator = object()
     return SimpleNamespace(
-        assembler=SessionRuntimeFactory("ada", resources),
+        assembler=SessionRuntimeFactory(
+            "ada",
+            resources,
+            agent_orchestrator=agent_orchestrator,
+        ),
         config_manager=config_manager,
         project_state=project_state,
         resources=resources,
         batch_processor=shared_processor,
         get_next_ent_id=get_next_ent_id,
+        agent_orchestrator=agent_orchestrator,
     )
 
 
@@ -134,6 +139,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.model == "model-a"
     assert ctx.agent_id == "agent-1"
     assert ctx.enabled_tools == []
+    assert ctx.agent_orchestrator is harness.agent_orchestrator
 
     assert harness.resources.redis.evals == []
 
@@ -141,7 +147,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     processor = harness.batch_processor
     assert ctx.batch_processor is processor
     assert processor.kwargs["project_id"] == "project-1"
-    assert processor.kwargs["redis_client"] is harness.resources.redis
+    assert "redis_client" not in processor.kwargs
     assert processor.kwargs["llm"] is harness.resources.llm_service
     assert processor.kwargs["entities"] is harness.project_state.entities
     assert processor.kwargs["processor"] is harness.project_state.pipeline
@@ -151,12 +157,11 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     consumer = RecordingIngestionWorker.instances[0]
     assert ctx.consumer is consumer
     assert consumer.kwargs["knowledge_store"] is harness.resources.knowledge_store
-    assert consumer.kwargs["redis"] is harness.resources.redis
+    assert "redis" not in consumer.kwargs
     assert consumer.kwargs["processor"] is processor
     assert consumer.get_session_context == ctx.get_conversation_context
     assert consumer.write_to_graph == ctx._write_to_graph_callback
     assert consumer.kwargs["settings"].batch_size == 8
-    assert consumer.kwargs["settings"].checkpoint_interval == 32
     assert consumer.kwargs["settings"].session_window == 24
 
     assert ctx.document_service is harness.project_state.document_service
@@ -214,6 +219,13 @@ async def test_session_assembler_launch_starts_consumer_only(
     assert harness.project_state.scheduler.running is False
     assert harness.project_state.scheduler.started == 0
     assert ctx.consumer.started == 1
+    assert harness.resources.knowledge_store.reset_claimed_ingestion_calls == [
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+        }
+    ]
 
 
 @pytest.mark.runtime

@@ -40,8 +40,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "get_ingestion_health",
             "description": (
-                "Read bounded ingestion worker, pending-buffer, checkpoint, "
-                "and dead-letter queue health for the current session. This "
+                "Read bounded ingestion worker and canonical queue health for "
+                "the current session. This "
                 "is a read-only diagnostic and does not wake, flush, stop, "
                 "or retry ingestion work."
             ),
@@ -747,26 +747,6 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "request_replanning",
-            "description": (
-                "Escalate back to the Architect for a new strategy. Use this when the current plan has failed or search results are dead-ended."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional explanation of why you are escalating or what failed.",
-                    }
-                },
-                "required": [],
-            },
-            "tags": ["core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "submit_answer",
             "description": "Submit your final synthesized answer to the user. You MUST call this tool when you are finished gathering evidence and are ready to respond.",
             "parameters": {
@@ -1092,7 +1072,6 @@ READ_CAPABILITY = "read"
 REVERSIBLE_WRITE_CAPABILITY = "reversible_write"
 CONFIGURATION_WRITE_CAPABILITY = "configuration_write"
 IDENTITY_WRITE_CAPABILITY = "identity_write"
-DESTRUCTIVE_WRITE_CAPABILITY = "destructive_write"
 
 CAPABILITY_CLASSES = frozenset(
     {
@@ -1100,12 +1079,11 @@ CAPABILITY_CLASSES = frozenset(
         REVERSIBLE_WRITE_CAPABILITY,
         CONFIGURATION_WRITE_CAPABILITY,
         IDENTITY_WRITE_CAPABILITY,
-        DESTRUCTIVE_WRITE_CAPABILITY,
     }
 )
 
-# Missing agent configuration gets useful autonomy without destructive authority.
-# A destructive tool must be explicitly enabled and confirmed at execution time.
+# Missing agent configuration gets useful autonomy for the currently exposed
+# read and reversible write tools.
 SAFE_DEFAULT_CAPABILITIES = frozenset(
     {
         READ_CAPABILITY,
@@ -1254,7 +1232,7 @@ def get_filtered_schemas(
 
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
-        if name in ("request_clarification", "request_replanning", "submit_answer"):
+        if name in ("request_clarification", "submit_answer"):
             filtered.append(schema)
             continue
 

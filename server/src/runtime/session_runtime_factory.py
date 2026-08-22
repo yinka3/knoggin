@@ -23,10 +23,12 @@ class SessionRuntimeFactory:
         resources: RuntimeResources,
         *,
         health_service=None,
+        agent_orchestrator=None,
     ):
         self.user_name = user_name
         self.resources = resources
         self.health_service = health_service
+        self.agent_orchestrator = agent_orchestrator
 
     @property
     def config(self):
@@ -81,6 +83,7 @@ class SessionRuntimeFactory:
             self.user_name,
             self.resources,
             health_service=self.health_service,
+            agent_orchestrator=self.agent_orchestrator,
         )
         ctx.session_id = session_id
         ctx.project_id = project_state.project_id
@@ -132,6 +135,17 @@ class SessionRuntimeFactory:
                 raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
 
         if ctx.consumer:
+            reset_message_ids = await self.resources.knowledge_store.reset_claimed_ingestion(
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                session_id=ctx.session_id,
+            )
+            if reset_message_ids:
+                logger.info(
+                    "Released {} stale ingestion claims for session {}",
+                    len(reset_message_ids),
+                    ctx.session_id,
+                )
             ctx.consumer.start()
 
         logger.info(f"System launched successfully for session {ctx.session_id}")
@@ -149,7 +163,6 @@ class SessionRuntimeFactory:
             user_name=self.user_name,
             session_id=session_id,
             knowledge_store=self.resources.knowledge_store,
-            redis=self.resources.redis,
             processor=processor,
             get_session_context=get_session_context,
             write_to_graph=write_to_graph,

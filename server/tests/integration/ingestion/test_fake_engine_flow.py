@@ -135,7 +135,6 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
         user_name="ada",
         project_manager=project_manager,
     )
-    await resources.redis.rpush(RedisKeys.buffer("ada", session_id), "pending")
     await resources.redis.hset(
         RedisKeys.conversation("ada", session_id),
         "1",
@@ -151,9 +150,6 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
     deleted_project = await project_manager.delete_project(project["id"])
     assert await project_manager.get_session_ids(project["id"]) == []
 
-    assert (
-        await resources.redis.lrange(RedisKeys.buffer("ada", session_id), 0, -1) == []
-    )
     assert (
         await resources.redis.hget(RedisKeys.conversation("ada", session_id), "1")
         is None

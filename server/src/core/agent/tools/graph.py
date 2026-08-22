@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     from core.knowledge.services.embedding_service import EmbeddingService
     from core.knowledge.store import KnowledgeStore
 
+
+DEFAULT_EPISODE_RETRIEVAL_LIMIT = 5
+
+
 class GraphTools:
     # Attributes provided by the composed Tools class
     knowledge_store: KnowledgeStore
@@ -516,7 +520,7 @@ class GraphTools:
         )
 
     def _episode_retrieval_limit(self) -> int:
-        return int(getattr(self, "episode_retrieval_limit", 5))
+        return DEFAULT_EPISODE_RETRIEVAL_LIMIT
 
     @staticmethod
     def _as_message_evidence(source: Dict) -> Dict:

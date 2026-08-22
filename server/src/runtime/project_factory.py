@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from functools import partial
 from typing import Any, Callable
 
@@ -14,13 +13,15 @@ from common.scoping import (
     require_visible_project_ids,
 )
 from core.community.community_job import AACJob
-from core.ingestion.graph_commit import write_batch_callback
-from core.ingestion.jobs.cleaner_job import EntityCleanupJob
 from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.recovery.replay_job import DLQReplayJob
 from core.ingestion.text_processor import TextProcessor
-from core.knowledge.documents import DocumentService
-from core.knowledge.documents.indexing_job import DocumentIndexingRecoveryJob
+from core.knowledge.db.readers.document_reader import DocumentReader
+from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.documents import (
+    DocumentIndexer,
+    DocumentIndexPolicy,
+    DocumentService,
+)
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.jobs.audit_retention_cleanup_job import (
@@ -28,7 +29,9 @@ from core.knowledge.jobs.audit_retention_cleanup_job import (
 )
 from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
 from core.knowledge.jobs.merge_rollback_cleanup_job import MergeCleanupJob
+from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
+from core.project.workspace_service import ProjectWorkspaceService
 from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -89,6 +92,23 @@ class ProjectRuntimeFactory:
         )
         await self._verify_user_entity(entities)
 
+        runtime_config = ConfigManager.get().config
+        retrieval = KnowledgeRetrieval(
+            project_id=project_id,
+            readable_project_ids=readable_project_ids,
+            user_name=self.user_name,
+            entities=entities,
+            embedding_service=self.resources.embedding,
+            knowledge_store=self.resources.knowledge_store,
+            postgres=self.resources.postgres,
+            redis=self.resources.redis,
+            search_config={
+                **runtime_config.developer_settings.search.model_dump(),
+                **runtime_config.search.model_dump(),
+            },
+            active_topics=list(compiled_domain.active_topics),
+        )
+
         pipeline = await asyncio.get_running_loop().run_in_executor(
             self.resources.executor,
             partial(
@@ -105,7 +125,6 @@ class ProjectRuntimeFactory:
         )
         project_processor = IngestionPipeline(
             project_id=project_id,
-            redis_client=self.resources.redis,
             llm=self.resources.llm_service,
             entities=entities,
             processor=pipeline,
@@ -125,16 +144,21 @@ class ProjectRuntimeFactory:
             project_id,
             background_work=self.resources.background_work,
         )
-        document_service = self._create_document_service(project_id)
+        document_service, workspace_service = self._create_document_services(
+            project_id,
+            readable_project_ids=readable_project_ids,
+        )
         runtime = ProjectRuntime(
             project_id=project_id,
             entities=entities,
+            knowledge_retrieval=retrieval,
             pipeline=pipeline,
             scheduler=scheduler,
             user_name=self.user_name,
             readable_project_ids=readable_project_ids,
             domain_config=domain_config,
             document_service=document_service,
+            workspace_service=workspace_service,
             domain_config_store=domain_store,
             batch_processor=project_processor,
             background_work=self.resources.background_work,
@@ -143,6 +167,7 @@ class ProjectRuntimeFactory:
         runtime.episode_job = episode_job
 
         try:
+            await runtime.document_indexer.start()
             self._register_background_jobs(
                 runtime,
                 entities=entities,
@@ -155,26 +180,56 @@ class ProjectRuntimeFactory:
             raise
         return runtime
 
-    def _create_document_service(self, project_id: str) -> DocumentService:
+    def _create_document_services(
+        self,
+        project_id: str,
+        *,
+        readable_project_ids: list[str],
+    ) -> tuple[DocumentService, ProjectWorkspaceService]:
         resource_profile = self.resources.resource_profile
         if resource_profile is None:
             raise RuntimeError("Runtime resource profile is unavailable")
-        return DocumentService(
+        runtime_config = ConfigManager.get().config
+        document_settings = runtime_config.developer_settings.documents
+        reader = DocumentReader(
+            self.resources.postgres,
+            project_id,
+            readable_project_ids=readable_project_ids,
+        )
+        writer = DocumentWriter(self.resources.postgres, project_id)
+        indexer = DocumentIndexer(
+            project_id=project_id,
+            reader=reader,
+            writer=writer,
+            embedding_service=self.resources.embedding,
+            policy=DocumentIndexPolicy.capture(
+                workspace_prepare_concurrency=(
+                    resource_profile.workspace_prepare_concurrency
+                )
+            ),
+            blocking_runner=asyncio.to_thread,
+            background_work=self.resources.background_work,
+        )
+        document_service = DocumentService(
             project_id=project_id,
             postgres_client=self.resources.postgres,
             embedding_service=self.resources.embedding,
             background_work=self.resources.background_work,
-            document_rerank_enabled=os.getenv(
-                "KNOGGIN_DOCUMENT_RERANK_ENABLED", "true"
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"},
-            document_rerank_candidates=int(
-                os.getenv("KNOGGIN_DOCUMENT_RERANK_CANDIDATES", "15")
-            ),
-            workspace_prepare_concurrency=resource_profile.workspace_prepare_concurrency,
+            readable_project_ids=readable_project_ids,
+            reader=reader,
+            writer=writer,
+            indexer=indexer,
+            blocking_runner=asyncio.to_thread,
+            document_rerank_enabled=document_settings.rerank_enabled,
+            document_rerank_candidates=document_settings.rerank_candidates,
         )
+        workspace_service = ProjectWorkspaceService(
+            project_id=project_id,
+            reader=reader,
+            writer=writer,
+            indexer=indexer,
+        )
+        return document_service, workspace_service
 
     async def _verify_user_entity(self, entities: EntityResolver) -> None:
         user_id = await entities.get_id(self.user_name)
@@ -204,22 +259,8 @@ class ProjectRuntimeFactory:
         episode_job: EpisodeJob,
     ) -> None:
         scheduler = runtime.scheduler
-        project_id = runtime.project_id
         jobs = self.dev_settings.jobs
         config_manager = ConfigManager.get()
-
-        async def write_dlq_batch(result):
-            if not result.scope or not result.scope.session_id:
-                return False, "DLQ graph replay missing source session_id"
-            return await write_batch_callback(
-                result,
-                knowledge_store=self.resources.knowledge_store,
-                entities=entities,
-                session_id=result.scope.session_id,
-                project_id=project_id,
-                user_name=self.user_name,
-                redis_client=self.resources.redis,
-            )
 
         def update_entity_resolution(settings):
             entities.update_settings(settings)
@@ -242,46 +283,6 @@ class ProjectRuntimeFactory:
             config_manager.subscribe(
                 episode_job.update_settings,
                 "developer_settings.jobs.episode",
-            )
-        )
-
-        document_index_job = DocumentIndexingRecoveryJob(
-            runtime.document_service,
-            jobs.document_indexing,
-        )
-        scheduler.register(document_index_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                document_index_job.update_settings,
-                "developer_settings.jobs.document_indexing",
-            )
-        )
-
-        dlq_job = DLQReplayJob(
-            entities=entities,
-            processor=processor,
-            write_to_graph=write_dlq_batch,
-            redis_client=self.resources.redis,
-            settings=jobs.dlq,
-        )
-        runtime.dlq_job = dlq_job
-        scheduler.register(dlq_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(dlq_job.update_settings, "developer_settings.jobs.dlq")
-        )
-
-        cleaner_job = EntityCleanupJob(
-            user_name=self.user_name,
-            knowledge_store=self.resources.knowledge_store,
-            entities=entities,
-            redis_client=self.resources.redis,
-            settings=jobs.cleaner,
-        )
-        scheduler.register(cleaner_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                cleaner_job.update_settings,
-                "developer_settings.jobs.cleaner",
             )
         )
 

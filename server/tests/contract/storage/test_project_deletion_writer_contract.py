@@ -7,9 +7,9 @@ from infrastructure.postgres_client import PostgresClient
 
 
 class RecordingCursor:
-    def __init__(self, *, project_exists=True, fail_on_table=None) -> None:
+    def __init__(self, *, project_exists=True, fail_on_operation=None) -> None:
         self.project_exists = project_exists
-        self.fail_on_table = fail_on_table
+        self.fail_on_operation = fail_on_operation
         self.calls = []
         self.rowcount = 0
         self._result = None
@@ -17,11 +17,8 @@ class RecordingCursor:
     async def execute(self, query, params=None) -> None:
         normalized = " ".join(query.split())
         self.calls.append((normalized, params))
-        if (
-            self.fail_on_table
-            and f"DELETE FROM public.{self.fail_on_table}" in normalized
-        ):
-            raise RuntimeError("injected aggregate delete failure")
+        if self.fail_on_operation and self.fail_on_operation in normalized:
+            raise RuntimeError("injected project delete failure")
         if normalized.startswith("SELECT project_id FROM public.projects"):
             self._result = {"project_id": "project-1"} if self.project_exists else None
             self.rowcount = 1 if self.project_exists else 0
@@ -56,21 +53,22 @@ class RecordingClient:
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_project_deletion_removes_all_relational_and_age_state_atomically():
+async def test_project_deletion_uses_one_project_cascade_root_atomically():
     client = RecordingClient()
     writer = ProjectDeletionWriter(client)
 
     deleted = await writer.delete_project(user_name="ada", project_id="project-1")
 
     assert deleted is not None
-    assert set(deleted) == {*writer._PROJECT_TABLES, "projects"}
+    assert set(deleted) == {"entities", "projects"}
     assert client.transaction_exits == ["commit"]
 
     queries = [query for query, _ in client.cursor.calls]
     assert queries[0].startswith("SELECT project_id FROM public.projects")
     assert any("DETACH DELETE n" in query for query in queries)
-    for table in writer._PROJECT_TABLES:
-        assert any(f"DELETE FROM public.{table}" in query for query in queries)
+    assert any("DELETE FROM public.entities" in query for query in queries)
+    assert not any("DELETE FROM public.messages" in query for query in queries)
+    assert not any("DELETE FROM public.project_documents" in query for query in queries)
     assert queries[-1].startswith("DELETE FROM public.projects")
 
 
@@ -88,10 +86,10 @@ async def test_project_deletion_returns_none_without_mutating_missing_project():
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_project_deletion_failure_escapes_atomic_transaction():
-    client = RecordingClient(fail_on_table="episode_entities")
+    client = RecordingClient(fail_on_operation="DELETE FROM public.entities")
     writer = ProjectDeletionWriter(client)
 
-    with pytest.raises(RuntimeError, match="injected aggregate delete failure"):
+    with pytest.raises(RuntimeError, match="injected project delete failure"):
         await writer.delete_project(user_name="ada", project_id="project-1")
 
     assert client.transaction_exits == ["rollback"]
@@ -154,10 +152,6 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
         "SELECT count(*) AS count FROM public.entities WHERE project_id = 'project-1'"
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.project_search_revisions "
-        "WHERE project_id = 'project-1'"
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
         "WHERE project_id = 'project-1'"
     ) == {"count": 0}
@@ -215,36 +209,44 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         )
         await cur.execute(
             """
-            INSERT INTO relationships (
-                relationship_id, user_name, project_id, entity_a_id, entity_b_id,
-                relationship_type, observed_relationship_label, context
-            ) VALUES
-                ('project-1:42:43:related', 'ada', 'project-1', 42, 43, 'related', 'related', 'P1 context'),
-                ('project-2:52:53:related', 'ada', 'project-2', 52, 53, 'related', 'related', 'P2 context')
+        INSERT INTO relationships (
+            relationship_id, user_name, project_id, entity_a_id, entity_b_id,
+            relationship_type
+        ) VALUES
+            ('project-1:42:43:related', 'ada', 'project-1', 42, 43, 'related'),
+            ('project-2:52:53:related', 'ada', 'project-2', 52, 53, 'related')
             """
         )
         await cur.execute(
             """
-            INSERT INTO relationship_evidence_refs (
-                relationship_id, project_id, user_name, session_id, message_id
+            INSERT INTO relationship_observations (
+                relationship_id, project_id, user_name, session_id, message_id,
+                source_entity_id, target_entity_id, observed_relationship_label,
+                observed_at_ms
             ) VALUES
-                ('project-1:42:43:related', 'project-1', 'ada', 'session-1', 101),
-                ('project-2:52:53:related', 'project-2', 'ada', 'session-2', 201)
+                (
+                    'project-1:42:43:related', 'project-1', 'ada', 'session-1',
+                    101, 42, 43, 'related to', 1000
+                ),
+                (
+                    'project-2:52:53:related', 'project-2', 'ada', 'session-2',
+                    201, 52, 53, 'related to', 2000
+                )
             """
         )
         await cur.execute(
             """
             INSERT INTO episodes (
-                episode_id, project_id, session_id, summary, source_message_count,
+                episode_id, project_id, summary, source_message_count,
                 first_message_at, last_message_at, created_at, updated_at
             ) VALUES
                 (
-                    'episode-1', 'project-1', 'session-1', 'Delete project one episode', 1,
+                    'episode-1', 'project-1', 'Delete project one episode', 1,
                     TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00',
                     TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00'
                 ),
                 (
-                    'episode-2', 'project-2', 'session-2', 'Keep project two episode', 1,
+                    'episode-2', 'project-2', 'Keep project two episode', 1,
                     TIMESTAMPTZ '2026-01-02 00:00:01+00', TIMESTAMPTZ '2026-01-02 00:00:01+00',
                     TIMESTAMPTZ '2026-01-02 00:00:01+00', TIMESTAMPTZ '2026-01-02 00:00:01+00'
                 )
@@ -331,19 +333,19 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             """
             INSERT INTO message_source_refs (
                 source_ref_id, project_id, session_id, message_id, source_kind,
-                document_id, content_hash, locator, excerpt, metadata, encounter_kind,
+                document_id, source_project_id, content_hash, locator, excerpt, metadata, encounter_kind,
                 agent_run_id, tool_call_id, result_position, idempotency_key
             ) VALUES
                 (
                     'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'project-1', 'session-1', 101,
-                    'text_document', '77777777-7777-4777-8777-777777777777', repeat('1', 64),
+                    'text_document', '77777777-7777-4777-8777-777777777777', 'project-1', repeat('1', 64),
                     '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
                     'delete', '{"document_name":"delete.md"}'::jsonb, 'document_search',
                     'run-delete', 'tool-delete', 0, 'source-delete'
                 ),
                 (
                     'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'project-2', 'session-2', 201,
-                    'text_document', '88888888-8888-4888-8888-888888888888', repeat('2', 64),
+                    'text_document', '88888888-8888-4888-8888-888888888888', 'project-2', repeat('2', 64),
                     '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
                     'keep', '{"document_name":"keep.md"}'::jsonb, 'document_search',
                     'run-keep', 'tool-keep', 0, 'source-keep'
@@ -371,7 +373,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-1'",
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-1'",
-        "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-1'",
+        "relationship_observations": "SELECT count(*) AS count FROM relationship_observations WHERE project_id = 'project-1'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-1'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-1'",
         "chunks": (
@@ -389,10 +391,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "JOIN entities e ON e.entity_id = a.entity_id "
             "WHERE e.project_id = 'project-1'"
         ),
-        "project_search_revisions": (
-            "SELECT count(*) AS count FROM project_search_revisions "
-            "WHERE project_id = 'project-1'"
-        ),
     }
     for query in project_one_queries.values():
         assert await real_postgres_client.fetch_one(query) == {"count": 0}
@@ -407,7 +405,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-2'",
         "entities": "SELECT count(*) AS count FROM entities WHERE project_id = 'project-2'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-2'",
-        "relationship_evidence": "SELECT count(*) AS count FROM relationship_evidence_refs WHERE project_id = 'project-2'",
+        "relationship_observations": "SELECT count(*) AS count FROM relationship_observations WHERE project_id = 'project-2'",
         "source_refs": "SELECT count(*) AS count FROM message_source_refs WHERE project_id = 'project-2'",
         "documents": "SELECT count(*) AS count FROM project_documents WHERE project_id = 'project-2'",
         "chunks": (
@@ -424,10 +422,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "SELECT count(*) AS count FROM entity_aliases a "
             "JOIN entities e ON e.entity_id = a.entity_id "
             "WHERE e.project_id = 'project-2'"
-        ),
-        "project_search_revisions": (
-            "SELECT count(*) AS count FROM project_search_revisions "
-            "WHERE project_id = 'project-2'"
         ),
     }
     for name, query in project_two_queries.items():

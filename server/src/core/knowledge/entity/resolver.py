@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
 from cachetools import LRUCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
+from wordfreq import word_frequency
 
+from common.schema.ingestion.contracts import EntityWrite, ValidationIssue
 from common.schema.settings import EntityResolutionSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.core_utils import is_substring_match
 from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
+from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.embedding import (
     build_entity_embedding_text,
 )
@@ -137,6 +141,462 @@ class EntityResolver:
             f"non-sub={self.fuzzy_non_substring_threshold}, "
             f"freq={self.generic_token_freq}"
         )
+
+    def mention_dedupe_key(
+        self,
+        name: str,
+        mention_type: str,
+        topic: str,
+        policy: IngestionPolicy,
+    ) -> Tuple[str, str, str]:
+        """Return the policy-aware identity of a mention decision."""
+
+        normalized_topic = policy.domain.normalize_topic(topic)
+        canonical_type = policy.domain.canonical_entity_type(mention_type) or (
+            policy.domain.resolve_entity_type(mention_type)
+        )
+        return (
+            name.strip().casefold(),
+            (canonical_type or mention_type or "").strip().casefold(),
+            (normalized_topic or "").casefold(),
+        )
+
+    async def candidate_entries_for_mentions(
+        self,
+        mentions: List[Tuple[int, str, str, str]],
+        *,
+        policy: IngestionPolicy,
+        parent_work_record=None,
+    ) -> List[Optional[Tuple[str, Any]]]:
+        """Build reusable candidate searches under one batch policy snapshot."""
+
+        unique_names = list({name for _, name, _, _ in mentions if name})
+        embedding_map = {}
+        if unique_names:
+            if getattr(
+                self.embedding_service,
+                "supports_model_work_records",
+                False,
+            ):
+                embeddings = await self.embedding_service.encode(
+                    unique_names,
+                    parent_work_record=parent_work_record,
+                )
+            else:
+                embeddings = await self.embedding_service.encode(unique_names)
+            embedding_map = dict(zip(unique_names, embeddings))
+
+        entries: List[Optional[Tuple[str, object]]] = []
+        seen_by_dedupe_key: Dict[Tuple[str, str, str], Tuple[str, object]] = {}
+        for _, name, mention_type, topic in mentions:
+            if not name:
+                entries.append(None)
+                continue
+            dedupe_key = self.mention_dedupe_key(name, mention_type, topic, policy)
+            if dedupe_key not in seen_by_dedupe_key:
+                candidates = await self.get_candidate_ids(
+                    name,
+                    precomputed_embedding=embedding_map.get(name),
+                    candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
+                    candidate_vector_threshold=policy.candidate_vector_threshold,
+                )
+                seen_by_dedupe_key[dedupe_key] = (
+                    ("candidates", candidates) if candidates else ("new", None)
+                )
+            entries.append(seen_by_dedupe_key[dedupe_key])
+        return entries
+
+    async def resolve_mentions(
+        self,
+        mentions: List[Tuple[int, str, str, str]],
+        *,
+        messages: Iterable[Any],
+        policy: IngestionPolicy,
+        parent_work_record=None,
+        allocate_entity_id,
+        issues: Optional[List[ValidationIssue]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve mentions and prepare the durable entity changes for a batch.
+
+        The resolver owns the identity decision: candidate acceptance, in-batch
+        deduplication, alias staging, and pending entity allocation.  The caller
+        only applies the returned aggregate state after this decision completes.
+        """
+
+        async with self.resolution_lock:
+            msg_text_map = {
+                message["id"]: message["message"] for message in messages
+            }
+            entity_ids: List[int] = []
+            new_ids: set[int] = set()
+            alias_ids: set[int] = set()
+            entity_msg_map: Dict[int, List[int]] = {}
+            created_in_batch: Dict[Tuple[str, str, str], int] = {}
+            alias_updates: Dict[int, List[str]] = {}
+            pending_entity_writes: Dict[int, EntityWrite] = {}
+
+            mention_candidates = await self.candidate_entries_for_mentions(
+                mentions,
+                policy=policy,
+                parent_work_record=parent_work_record,
+            )
+
+            for index, (msg_id, name, mention_type, topic) in enumerate(mentions):
+                if not name:
+                    continue
+
+                entry = mention_candidates[index]
+                if entry is None:
+                    continue
+
+                dedupe_key = self.mention_dedupe_key(
+                    name, mention_type, topic, policy
+                )
+                entity_id = None
+
+                if entry[0] == "candidates":
+                    message_text = msg_text_map.get(msg_id, "")
+                    for candidate in entry[1]:
+                        candidate_id = candidate.entity_id
+                        profile = await self.get_profile(candidate_id)
+                        compatibility = (
+                            self.schema_compatibility(
+                                mention_type,
+                                topic,
+                                profile,
+                                policy,
+                            )
+                            if profile
+                            else "missing_profile"
+                        )
+                        if (
+                            candidate.score < policy.resolution_threshold
+                            or profile is None
+                            or not self.is_profile_visible(profile)
+                        ):
+                            continue
+
+                        if self.should_accept_candidate(
+                            name,
+                            mention_type,
+                            topic,
+                            message_text,
+                            profile,
+                            candidate_id,
+                            policy=policy,
+                            compatibility=compatibility,
+                            candidate=candidate,
+                        ):
+                            entity_id = candidate_id
+                            existing_id, aliases_added, new_aliases = (
+                                self.validate_existing(
+                                    profile.canonical_name,
+                                    [name.strip()],
+                                )
+                            )
+                            if existing_id and aliases_added:
+                                alias_ids.add(existing_id)
+                                alias_updates.setdefault(existing_id, []).extend(
+                                    new_aliases
+                                )
+                            break
+
+                if entity_id is None:
+                    if dedupe_key in created_in_batch:
+                        entity_id = created_in_batch[dedupe_key]
+                    else:
+                        try:
+                            entity_id = await allocate_entity_id()
+                            pending_entity_writes[
+                                entity_id
+                            ] = await self.prepare_pending_entity(
+                                entity_id,
+                                name.strip(),
+                                [name.strip()],
+                                mention_type,
+                                topic,
+                            )
+                            new_ids.add(entity_id)
+                            created_in_batch[dedupe_key] = entity_id
+                        except Exception as exc:
+                            if issues is not None:
+                                issues.append(
+                                    ValidationIssue(
+                                        stage="resolution",
+                                        code="entity_registration_failed",
+                                        message=(
+                                            f"Failed to register entity '{name}': "
+                                            f"{exc}"
+                                        ),
+                                        severity="error",
+                                        item_ref=name,
+                                        metadata={
+                                            "msg_id": msg_id,
+                                            "type": mention_type,
+                                            "topic": topic,
+                                        },
+                                    )
+                                )
+                            entity_id = None
+
+                if entity_id is not None:
+                    if entity_id not in entity_msg_map:
+                        entity_msg_map[entity_id] = []
+                        entity_ids.append(entity_id)
+                    entity_msg_map[entity_id].append(msg_id)
+
+            return {
+                "entity_ids": entity_ids,
+                "new_entity_ids": new_ids,
+                "alias_updated_ids": alias_ids,
+                "entity_message_map": entity_msg_map,
+                "alias_updates": alias_updates,
+                "pending_entity_writes": pending_entity_writes,
+            }
+
+    def is_profile_visible(self, profile: EntityProfile) -> bool:
+        return profile.project_id in set(self.readable_project_ids)
+
+    def should_accept_candidate(
+        self,
+        name: str,
+        mention_type: str,
+        mention_topic: str,
+        message_text: str,
+        profile: EntityProfile,
+        candidate_id: int,
+        *,
+        policy: IngestionPolicy,
+        compatibility: Optional[str] = None,
+        candidate: EntityCandidate | None = None,
+    ) -> bool:
+        """Apply all conservative reuse policy for one existing entity candidate."""
+
+        compatibility = compatibility or self.schema_compatibility(
+            mention_type, mention_topic, profile, policy
+        )
+        if compatibility == "incompatible" or (
+            candidate is not None and "ambiguous_alias" in candidate.signals
+        ):
+            return False
+
+        evidence = self._name_evidence_level(
+            name,
+            mention_type,
+            message_text,
+            profile,
+            candidate_id,
+            policy=policy,
+            compatibility=compatibility,
+            candidate=candidate,
+        )
+        if evidence == "strong":
+            return True
+        if evidence == "medium":
+            return self._has_positive_entity_context(
+                name, mention_type, message_text, profile, compatibility, policy
+            )
+        return compatibility == "compatible" and self._has_contextual_support(
+            name, message_text, profile, compatibility, candidate_id, policy
+        )
+
+    def schema_compatibility(
+        self,
+        mention_type: str,
+        mention_topic: str,
+        profile: EntityProfile,
+        policy: IngestionPolicy,
+    ) -> str:
+        mention_type_lower = (
+            (
+                policy.domain.canonical_entity_type(mention_type)
+                or policy.domain.resolve_entity_type(mention_type)
+                or mention_type
+            )
+            .strip()
+            .lower()
+        )
+        profile_type_lower = (
+            (
+                policy.domain.canonical_entity_type(profile.entity_type or "")
+                or policy.domain.resolve_entity_type(profile.entity_type or "")
+                or profile.entity_type
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        if mention_type_lower and mention_type_lower == profile_type_lower:
+            return "compatible"
+
+        mention_topic_normalized = self._normalize_resolution_topic(
+            mention_topic, policy
+        )
+        profile_topic_normalized = self._normalize_resolution_topic(
+            profile.topic or "", policy
+        )
+        if (
+            mention_topic_normalized
+            and profile_topic_normalized
+            and mention_topic_normalized == profile_topic_normalized
+            and mention_topic_normalized.casefold() != "general"
+        ):
+            return "compatible"
+
+        mention_label_topics = self._label_topics(mention_type_lower, policy)
+        profile_label_topics = self._label_topics(profile_type_lower, policy)
+        if mention_label_topics and profile_label_topics:
+            return (
+                "compatible"
+                if mention_label_topics & profile_label_topics
+                else "incompatible"
+            )
+        return "neutral"
+
+    def _name_evidence_level(
+        self,
+        name: str,
+        mention_type: str,
+        message_text: str,
+        profile: EntityProfile,
+        candidate_id: int,
+        *,
+        policy: IngestionPolicy,
+        compatibility: str,
+        candidate: EntityCandidate | None,
+    ) -> str:
+        mention = name.strip().casefold()
+        if not mention:
+            return "none"
+        if candidate is not None and "ambiguous_alias" in candidate.signals:
+            return "weak"
+        owners = self.get_entity_ids_for_name(mention)
+        if owners and candidate_id not in owners:
+            return "none"
+        if len(owners) > 1:
+            return "weak"
+
+        aliases = {
+            alias.strip().casefold()
+            for alias in self.get_mentions_for_id(candidate_id)
+            if alias and alias.strip()
+        }
+        exact_name = mention == (profile.canonical_name or "").strip().casefold() or (
+            mention in aliases
+        )
+        if self._is_acronym_alias(name, profile.canonical_name or "", list(aliases)):
+            return "strong"
+        if not exact_name:
+            return "weak" if candidate is not None else "none"
+        if self._is_common_word_mention(
+            name, policy
+        ) and not self._has_positive_entity_context(
+            name, mention_type, message_text, profile, compatibility, policy
+        ):
+            return "weak"
+        if (
+            candidate is not None
+            and len(candidate.signals & {"exact", "fuzzy", "vector"}) > 1
+        ):
+            return "strong"
+        if len(self._word_tokens(name)) > 1:
+            return "strong"
+        return "medium" if compatibility == "compatible" else "weak"
+
+    def _label_topics(self, label: str, policy: IngestionPolicy) -> set[str]:
+        entity_type = policy.domain.canonical_entity_type(label) or (
+            policy.domain.resolve_entity_type(label)
+        )
+        topic = policy.domain.topic_for_entity_type(entity_type)
+        return {topic} if topic is not None else set()
+
+    @staticmethod
+    def _normalize_resolution_topic(
+        topic: str, policy: IngestionPolicy
+    ) -> Optional[str]:
+        return policy.domain.normalize_topic(topic.strip()) if topic else None
+
+    def _has_positive_entity_context(
+        self,
+        name: str,
+        mention_type: str,
+        message_text: str,
+        profile: EntityProfile,
+        compatibility: str,
+        policy: IngestionPolicy,
+    ) -> bool:
+        if compatibility != "compatible":
+            return False
+        mention_type_lower = (mention_type or "").strip().casefold()
+        profile_type_lower = (profile.entity_type or "").strip().casefold()
+        type_matches = bool(
+            mention_type_lower and mention_type_lower == profile_type_lower
+        )
+        label_topic_overlap = bool(
+            self._label_topics(mention_type_lower, policy)
+            & self._label_topics(profile_type_lower, policy)
+        )
+        return (type_matches or label_topic_overlap) and self._has_rich_context(
+            name, message_text, policy
+        )
+
+    def _has_contextual_support(
+        self,
+        name: str,
+        message_text: str,
+        profile: EntityProfile,
+        compatibility: str,
+        candidate_id: int,
+        policy: IngestionPolicy,
+    ) -> bool:
+        if self._is_acronym_alias(
+            name, profile.canonical_name or "", self.get_mentions_for_id(candidate_id)
+        ):
+            return True
+        return compatibility == "compatible" and self._has_rich_context(
+            name, message_text, policy
+        )
+
+    def _has_rich_context(
+        self, name: str, message_text: str, policy: IngestionPolicy
+    ) -> bool:
+        name_tokens = set(self._word_tokens(name))
+        context_tokens = [
+            token
+            for token in self._word_tokens(message_text)
+            if token not in name_tokens
+        ]
+        content_tokens = [
+            token
+            for token in context_tokens
+            if token not in policy.sparse_context_verbs and len(token) > 2
+        ]
+        return len(content_tokens) >= 3
+
+    def _is_common_word_mention(self, name: str, policy: IngestionPolicy) -> bool:
+        tokens = self._word_tokens(name)
+        return (
+            len(tokens) == 1
+            and len(tokens[0]) > 2
+            and word_frequency(tokens[0], "en")
+            >= policy.common_word_frequency_threshold
+        )
+
+    @staticmethod
+    def _word_tokens(text: str) -> List[str]:
+        return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+    def _is_acronym_alias(
+        self, name: str, canonical_name: str, aliases: List[str]
+    ) -> bool:
+        mention = name.strip().lower()
+        if not mention or len(mention) < 2 or not mention.isalnum():
+            return False
+        for known_name in [canonical_name, *aliases]:
+            initials = "".join(token[0] for token in self._word_tokens(known_name))
+            if initials and mention == initials:
+                return True
+        return False
 
     def _populate_cache(self, entity: dict) -> EntityProfile:
         """Hydrate internal indexes from a KnowledgeStore entity record."""
@@ -470,6 +930,62 @@ class EntityResolver:
                 self._bump_alias_version()
 
         return embedding
+
+    async def prepare_pending_entity(
+        self,
+        entity_id: int,
+        canonical_name: str,
+        aliases: List[str],
+        entity_type: str,
+        topic: str,
+    ) -> EntityWrite:
+        """Build a new entity write without exposing it through shared indexes."""
+
+        embedding = await self.embedding_service.encode_single(
+            build_entity_embedding_text(canonical_name, entity_type)
+        )
+        return EntityWrite(
+            entity_id=entity_id,
+            is_new=True,
+            canonical_name=canonical_name,
+            entity_type=entity_type,
+            topic=topic,
+            embedding=tuple(embedding) if embedding is not None else None,
+            aliases=tuple(alias for alias in aliases if alias and alias.strip()),
+        )
+
+    def apply_committed_entity_writes(
+        self, entity_writes: List[EntityWrite] | tuple[EntityWrite, ...]
+    ) -> None:
+        """Expose newly durable entity rows to the local resolver cache.
+
+        Callers must invoke this only after the encompassing database transaction
+        succeeds. Pending entities deliberately remain invisible to other batches.
+        """
+
+        with self._lock:
+            aliases_changed = False
+            for write in entity_writes:
+                if not write.is_new:
+                    continue
+                profile = EntityProfile.registered(
+                    canonical_name=write.canonical_name,
+                    entity_type=write.entity_type,
+                    topic=write.topic,
+                    project_id=self.project_id,
+                    embedding=list(write.embedding) if write.embedding else None,
+                )
+                aliases_changed = (
+                    self._index.register(
+                        write.entity_id,
+                        profile,
+                        write.canonical_name,
+                        list(write.aliases),
+                    )
+                    or aliases_changed
+                )
+            if aliases_changed:
+                self._bump_alias_version()
 
     async def compute_embedding(
         self,

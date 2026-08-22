@@ -31,6 +31,7 @@ def compiled_domain():
 
 def unknown_row():
     return {
+        "observation_id": 1,
         "relationship_id": "demo:10:20:deploys to",
         "project_id": "demo",
         "entity_a_id": 10,
@@ -39,6 +40,7 @@ def unknown_row():
         "canonical_relationship_type": None,
         "observed_relationship_label": "deploys to",
         "domain_status": "unrecognized",
+        "domain_version": 0,
         "symmetric": False,
         "source_type": "Project",
         "target_type": "Technology",
@@ -65,7 +67,21 @@ async def test_writer_compare_and_updates_relationship_dependents_transactionall
     executed = [call[1] for call in client.calls if call[0] == "execute"]
     assert "FOR UPDATE" in executed[0]
     assert "INSERT INTO public.relationships" in executed[1]
-    assert "relationship_evidence_refs" in executed[2]
-    assert "relationship_observations" in executed[3]
-    assert "episode_relationships" in executed[4]
+    assert "relationship_observations" in executed[2]
+    assert "domain_version" in executed[2]
+    assert '"symmetric"' in executed[2]
+    assert "episode_relationships" in executed[3]
     assert "DELETE FROM public.relationships" in executed[-1]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_writer_preserves_invalid_observation_cursor_error():
+    writer = RelationshipReclassificationWriter(RecordingPostgresClient())
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        await writer.fetch_observations(
+            user_name="ada",
+            project_id="demo",
+            after_observation_id=-1,
+        )

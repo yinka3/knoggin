@@ -28,11 +28,13 @@ class SessionManager:
         resources: Any,
         user_name: str,
         project_manager: ProjectManager,
+        agent_orchestrator: Any | None = None,
     ):
         self.resources = resources
         self.user_name = user_name
         self._active_sessions: Dict[str, SessionRuntime] = {}
         self._health_service: Any | None = None
+        self._agent_orchestrator = agent_orchestrator
         self.project_manager = project_manager
         self.pg = resources.postgres
         self._session_deletion_writer = SessionDeletionWriter(self.pg)
@@ -47,6 +49,12 @@ class SessionManager:
         if self._health_service is not None:
             raise RuntimeError("SessionManager health service is already attached")
         self._health_service = health_service
+
+    def attach_agent_orchestrator(self, agent_orchestrator: Any) -> None:
+        """Attach the application-owned agent service before sessions are exposed."""
+        if self._agent_orchestrator is not None:
+            raise RuntimeError("SessionManager agent orchestrator is already attached")
+        self._agent_orchestrator = agent_orchestrator
 
     def get_runtime_session(self, session_id: str) -> SessionRuntime | None:
         """Return one active session for read-only runtime inspection."""
@@ -91,6 +99,7 @@ class SessionManager:
             self.user_name,
             self.resources,
             health_service=self._health_service,
+            agent_orchestrator=self._agent_orchestrator,
         )
 
     async def _hard_delete_failed_session(self, session_id: str) -> None:

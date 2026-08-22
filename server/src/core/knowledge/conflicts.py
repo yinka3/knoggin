@@ -56,36 +56,22 @@ class ConflictWriteResult:
 
 
 @dataclass(frozen=True, slots=True)
-class ConflictDiscoveryLease:
+class ConflictDiscoveryCursor:
+    """The one durable progress marker for a project's evidence review."""
+
     user_name: str
     project_id: str
-    cursor_observed_at_ms: int
-    cursor_observation_id: int
-    lease_token: str
-    continuation: "ConflictDiscoveryContinuation | None" = None
-
-
-@dataclass(frozen=True, slots=True)
-class ConflictDiscoveryContinuation:
-    """Durable progress through an oversized one-hop evidence neighborhood."""
-
-    seed_observation_id: int
-    source_entity_id: int
-    target_entity_id: int
-    after_observation_id: int = 0
-    overlap_observation_ids: tuple[int, ...] = ()
+    last_reviewed_observation_id: int
 
 
 @dataclass(frozen=True, slots=True)
 class ConflictDiscoveryPackage:
-    lease: ConflictDiscoveryLease
+    cursor: ConflictDiscoveryCursor
     observations: tuple[dict[str, Any], ...]
-    next_observed_at_ms: int
     next_observation_id: int
     prompt: str
     estimated_tokens: int
     compacted: bool = False
-    continuation: ConflictDiscoveryContinuation | None = None
 
 
 class LLMConflictCandidate(BaseModel):

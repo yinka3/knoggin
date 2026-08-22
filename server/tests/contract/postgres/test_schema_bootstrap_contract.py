@@ -20,6 +20,11 @@ SCHEMA_SQL = (
 ).read_text(encoding="utf-8")
 
 
+def test_schema_drops_obsolete_ingestion_tables():
+    assert "DROP TABLE IF EXISTS public.ingestion_candidate_suggestions;" in SCHEMA_SQL
+    assert "DROP TABLE IF EXISTS public.parked_dlq_items;" in SCHEMA_SQL
+
+
 def _conninfo_for_database(database: str) -> str:
     params = conninfo_to_dict(DB_URL)
     params["dbname"] = database
@@ -72,6 +77,18 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
             "SELECT 1 AS present FROM information_schema.tables "
             "WHERE table_schema = 'public' AND table_name = 'messages'"
         ) == {"present": 1}
+        assert await client.fetch_one(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'messages' "
+            "AND column_name = 'session_id'"
+        ) == {"is_nullable": "NO"}
+        assert await client.fetch_one(
+            "SELECT 1 AS present FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'agent_tool_audits' "
+            "AND column_name = 'confirmation_state'"
+        ) is None
         assert await client.fetch_one(
             "SELECT 1 AS present FROM ag_catalog.ag_graph WHERE name = 'knoggin_graph'"
         ) == {"present": 1}

@@ -1003,6 +1003,7 @@ class DocumentWriter:
                 FROM public.project_documents
                 WHERE project_id = %s
                   AND document_id = ANY(%s)
+                  AND status = 'indexing'
                 FOR UPDATE
                 """,
                 (self._project_id, document_ids),
@@ -1089,53 +1090,12 @@ class DocumentWriter:
         content_hash: str,
         content: bytes,
         created_at: str,
-        replaces_document_id: Optional[str] = None,
     ) -> None:
         """
         Insert one manual-upload document row and its raw bytes in a single
         transaction.
         """
         async with self._client.transaction() as cur:
-            version_number = 1
-            if replaces_document_id is not None:
-                await cur.execute(
-                    """
-                    SELECT document_id, version_number
-                    FROM public.project_documents
-                    WHERE document_id = %s
-                      AND project_id = %s
-                      AND status = 'deleted'
-                      AND visibility_scope = %s
-                      AND (visibility_scope = 'project' OR session_id = %s)
-                    FOR UPDATE
-                    """,
-                    (
-                        replaces_document_id,
-                        self._project_id,
-                        visibility_scope,
-                        session_id,
-                    ),
-                )
-                replaced = await cur.fetchone()
-                if replaced is None:
-                    raise ValueError(
-                        "replacement document must be a visible deleted document"
-                    )
-                await cur.execute(
-                    """
-                    SELECT document_id
-                    FROM public.project_documents
-                    WHERE replaces_document_id = %s
-                    LIMIT 1
-                    """,
-                    (replaces_document_id,),
-                )
-                if await cur.fetchone() is not None:
-                    raise ValueError(
-                        "replacement document already has a replacement; "
-                        "choose its latest deleted version instead"
-                    )
-                version_number = int(replaced["version_number"]) + 1
             await cur.execute(
                 """
                 INSERT INTO public.project_documents (
@@ -1151,14 +1111,12 @@ class DocumentWriter:
                     size_bytes,
                     content_hash,
                     status,
-                    replaces_document_id,
-                    version_number,
                     created_at,
                     updated_at
                 )
                 VALUES (
                     %s, %s, %s, %s, NULL, 'manual_upload',
-                    %s, %s, %s, %s, %s, 'uploaded', %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, 'queued', %s, %s
                 )
                 """,
                 (
@@ -1171,8 +1129,6 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
-                    replaces_document_id,
-                    version_number,
                     created_at,
                     created_at,
                 ),
@@ -1197,6 +1153,8 @@ class DocumentWriter:
                 """
             UPDATE public.project_documents
             SET status = 'deleted',
+                source_id = NULL,
+                folder_root_id = NULL,
                 deleted_at = COALESCE(deleted_at, now()),
                 indexed_at = NULL,
                 error_message = NULL,
@@ -1228,8 +1186,6 @@ class DocumentWriter:
                 updated_at,
                 indexed_at,
                 error_message,
-                replaces_document_id,
-                version_number,
                 deleted_at
                 """,
                 (document_id, self._project_id, session_id),
@@ -1368,16 +1324,15 @@ class DocumentWriter:
         excluded_reason_counts: Dict,
         scan_settings: Dict,
         documents: List[Dict],
-        indexed_at: str,
+        created_at: str,
     ) -> None:
         """
-        Atomically insert one folder-upload batch record together with all of
-        its documents, raw bytes, and chunks.
+        Atomically insert one folder-upload batch record together with each
+        document's queued metadata and raw bytes.
 
         Each element of `documents` must contain:
             document_id, original_name, relative_path, extension,
-            size_bytes, content_hash, content (bytes),
-            chunks: List[Tuple[str, List[float]]]  (text, embedding)
+            size_bytes, content_hash, and content (bytes).
         """
         async with self._client.transaction() as cur:
             await cur.execute(
@@ -1397,13 +1352,11 @@ class DocumentWriter:
                             excluded_directory_count,
                             excluded_reason_counts,
                             scan_settings,
-                            created_at,
-                            indexed_at
+                            created_at
                         )
                         VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s::jsonb, %s::jsonb,
-                            %s, %s
+                            %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s
                         )
                         """,
                 (
@@ -1421,8 +1374,7 @@ class DocumentWriter:
                     excluded_directory_count,
                     json.dumps(excluded_reason_counts),
                     json.dumps(scan_settings),
-                    indexed_at,
-                    indexed_at,
+                    created_at,
                 ),
             )
 
@@ -1442,14 +1394,12 @@ class DocumentWriter:
                                 size_bytes,
                                 content_hash,
                                 status,
-                                indexed_at,
                                 created_at,
                                 updated_at
                             )
                             VALUES (
                                 %s, %s, %s, %s, %s, 'folder_upload',
-                                %s, %s, %s, %s, %s, 'indexed',
-                                %s, %s, %s
+                                %s, %s, %s, %s, %s, 'queued', %s, %s
                             )
                             """,
                     (
@@ -1463,42 +1413,21 @@ class DocumentWriter:
                         document["extension"],
                         document["size_bytes"],
                         document["content_hash"],
-                        indexed_at,
-                        indexed_at,
-                        indexed_at,
+                        created_at,
+                        created_at,
                     ),
                 )
                 await cur.execute(
                     """
                             INSERT INTO public.document_content (
-                                document_id,
-                                content,
-                                extracted_text,
-                                extracted_content_hash
+                                document_id, content
                             )
-                            VALUES (%s, %s, %s, %s)
+                            VALUES (%s, %s)
                             """,
                     (
                         document["document_id"],
                         document["content"],
-                        document["extracted_text"],
-                        document["content_hash"],
                     ),
-                )
-                await self._copy_chunk_rows(
-                    cur,
-                    [
-                        self._chunk_copy_row(
-                            document_id=document["document_id"],
-                            relative_path=document["relative_path"],
-                            chunk_index=chunk_index,
-                            chunk=chunk,
-                            embedding=embedding,
-                        )
-                        for chunk_index, (chunk, embedding) in enumerate(
-                            document["chunks"]
-                        )
-                    ],
                 )
 
     async def persist_indexed_chunks(
@@ -1572,6 +1501,8 @@ class DocumentWriter:
                 return None
             if locked["status"] == "indexed":
                 return dict(locked)
+            if locked["status"] != "indexing":
+                return None
 
             await cur.execute(
                 """

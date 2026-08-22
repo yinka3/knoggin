@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 
 from common.exceptions import ToolExecutionError
+from common.schema.agent.tool_contracts import TOOL_SCHEMAS_BY_NAME
 from core.agent.tool_runtime import execute_tool
 from core.agent.tools.memory import MemoryTools
 
@@ -153,23 +156,22 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
 
 
 @pytest.mark.no_network
-async def test_execute_tool_special_request_tools_do_not_touch_methods():
+async def test_execute_tool_rejects_executor_control_operations():
     tools = DispatchTools()
 
-    clarification = await execute_tool(
-        tools,
-        "request_clarification",
-        {"question": "Which project?"},
-    )
-    replanning = await execute_tool(
-        tools,
-        "request_replanning",
-        {"reason": "Search results were empty"},
-    )
+    with pytest.raises(ToolExecutionError, match="Unknown tool"):
+        await execute_tool(
+            tools,
+            "request_clarification",
+            {"question": "Which project?"},
+        )
 
-    assert clarification == {"clarification": "Which project?"}
-    assert replanning == {"replanning": "Search results were empty"}
     assert tools.calls == []
+
+
+@pytest.mark.no_network
+def test_request_replanning_is_not_an_agent_tool():
+    assert "request_replanning" not in TOOL_SCHEMAS_BY_NAME
 
 
 @pytest.mark.no_network
@@ -213,19 +215,28 @@ async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
     tools = DispatchTools()
 
     monkeypatch.setattr(
-        "core.agent.tools.registry.TOOL_DISPATCH",
-        {"broken_tool": ("broken", [])},
-    )
-    monkeypatch.setattr(
-        "core.agent.tool_runtime.TOOL_DISPATCH",
-        {"broken_tool": ("broken", [])},
+        "core.agent.tool_runtime.get_tool_definition",
+        lambda name: (
+            SimpleNamespace(
+                dispatch=("broken", ()),
+                schema={
+                    "function": {
+                        "capability": "read",
+                        "parameters": {"type": "object"},
+                    }
+                },
+                capability="read",
+            )
+            if name == "broken_tool"
+            else None
+        ),
     )
 
     with pytest.raises(ToolExecutionError) as exc:
         await execute_tool(tools, "broken_tool", {})
 
     assert exc.value.details["tool"] == "broken_tool"
-    assert "method exploded" in exc.value.message
+    assert "Tool execution failed" in exc.value.message
 
 
 class RecordingPostgres:

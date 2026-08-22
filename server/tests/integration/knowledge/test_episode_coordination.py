@@ -153,7 +153,7 @@ def _episode_job(store, llm, embedding=None):
     embedding = embedding or DeterministicEmbeddingService()
     return EpisodeJob(
         knowledge_store=store,
-        settings=EpisodeSettings(max_message_count=8),
+        settings=EpisodeSettings(),
         episode_window_size=8,
         llm=llm,
         embedding_service=embedding,
@@ -193,9 +193,9 @@ async def test_real_episode_jobs_converge_when_same_window_runs_concurrently(
         """
         SELECT count(*) AS episode_count
         FROM episodes
-        WHERE project_id = %s AND session_id = %s
+        WHERE project_id = %s
         """,
-        (scope["project_id"], scope["session_id"]),
+        (scope["project_id"],),
     )
     assert row == {"episode_count": 1}
     checkpoint = await store.get_episode_checkpoint(
@@ -245,8 +245,8 @@ async def test_real_episode_persistence_failure_rolls_back_for_retry(
         writer._write_project_episode = original_write_episode
 
     assert await resources["postgres"].fetch_one(
-        "SELECT count(*) AS count FROM episodes WHERE project_id = %s AND session_id = %s",
-        (scope["project_id"], scope["session_id"]),
+        "SELECT count(*) AS count FROM episodes WHERE project_id = %s",
+        (scope["project_id"],),
     ) == {"count": 0}
 
     retry = await job.process_next_window(
@@ -255,8 +255,8 @@ async def test_real_episode_persistence_failure_rolls_back_for_retry(
     )
     assert retry is not None
     assert await resources["postgres"].fetch_one(
-        "SELECT count(*) AS count FROM episodes WHERE project_id = %s AND session_id = %s",
-        (scope["project_id"], scope["session_id"]),
+        "SELECT count(*) AS count FROM episodes WHERE project_id = %s",
+        (scope["project_id"],),
     ) == {"count": 1}
 
 
@@ -285,8 +285,8 @@ async def test_real_episode_embedding_failure_leaves_window_retryable(
         )
 
     assert await resources["postgres"].fetch_one(
-        "SELECT count(*) AS count FROM episodes WHERE project_id = %s AND session_id = %s",
-        (scope["project_id"], scope["session_id"]),
+        "SELECT count(*) AS count FROM episodes WHERE project_id = %s",
+        (scope["project_id"],),
     ) == {"count": 0}
     retry = await job.process_next_window(
         user_name=resources["user_name"],
@@ -294,8 +294,8 @@ async def test_real_episode_embedding_failure_leaves_window_retryable(
     )
     assert retry is not None
     assert await resources["postgres"].fetch_one(
-        "SELECT count(*) AS count FROM episodes WHERE project_id = %s AND session_id = %s",
-        (scope["project_id"], scope["session_id"]),
+        "SELECT count(*) AS count FROM episodes WHERE project_id = %s",
+        (scope["project_id"],),
     ) == {"count": 1}
 
 
@@ -330,10 +330,10 @@ async def test_real_episode_jobs_keep_project_and_session_checkpoints_isolated(
     assert all(result is not None for result in results)
     rows = await resources["postgres"].fetch_all(
         """
-        SELECT project_id, session_id, count(*) AS episode_count
+        SELECT project_id, count(*) AS episode_count
         FROM episodes
         WHERE project_id = ANY(%s)
-        GROUP BY project_id, session_id
+        GROUP BY project_id
         ORDER BY project_id
         """,
         ([scope["project_id"] for scope in resources["scopes"]],),
@@ -341,7 +341,6 @@ async def test_real_episode_jobs_keep_project_and_session_checkpoints_isolated(
     assert [dict(row) for row in rows] == [
         {
             "project_id": scope["project_id"],
-            "session_id": scope["session_id"],
             "episode_count": 1,
         }
         for scope in sorted(resources["scopes"], key=lambda item: item["project_id"])

@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
-from common.conf.manager import ConfigManager
 from common.schema.agent.stream import (
     AgentExecutionEvent,
     validate_agent_execution_event,
@@ -16,9 +15,7 @@ from common.schema.document import (
     dump_document_focus,
     parse_document_focus,
 )
-from common.utils.json_utils import safe_json_loads
 from core.agent.executor import AgentExecutor
-from core.agent.maintenance import build_maintenance_candidates
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.sources.pasted_text import build_pasted_text_candidates
@@ -33,20 +30,19 @@ PUBLIC_AGENT_ERROR_MESSAGE = (
 )
 
 
-class Orchestrator:
+class AgentOrchestrator:
     """
-    Orchestrator manages the high-level flow of an agent run.
+    AgentOrchestrator manages the high-level flow of an agent run.
     It prepares the environment and delegates the reasoning loop to AgentExecutor.
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, agent_manager: AgentManager, *, config_provider):
+        self._agent_manager = agent_manager
+        self._config_provider = config_provider
 
     async def run_stream(
         self,
         user_query: str,
-        user_name: str,
-        session_id: str,
         context: SessionRuntime,
         user_timezone: Optional[str] = None,
         model: Optional[str] = None,
@@ -76,19 +72,22 @@ class Orchestrator:
                 request_document_focus = parse_document_focus(request_document_focus)
 
             # Configuration
-            config = ConfigManager.get().config
+            config = self._config_provider.get().config
             limits = config.developer_settings.limits
             run_limits = AgentRunLimits.from_settings(limits)
 
             # Identity & Persona
             identity = await self._resolve_agent_identity(
-                context,
-                agent_id,
+                agent_id if agent_id is not None else context.agent_id,
                 agent_name_override,
                 agent_persona_override,
             )
             agent_cfg = identity.config
-            effective_model = model or (agent_cfg.model if agent_cfg else None)
+            effective_model = (
+                model
+                if model is not None
+                else (context.model if context.model is not None else agent_cfg.model)
+            )
             effective_temperature = (
                 agent_temperature
                 if agent_temperature is not None
@@ -98,30 +97,30 @@ class Orchestrator:
                     else 0.7
                 )
             )
+            effective_brain = agent_brain or (agent_cfg.brain if agent_cfg else "")
+            effective_directives = agent_directives or ""
 
             # Services (Session-Aware)
+            effective_document_focus = await self._resolve_document_focus(
+                context,
+                request_document_focus or context.document_focus,
+            )
             tools = await self._bootstrap_services(
                 context,
                 agent_cfg.id if agent_cfg else None,
+                effective_document_focus,
             )
-            if request_document_focus is not None:
-                # Request focus is ephemeral.  It overrides a persisted session
-                # focus for this run without writing to session state.
-                tools.document_focus = request_document_focus.model_dump(mode="json")
             compiled_domain = context.project.compiled_domain
 
             effective_enabled_tools = (
                 enabled_tools
                 if enabled_tools is not None
-                else (agent_cfg.enabled_tools if agent_cfg else None)
+                else (
+                    context.enabled_tools
+                    if context.enabled_tools is not None
+                    else agent_cfg.enabled_tools
+                )
             )
-            maintenance_candidates = await build_maintenance_candidates(
-                redis=context.redis_client,
-                user_name=user_name,
-                project_id=context.project_id,
-                enabled_tools=effective_enabled_tools,
-            )
-
             # One aggregate owns all mutable state for this execution.
             requested_hot_topics = hot_topics or []
             effective_hot_topics = []
@@ -140,8 +139,8 @@ class Orchestrator:
                     logger.warning(f"Failed to preload hot topic context: {exc}")
 
             run = AgentRun.open(
-                user_name=user_name,
-                session_id=session_id,
+                user_name=context.user_name,
+                session_id=context.session_id,
                 project_id=context.project_id or "",
                 user_query=user_query,
                 run_id=run_id,
@@ -149,17 +148,19 @@ class Orchestrator:
                 limits=run_limits,
                 model=effective_model,
                 temperature=effective_temperature,
+                brain=effective_brain,
+                directives=effective_directives,
                 enabled_tools=effective_enabled_tools,
+                additional_tool_schemas=additional_tool_schemas,
                 hot_topics=effective_hot_topics,
                 active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
                 history=conversation_history or [],
-                maintenance_candidates=maintenance_candidates,
-                document_focus=request_document_focus,
+                document_focus=effective_document_focus,
                 initial_source_candidates=(
                     build_pasted_text_candidates(
                         project_id=context.project_id or "",
-                        session_id=session_id,
+                        session_id=context.session_id,
                         source_message_id=user_message_id,
                         message_content=incoming_user_query,
                         agent_run_id=run_id,
@@ -175,18 +176,12 @@ class Orchestrator:
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
-                model=effective_model,
-                enabled_tools=effective_enabled_tools,
                 simulated_date=simulated_date,
-                agent_temperature=effective_temperature,
-                agent_brain=agent_brain or (agent_cfg.brain if agent_cfg else None),
-                agent_directives=agent_directives,
-                additional_tool_schemas=additional_tool_schemas,
             ):
                 yield validate_agent_execution_event(event)
 
         except Exception as e:
-            logger.exception(f"Orchestrator error: {e}")
+            logger.exception(f"Agent orchestration error: {e}")
             yield validate_agent_execution_event(
                 {
                     "event": "error",
@@ -202,15 +197,13 @@ class Orchestrator:
 
     async def _resolve_agent_identity(
         self,
-        context: SessionRuntime,
         agent_id: Optional[str],
         name_override: Optional[str],
         persona_override: Optional[str],
     ) -> AgentIdentity:
         """Resolve the durable Postgres agent used for this run."""
-        manager = AgentManager(context.resources, context.user_name, {})
-        resolved_id = agent_id or await manager.get_default_agent_id()
-        agent_cfg = await manager.get_agent(resolved_id)
+        resolved_id = agent_id or await self._agent_manager.get_default_agent_id()
+        agent_cfg = await self._agent_manager.get_agent(resolved_id)
         if agent_cfg is None:
             raise ValueError(f"Agent identity not found: {resolved_id}")
 
@@ -228,15 +221,14 @@ class Orchestrator:
         self,
         context: SessionRuntime,
         agent_id: Optional[str] = None,
+        document_focus: Optional[DocumentFocus] = None,
     ) -> Tools:
         """Retrieve context services and instantiate the agent tool suite."""
-        config = ConfigManager.get().config
+        config = self._config_provider.get().config
         search_cfg = {
             **config.developer_settings.search.model_dump(),
             **config.search.model_dump(),
         }
-
-        document_focus = await self._load_document_focus(context)
 
         tools = Tools(
             user_name=context.user_name,
@@ -246,45 +238,31 @@ class Orchestrator:
             search_config=search_cfg,
             document_service=context.document_service,
             workspace_service=getattr(context.project, "workspace_service", None),
-            document_focus=document_focus,
+            document_focus=(
+                dump_document_focus(document_focus)
+                if document_focus is not None
+                else None
+            ),
+            knowledge_retrieval=context.project.knowledge_retrieval,
             knowledge_store=context.knowledge_store,
             postgres=context.resources.postgres,
             redis=context.redis_client,
             agent_id=agent_id,
-            episode_settings=config.developer_settings.jobs.episode,
             health_service=getattr(context, "health_service", None),
         )
 
         return tools
 
-    async def _load_document_focus(
+    async def _resolve_document_focus(
         self,
         context: SessionRuntime,
-    ) -> Optional[dict]:
-        """Load and validate Postgres-owned session focus for this run."""
-        rows = await context.resources.postgres.fetch_all(
-            """
-            SELECT document_focus
-            FROM public.sessions
-            WHERE user_name = %(user_name)s
-              AND session_id = %(session_id)s
-            """,
-            {
-                "user_name": context.user_name,
-                "session_id": context.session_id,
-            },
-        )
-        if not rows:
-            return None
-        focus = rows[0].get("document_focus")
-        if isinstance(focus, str):
-            focus = safe_json_loads(focus, {})
-        if focus is None:
+        focus: Optional[DocumentFocus],
+    ) -> Optional[DocumentFocus]:
+        """Validate session-owned focus without rereading session persistence."""
+        if focus is None or context.document_service is None:
             return None
         try:
             persisted = parse_document_focus(focus)
-            if context.document_service is None:
-                return None
             target = await context.document_service.resolve_focus_target(
                 session_id=context.session_id,
                 document_id=(
@@ -303,12 +281,10 @@ class Orchestrator:
                     else None
                 ),
             )
-            return dump_document_focus(
-                create_document_focus(
-                    mode="pinned",
-                    created_at=persisted.created_at,
-                    **target,
-                )
+            return create_document_focus(
+                mode=("request" if persisted.mode == "request" else "pinned"),
+                created_at=persisted.created_at,
+                **target,
             )
         except (FileNotFoundError, ValueError) as exc:
             logger.warning(

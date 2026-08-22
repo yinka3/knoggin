@@ -147,16 +147,16 @@ class CommunityManager:
         return [IDENTITY_SCOPE, *projects] if projects else []
 
     async def _agent_exists(self, agent_id: str) -> bool:
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         return await manager.get_agent(agent_id) is not None
 
     async def _get_default_agent_id(self) -> str:
         """Get the default agent ID for fallback."""
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         return await manager.get_default_agent_id()
 
     async def _get_agent_config(self, agent_id: str) -> Optional[AgentConfig]:
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         return await manager.get_agent(agent_id)
 
     def _track_discussion_task(self, task: asyncio.Task) -> None:
@@ -476,6 +476,7 @@ class CommunityManager:
         """Runs a single agent turn using the core AgentExecutor."""
 
         agent_directives = await self._get_agent_directives(agent.id)
+        enabled_tools, additional_tool_schemas = self._resolve_agent_tools(agent)
 
         readable_project_ids = await self._resolve_project_scope()
         base_tools = SimpleNamespace(
@@ -490,6 +491,7 @@ class CommunityManager:
             postgres=self.resources.postgres,
             redis=self.resources.redis,
             readable_project_ids=readable_project_ids,
+            knowledge_retrieval=ctx.project.knowledge_retrieval,
         )
 
         comm_tools = CommunityTools(
@@ -515,7 +517,10 @@ class CommunityManager:
             limits=COMMUNITY_RUN_LIMITS,
             model=agent.model,
             temperature=agent.temperature,
-            enabled_tools=None,
+            brain=agent.brain,
+            directives=agent_directives,
+            enabled_tools=enabled_tools,
+            additional_tool_schemas=additional_tool_schemas,
             history=history,
             is_community=True,
             current_participants=participants,
@@ -528,17 +533,9 @@ class CommunityManager:
         )
 
         full_response: str = ""
-        enabled_tools, additional_tool_schemas = self._resolve_agent_tools(agent)
 
         try:
-            async for event in executor.execute(
-                model=agent.model,
-                agent_temperature=agent.temperature,
-                agent_brain=agent.brain,
-                agent_directives=agent_directives,
-                enabled_tools=enabled_tools,
-                additional_tool_schemas=additional_tool_schemas,
-            ):
+            async for event in executor.execute():
                 e_type = event.get("event")
                 data = event.get("data", {})
 
@@ -612,7 +609,7 @@ class CommunityManager:
             project_context=project_context,
             documents_context="",
             is_community=False,
-            current_mode="Architect",
+            phase="PLAN",
         )
 
         seeding_instructions = """
@@ -831,7 +828,7 @@ class CommunityManager:
     ) -> tuple[dict[str, str], str]:
         """Build the model-facing agent pool with one local-reference map."""
 
-        manager = AgentManager(self.resources, self.user_name, {})
+        manager = AgentManager(self.resources, self.user_name)
         agents = await manager.list_agents()
         pool_ids = set(
             ConfigManager.get().config.developer_settings.community.agent_pool_ids

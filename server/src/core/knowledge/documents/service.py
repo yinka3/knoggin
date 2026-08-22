@@ -2,11 +2,9 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from loguru import logger
 
@@ -21,10 +19,7 @@ from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.services.embedding_service import EmbeddingService
-from infrastructure.background_work import (
-    BackgroundWorkCoordinator,
-    BackgroundWorkRejected,
-)
+from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.postgres_client import PostgresClient
 
 from .constants import (
@@ -36,21 +31,18 @@ from .constants import (
     HYBRID_SEARCH_MIN_CANDIDATES,
     INLINE_INDEX_MAX_BYTES,
     MAX_DOCUMENT_SIZE,
-    MAX_ERROR_MESSAGE_LENGTH,
     MAX_READ_CHARACTERS,
     MAX_READ_LINES,
     VALID_VISIBILITY_SCOPES,
     WORKSPACE_PREPARE_CONCURRENCY,
     document_extension,
 )
+from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
 from .scanning import build_folder_preview, normalize_relative_path
 from .storage import (
-    DocumentChunk,
     csv_data_rows,
     docx_heading_path,
-    embedding_text,
-    extract_and_split_document,
     extract_docx_paragraphs,
     extract_pdf_pages,
     extract_text,
@@ -75,6 +67,10 @@ class DocumentService:
         postgres_client: PostgresClient,
         embedding_service: EmbeddingService,
         background_work: Optional[BackgroundWorkCoordinator] = None,
+        readable_project_ids: Optional[Iterable[str]] = None,
+        reader: Optional[DocumentReader] = None,
+        writer: Optional[DocumentWriter] = None,
+        indexer: Optional[DocumentIndexer] = None,
         inline_index_max_bytes: int = INLINE_INDEX_MAX_BYTES,
         blocking_runner: BlockingRunner = _run_in_worker,
         document_rerank_enabled: bool = True,
@@ -83,14 +79,28 @@ class DocumentService:
     ):
         self.project_id = project_id
         self._embedding = embedding_service
-        self._reader = DocumentReader(postgres_client, project_id)
-        self._writer = DocumentWriter(postgres_client, project_id)
-        self._background_work = background_work
-        self._indexing_policy = DocumentIndexPolicy.capture(
-            inline_index_max_bytes=inline_index_max_bytes,
-            workspace_prepare_concurrency=workspace_prepare_concurrency,
+        self._reader = reader or DocumentReader(
+            postgres_client,
+            project_id,
+            readable_project_ids=readable_project_ids,
         )
+        self._writer = writer or DocumentWriter(postgres_client, project_id)
         self._run_blocking = blocking_runner
+        if indexer is None:
+            indexing_policy = DocumentIndexPolicy.capture(
+                inline_index_max_bytes=inline_index_max_bytes,
+                workspace_prepare_concurrency=workspace_prepare_concurrency,
+            )
+            indexer = DocumentIndexer(
+                project_id=project_id,
+                reader=self._reader,
+                writer=self._writer,
+                embedding_service=embedding_service,
+                policy=indexing_policy,
+                blocking_runner=blocking_runner,
+                background_work=background_work,
+            )
+        self._indexer = indexer
         if not isinstance(document_rerank_enabled, bool):
             raise ValueError("document_rerank_enabled must be a boolean")
         if (
@@ -101,10 +111,6 @@ class DocumentService:
             raise ValueError("document_rerank_candidates must be between 1 and 50")
         self._document_rerank_enabled = document_rerank_enabled
         self._document_rerank_candidates = document_rerank_candidates
-        self._background_tasks: set[asyncio.Task] = set()
-        self._workspace_source_tasks: dict[str, asyncio.Task] = {}
-        self._recovered_count = 0
-        self._last_recovery_requeued = 0
 
     async def preview_folder(
         self,
@@ -363,7 +369,7 @@ class DocumentService:
             updated_at=get_now_iso(),
         )
         if counts["queued"]:
-            self._submit_workspace_source_batch(
+            self._indexer.queue_workspace_source_indexing(
                 source_id=source["source_id"],
                 session_id=session_id,
             )
@@ -467,7 +473,7 @@ class DocumentService:
             updated_at=get_now_iso(),
         )
         if counts["queued"]:
-            self._submit_workspace_source_batch(
+            self._indexer.queue_workspace_source_indexing(
                 source_id=source["source_id"],
                 session_id=session_id,
             )
@@ -513,279 +519,17 @@ class DocumentService:
         )
         return result
 
-    def _submit_workspace_source_batch(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-        policy: Optional[DocumentIndexPolicy] = None,
-    ) -> None:
-        """Submit one bounded workspace batch without blocking its caller."""
-        if self._background_work is None:
-            return
-        existing = self._workspace_source_tasks.get(source_id)
-        if existing is not None and not existing.done():
-            return
-        policy = policy or self._indexing_policy
-        task = asyncio.create_task(
-            self._background_work.submit(
-                self.project_id,
-                lambda: self._index_workspace_source_batch(
-                    source_id=source_id,
-                    session_id=session_id,
-                    policy=policy,
-                ),
-                name="workspace-source-index",
-                coalesce_key=f"workspace-source-index:{source_id}",
-            ),
-            name=f"workspace-source-index:{self.project_id}:{source_id}",
-        )
-        self._background_tasks.add(task)
-        self._workspace_source_tasks[source_id] = task
-        task.add_done_callback(
-            lambda completed: self._observe_workspace_source_batch(
-                completed,
-                source_id=source_id,
-                session_id=session_id,
-                policy=policy,
-            )
-        )
-
     def queue_workspace_source_indexing(
         self,
         *,
         source_id: str,
         session_id: Optional[str] = None,
     ) -> None:
-        """Queue one coalesced indexing batch for a workspace source.
-
-        Managed project workspaces use the same bounded indexing pipeline as
-        externally synchronized sources.  This public wrapper keeps the
-        scheduling boundary in ``DocumentService`` without exposing its
-        implementation details to the workspace API.
-        """
-        self._submit_workspace_source_batch(
+        """Delegate durable workspace scheduling to the indexer."""
+        self._indexer.queue_workspace_source_indexing(
             source_id=source_id,
             session_id=session_id,
         )
-
-    @asynccontextmanager
-    async def _workspace_index_claim(
-        self,
-        *,
-        claimed: List[Dict],
-        session_id: Optional[str],
-    ) -> AsyncIterator[None]:
-        """Make a claimed workspace batch terminal or durably retryable."""
-        document_ids = [str(document["document_id"]) for document in claimed]
-        try:
-            yield
-        except asyncio.CancelledError:
-            await self._release_index_claims(document_ids)
-            raise
-        except Exception as exc:
-            await asyncio.gather(
-                *(
-                    self._record_workspace_index_failure(
-                        document_id=document_id,
-                        session_id=session_id,
-                        error=exc,
-                    )
-                    for document_id in document_ids
-                )
-            )
-            raise
-
-    async def _index_workspace_source_batch(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-        policy: Optional[DocumentIndexPolicy] = None,
-    ) -> bool:
-        """Index one fair, cross-file batch of queued workspace documents."""
-        policy = policy or self._indexing_policy
-        claimed = await self._writer.claim_workspace_documents(
-            source_id=source_id,
-            limit=policy.workspace_document_batch_size,
-            updated_at=get_now_iso(),
-        )
-        if not claimed:
-            return False
-
-        semaphore = asyncio.Semaphore(policy.workspace_prepare_concurrency)
-
-        async def prepare_document(document: Dict):
-            document_id = str(document["document_id"])
-            try:
-                async with semaphore:
-                    raw_bytes = await self._reader.fetch_document_content(
-                        document_id=document_id,
-                        session_id=document["session_id"],
-                    )
-                    if raw_bytes is None:
-                        raise FileNotFoundError("Document content is missing")
-                    extraction = await self._run_blocking(
-                        extract_and_split_document,
-                        raw_bytes,
-                        document["extension"],
-                    )
-            except Exception as exc:
-                return document, None, None, exc
-            return document, extraction.text, extraction.chunks, None
-
-        async with self._workspace_index_claim(
-            claimed=claimed,
-            session_id=session_id,
-        ):
-            preparation_results = await asyncio.gather(
-                *(prepare_document(document) for document in claimed)
-            )
-            prepared: list[tuple[Dict, str, List[DocumentChunk]]] = []
-            for document, text, chunks, error in preparation_results:
-                if error is not None:
-                    await self._record_workspace_index_failure(
-                        document_id=str(document["document_id"]),
-                        session_id=session_id,
-                        error=error,
-                    )
-                else:
-                    prepared.append((document, text, chunks))
-
-            try:
-                all_chunks = [chunk for _, _, chunks in prepared for chunk in chunks]
-                all_embedding_texts = [
-                    embedding_text(chunk, document["relative_path"])
-                    for document, _, chunks in prepared
-                    for chunk in chunks
-                ]
-                embeddings = await self._encode_index_embeddings(
-                    all_embedding_texts,
-                    policy=policy,
-                )
-                self._validate_embeddings(embeddings, all_chunks)
-            except Exception as exc:
-                for document, _, _ in prepared:
-                    await self._record_workspace_index_failure(
-                        document_id=document["document_id"],
-                        session_id=session_id,
-                        error=exc,
-                    )
-            else:
-                offset = 0
-                indexed_documents = []
-                for document, text, chunks in prepared:
-                    next_offset = offset + len(chunks)
-                    indexed_documents.append(
-                        {
-                            "document_id": str(document["document_id"]),
-                            "relative_path": document["relative_path"],
-                            "content_hash": document["content_hash"],
-                            "extracted_text": text,
-                            "chunks": chunks,
-                            "embeddings": embeddings[offset:next_offset],
-                        }
-                    )
-                    offset = next_offset
-                try:
-                    await self._writer.persist_workspace_indexed_documents(
-                        documents=indexed_documents,
-                        indexed_at=get_now_iso(),
-                    )
-                except Exception as exc:
-                    for document in indexed_documents:
-                        await self._record_workspace_index_failure(
-                            document_id=document["document_id"],
-                            session_id=session_id,
-                            error=exc,
-                        )
-            return bool(await self._reader.count_queued_workspace_documents(source_id))
-
-    def _observe_workspace_source_batch(
-        self,
-        task: asyncio.Task,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-        policy: DocumentIndexPolicy,
-    ) -> None:
-        """Schedule the next fair source batch after this one has released it."""
-        self._background_tasks.discard(task)
-        if self._workspace_source_tasks.get(source_id) is task:
-            del self._workspace_source_tasks[source_id]
-        if task.cancelled():
-            return
-        try:
-            has_more = task.result()
-        except BackgroundWorkRejected as exc:
-            logger.warning("Workspace indexing remains queued: {}", exc.message)
-        except Exception as exc:
-            logger.error("Workspace indexing batch failed: {}", exc)
-        else:
-            if has_more:
-                self._submit_workspace_source_batch(
-                    source_id=source_id,
-                    session_id=session_id,
-                    policy=policy,
-                )
-
-    async def _record_workspace_index_failure(
-        self,
-        *,
-        document_id: str,
-        session_id: Optional[str],
-        error: Exception,
-    ) -> None:
-        error_message = str(error).strip() or type(error).__name__
-        try:
-            await self._record_index_failure(
-                document_id=document_id,
-                session_id=session_id,
-                error_message=error_message[:MAX_ERROR_MESSAGE_LENGTH],
-            )
-        except Exception as failure_error:
-            logger.error(
-                "Failed to record workspace document indexing failure for {}: {}",
-                document_id,
-                failure_error,
-            )
-
-    async def _release_index_claims(self, document_ids: List[str]) -> None:
-        """Return interrupted claims to the durable queue before shutdown."""
-        if not document_ids:
-            return
-        try:
-            await self._writer.requeue_index_claims(
-                document_ids=document_ids,
-                updated_at=get_now_iso(),
-            )
-        except Exception as exc:
-            logger.error(
-                "Failed to release interrupted document indexing claims for {}: {}",
-                self.project_id,
-                exc,
-            )
-
-    @asynccontextmanager
-    async def _document_index_claim(
-        self,
-        *,
-        document_id: str,
-        session_id: Optional[str],
-    ) -> AsyncIterator[None]:
-        """Make one claimed document index terminal or durably retryable."""
-        try:
-            yield
-        except asyncio.CancelledError:
-            await self._release_index_claims([document_id])
-            raise
-        except Exception as exc:
-            await self._record_workspace_index_failure(
-                document_id=document_id,
-                session_id=session_id,
-                error=exc,
-            )
-            raise
 
     async def get_document_info(
         self,
@@ -1003,74 +747,6 @@ class DocumentService:
         deleted_metadata["deleted"] = True
         return deleted_metadata
 
-    @staticmethod
-    def _validate_embeddings(
-        embeddings: List[List[float]],
-        chunks: List[DocumentChunk],
-    ) -> None:
-        if len(embeddings) != len(chunks):
-            raise ValueError("Embedding count does not match chunk count")
-        if any(
-            len(embedding) != EXPECTED_EMBEDDING_DIMENSION
-            for embedding in embeddings
-        ):
-            raise ValueError(
-                "Document chunk embeddings must have exactly "
-                f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
-            )
-
-    async def _encode_index_embeddings(
-        self,
-        values: List[str],
-        *,
-        policy: DocumentIndexPolicy,
-    ) -> List[List[float]]:
-        """Encode one operation's chunks using its captured batch limit."""
-        embeddings: List[List[float]] = []
-        for start in range(0, len(values), policy.embedding_chunk_batch_size):
-            embeddings.extend(
-                await self._embedding.encode(
-                    values[start : start + policy.embedding_chunk_batch_size]
-                )
-            )
-        return embeddings
-
-    async def _persist_indexed_chunks(
-        self,
-        *,
-        document_id: str,
-        session_id: Optional[str],
-        chunks: List[DocumentChunk],
-        embeddings: List[List[float]],
-        extracted_text: str,
-    ) -> Dict:
-        indexed_at = get_now_iso()
-        row = await self._writer.persist_indexed_chunks(
-            document_id=document_id,
-            session_id=session_id,
-            chunks=chunks,
-            embeddings=embeddings,
-            extracted_text=extracted_text,
-            indexed_at=indexed_at,
-        )
-        if row is None:
-            raise FileNotFoundError("Document not found")
-        return self._public_metadata(row)
-
-    async def _record_index_failure(
-        self,
-        *,
-        document_id: str,
-        session_id: Optional[str],
-        error_message: str,
-    ) -> None:
-        await self._writer.record_index_failure(
-            document_id=document_id,
-            session_id=session_id,
-            error_message=error_message,
-            updated_at=get_now_iso(),
-        )
-
     async def accept_folder(
         self,
         *,
@@ -1082,7 +758,7 @@ class DocumentService:
         session_id: Optional[str] = None,
         visibility_scope: str = "project",
     ) -> Dict:
-        """Synchronously index and atomically persist a folder batch."""
+        """Durably admit a selected folder batch before indexing its files."""
         self._validate_visibility(visibility_scope, session_id)
         validated_entries = [
             entry
@@ -1139,37 +815,22 @@ class DocumentService:
             )
 
         folder_root_id = str(uuid.uuid4())
-        indexed_at = get_now_iso()
+        created_at = get_now_iso()
         candidate_bytes = sum(len(entry.content) for entry in validated_entries)
         prepared_documents = []
 
         for relative_path in normalized_selected:
             content = entry_content[relative_path]
             preview_entry = included_by_path[relative_path]
-            document_id = str(uuid.uuid4())
-            extraction = await self._run_blocking(
-                extract_and_split_document,
-                content,
-                preview_entry.extension,
-            )
-            text = extraction.text
-            chunks = extraction.chunks
-            embeddings = await self._embedding.encode(
-                [embedding_text(chunk, relative_path) for chunk in chunks]
-            )
-            self._validate_embeddings(embeddings, chunks)
             prepared_documents.append(
                 {
-                    "document_id": document_id,
+                    "document_id": str(uuid.uuid4()),
                     "relative_path": relative_path,
                     "original_name": preview_entry.original_name,
                     "extension": preview_entry.extension,
                     "size_bytes": preview_entry.size_bytes,
                     "content_hash": preview_entry.content_hash,
                     "content": content,
-                    "extracted_text": text,
-                    "chunks": list(zip(chunks, embeddings)),
-                    "chunk_count": len(chunks),
                 }
             )
 
@@ -1186,29 +847,14 @@ class DocumentService:
             excluded_reason_counts=preview.summary.reason_counts,
             scan_settings=preview.settings.model_dump(mode="json"),
             documents=prepared_documents,
-            indexed_at=indexed_at,
+            created_at=created_at,
         )
 
         documents = [
-            {
-                "document_id": document["document_id"],
-                "project_id": self.project_id,
-                "session_id": session_id,
-                "visibility_scope": visibility_scope,
-                "folder_root_id": folder_root_id,
-                "source_kind": "folder_upload",
-                "original_name": document["original_name"],
-                "relative_path": document["relative_path"],
-                "extension": document["extension"],
-                "size_bytes": document["size_bytes"],
-                "content_hash": document["content_hash"],
-                "status": "indexed",
-                "indexed_at": indexed_at,
-                "error_message": None,
-                "created_at": indexed_at,
-                "updated_at": indexed_at,
-                "chunk_count": document["chunk_count"],
-            }
+            await self.schedule_document_index(
+                document_id=document["document_id"],
+                session_id=session_id,
+            )
             for document in prepared_documents
         ]
         return {
@@ -1228,8 +874,8 @@ class DocumentService:
             "excluded_directory_count": preview.summary.excluded_directory_count,
             "excluded_reason_counts": preview.summary.reason_counts,
             "scan_settings": preview.settings.model_dump(mode="json"),
-            "created_at": indexed_at,
-            "indexed_at": indexed_at,
+            "created_at": created_at,
+            "indexed_at": None,
             "documents": documents,
         }
 
@@ -1241,10 +887,8 @@ class DocumentService:
         relative_path: Optional[str] = None,
         session_id: Optional[str] = None,
         visibility_scope: str = "project",
-        replace_document_id: Optional[str] = None,
-        confirm_as_separate: bool = False,
     ) -> Dict:
-        """Store a manual upload or return a replacement confirmation request."""
+        """Store a manual upload as durable queued indexing work."""
         if not isinstance(content, bytes):
             raise TypeError("content must be bytes")
         if not content:
@@ -1263,32 +907,7 @@ class DocumentService:
                 f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
         self._validate_visibility(visibility_scope, session_id)
-        if replace_document_id is not None and confirm_as_separate:
-            raise ValueError(
-                "replace_document_id and confirm_as_separate are mutually exclusive"
-            )
-
         normalized_path = normalize_relative_path(relative_path, original_name)
-        candidates = await self._reader.find_deleted_replacement_candidates(
-            original_name=original_name,
-            relative_path=normalized_path,
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-        )
-        candidate_ids = {str(candidate["document_id"]) for candidate in candidates}
-        if replace_document_id is not None:
-            replace_document_id = replace_document_id.strip()
-            if replace_document_id not in candidate_ids:
-                raise ValueError(
-                    "replace_document_id must be one of the offered deleted documents"
-                )
-        elif candidates and not confirm_as_separate:
-            return {
-                "confirmation_required": True,
-                "replacement_candidates": [
-                    self._public_metadata(candidate) for candidate in candidates
-                ],
-            }
         document_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
@@ -1304,7 +923,6 @@ class DocumentService:
             content_hash=content_hash,
             content=content,
             created_at=created_at,
-            replaces_document_id=replace_document_id,
         )
         return {
             "document_id": document_id,
@@ -1318,18 +936,7 @@ class DocumentService:
             "extension": extension,
             "size_bytes": len(content),
             "content_hash": content_hash,
-            "status": "uploaded",
-            "replaces_document_id": replace_document_id,
-            "version_number": (
-                int(next(
-                    candidate["version_number"]
-                    for candidate in candidates
-                    if str(candidate["document_id"]) == replace_document_id
-                ))
-                + 1
-                if replace_document_id is not None
-                else 1
-            ),
+            "status": "queued",
             "deleted_at": None,
             "indexed_at": None,
             "error_message": None,
@@ -1345,80 +952,20 @@ class DocumentService:
         session_id: Optional[str] = None,
         policy: Optional[DocumentIndexPolicy] = None,
     ) -> Dict:
-        """Extract, chunk, embed, and persist one visible project document."""
-        policy = policy or self._indexing_policy
-        rows = await self._reader.fetch_documents_by_reference(
-            document_id=document_id,
-            relative_path=None,
-            session_id=session_id,
-        )
-        document_metadata = rows[0] if rows else None
-        if document_metadata is None:
-            raise FileNotFoundError("Document not found")
-        if document_metadata["status"] == "indexed":
-            return self._public_metadata(document_metadata)
+        """Delegate document derivation to this project's DocumentIndexer."""
 
-        claimed = await self._writer.transition_index_status(
+        row = await self._indexer.index_document(
             document_id=document_id,
             session_id=session_id,
-            status="indexing",
-            allowed_statuses=("uploaded", "queued", "failed"),
-            updated_at=get_now_iso(),
+            policy=policy,
         )
-        if claimed is None:
-            refreshed = await self._reader.fetch_documents_by_reference(
-                document_id=document_id,
-                relative_path=None,
-                session_id=session_id,
-            )
-            if not refreshed:
-                raise FileNotFoundError("Document not found")
-            return self._public_metadata(refreshed[0])
-        document_metadata = claimed
+        return self._public_metadata(row)
 
-        try:
-            async with self._document_index_claim(
-                document_id=document_id,
-                session_id=session_id,
-            ):
-                raw_bytes = await self._reader.fetch_document_content(
-                    document_id=str(document_metadata["document_id"]),
-                    session_id=session_id,
-                )
-                if raw_bytes is None:
-                    raise FileNotFoundError("Document content is missing")
-                extraction = await self._run_blocking(
-                    extract_and_split_document,
-                    raw_bytes,
-                    document_metadata["extension"],
-                )
-                text = extraction.text
-                chunks = extraction.chunks
-                embeddings = await self._encode_index_embeddings(
-                    [
-                        embedding_text(chunk, document_metadata["relative_path"])
-                        for chunk in chunks
-                    ],
-                    policy=policy,
-                )
-                self._validate_embeddings(embeddings, chunks)
-                return await self._persist_indexed_chunks(
-                    document_id=document_id,
-                    session_id=session_id,
-                    chunks=chunks,
-                    embeddings=embeddings,
-                    extracted_text=text,
-                )
-        except asyncio.CancelledError:
-            raise
-        except FileNotFoundError:
-            raise
-        except Exception as exc:
-            error_message = str(exc).strip() or type(exc).__name__
-            error_message = error_message[:MAX_ERROR_MESSAGE_LENGTH]
-            raise RuntimeError(
-                f"Failed to index document: {error_message}"
-            ) from exc
+    @property
+    def indexer(self) -> DocumentIndexer:
+        """Expose the project-owned indexer for runtime lifecycle ownership."""
+
+        return self._indexer
 
     async def submit_document(
         self,
@@ -1428,8 +975,6 @@ class DocumentService:
         relative_path: Optional[str] = None,
         session_id: Optional[str] = None,
         visibility_scope: str = "project",
-        replace_document_id: Optional[str] = None,
-        confirm_as_separate: bool = False,
     ) -> Dict:
         """Persist a document, then index inline or admit durable background work."""
         document = await self.add_document(
@@ -1438,11 +983,7 @@ class DocumentService:
             relative_path=relative_path,
             session_id=session_id,
             visibility_scope=visibility_scope,
-            replace_document_id=replace_document_id,
-            confirm_as_separate=confirm_as_separate,
         )
-        if document.get("confirmation_required"):
-            return document
         return await self.schedule_document_index(
             document_id=document["document_id"],
             session_id=session_id,
@@ -1454,141 +995,31 @@ class DocumentService:
         document_id: str,
         session_id: Optional[str] = None,
     ) -> Dict:
-        """Mark a persisted document queued and start indexing when capacity allows."""
-        policy = self._indexing_policy
-        rows = await self._reader.fetch_documents_by_reference(
-            document_id=document_id,
-            relative_path=None,
-            session_id=session_id,
-        )
-        if not rows:
-            raise FileNotFoundError("Document not found")
-        document = rows[0]
-        if document["status"] == "indexed":
-            return self._public_metadata(document)
-
-        if document["status"] == "indexing":
-            return self._public_metadata(document)
-        if document["status"] == "queued":
-            queued = document
-        else:
-            queued = await self._writer.transition_index_status(
+        """Delegate durable index admission to the project-owned indexer."""
+        return self._public_metadata(
+            await self._indexer.schedule_document_index(
                 document_id=document_id,
                 session_id=session_id,
-                status="queued",
-                allowed_statuses=("uploaded", "failed"),
-                updated_at=get_now_iso(),
             )
-            if queued is None:
-                return self._public_metadata(document)
-
-        if (
-            document["size_bytes"] <= policy.inline_index_max_bytes
-            or self._background_work is None
-        ):
-            return await self.index_document(
-                document_id=document_id,
-                session_id=session_id,
-                policy=policy,
-            )
-
-        task = asyncio.create_task(
-            self._background_work.submit(
-                self.project_id,
-                lambda: self.index_document(
-                    document_id=document_id,
-                    session_id=session_id,
-                    policy=policy,
-                ),
-                name="document-index",
-                coalesce_key=f"document-index:{document_id}",
-            ),
-            name=f"document-index:{self.project_id}:{document_id}",
         )
-        self._background_tasks.add(task)
-        task.add_done_callback(self._observe_background_task)
-        return self._public_metadata(queued)
-
-    def _observe_background_task(self, task: asyncio.Task) -> None:
-        self._background_tasks.discard(task)
-        if task.cancelled():
-            return
-        try:
-            task.result()
-        except BackgroundWorkRejected as exc:
-            logger.warning("Document indexing remains queued: {}", exc.message)
-        except Exception as exc:
-            logger.error("Background document indexing failed: {}", exc)
 
     async def shutdown(self) -> None:
-        """Cancel local submission waiters; queued document rows remain durable."""
-        tasks = [task for task in self._background_tasks if not task.done()]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._background_tasks.clear()
-        self._workspace_source_tasks.clear()
+        """Delegate indexer task shutdown while retaining this public façade."""
+        await self._indexer.shutdown()
 
     async def recover_pending_indexes(self, limit: int = 16) -> int:
-        """Resume durable queued work and repair indexes interrupted by a restart."""
-        self._last_recovery_requeued = await self._writer.requeue_interrupted_indexes(
-            updated_at=get_now_iso()
-        )
-        pending = await self._reader.list_documents_for_index_recovery(limit)
-        for document in pending:
-            await self.schedule_document_index(
-                document_id=str(document["document_id"]),
-                session_id=document.get("session_id"),
-            )
-        workspace_sources = await self._reader.list_workspace_sources_for_index_recovery(
-            limit
-        )
-        for source in workspace_sources:
-            self._submit_workspace_source_batch(
-                source_id=str(source["source_id"]),
-                session_id=source.get("session_id"),
-            )
-        recovered = len(pending) + len(workspace_sources)
-        self._recovered_count += recovered
-        if recovered or self._last_recovery_requeued:
-            logger.info(
-                "Document indexing recovery for {}: requeued={}, submitted={}",
-                self.project_id,
-                self._last_recovery_requeued,
-                recovered,
-            )
-        return recovered
+        """Delegate recovery to the project-owned indexer."""
+        return await self._indexer.recover_pending_indexes(limit)
 
     async def pending_index_count(self) -> int:
-        legacy = await self._reader.count_documents_for_index_recovery()
-        workspace = await self._reader.count_workspace_documents_for_index_recovery()
-        return legacy + workspace
+        return await self._indexer.pending_index_count()
 
     def indexing_snapshot(self) -> Dict:
-        """Expose cheap document-indexing health for future API instrumentation."""
-        return {
-            "policy_version": self._indexing_policy.version,
-            "inline_index_max_bytes": self._indexing_policy.inline_index_max_bytes,
-            "embedding_chunk_batch_size": (
-                self._indexing_policy.embedding_chunk_batch_size
-            ),
-            "workspace_document_batch_size": (
-                self._indexing_policy.workspace_document_batch_size
-            ),
-            "workspace_prepare_concurrency": (
-                self._indexing_policy.workspace_prepare_concurrency
-            ),
-            "local_submission_tasks": len(
-                [task for task in self._background_tasks if not task.done()]
-            ),
-            "recovered_count": self._recovered_count,
-            "last_recovery_requeued": self._last_recovery_requeued,
-        }
+        """Expose the indexer's bounded health projection."""
+        return self._indexer.indexing_snapshot()
 
     def indexing_snapshot_for_health(self) -> dict[str, object]:
         """Return a bounded public projection of indexing metrics."""
-
         return sanitize_health_details(self.indexing_snapshot())
 
     async def list_folder_uploads(

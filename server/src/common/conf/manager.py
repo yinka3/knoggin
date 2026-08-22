@@ -141,7 +141,7 @@ class ConfigManager:
 
         Args:
             callback: Method to call when config changes (e.g. `self.update_settings`).
-            path: Pydantic attribute path (e.g. 'developer_settings.jobs.cleaner').
+            path: Pydantic attribute path (e.g. 'developer_settings.jobs.episode').
                   If provided, the callback is only triggered if this specific subtree changes.
         """
         subscription = {

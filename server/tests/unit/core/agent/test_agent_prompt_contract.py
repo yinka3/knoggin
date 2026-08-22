@@ -7,13 +7,13 @@ from core.agent.system_prompt import (
 
 
 @pytest.mark.no_network
-def test_agent_prompt_renders_core_identity_mode_and_tool_policy():
+def test_agent_prompt_renders_core_identity_phase_and_tool_policy():
     prompt = get_agent_prompt(
         user_name="Ada",
         current_time="2026-04-05 10:30 UTC",
         persona="Precise, skeptical, and warm.",
         agent_name="STELLA",
-        current_mode="Architect",
+        phase="PLAN",
     )
 
     assert prompt.startswith(
@@ -21,7 +21,7 @@ def test_agent_prompt_renders_core_identity_mode_and_tool_policy():
     )
     assert "<cognitive_persona>" in prompt
     assert "Precise, skeptical, and warm." in prompt
-    assert "YOUR CURRENT MODE: Architect" in prompt
+    assert "CURRENT EXECUTION PHASE: PLAN" in prompt
     assert "Current time: 2026-04-05 10:30 UTC." in prompt
     assert 'entity_name="Ada"' in prompt
     assert "read_episode" in prompt
@@ -130,7 +130,7 @@ def test_agent_prompt_renders_agent_and_community_contexts():
         agent_brain="Use the available evidence before answering.",
         is_community=True,
         participants=["planner", "critic"],
-        current_mode="Librarian",
+        phase="EXECUTE",
     )
 
     assert "<agent_brain>" in prompt
@@ -141,8 +141,8 @@ def test_agent_prompt_renders_agent_and_community_contexts():
     assert "<community_context>" in prompt
     assert "Current participants: planner, critic" in prompt
     assert "Use the available evidence before answering." in prompt
-    assert "YOUR CURRENT MODE: Librarian" in prompt
-    assert "request_replanning" in prompt
+    assert "CURRENT EXECUTION PHASE: EXECUTE" in prompt
+    assert "request_replanning" not in prompt
 
 
 @pytest.mark.no_network

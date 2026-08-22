@@ -4,8 +4,8 @@ import pytest
 
 from common.conf.domain_config import DomainConfig
 from common.schema.agent.identity import AgentConfig
-from core.agent.orchestrator import Orchestrator
-from infrastructure.redis_client import RedisKeys
+from core.agent.orchestrator import AgentOrchestrator
+from core.agent.services.agent_manager import AgentManager
 from tests.fixtures.fakes import FakeResources
 
 FAKE_RESPONSE_EVENT = {
@@ -46,6 +46,10 @@ class FakeConfig:
 
 class FakeConfigManager:
     config = FakeConfig()
+
+    @staticmethod
+    def get():
+        return FakeConfigManager()
 
 
 class FakeTools:
@@ -88,6 +92,11 @@ class FakeSession:
         self.user_name = "ada"
         self.session_id = "session-1"
         self.project_id = "project-1"
+        self.model = None
+        self.agent_id = None
+        self.enabled_tools = None
+        self.document_focus = None
+        self.document_service = None
         self.project = SimpleNamespace(
             entities=object(),
             compiled_domain=DomainConfig.from_mapping(
@@ -103,6 +112,13 @@ class FakeSession:
                 }
             ).compile(),
         )
+
+
+def make_orchestrator(context):
+    return AgentOrchestrator(
+        AgentManager(context.resources, context.user_name),
+        config_provider=FakeConfigManager,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -124,8 +140,7 @@ async def test_orchestrator_resolves_agent_identity_from_redis():
     )
     context.resources.postgres.upsert_agent(agent)
 
-    identity = await Orchestrator()._resolve_agent_identity(
-        context,
+    identity = await make_orchestrator(context)._resolve_agent_identity(
         agent_id="agent-1",
         name_override=None,
         persona_override=None,
@@ -149,8 +164,7 @@ async def test_orchestrator_identity_overrides_take_precedence():
         )
     )
 
-    identity = await Orchestrator()._resolve_agent_identity(
-        context,
+    identity = await make_orchestrator(context)._resolve_agent_identity(
         agent_id=None,
         name_override="Custom",
         persona_override="Direct",
@@ -179,25 +193,19 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     )
     context.resources.postgres.upsert_agent(agent)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
-    async def fake_bootstrap_services(self, context_arg, agent_id):
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
         assert context_arg is context
         assert agent_id == "agent-1"
         return tools
 
-    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
-        async for event in Orchestrator().run_stream(
+        async for event in make_orchestrator(context).run_stream(
             user_query="hello",
-            user_name="ada",
-            session_id="session-1",
             context=context,
             agent_id="agent-1",
             conversation_history=[{"role": "user", "content": "prior"}],
@@ -215,11 +223,75 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.active_topics == ["Research", "Identity"]
     assert executor.ctx.hot_topic_context == {}
     assert tools.hot_topic_calls == []
-    assert executor.execute_kwargs["model"] == "agent-model"
-    assert executor.execute_kwargs["agent_temperature"] == 0.25
-    assert "Use memory" in executor.execute_kwargs["agent_brain"]
-    assert executor.execute_kwargs["enabled_tools"] == ["episode_check"]
+    assert executor.ctx.model == "agent-model"
+    assert executor.ctx.temperature == 0.25
+    assert "Use memory" in executor.ctx.brain
+    assert executor.ctx.enabled_tools == ("episode_check",)
+    assert executor.execute_kwargs == {
+        "user_timezone": None,
+        "simulated_date": None,
+    }
     assert tools.closed is True
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_resolves_request_then_session_then_agent_config(
+    monkeypatch,
+):
+    context = FakeSession()
+    context.model = "session-model"
+    context.enabled_tools = ["message_search"]
+    tools = FakeTools()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(
+            id="agent-1",
+            name="Researcher",
+            persona="Careful",
+            model="agent-model",
+            enabled_tools=["episode_check"],
+            is_default=True,
+        )
+    )
+
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
+
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
+        assert context_arg is context
+        assert agent_id == "agent-1"
+        assert document_focus is None
+        return tools
+
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
+
+    async for _ in make_orchestrator(context).run_stream(
+        user_query="hello",
+        context=context,
+        model="request-model",
+        enabled_tools=["graph_query"],
+    ):
+        pass
+    request_run = FakeExecutor.instances[-1]
+
+    async for _ in make_orchestrator(context).run_stream(
+        user_query="hello",
+        context=context,
+    ):
+        pass
+    session_run = FakeExecutor.instances[-1]
+
+    assert request_run.ctx.model == "request-model"
+    assert request_run.ctx.enabled_tools == ("graph_query",)
+    assert session_run.ctx.model == "session-model"
+    assert session_run.ctx.enabled_tools == ("message_search",)
+    assert request_run.execute_kwargs == {
+        "user_timezone": None,
+        "simulated_date": None,
+    }
+    assert session_run.execute_kwargs == {
+        "user_timezone": None,
+        "simulated_date": None,
+    }
 
 
 @pytest.mark.runtime
@@ -227,22 +299,15 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
 async def test_orchestrator_hides_unexpected_error_details(monkeypatch):
     context = FakeSession()
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
-
     async def fail_bootstrap_services(*_args):
         raise RuntimeError("postgres://internal-host/knoggin")
 
-    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fail_bootstrap_services)
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fail_bootstrap_services)
 
     events = [
         event
-        async for event in Orchestrator().run_stream(
+        async for event in make_orchestrator(context).run_stream(
             user_query="hello",
-            user_name="ada",
-            session_id="session-1",
             context=context,
         )
     ]
@@ -272,42 +337,35 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
     )
     context.resources.postgres.upsert_agent(agent)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
-    async def fake_bootstrap_services(self, context_arg, agent_id):
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
         assert context_arg is context
         assert agent_id == "agent-1"
         return tools
 
-    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
-        async for event in Orchestrator().run_stream(
+        async for event in make_orchestrator(context).run_stream(
             user_query="hello",
-            user_name="ada",
-            session_id="session-1",
             context=context,
             agent_id="agent-1",
         )
     ]
 
     assert events == [FAKE_RESPONSE_EVENT]
-    assert FakeExecutor.instances[0].execute_kwargs["enabled_tools"] == []
+    assert FakeExecutor.instances[0].ctx.enabled_tools == ()
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_orchestrator_forwards_python_selected_maintenance_candidates(
+async def test_orchestrator_does_not_inject_maintenance_candidates(
     monkeypatch,
 ):
     context = FakeSession()
     tools = FakeTools()
-    await context.redis_client.sadd(RedisKeys.merge_queue("ada", "project-1"), "1")
     agent = AgentConfig(
         id="agent-1",
         name="Researcher",
@@ -316,33 +374,24 @@ async def test_orchestrator_forwards_python_selected_maintenance_candidates(
     )
     context.resources.postgres.upsert_agent(agent)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
-    async def fake_bootstrap_services(self, context_arg, agent_id):
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
         return tools
 
-    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
-        async for event in Orchestrator().run_stream(
+        async for event in make_orchestrator(context).run_stream(
             user_query="hello",
-            user_name="ada",
-            session_id="session-1",
             context=context,
             agent_id="agent-1",
         )
     ]
 
     assert events == [FAKE_RESPONSE_EVENT]
-    candidate = FakeExecutor.instances[0].ctx.maintenance_candidates[0]
-    assert candidate.kind == "graph_merge_scan"
-    assert candidate.suggested_tool == "check_graph_health"
-    assert "Merge queue has 1" in candidate.reason
+    assert not hasattr(FakeExecutor.instances[0].ctx, "maintenance_candidates")
 
 
 @pytest.mark.runtime
@@ -361,23 +410,17 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
         )
     )
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
-    async def fake_bootstrap_services(self, context_arg, agent_id):
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
         return tools
 
-    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
-        async for event in Orchestrator().run_stream(
+        async for event in make_orchestrator(context).run_stream(
             user_query="hello",
-            user_name="ada",
-            session_id="session-1",
             context=context,
             hot_topics=["Identity", "General", "Identity"],
         )
@@ -397,7 +440,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_orchestrator_loads_validated_document_focus_once():
+async def test_orchestrator_resolves_session_document_focus_without_querying_postgres():
     context = FakeSession()
     focus = {
         "mode": "pinned",
@@ -408,15 +451,6 @@ async def test_orchestrator_loads_validated_document_focus_once():
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
-    expected_focus = {
-        "mode": "pinned",
-        "target_type": "subtree",
-        "folder_root_id": "folder-1",
-        "path_prefix": "src",
-        "created_at": "2026-06-22T12:00:00+00:00",
-    }
-    context.resources.postgres.read_results.append([{"document_focus": focus}])
-
     class FocusDocumentService:
         async def resolve_focus_target(self, **kwargs):
             assert kwargs == {
@@ -435,9 +469,17 @@ async def test_orchestrator_loads_validated_document_focus_once():
 
     context.document_service = FocusDocumentService()
 
-    loaded = await Orchestrator()._load_document_focus(context)
+    context.document_focus = focus
+    loaded = await make_orchestrator(context)._resolve_document_focus(
+        context,
+        context.document_focus,
+    )
 
-    assert loaded == expected_focus
+    assert loaded is not None
+    assert loaded.mode == "pinned"
+    assert loaded.target_type == "subtree"
+    assert loaded.folder_root_id == "folder-1"
+    assert loaded.path_prefix == "src"
 
 
 @pytest.mark.runtime
@@ -450,23 +492,17 @@ async def test_orchestrator_ignores_stale_document_focus():
             raise FileNotFoundError("Document focus target not found")
 
     context.document_service = MissingFocusService()
-    context.resources.postgres.read_results.append(
-        [
-            {
-                "document_focus": {
-                    "mode": "pinned",
-                    "target_type": "folder_upload",
-                    "document_id": None,
-                    "relative_path": None,
-                    "folder_root_id": "missing-folder",
-                    "path_prefix": None,
-                    "created_at": "2026-06-22T12:00:00+00:00",
-                }
-            }
-        ]
-    )
+    context.document_focus = {
+        "mode": "pinned",
+        "target_type": "folder_upload",
+        "folder_root_id": "missing-folder",
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
 
-    assert await Orchestrator()._load_document_focus(context) is None
+    assert await make_orchestrator(context)._resolve_document_focus(
+        context,
+        context.document_focus,
+    ) is None
 
 
 @pytest.mark.runtime
@@ -488,23 +524,17 @@ async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
     excerpt = "revenue increased 18%"
     start_char = user_query.index(excerpt)
 
-    monkeypatch.setattr(
-        "core.agent.orchestrator.ConfigManager.get",
-        staticmethod(lambda: FakeConfigManager()),
-    )
     monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
 
-    async def fake_bootstrap_services(self, context_arg, agent_id):
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
         return tools
 
-    monkeypatch.setattr(Orchestrator, "_bootstrap_services", fake_bootstrap_services)
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
 
     events = [
         event
-        async for event in Orchestrator().run_stream(
+        async for event in make_orchestrator(context).run_stream(
             user_query=user_query,
-            user_name="ada",
-            session_id="session-1",
             context=context,
             user_message_id=42,
             pasted_text_spans=[

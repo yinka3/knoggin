@@ -56,10 +56,10 @@ async def test_messages_must_belong_to_an_existing_session_in_the_same_project(
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_episode_and_source_messages_must_share_project_session_scope(
+async def test_project_episode_and_source_messages_must_share_scope(
     real_postgres_client,
 ):
-    """Direct SQL cannot join an episode to another scope's session or message."""
+    """Direct SQL cannot join a project episode to another project's message."""
 
     await real_postgres_client.execute(
         """
@@ -80,18 +80,10 @@ async def test_episode_and_source_messages_must_share_project_session_scope(
         """
     )
 
-    with pytest.raises(ForeignKeyViolation):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO episodes (episode_id, project_id, session_id, summary)
-            VALUES ('episode-invalid', 'project-1', 'session-2', 'Invalid scope.')
-            """
-        )
-
     await real_postgres_client.execute(
         """
-        INSERT INTO episodes (episode_id, project_id, session_id, summary)
-        VALUES ('episode-1', 'project-1', 'session-1', 'Valid scope.')
+        INSERT INTO episodes (episode_id, project_id, summary)
+        VALUES ('episode-1', 'project-1', 'Valid scope.')
         """
     )
     await real_postgres_client.execute(
@@ -146,8 +138,8 @@ async def test_episode_derived_attachments_must_share_project_scope(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO episodes (episode_id, project_id, session_id, summary)
-        VALUES ('episode-1', 'project-1', 'session-1', 'Valid scope.')
+        INSERT INTO episodes (episode_id, project_id, summary)
+        VALUES ('episode-1', 'project-1', 'Valid scope.')
         """
     )
     await real_postgres_client.execute(
@@ -165,12 +157,11 @@ async def test_episode_derived_attachments_must_share_project_scope(
         """
         INSERT INTO relationships (
             relationship_id, user_name, project_id,
-            entity_a_id, entity_b_id, relationship_type,
-            observed_relationship_label
+            entity_a_id, entity_b_id, relationship_type
         )
         VALUES (
             'project-2:3:4:related', 'ada', 'project-2', 3, 4,
-            'related', 'related'
+            'related'
         )
         """
     )

@@ -12,7 +12,7 @@ def make_event(**overrides) -> InternalEvent:
         "ts": "2026-06-29T12:00:00Z",
         "scope_id": "project-1",
         "component": "pipeline",
-        "event": "dlq_enqueued",
+        "event": "graph_write_failed",
         "data": {},
     }
     data.update(overrides)
@@ -41,7 +41,6 @@ def test_policy_normalizes_approved_event_and_drops_raw_content():
             "user_name": "ada",
             "project_id": "project-1",
             "session_id": "session-1",
-            "dlq_key": "dlq:ada:project-1",
             "msg_ids": [1, 2],
             "stage": "graph_write",
             "error": "x" * 250,
@@ -52,7 +51,7 @@ def test_policy_normalizes_approved_event_and_drops_raw_content():
 
     assert record is not None
     assert record["label"] == "RECOVERY"
-    assert record["event"] == "pipeline.dlq_enqueued"
+    assert record["event"] == "pipeline.graph_write_failed"
     assert record["user"] == "ada"
     assert record["message_ids"] == "1,2"
     assert record["error"].endswith("...")
@@ -72,7 +71,7 @@ def test_policy_rejects_disallowed_and_verbose_events():
     assert (
         normalize_coordination_event(make_event(
             component="job",
-            event="dlq_retry_failed",
+            event="retry_failed",
             data={},
             verbose_only=True,
         ))

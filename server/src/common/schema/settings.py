@@ -95,8 +95,7 @@ class IngestionSettings(ConfigModel):
     message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
     ingestion_batch_settle_delay_seconds: float = Field(120.0, ge=0.0, le=3_600.0)
     message_lifecycle_poll_seconds: float = Field(15.0, ge=1.0, le=300.0)
-    ingestion_claim_lease_seconds: float = Field(300.0, ge=10.0, le=3_600.0)
-    checkpoint_interval: int = Field(32, ge=1)
+    ingestion_max_attempts: int = Field(3, ge=1, le=20)
     session_window: int = Field(24, ge=1)
 
 
@@ -105,33 +104,19 @@ class DocumentIndexingSettings(ConfigModel):
     recovery_batch_size: int = Field(16, ge=1, le=100)
 
 
-class CleanerSettings(ConfigModel):
-    enabled: bool = Field(True)
-    interval_hours: int = Field(24, ge=1)
-    orphan_age_hours: int = Field(24, ge=1)
-    stale_junk_days: int = Field(30, ge=1)
+class DocumentSettings(ConfigModel):
+    rerank_enabled: bool = True
+    rerank_candidates: int = Field(15, ge=1, le=50)
 
 
 class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
     enabled: bool = Field(True)
-    # The window size belongs to each project, not to global ingestion batch
-    # tuning.  These remain server-wide operational limits only.
-    max_message_count: int = Field(72, ge=1)
     # A server-owned hard cap across every persisted narrative field.  The
     # prompt uses 90% of this value; persistence validates the full limit.
     max_narrative_chars: int = Field(4000, ge=500, le=20000)
-    max_age_hours: Optional[float] = Field(None, gt=0)
     prior_episode_candidate_count: int = Field(3, ge=1, le=3)
-    retrieval_episode_limit: int = Field(5, ge=1)
-
-
-class DLQSettings(ConfigModel):
-    interval_seconds: int = Field(60, ge=10)
-    batch_size: int = Field(50, ge=1)
-    max_attempts: int = Field(2, ge=1)
-    completed_state_retention_hours: float = Field(24.0, ge=0.25)
 
 
 class MergeRollbackSettings(ConfigModel):
@@ -145,7 +130,6 @@ class AuditRetentionSettings(ConfigModel):
 
     enabled: bool = Field(True)
     interval_hours: float = Field(24.0, ge=0.25)
-    candidate_suggestion_days: int = Field(30, ge=1)
     tool_audit_days: int = Field(180, ge=1)
     merge_history_days: int = Field(180, ge=1)
 
@@ -158,9 +142,7 @@ class ConflictDiscoverySettings(ConfigModel):
 
 
 class JobSettings(ConfigModel):
-    cleaner: CleanerSettings = Field(default_factory=CleanerSettings)
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
-    dlq: DLQSettings = Field(default_factory=DLQSettings)
     merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
     audit_retention: AuditRetentionSettings = Field(
         default_factory=AuditRetentionSettings
@@ -274,6 +256,7 @@ class DeveloperSettings(ConfigModel):
     )
     nlp_pipeline: TextProcessorSettings = Field(default_factory=TextProcessorSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
+    documents: DocumentSettings = Field(default_factory=DocumentSettings)
     community: CommunitySettings = Field(default_factory=CommunitySettings)
     coordination_log: CoordinationLogSettings = Field(
         default_factory=CoordinationLogSettings

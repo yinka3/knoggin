@@ -157,7 +157,6 @@ async def test_context_add_persists_editable_turn_maps_and_signals_consumer(cont
         "role": "user",
     }
 
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
     assert await resources.redis.get(project_heartbeat_key) == "1"
     assert resources.redis.expirations
 
@@ -249,9 +248,6 @@ async def test_context_add_releases_dedup_claim_after_failure(context, monkeypat
 
     assert retried.id == 2
     assert ctx.consumer.signaled == 1
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
-
-
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_context_add_keeps_durable_pending_claim_and_recovers_signal_failure(
@@ -287,7 +283,6 @@ async def test_context_add_keeps_durable_pending_claim_and_recovers_signal_failu
 
     assert retried.id == 1
     assert await resources.redis.get(dedup_key) == "accepted:1"
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
     assert ctx.consumer.signaled == 1
     assert [
         batch[0]["id"] for batch in resources.knowledge_store.saved_message_logs
@@ -321,9 +316,6 @@ async def test_context_add_keeps_claim_after_message_is_queued(context):
     accepted = await ctx.add(Message(content="hello", timestamp=timestamp))
 
     assert accepted.id == 1
-    assert resources.redis.lists[RedisKeys.buffer("ada", "session-1")] == []
-
-
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_context_assistant_turn_uses_canonical_message_sequence(context):
@@ -367,8 +359,8 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def save_atomically(message, candidates):
-        calls.append((message, candidates))
+    async def save_atomically(message, candidates, *, readable_project_ids):
+        calls.append((message, candidates, readable_project_ids))
         return []
 
     resources.knowledge_store.save_assistant_message_with_source_refs = save_atomically
@@ -395,8 +387,9 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
                     "ingestion_state": "excluded",
                     "episode_eligible": False,
-                },
+            },
             [candidate],
+            ["project-1"],
         )
     ]
     assert resources.knowledge_store.saved_message_logs == []
@@ -413,7 +406,8 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def fail_once_then_save(message, candidates):
+    async def fail_once_then_save(message, candidates, *, readable_project_ids):
+        del readable_project_ids
         calls.append((message, candidates))
         if len(calls) == 1:
             raise ConnectionError("temporary transaction failure")
@@ -448,7 +442,8 @@ async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     attempts = 0
 
-    async def fail_atomically(_message, _candidates):
+    async def fail_atomically(_message, _candidates, *, readable_project_ids):
+        del readable_project_ids
         nonlocal attempts
         attempts += 1
         raise ConnectionError("source reference write failed")
@@ -522,9 +517,9 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         history_calls.append((limit, up_to_msg_id))
         return [{"role": "assistant", "content": "A prior durable answer."}]
 
-    async def persist_assistant(message, candidates):
+    async def persist_assistant(message, candidates, *, readable_project_ids):
         nonlocal persisted
-        source_handoffs.append((message, candidates))
+        source_handoffs.append((message, candidates, readable_project_ids))
         resources.knowledge_store.saved_message_logs.append([message])
         persisted = True
         return candidates
@@ -561,7 +556,7 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         {"role": "assistant", "content": "A prior durable answer."}
     ]
     assert orchestrator.calls[0]["user_message_id"] == 1
-    assistant_message, candidates = source_handoffs[0]
+    assistant_message, candidates, readable_project_ids = source_handoffs[0]
     assert assistant_message["content"] == "Durable final answer"
     assert assistant_message["user_msg_id"] == 1
     assert assistant_message["metadata"] == {
@@ -573,6 +568,7 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         }
     }
     assert candidates[0].source_message_id == 1
+    assert readable_project_ids == ["project-1"]
     assert ctx.agent_run_snapshot() == {
         "state": "completed",
         "active": False,
@@ -771,7 +767,7 @@ async def test_cancelling_one_session_run_does_not_cancel_another(context):
     release_second = asyncio.Event()
 
     async def handler(kwargs):
-        if kwargs["session_id"] == "session-1":
+        if kwargs["context"].session_id == "session-1":
             first_started.set()
             await asyncio.Event().wait()
         second_started.set()

@@ -29,7 +29,7 @@ def test_format_report_is_human_readable():
 
 
 def test_redis_key_classification_uses_declared_families():
-    assert classify_redis_key(RedisKeys.dlq("ada", "p1")) == "ephemeral_only"
+    assert classify_redis_key(RedisKeys.dirty_entities("ada", "p1")) == "ephemeral_only"
     assert (
         classify_redis_key(RedisKeys.conversation("ada", "s1"))
         == "rebuildable_from_postgres"
@@ -46,7 +46,7 @@ def test_redis_runtime_result_can_allow_missing_restart_state():
     assert result.passed is False
     assert result.name == "Redis runtime state present"
 
-    result = redis_runtime_result(["dlq:ada:p1"], allow_missing=False)
+    result = redis_runtime_result(["dirty_entities:ada:p1"], allow_missing=False)
     assert result.passed is True
     assert "1 matching keys" in result.detail
 

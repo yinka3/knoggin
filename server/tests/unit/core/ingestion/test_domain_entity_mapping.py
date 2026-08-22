@@ -2,6 +2,7 @@ import pytest
 
 from common.conf.domain_config import DomainConfig
 from core.ingestion.batch import IngestionBatch
+from core.ingestion.text_processor import TextProcessor
 from tests.fixtures.ingestion import ingestion_policy
 from tests.unit.core.ingestion.test_pipeline_entity_resolution_contract import (
     make_harness,
@@ -10,7 +11,7 @@ from tests.unit.core.ingestion.test_pipeline_entity_resolution_contract import (
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_pipeline_derives_topic_from_canonical_entity_type():
+async def test_pipeline_trusts_text_processor_canonical_mentions():
     policy = ingestion_policy(
         compiled_domain=DomainConfig.from_mapping(
             {
@@ -32,7 +33,7 @@ async def test_pipeline_derives_topic_from_canonical_entity_type():
 
     class Processor:
         async def extract_mentions(self, _batch):
-            return [(1, "Knoggin", "Software Project", "Wrong Topic")]
+            return [(1, "Knoggin", "Software Project", "Software Development")]
 
     pipeline.processor = Processor()
     batch = IngestionBatch.open(
@@ -45,6 +46,44 @@ async def test_pipeline_derives_topic_from_canonical_entity_type():
     )
 
     mentions = await pipeline._extract_mentions(batch)
+
+    assert mentions == [(1, "Knoggin", "Software Project", "Software Development")]
+    assert batch.issues == []
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+def test_text_processor_canonicalizes_types_and_derives_topics():
+    policy = ingestion_policy(
+        compiled_domain=DomainConfig.from_mapping(
+            {
+                "version": 0,
+                "topics": {
+                    "General": {"active": True},
+                    "Software Development": {"active": True},
+                },
+                "entity_types": {
+                    "Software Project": {
+                        "topic": "Software Development",
+                        "labels": ["software project"],
+                    }
+                },
+            }
+        ).compile()
+    )
+    batch = IngestionBatch.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        messages=[{"id": 1, "message": "Knoggin"}],
+        session_text="",
+        policy=policy,
+    )
+
+    mentions = TextProcessor._canonicalize_mentions(
+        [(1, "Knoggin", "software project", "Wrong Topic")],
+        batch,
+    )
 
     assert mentions == [(1, "Knoggin", "Software Project", "Software Development")]
     assert [issue.code for issue in batch.issues] == ["derived_topic_override"]

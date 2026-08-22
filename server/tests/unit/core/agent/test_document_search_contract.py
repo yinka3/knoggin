@@ -617,6 +617,7 @@ async def test_search_documents_adds_source_context_from_the_stored_chunk():
     content_hash = "a" * 64
     stored_chunk = {
         "document_id": "file-1",
+        "project_id": "project-1",
         "original_name": "report.pdf",
         "relative_path": "reports/q2.pdf",
         "extension": ".pdf",
@@ -647,6 +648,7 @@ async def test_search_documents_adds_source_context_from_the_stored_chunk():
     assert results[0]["source_context"] == {
         "source_kind": "pdf_document",
         "document_id": "file-1",
+        "source_project_id": "project-1",
         "content_hash": content_hash,
         "locator": {"kind": "pdf_page", "page": 7},
         "excerpt": stored_chunk["content"],
@@ -676,6 +678,7 @@ async def test_read_document_adds_source_context_from_the_returned_read_range():
     content_hash = "b" * 64
     read_result = {
         "document_id": "file-1",
+        "project_id": "project-1",
         "document_name": "notes.md",
         "relative_path": "docs/notes.md",
         "extension": ".md",
@@ -699,6 +702,7 @@ async def test_read_document_adds_source_context_from_the_returned_read_range():
     assert results[0]["source_context"] == {
         "source_kind": "text_document",
         "document_id": "file-1",
+        "source_project_id": "project-1",
         "content_hash": content_hash,
         "locator": {
             "kind": "text_lines",
@@ -721,6 +725,7 @@ async def test_search_documents_adds_docx_paragraph_source_context():
     content_hash = "d" * 64
     stored_chunk = {
         "document_id": "file-1",
+        "project_id": "project-1",
         "original_name": "outline.docx",
         "relative_path": "docs/outline.docx",
         "extension": ".docx",

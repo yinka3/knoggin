@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 
 from common.schema.health import HealthSnapshot
@@ -78,7 +76,7 @@ def test_health_tools_are_registered_with_low_limits_and_runtime_guidance():
         reason="registry import follows the optional embedding runtime stack",
     )
     from core.agent.tools.registry import (
-        DEFAULT_TOOL_LIMITS,
+        get_default_tool_limits,
         get_runtime_instructions,
         get_tool_schemas,
     )
@@ -87,13 +85,11 @@ def test_health_tools_are_registered_with_low_limits_and_runtime_guidance():
         enabled_tools=["get_engine_health", "get_resource_health"],
     )
     names = {schema["function"]["name"] for schema in schemas}
-    instructions = get_runtime_instructions(
-        SimpleNamespace(maintenance_candidates=[]),
-        frozenset({"get_engine_health", "get_resource_health"}),
-    )
+    instructions = get_runtime_instructions(schemas)
+    limits = get_default_tool_limits()
 
     assert {"get_engine_health", "get_resource_health"} <= names
-    assert DEFAULT_TOOL_LIMITS["get_engine_health"] == 1
-    assert DEFAULT_TOOL_LIMITS["get_resource_health"] == 1
+    assert limits["get_engine_health"] == 1
+    assert limits["get_resource_health"] == 1
     assert "read-only diagnostics" in instructions
     assert "ordinary project questions" in instructions

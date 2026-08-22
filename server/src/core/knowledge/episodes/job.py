@@ -12,14 +12,18 @@ from common.schema.episode.models import EpisodeNarrativeLimitError
 from common.schema.settings import EpisodeSettings
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
-from core.ingestion.episode_policy import EpisodeGenerationPolicy
-from core.ingestion.ports import EmbeddingEncoder, EpisodeStore, StructuredGenerator
-from core.ingestion.project_episode_build import ProjectEpisodeBuild
-from core.ingestion.prompts import (
+from core.knowledge.episodes.build import ProjectEpisodeBuild
+from core.knowledge.episodes.embedding import build_episode_embedding_text
+from core.knowledge.episodes.policy import EpisodeGenerationPolicy
+from core.knowledge.episodes.ports import (
+    EmbeddingEncoder,
+    EpisodeStore,
+    StructuredGenerator,
+)
+from core.knowledge.episodes.prompts import (
     get_episode_generation_prompt,
     get_episode_narrative_repair_prompt,
 )
-from core.knowledge.episodes.embedding import build_episode_embedding_text
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 
 
@@ -57,7 +61,6 @@ class EpisodeJob(BaseJob):
             settings=settings,
             episode_window_size=current_window_size,
         )
-        self.retrieval_episode_limit = settings.retrieval_episode_limit
 
     def update_episode_window_size(self, episode_window_size: int) -> None:
         self._policy = EpisodeGenerationPolicy.capture(
@@ -76,11 +79,11 @@ class EpisodeJob(BaseJob):
         if not self._policy.enabled or self.llm is None or self.embedding_service is None:
             return False
         await self._refresh_project_window_size()
-        window = await self.knowledge_store.get_next_project_episode_window(
-            user_name=ctx.user_name, project_id=ctx.project_id,
+        return await self.knowledge_store.has_ready_project_episode_window(
+            user_name=ctx.user_name,
+            project_id=ctx.project_id,
             message_count=self._policy.target_message_count,
         )
-        return bool(window)
 
     async def load_build(self, *, user_name: str, project_id: str) -> ProjectEpisodeBuild | None:
         messages = await self.knowledge_store.get_next_project_episode_window(

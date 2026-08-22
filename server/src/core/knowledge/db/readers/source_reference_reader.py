@@ -44,6 +44,7 @@ class SourceReferenceReader:
                 ref.message_id,
                 ref.source_kind,
                 ref.document_id,
+                ref.source_project_id,
                 ref.canonical_url,
                 ref.source_message_id,
                 ref.content_hash,
@@ -56,7 +57,8 @@ class SourceReferenceReader:
                 ref.result_position,
                 ref.idempotency_key,
                 ref.created_at,
-                document.status AS document_status
+                document.status AS document_status,
+                document.content_hash AS document_content_hash
             FROM public.message_source_refs AS ref
             JOIN public.messages AS message
               ON message.message_id = ref.message_id
@@ -67,7 +69,7 @@ class SourceReferenceReader:
              AND session.project_id = message.project_id
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
-             AND document.project_id = ref.project_id
+             AND document.project_id = ref.source_project_id
             WHERE ref.message_id = %s
               AND ref.project_id = %s
               AND ref.session_id = %s
@@ -80,6 +82,7 @@ class SourceReferenceReader:
             self._present_reference(
                 self._reference_from_row(row),
                 document_status=row.get("document_status"),
+                document_content_hash=row.get("document_content_hash"),
                 document_status_resolved="document_status" in row,
             )
             for row in rows
@@ -159,6 +162,7 @@ class SourceReferenceReader:
                 ref.message_id,
                 ref.source_kind,
                 ref.document_id,
+                ref.source_project_id,
                 ref.canonical_url,
                 ref.source_message_id,
                 ref.content_hash,
@@ -171,7 +175,8 @@ class SourceReferenceReader:
                 ref.result_position,
                 ref.idempotency_key,
                 ref.created_at,
-                document.status AS document_status
+                document.status AS document_status,
+                document.content_hash AS document_content_hash
             FROM public.episode_messages AS attachment
             JOIN public.episodes AS episode
               ON episode.episode_id = attachment.episode_id
@@ -185,7 +190,7 @@ class SourceReferenceReader:
              AND ref.session_id = attachment.session_id
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
-             AND document.project_id = ref.project_id
+             AND document.project_id = ref.source_project_id
             WHERE attachment.episode_id = %s
               AND episode.project_id = %s
               AND attachment.session_id = %s
@@ -207,6 +212,7 @@ class SourceReferenceReader:
                 self._present_reference(
                     reference,
                     document_status=row.get("document_status"),
+                    document_content_hash=row.get("document_content_hash"),
                     document_status_resolved="document_status" in row,
                 )
             )
@@ -217,7 +223,10 @@ class SourceReferenceReader:
     ) -> list[SourceConsulted]:
         rows = await self.client.fetch_all(
             """
-            SELECT ref.*, document.status AS document_status
+            SELECT
+                ref.*,
+                document.status AS document_status,
+                document.content_hash AS document_content_hash
             FROM public.episode_messages attachment
             JOIN public.episodes episode
               ON episode.episode_id = attachment.episode_id
@@ -229,7 +238,7 @@ class SourceReferenceReader:
              AND ref.session_id = attachment.session_id
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
-             AND document.project_id = ref.project_id
+             AND document.project_id = ref.source_project_id
             WHERE attachment.episode_id = %s AND episode.project_id = %s
               AND project.user_name = %s
             ORDER BY attachment.message_position, ref.created_at,
@@ -246,8 +255,9 @@ class SourceReferenceReader:
                 presented.append(
                     self._present_reference(
                         reference,
-                        document_status=row.get("document_status"),
-                        document_status_resolved="document_status" in row,
+                    document_status=row.get("document_status"),
+                    document_content_hash=row.get("document_content_hash"),
+                    document_status_resolved="document_status" in row,
                     )
                 )
         return presented
@@ -269,6 +279,7 @@ class SourceReferenceReader:
     def _reference_from_row(row: dict[str, Any]) -> SourceReference:
         payload = dict(row)
         payload.pop("document_status", None)
+        payload.pop("document_content_hash", None)
         for field in ("source_ref_id", "document_id"):
             if payload.get(field) is not None:
                 payload[field] = str(payload[field])
@@ -283,13 +294,17 @@ class SourceReferenceReader:
         reference: SourceReference,
         *,
         document_status: str | None = None,
+        document_content_hash: str | None = None,
         document_status_resolved: bool = False,
     ) -> SourceConsulted:
         if reference.source_kind in {"pdf_document", "text_document"}:
             source_status = (
                 "unavailable"
                 if document_status_resolved
-                and document_status in {None, "deleted"}
+                and (
+                    document_status in {None, "deleted"}
+                    or document_content_hash != reference.content_hash
+                )
                 else "available"
             )
         elif reference.source_kind == "user_pasted_text":
@@ -302,6 +317,7 @@ class SourceReferenceReader:
             locator=reference.locator,
             excerpt=reference.excerpt,
             document_id=reference.document_id,
+            source_project_id=reference.source_project_id,
             canonical_url=reference.canonical_url,
             source_message_id=reference.source_message_id,
             source_status=source_status,

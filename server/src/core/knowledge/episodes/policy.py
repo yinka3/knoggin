@@ -16,9 +16,7 @@ class EpisodeGenerationPolicy:
     version: str
     enabled: bool
     target_message_count: int
-    max_message_count: int
     max_narrative_chars: int
-    max_age_hours: float | None
     prior_episode_candidate_count: int
 
     @classmethod
@@ -30,18 +28,11 @@ class EpisodeGenerationPolicy:
     ) -> "EpisodeGenerationPolicy":
         if not 8 <= episode_window_size <= 72:
             raise ValueError("episode_window_size must be between 8 and 72")
-        target_message_count = episode_window_size
-        if settings.max_message_count < target_message_count:
-            raise ValueError(
-                "Episode max_message_count must be at least the target window size"
-            )
 
         values = {
             "enabled": settings.enabled,
-            "target_message_count": target_message_count,
-            "max_message_count": settings.max_message_count,
+            "target_message_count": episode_window_size,
             "max_narrative_chars": settings.max_narrative_chars,
-            "max_age_hours": settings.max_age_hours,
             "prior_episode_candidate_count": settings.prior_episode_candidate_count,
         }
         encoded = json.dumps(values, sort_keys=True, separators=(",", ":"))
@@ -56,10 +47,8 @@ class EpisodeGenerationPolicy:
         return {
             "version": self.version,
             "target_message_count": self.target_message_count,
-            "max_message_count": self.max_message_count,
             "max_narrative_chars": self.max_narrative_chars,
             "prompt_narrative_chars": self.prompt_narrative_chars,
-            "max_age_hours": self.max_age_hours,
             "prior_episode_candidate_count": self.prior_episode_candidate_count,
         }
 

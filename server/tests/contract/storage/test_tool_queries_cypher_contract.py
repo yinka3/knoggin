@@ -1,6 +1,7 @@
 import pytest
 
-from core.knowledge.db.tool_queries import ToolQueries
+from core.knowledge.db.readers.entity_reader import EntityReader
+from core.knowledge.db.readers.graph_reader import GraphReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
 _PATH_DEPTH_ERROR = "max_depth must be an integer between 1 and 4"
@@ -11,10 +12,10 @@ _PATH_DEPTH_ERROR = "max_depth must be an integer between 1 and 4"
 @pytest.mark.parametrize("max_depth", [0, 5, True, "4", "1]-(x)-[]-"])
 async def test_find_path_rejects_untrusted_cypher_depth_before_querying(max_depth):
     client = RecordingPostgresClient()
-    queries = ToolQueries(client)
+    reader = GraphReader(client)
 
     with pytest.raises(ValueError, match=_PATH_DEPTH_ERROR):
-        await queries.find_path_filtered(
+        await reader.find_path_filtered(
             "Ada",
             "Grace",
             visible_project_ids=["project-1"],
@@ -28,10 +29,10 @@ async def test_find_path_rejects_untrusted_cypher_depth_before_querying(max_dept
 @pytest.mark.no_network
 async def test_internal_path_helper_enforces_the_same_cypher_depth_boundary():
     client = RecordingPostgresClient()
-    queries = ToolQueries(client)
+    reader = GraphReader(client)
 
     with pytest.raises(ValueError, match=_PATH_DEPTH_ERROR):
-        await queries._find_shortest_path(
+        await reader._find_shortest_path(
             "Ada",
             "Grace",
             visible_project_ids=["project-1"],
@@ -45,9 +46,9 @@ async def test_internal_path_helper_enforces_the_same_cypher_depth_boundary():
 @pytest.mark.no_network
 async def test_find_path_uses_a_validated_fixed_depth_in_its_cypher_query():
     client = RecordingPostgresClient(fetch_all_results=[[]])
-    queries = ToolQueries(client)
+    reader = GraphReader(client)
 
-    assert await queries.find_path_filtered(
+    assert await reader.find_path_filtered(
         "Ada",
         "Grace",
         visible_project_ids=["project-1"],
@@ -96,9 +97,9 @@ async def test_related_entities_exposes_observed_evidence_metadata():
             ]
         ]
     )
-    queries = ToolQueries(client)
+    reader = EntityReader(client)
 
-    result = await queries.get_related_entities(
+    result = await reader.get_related_entities_by_name(
         ["Ade"],
         visible_project_ids=["project-1"],
     )
@@ -109,9 +110,6 @@ async def test_related_entities_exposes_observed_evidence_metadata():
             "target": "Acme",
             "relationship_id": "project-1:1:2:works_at",
             "relationship_type": "works_at",
-            "canonical_relationship_type": "works_at",
-            "observed_relationship_label": "works at",
-            "domain_status": "recognized",
             "symmetric": False,
             "relationship_semantics": "observed_evidence",
             "connection_strength": 2.0,
@@ -130,12 +128,9 @@ async def test_related_entities_exposes_observed_evidence_metadata():
             "observation_count": 2,
             "first_observed": 100,
             "last_observed": 200,
-            "confidence": 0.9,
-            "last_seen": 200,
-            "context": "Ade joined Acme.",
         }
     ]
     query = client.calls[0][1]
     assert "relationship_observations" in query
     assert "observation_refs" in query
-    assert "evidence_message_count" in query
+    assert "relationship_observations" in query

@@ -1,7 +1,7 @@
 """Typed contracts for ingestion and graph-persistence handoffs."""
 
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import (
@@ -358,6 +358,62 @@ class AliasUpdate:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class IngestionCommit:
+    """The complete durable change set for one claimed ingestion batch."""
+
+    scope: ExecutionScope
+    batch_id: str
+    message_ids: tuple[int, ...]
+    entity_writes: tuple[EntityWrite, ...] = ()
+    alias_updates: tuple[AliasUpdate, ...] = ()
+    message_entity_refs: tuple[MessageEntityRef, ...] = ()
+    relationship_writes: tuple[RelationshipWrite, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scope, ExecutionScope):
+            raise TypeError("IngestionCommit.scope must be an ExecutionScope")
+        if not self.scope.project_id:
+            raise ValueError("IngestionCommit requires a project-scoped execution")
+        object.__setattr__(
+            self,
+            "batch_id",
+            _require_nonblank_text(self.batch_id, "IngestionCommit.batch_id"),
+        )
+        if not isinstance(self.message_ids, tuple):
+            raise ValueError("IngestionCommit.message_ids must be a tuple")
+        message_ids = tuple(
+            _require_positive_id(message_id, "IngestionCommit.message_ids entry")
+            for message_id in self.message_ids
+        )
+        if not message_ids or len(message_ids) != len(set(message_ids)):
+            raise ValueError("IngestionCommit requires unique claimed message IDs")
+        object.__setattr__(self, "message_ids", tuple(sorted(message_ids)))
+
+        for field_name, values, expected_type in (
+            ("entity_writes", self.entity_writes, EntityWrite),
+            ("alias_updates", self.alias_updates, AliasUpdate),
+            ("message_entity_refs", self.message_entity_refs, MessageEntityRef),
+            ("relationship_writes", self.relationship_writes, RelationshipWrite),
+        ):
+            if not isinstance(values, tuple) or not all(
+                isinstance(value, expected_type) for value in values
+            ):
+                raise TypeError(
+                    f"IngestionCommit.{field_name} must contain "
+                    f"{expected_type.__name__} instances"
+                )
+
+        claimed_ids = set(message_ids)
+        evidence_ids = {
+            reference.message_id for reference in self.message_entity_refs
+        } | {relationship.message_id for relationship in self.relationship_writes}
+        if not evidence_ids.issubset(claimed_ids):
+            raise ValueError(
+                "IngestionCommit evidence must belong to claimed messages"
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SkippedRelationship:
     """Relationship observation skipped before graph persistence."""
 
@@ -387,39 +443,3 @@ class GraphWriteSummary:
     dirty_entities_marked: int = 0
     zombies_filtered: int = 0
     relationships_skipped: int = 0
-
-
-@dataclass
-class CandidateSuggestion:
-    """Advisory entity-resolution candidate preserved for later review."""
-
-    msg_id: int
-    mention: str
-    mention_type: str
-    mention_topic: str
-    candidate_id: int
-    candidate_name: str
-    base_score: float
-    reasons: List[str] = field(default_factory=list)
-    created_entity_id: Optional[int] = None
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "CandidateSuggestion":
-        return cls(
-            msg_id=int(data.get("msg_id", 0)),
-            mention=str(data.get("mention") or ""),
-            mention_type=str(data.get("mention_type") or ""),
-            mention_topic=str(data.get("mention_topic") or ""),
-            candidate_id=int(data.get("candidate_id", 0)),
-            candidate_name=str(data.get("candidate_name") or ""),
-            base_score=float(data.get("base_score") or 0.0),
-            reasons=list(data.get("reasons") or []),
-            created_entity_id=(
-                int(data["created_entity_id"])
-                if data.get("created_entity_id") is not None
-                else None
-            ),
-        )

@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import AsyncGenerator, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -39,21 +41,32 @@ from core.agent.system_prompt import (
     get_agent_prompt,
     get_fallback_summary_prompt,
 )
-from core.agent.tool_call import ToolCall
 from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
 from core.agent.tools.registry import (
     Tools,
-    apply_tool_error_hooks,
-    apply_tool_result_hooks,
-    configure_tool_authorization,
-    get_active_tool_names,
-    get_runtime_instructions,
-    get_tool_schemas,
+    install_tool_runtime,
 )
 from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
+PUBLIC_AGENT_FAILURE_MESSAGE = "The agent couldn't complete this request. Please try again."
+
+
+class _AgentPhase(StrEnum):
+    PLAN = "PLAN"
+    EXECUTE = "EXECUTE"
+    SYNTHESIZE = "SYNTHESIZE"
+
+
+@dataclass
+class _ToolCall:
+    """Temporary parsed call state owned by the executor loop."""
+
+    name: str
+    args: Dict = field(default_factory=dict)
+    thinking: Optional[str] = None
+    call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 def _is_local_reference_resolution_error(message: str) -> bool:
@@ -91,21 +104,20 @@ class AgentExecutor:
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
+        install_tool_runtime(
+            tools,
+            ctx.tool_runtime,
+            ctx.short_uuid_references,
+        )
         for candidate in ctx.initial_source_candidates:
             ctx.record_source(candidate)
 
     async def execute(
         self,
         user_timezone: Optional[str] = None,
-        model: Optional[str] = None,
-        enabled_tools: Optional[List[str]] = None,
         simulated_date: Optional[str] = None,
-        agent_temperature: float = 0.7,
-        agent_brain: Optional[str] = None,
-        agent_directives: Optional[str] = None,
-        additional_tool_schemas: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
-        """Run one agent execution and discard its model-only UUID handles."""
+        """Run one execution from the policy captured on ``AgentRun``."""
 
         with diagnostic_scope(
             user_name=self.ctx.user_name,
@@ -116,13 +128,7 @@ class AgentExecutor:
             try:
                 async for event in self._execute_run(
                     user_timezone=user_timezone,
-                    model=model,
-                    enabled_tools=enabled_tools,
                     simulated_date=simulated_date,
-                    agent_temperature=agent_temperature,
-                    agent_brain=agent_brain,
-                    agent_directives=agent_directives,
-                    additional_tool_schemas=additional_tool_schemas,
                 ):
                     yield event
             finally:
@@ -131,13 +137,7 @@ class AgentExecutor:
     async def _execute_run(
         self,
         user_timezone: Optional[str] = None,
-        model: Optional[str] = None,
-        enabled_tools: Optional[List[str]] = None,
         simulated_date: Optional[str] = None,
-        agent_temperature: float = 0.7,
-        agent_brain: Optional[str] = None,
-        agent_directives: Optional[str] = None,
-        additional_tool_schemas: Optional[List[Dict]] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Runs the reasoning loop and yields events."""
 
@@ -157,12 +157,10 @@ class AgentExecutor:
         )
         project_context = await self._load_project_context()
 
-        a_directives = agent_directives or ""
-
         last_result = None
 
-        # Reasoning Loop
-        needs_replanning = False
+        # The executor, not the model, owns phase transitions.
+        needs_replan = False
         needs_final_synthesis = False
 
         while self.ctx.attempt_count < self.ctx.limits.max_attempts:
@@ -173,37 +171,31 @@ class AgentExecutor:
             if not self.ctx.begin_attempt():
                 break
 
-            current_model = None
-            current_reasoning = None
-
-            if self.ctx.attempt_count == 1 or needs_replanning or needs_final_synthesis:
-                # Architect Mode: Strategic planning or final synthesis
-                current_mode_name = "Architect"
-                current_model = model or self.llm.agent_model
+            if needs_final_synthesis:
+                phase = _AgentPhase.SYNTHESIZE
+                current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "high"
-                if needs_replanning:
-                    logger.info(
-                        "AgentExecutor: Escalating back to Architect for re-planning."
-                    )
-                elif needs_final_synthesis:
-                    logger.info(
-                        "AgentExecutor: Architect performing final synthesis/review."
-                    )
+                logger.info("AgentExecutor: synthesizing the final response.")
+            elif self.ctx.attempt_count == 1 or needs_replan:
+                phase = _AgentPhase.PLAN
+                current_model = self.ctx.model or self.llm.agent_model
+                current_reasoning = "high"
+                if needs_replan:
+                    logger.info("AgentExecutor: replanning after an insufficient step.")
             else:
-                # Librarian Mode: Execution, use the lighter extraction model
-                current_mode_name = "Librarian"
-                current_model = model or self.llm.extraction_model
+                phase = _AgentPhase.EXECUTE
+                current_model = self.ctx.model or self.llm.extraction_model
                 current_reasoning = "medium"
 
-            # Reset flags so the next turn defaults to Librarian.
-            needs_replanning = False
+            # Reset flags so a successful retrieval defaults back to execution.
+            needs_replan = False
             needs_final_synthesis = False
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
 
             # Call LLM for this step
-            pending_tool_calls: List[ToolCall] = []
+            pending_tool_calls: List[_ToolCall] = []
             step_failed = False
             step_completed = False
 
@@ -211,15 +203,10 @@ class AgentExecutor:
                 current_time,
                 current_model,
                 current_reasoning,
-                current_mode_name,
-                enabled_tools,
+                phase,
                 documents_context,
                 document_focus_context,
-                a_directives,
-                agent_temperature,
-                agent_brain or "",
                 last_result,
-                additional_tool_schemas,
                 project_context=project_context,
             ):
                 event_type = event["event"]
@@ -280,10 +267,9 @@ class AgentExecutor:
                             sources_consulted=list(self.ctx.source_candidates),
                         )
 
-                        if current_mode_name == "Librarian":
+                        if phase is not _AgentPhase.SYNTHESIZE:
                             logger.info(
-                                "AgentExecutor: Librarian believes we have the answer. "
-                                "Promoting to Architect for final synthesis."
+                                "AgentExecutor: evidence is ready; scheduling synthesis."
                             )
                             needs_final_synthesis = True
                             break
@@ -314,23 +300,6 @@ class AgentExecutor:
                         }
                         return
 
-                    replanning = next(
-                        (
-                            call
-                            for call in pending_tool_calls
-                            if call.name == "request_replanning"
-                        ),
-                        None,
-                    )
-                    if replanning:
-                        reason = replanning.args.get("reason", "No reason provided")
-                        logger.info(
-                            "AgentExecutor: Librarian requested re-planning. "
-                            f"Reason: {reason}"
-                        )
-                        needs_replanning = True
-                        break
-
                     async for tool_event in self._execute_tools(
                         pending_tool_calls,
                         current_results,
@@ -357,7 +326,7 @@ class AgentExecutor:
                                 f"{self.ctx.consecutive_empty_results} "
                                 "consecutive empty results. Forcing replan."
                             )
-                            needs_replanning = True
+                            needs_replan = True
                             self.ctx.clear_empty_results()
                     else:
                         self.ctx.clear_empty_results()
@@ -378,6 +347,7 @@ class AgentExecutor:
                 ):
                     yield self._terminal_error()
                     return
+                needs_replan = True
                 continue
 
         # Fallback if max attempts reached
@@ -391,65 +361,41 @@ class AgentExecutor:
         date: str,
         model: Optional[str],
         reasoning: str,
-        current_mode: str,
-        enabled_tools: Optional[List[str]],
+        phase: _AgentPhase,
         documents_context: str,
         document_focus_context: str,
-        directives: str,
-        temp: float,
-        agent_brain: str,
         last_result: Optional[List[Dict]],
-        additional_tool_schemas: Optional[List[Dict]] = None,
         project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
-        active_schemas = get_tool_schemas(enabled_tools)
-        if additional_tool_schemas:
-            active_schemas = active_schemas + additional_tool_schemas
-
-        active_tool_names = get_active_tool_names(active_schemas)
-        runtime_instructions = get_runtime_instructions(self.ctx, active_tool_names)
-
         system_prompt = get_agent_prompt(
-            user_name=self.ctx.scope.user_name,
+            user_name=self.ctx.user_name,
             current_time=date,
             persona=self.ctx.agent.persona,
             agent_name=self.ctx.agent.name,
             documents_context=documents_context,
             document_focus_context=document_focus_context,
-            agent_directives=directives,
-            agent_brain=agent_brain,
+            agent_directives=self.ctx.directives,
+            agent_brain=self.ctx.brain,
             project_context=project_context,
-            runtime_instructions=runtime_instructions,
+            runtime_instructions=self.ctx.tool_runtime.runtime_instructions,
             active_topics=self.ctx.active_topics,
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
-            current_mode=current_mode,
+            phase=phase,
         )
 
         user_message = build_user_message(self.ctx, last_result)
         self.ctx.clear_last_error()
-        configure_tool_authorization(
-            self.tools,
-            active_schemas,
-            user_name=self.ctx.scope.user_name,
-            agent_id=self.ctx.agent.config.id or getattr(self.tools, "agent_id", ""),
-            project_id=(
-                self.ctx.scope.project_id or str(getattr(self.tools, "project_id", ""))
-            ),
-            session_id=self.ctx.scope.session_id,
-            run_id=self.ctx.run_id,
-        )
-
         saw_tool_calls = False
 
         try:
             async for event in self.llm.stream_with_tools(
                 system=system_prompt,
                 user=user_message,
-                tools=active_schemas,
+                tools=list(self.ctx.tool_runtime.schemas),
                 model=model or self.llm.agent_model,
-                temperature=temp,
+                temperature=self.ctx.temperature,
             reasoning=reasoning,
         ):
                 if event["event"] == "tool_calls":
@@ -475,7 +421,7 @@ class AgentExecutor:
                 "event": "step_error",
                 "data": {
                     "kind": "provider",
-                    "message": f"LLM API failure: {str(e)}",
+                    "message": "LLM provider unavailable",
                 },
             }
 
@@ -503,10 +449,10 @@ class AgentExecutor:
         self,
         calls: List[StreamToolCall],
         content: str,
-    ) -> List[ToolCall]:
+    ) -> List[_ToolCall]:
         thinking = content.strip() or None
         return [
-            ToolCall(
+            _ToolCall(
                 name=call["name"],
                 args=self._safe_parse_args(call.get("arguments", "{}")),
                 thinking=thinking,
@@ -524,17 +470,10 @@ class AgentExecutor:
         )
 
     def _terminal_error(self) -> ErrorEvent:
-        message = self.ctx.last_error or "Agent execution failed"
         self.ctx.finish_without_response()
         return {
             "event": "error",
-            "data": {
-                "message": (
-                    "Agent stopped after "
-                    f"{self.ctx.consecutive_errors} consecutive errors: "
-                    f"{message}"
-                )
-            },
+            "data": {"message": PUBLIC_AGENT_FAILURE_MESSAGE},
         }
 
     @staticmethod
@@ -557,7 +496,7 @@ class AgentExecutor:
         return {"_parse_error": True, "_raw": json_str[:500]}
 
     async def _execute_tools(
-        self, tool_calls: List[ToolCall], results_out: List[Dict]
+        self, tool_calls: List[_ToolCall], results_out: List[Dict]
     ) -> AsyncGenerator[Dict, None]:
         """Executes a batch of tool calls sequentially to avoid shared state races."""
 
@@ -631,12 +570,6 @@ class AgentExecutor:
 
                 self.ctx.record_tool_call(call.name, call.args)
 
-                if call.name == "request_clarification":
-                    question = call.args.get("question", "Could you clarify?")
-                    self.ctx.finish_without_response()
-                    yield {"event": "clarification", "data": {"question": question}}
-                    return
-
                 if call.args.get("_parse_error"):
                     error_message = f"Failed to parse arguments for '{call.name}'"
                     self.ctx.note_nonfatal_error(error_message)
@@ -651,32 +584,12 @@ class AgentExecutor:
                     }
                     continue
 
-                missing = object()
-                previous_short_uuid_references = getattr(
-                    self.tools, "short_uuid_references", missing
-                )
-                self.tools.short_uuid_references = self.ctx.short_uuid_references
-                try:
-                    async with asyncio.timeout(self.ctx.limits.tool_timeout):
-                        result = await execute_tool(
-                            self.tools,
-                            call.name,
-                            call.args,
-                        )
-                finally:
-                    if previous_short_uuid_references is missing:
-                        delattr(self.tools, "short_uuid_references")
-                    else:
-                        self.tools.short_uuid_references = (
-                            previous_short_uuid_references
-                        )
-
-                await apply_tool_result_hooks(
-                    self.ctx,
-                    self.tools,
-                    call.name,
-                    result,
-                )
+                async with asyncio.timeout(self.ctx.limits.tool_timeout):
+                    result = await execute_tool(
+                        self.tools,
+                        call.name,
+                        call.args,
+                    )
 
                 self.ctx.record_sources(
                     capture_tool_source_candidates(self.ctx, call, result)
@@ -703,13 +616,7 @@ class AgentExecutor:
                     f"{self.ctx.limits.tool_timeout:g} seconds"
                 )
                 logger.warning(f"Tool {call.name}: {message}")
-                handled_as_maintenance = await apply_tool_error_hooks(
-                    self.ctx,
-                    self.tools,
-                    call.name,
-                )
-                if not handled_as_maintenance:
-                    self.ctx.record_error(message)
+                self.ctx.record_error(message)
                 results_out.append({"tool": call.name, "error": message})
                 yield {
                     "event": "tool_error",
@@ -722,7 +629,7 @@ class AgentExecutor:
             except ToolExecutionError as e:
                 if _is_local_reference_resolution_error(e.message):
                     await emit(
-                        self.ctx.scope.session_id,
+                        self.ctx.session_id,
                         "agent",
                         "local_reference_resolution_failed",
                         {
@@ -731,11 +638,7 @@ class AgentExecutor:
                             "reason": "unknown_or_wrong_type",
                         },
                     )
-                handled_as_maintenance = await apply_tool_error_hooks(
-                    self.ctx, self.tools, call.name
-                )
-                if not handled_as_maintenance:
-                    self.ctx.record_error(e.message)
+                self.ctx.record_error(e.message)
                 results_out.append({"tool": call.name, "error": e.message})
                 yield {
                     "event": "tool_error",
@@ -747,11 +650,7 @@ class AgentExecutor:
                 }
             except Exception as e:
                 logger.exception(f"Tool {call.name} unexpected failure: {e}")
-                handled_as_maintenance = await apply_tool_error_hooks(
-                    self.ctx, self.tools, call.name
-                )
-                if not handled_as_maintenance:
-                    self.ctx.record_error("Internal tool failure")
+                self.ctx.record_error("Internal tool failure")
                 results_out.append(
                     {"tool": call.name, "error": "Internal tool failure"}
                 )
@@ -847,7 +746,7 @@ class AgentExecutor:
             )
 
         prompt = get_fallback_summary_prompt(
-            self.ctx.scope.user_name, self.ctx.user_query, evidence_ctx
+            self.ctx.user_name, self.ctx.user_query, evidence_ctx
         )
 
         return await self.llm.generate_text(
@@ -917,7 +816,7 @@ class AgentExecutor:
 
     async def _emit_llm_call(self, model: Optional[str], reasoning: str):
         await emit(
-            self.ctx.scope.session_id,
+            self.ctx.session_id,
             "agent",
             "llm_call",
             {

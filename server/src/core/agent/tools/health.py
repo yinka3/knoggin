@@ -46,7 +46,7 @@ class HealthTools:
         return _dump_health_snapshot(snapshot)
 
     async def get_ingestion_health(self) -> Dict:
-        """Report bounded ingestion worker, queue, checkpoint, and DLQ state."""
+        """Report bounded ingestion worker and canonical queue state."""
 
         service = getattr(self, "health_service", None)
         if service is None:

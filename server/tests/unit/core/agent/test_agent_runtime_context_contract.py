@@ -407,11 +407,6 @@ def test_update_accumulators_ignores_errors_and_empty_results():
             {"data": [{"content": "lines"}]},
             ("Read document content", 1),
         ),
-        (
-            "request_replanning",
-            {"data": {"replanning": "stuck"}},
-            ("Requested a new plan", 1),
-        ),
         ("anything_else", {"data": {"ok": True}}, ("Completed", 1)),
         ("anything_else", {"data": None}, ("No results", 0)),
         ("anything_else", {"error": "boom"}, ("Error: boom", 0)),

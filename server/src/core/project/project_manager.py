@@ -35,6 +35,7 @@ from core.project.domain_config_store import (
     DomainConfigConflict,
     DomainConfigStore,
 )
+from core.project.entity_cleanup import EntityCleanupWorkflow
 from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
 from infrastructure.redis_client import RedisKeys
 from runtime.project_factory import ProjectRuntimeFactory
@@ -48,7 +49,9 @@ class ProjectStatus(str, Enum):
     DELETED = "deleted"
 
 
-def _parse_initial_domain(candidate: DomainConfig | Mapping[str, object]) -> DomainConfig:
+def _parse_initial_domain(
+    candidate: DomainConfig | Mapping[str, object],
+) -> DomainConfig:
     """Validate the complete domain required to create a new project."""
 
     config = parse_candidate(candidate)
@@ -136,9 +139,7 @@ class ProjectManager:
                 f"knoggin-project-workspace:{project_id}",
             )
         )
-        project_file_content = build_project_markdown(name, description).encode(
-            "utf-8"
-        )
+        project_file_content = build_project_markdown(name, description).encode("utf-8")
         project_file_hash = hashlib.sha256(project_file_content).hexdigest()
         async with self.pg.transaction() as cur:
             await cur.execute(
@@ -357,18 +358,6 @@ class ProjectManager:
             project_id=project_id,
         )
 
-    async def requeue_parked_dlq_item(self, project_id: str, dlq_id: str) -> bool:
-        """Requeue a human-reviewed DLQ item through its active project runtime."""
-        await self._require_domain_project(project_id, allow_archived=True)
-        state = self.active_projects.get(project_id)
-        if state is None or state.dlq_job is None:
-            raise RuntimeError("Project runtime is not active for DLQ requeue")
-        return await state.dlq_job.requeue_parked_dlq_item(
-            user_name=self.user_name,
-            project_id=project_id,
-            dlq_id=dlq_id,
-        )
-
     async def get_conflict_group(self, project_id: str, conflict_id: str) -> dict:
         """Return the conflict workflow subject and immutable evidence snapshots."""
 
@@ -486,9 +475,7 @@ class ProjectManager:
             {
                 "session_id": str(row["session_id"]),
                 "enabled": bool(row["episode_participation_enabled"]),
-                "after_message_id": int(
-                    row["episode_participation_after_message_id"]
-                ),
+                "after_message_id": int(row["episode_participation_after_message_id"]),
             }
             for row in rows
         ]
@@ -735,12 +722,19 @@ class ProjectManager:
                 await active_state.shutdown()
                 del self.active_projects[project_id]
 
-            session_ids, agent_ids = await self._project_runtime_member_ids(project_id)
-            await self._delete_project_redis_state(
-                project_id,
-                session_ids=session_ids,
-                agent_ids=agent_ids,
-            )
+            session_ids: List[str] = []
+            agent_ids: List[str] = []
+            if getattr(self.resources, "redis", None) is not None:
+                try:
+                    session_ids, agent_ids = await self._project_runtime_member_ids(
+                        project_id
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not snapshot Redis cleanup members for project {}: {}",
+                        project_id,
+                        exc,
+                    )
             deleted = await self._project_deletion_writer.delete_project(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -748,6 +742,19 @@ class ProjectManager:
             if deleted is None:
                 raise RuntimeError(
                     f"Project '{project_id}' disappeared during deletion"
+                )
+
+            try:
+                await self._delete_project_redis_state(
+                    project_id,
+                    session_ids=session_ids,
+                    agent_ids=agent_ids,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Durable deletion completed but Redis cleanup failed for project {}: {}",
+                    project_id,
+                    exc,
                 )
 
             logger.info(
@@ -890,7 +897,7 @@ class ProjectManager:
         leases.add(session_id)
         return project_state
 
-    async def rebuild_project_search_indexes(self, project_id: str) -> Dict[str, int]:
+    async def rebuild_project_embeddings(self, project_id: str) -> Dict[str, int]:
         async with self._maintenance_lock:
             project = await self.get_project(project_id)
             if project is None:
@@ -903,26 +910,60 @@ class ProjectManager:
             ]
             if active_runtime_projects:
                 raise RuntimeError(
-                    "Search index repair requires all project runtimes to be "
+                    "Embedding rebuild requires all project runtimes to be "
                     f"inactive; active projects: {active_runtime_projects}"
                 )
 
-            rows = await self.pg.fetch_all(
-                """
-                SELECT project_id
-                FROM public.projects
-                WHERE user_name = %(user_name)s
-                  AND status IN ('active', 'archived')
-                ORDER BY project_id
-                """,
-                {"user_name": self.user_name},
-            )
-            identity_project_ids = [row["project_id"] for row in rows]
-            return await self.resources.knowledge_store.rebuild_project_search_indexes(
+            return await self.resources.knowledge_store.rebuild_project_embeddings(
                 project_id,
                 self.user_name,
-                identity_project_ids,
             )
+
+    async def preview_entity_cleanup(
+        self,
+        project_id: str,
+        *,
+        limit: int = 100,
+    ) -> dict:
+        """Preview project-owned derived entities for explicit user cleanup."""
+
+        async with self._maintenance_lock:
+            project = await self.get_project(project_id)
+            if project is None:
+                raise ValueError(f"Project '{project_id}' does not exist")
+            return await self._entity_cleanup_workflow().preview(
+                user_name=self.user_name,
+                project_id=project_id,
+                limit=limit,
+            )
+
+    async def apply_entity_cleanup(
+        self,
+        project_id: str,
+        *,
+        entity_ids: List[int],
+    ) -> dict:
+        """Delete user-selected derived entities while preserving messages."""
+
+        async with self._maintenance_lock:
+            project = await self.get_project(project_id)
+            if project is None:
+                raise ValueError(f"Project '{project_id}' does not exist")
+            result = await self._entity_cleanup_workflow().apply(
+                user_name=self.user_name,
+                project_id=project_id,
+                entity_ids=entity_ids,
+            )
+            runtime = self.active_projects.get(project_id)
+            if runtime is not None:
+                runtime.entities.remove_entities(result["deleted_entity_ids"])
+            return result
+
+    def _entity_cleanup_workflow(self) -> EntityCleanupWorkflow:
+        knowledge_store = getattr(self.resources, "knowledge_store", None)
+        if knowledge_store is None:
+            raise RuntimeError("Knowledge storage is unavailable for entity cleanup")
+        return EntityCleanupWorkflow(knowledge_store)
 
     async def preview_historical_reclassification(
         self,
@@ -998,43 +1039,34 @@ class ProjectManager:
                 raise DomainConfigConflict(expected_domain_version, actual_version)
 
             domain = stored.compile()
-            result = await self.resources.knowledge_store.reclassify_historical_entities(
-                user_name=self.user_name,
-                project_id=project_id,
-                domain=domain,
-                batch_size=batch_size,
-                max_entities=max_entities,
+            result = (
+                await self.resources.knowledge_store.reclassify_historical_entities(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                    domain=domain,
+                    batch_size=batch_size,
+                    max_entities=max_entities,
+                )
             )
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
-            summary["search_index_rebuilt"] = False
+            summary["embeddings_rebuilt"] = False
             if result.updated:
-                summary["projection"] = (
-                    await self.resources.knowledge_store.rebuild_project_projection(
-                        project_id,
-                        self.user_name,
-                    )
+                summary[
+                    "projection"
+                ] = await self.resources.knowledge_store.rebuild_project_projection(
+                    project_id,
+                    self.user_name,
                 )
                 summary["projection_rebuilt"] = True
 
-                rows = await self.pg.fetch_all(
-                    """
-                    SELECT project_id
-                    FROM public.projects
-                    WHERE user_name = %(user_name)s
-                      AND status IN ('active', 'archived')
-                    ORDER BY project_id
-                    """,
-                    {"user_name": self.user_name},
+                summary[
+                    "embeddings"
+                ] = await self.resources.knowledge_store.rebuild_project_embeddings(
+                    project_id,
+                    self.user_name,
                 )
-                summary["search_index"] = (
-                    await self.resources.knowledge_store.rebuild_project_search_indexes(
-                        project_id,
-                        self.user_name,
-                        [row["project_id"] for row in rows],
-                    )
-                )
-                summary["search_index_rebuilt"] = True
+                summary["embeddings_rebuilt"] = True
             return summary
 
     async def preview_historical_relationship_normalization(
@@ -1101,26 +1133,30 @@ class ProjectManager:
             if stored.version != expected_domain_version:
                 raise DomainConfigConflict(expected_domain_version, stored.version)
 
-            result = await self.resources.knowledge_store.normalize_historical_relationships(
-                user_name=self.user_name,
-                project_id=project_id,
-                domain=stored.compile(),
-                batch_size=batch_size,
-                max_relationships=max_relationships,
+            result = (
+                await self.resources.knowledge_store.normalize_historical_relationships(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                    domain=stored.compile(),
+                    batch_size=batch_size,
+                    max_relationships=max_relationships,
+                )
             )
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
             if result.updated:
-                summary["projection"] = (
-                    await self.resources.knowledge_store.rebuild_project_projection(
-                        project_id,
-                        self.user_name,
-                    )
+                summary[
+                    "projection"
+                ] = await self.resources.knowledge_store.rebuild_project_projection(
+                    project_id,
+                    self.user_name,
                 )
                 summary["projection_rebuilt"] = True
             return summary
 
-    async def release_project_for_session(self, project_id: str, session_id: str) -> None:
+    async def release_project_for_session(
+        self, project_id: str, session_id: str
+    ) -> None:
         """Release one exact session lease and stop the final project runtime."""
         async with self._maintenance_lock:
             leases = self._project_leases.get(project_id)

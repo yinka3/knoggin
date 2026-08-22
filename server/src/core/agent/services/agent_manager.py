@@ -12,6 +12,8 @@ from common.utils.agent_identity import (
 )
 from core.agent.tools.registry import get_registered_tool_names
 
+_UNSET = object()
+
 
 def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
     """Translate the agents-table row once at the repository boundary."""
@@ -38,10 +40,11 @@ def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
 
 
 class AgentManager:
-    def __init__(self, resources, user_name, active_sessions):
+    """Application-owned durable agent configuration boundary."""
+
+    def __init__(self, resources, user_name):
         self.resources = resources
         self.user_name = user_name
-        self.active_sessions = active_sessions
         self.pg = resources.postgres
 
     @staticmethod
@@ -62,10 +65,6 @@ class AgentManager:
             WHERE user_name = %(user_name)s
         '''
         rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
-
-        if not rows:
-            await self._seed_default_agents()
-            rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
 
         return [agent_from_row(row) for row in rows]
 
@@ -106,18 +105,51 @@ class AgentManager:
 
         return agent_from_row(rows[0])
 
-    async def get_default_agent_id(self) -> str:
-        """Get default agent ID. Seeds defaults if none exist."""
+    async def ensure_default_agent(self) -> str:
+        """Create or repair the durable default-agent invariant at startup."""
         query = (
             "SELECT agent_id FROM public.agents "
             "WHERE user_name = %(user_name)s AND is_default = true LIMIT 1"
         )
         rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
+        if rows:
+            return rows[0]["agent_id"]
 
+        existing = await self.pg.fetch_all(
+            """
+            SELECT agent_id
+            FROM public.agents
+            WHERE user_name = %(user_name)s
+            ORDER BY created_at ASC, agent_id ASC
+            LIMIT 1
+            """,
+            {"user_name": self.user_name},
+        )
+        if existing:
+            agent_id = existing[0]["agent_id"]
+            await self.pg.execute(
+                """
+                UPDATE public.agents
+                SET is_default = true, updated_at = now()
+                WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+                """,
+                {"user_name": self.user_name, "agent_id": agent_id},
+            )
+            return agent_id
+
+        await self._seed_default_agents()
+        rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
+        return rows[0]["agent_id"]
+
+    async def get_default_agent_id(self) -> str:
+        """Read the startup-initialized default agent without mutating state."""
+        rows = await self.pg.fetch_all(
+            "SELECT agent_id FROM public.agents "
+            "WHERE user_name = %(user_name)s AND is_default = true LIMIT 1",
+            {"user_name": self.user_name},
+        )
         if not rows:
-            await self._seed_default_agents()
-            rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
-
+            raise RuntimeError("Default agent has not been initialized")
         return rows[0]["agent_id"]
 
     async def create_agent(
@@ -192,28 +224,33 @@ class AgentManager:
     async def update_agent(
         self,
         agent_id: str,
-        name: str = None,
-        brain: str = None,
-        model: str = None,
-        temperature: Optional[float] = None,
-        enabled_tools: Optional[List[str]] = None,
+        name: str | object = _UNSET,
+        brain: Optional[str] | object = _UNSET,
+        model: Optional[str] | object = _UNSET,
+        temperature: Optional[float] | object = _UNSET,
+        enabled_tools: Optional[List[str]] | object = _UNSET,
     ) -> Optional[AgentConfig]:
         """Update an existing agent. Returns None if not found."""
         config = await self.get_agent(agent_id)
         if not config:
             return None
 
+        if name is None:
+            raise ValueError("Agent name cannot be cleared")
+        if temperature is None:
+            raise ValueError("Agent temperature cannot be cleared")
+
         candidate = AgentConfig(
             id=config.id,
-            name=name if name is not None else config.name,
+            name=name if name is not _UNSET else config.name,
             persona=config.persona,
-            brain=brain if brain is not None else config.brain,
-            model=model if model is not None else config.model,
+            brain=brain if brain is not _UNSET else config.brain,
+            model=model if model is not _UNSET else config.model,
             temperature=(
-                temperature if temperature is not None else config.temperature
+                temperature if temperature is not _UNSET else config.temperature
             ),
             enabled_tools=(
-                enabled_tools if enabled_tools is not None else config.enabled_tools
+                enabled_tools if enabled_tools is not _UNSET else config.enabled_tools
             ),
             is_default=config.is_default,
             is_spawned=config.is_spawned,
@@ -226,25 +263,26 @@ class AgentManager:
         updates = []
         params = {"user_name": self.user_name, "agent_id": agent_id}
 
-        if name is not None:
+        if name is not _UNSET:
             updates.append("name = %(name)s")
             params["name"] = candidate.name
-        if brain is not None:
+        if brain is not _UNSET:
             new_revision = int(config.brain_revision or 1) + 1
-            brain = normalize_agent_brain(
-                brain,
-                config.persona_markdown,
+            normalized_brain = (
+                normalize_agent_brain(brain, config.persona_markdown)
+                if brain is not None
+                else None
             )
             updates.append("brain = %(brain)s")
             updates.append("brain_revision = brain_revision + 1")
-            params["brain"] = brain
-        if model is not None:
+            params["brain"] = normalized_brain
+        if model is not _UNSET:
             updates.append("model = %(model)s")
             params["model"] = model
-        if temperature is not None:
+        if temperature is not _UNSET:
             updates.append("temperature = %(temperature)s")
             params["temperature"] = candidate.temperature
-        if enabled_tools is not None:
+        if enabled_tools is not _UNSET:
             updates.append("enabled_tools = %(enabled_tools)s")
             params["enabled_tools"] = json.dumps(candidate.enabled_tools)
 
@@ -254,7 +292,7 @@ class AgentManager:
         updates.append("updated_at = now()")
         set_clause = ", ".join(updates)
 
-        if brain is not None and should_snapshot_brain_revision(new_revision):
+        if brain is not _UNSET and should_snapshot_brain_revision(new_revision):
             params["change_summary"] = build_brain_snapshot_summary(
                 "full_user_update"
             )
@@ -292,7 +330,7 @@ class AgentManager:
                 WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
             '''
         await self.pg.execute(query, params)
-        logger.info(f"Updated agent: {name or config.name} ({agent_id})")
+        logger.info(f"Updated agent: {candidate.name} ({agent_id})")
         return await self.get_agent(agent_id)
 
     async def update_persona(

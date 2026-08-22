@@ -154,10 +154,7 @@ class GraphBuilder:
                 rel.entity_a_id,
                 rel.entity_b_id,
                 rel.relationship_type,
-                rel.canonical_relationship_type,
-                rel.observed_relationship_label,
-                rel.domain_status,
-                rel.symmetric,
+                rel."symmetric" AS symmetric
             FROM relationships rel
             WHERE rel.project_id = %s
               AND rel.user_name = %s

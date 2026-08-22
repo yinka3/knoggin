@@ -211,6 +211,56 @@ class TextProcessor:
             return False
         return validate_entity(name, "", policy.domain, label=label or entity_type)
 
+    @staticmethod
+    def _canonicalize_mentions(
+        mentions: List[Tuple[int, str, str, str]],
+        batch: IngestionBatch,
+    ) -> List[Tuple[int, str, str, str]]:
+        """Enforce the extractor contract before mentions leave this component."""
+
+        normalized: List[Tuple[int, str, str, str]] = []
+        domain = batch.policy.domain
+        for msg_id, text, entity_type, topic in mentions:
+            canonical_type = domain.canonical_entity_type(
+                entity_type
+            ) or domain.resolve_entity_type(entity_type)
+            derived_topic = domain.topic_for_entity_type(canonical_type or "")
+            if canonical_type is None or derived_topic is None:
+                batch.issues.append(
+                    ValidationIssue(
+                        stage="mentions",
+                        code="invalid_entity_type",
+                        message="Mention entity type is not active in the domain",
+                        item_ref=text,
+                        metadata={
+                            "type": entity_type,
+                            "topic": topic,
+                            "msg_id": msg_id,
+                        },
+                    )
+                )
+                continue
+            if topic and topic.strip().casefold() != derived_topic.casefold():
+                batch.issues.append(
+                    ValidationIssue(
+                        stage="mentions",
+                        code="derived_topic_override",
+                        message=(
+                            "Mention topic was replaced by the domain-derived topic"
+                        ),
+                        severity="info",
+                        item_ref=text,
+                        metadata={
+                            "type": canonical_type,
+                            "supplied_topic": topic,
+                            "derived_topic": derived_topic,
+                            "msg_id": msg_id,
+                        },
+                    )
+                )
+            normalized.append((msg_id, text, canonical_type, derived_topic))
+        return normalized
+
     async def extract_mentions(
         self,
         batch: IngestionBatch,
@@ -388,7 +438,7 @@ class TextProcessor:
                     "vp01": 0,
                 },
             )
-            return output
+            return self._canonicalize_mentions(output, batch)
 
         message_local_ids, message_ids_by_local = build_local_id_maps(
             (message["id"] for message in messages),
@@ -552,4 +602,4 @@ class TextProcessor:
             },
         )
 
-        return output
+        return self._canonicalize_mentions(output, batch)

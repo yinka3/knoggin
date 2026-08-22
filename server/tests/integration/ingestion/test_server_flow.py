@@ -10,38 +10,36 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.conf.manager import ConfigManager
 from common.schema.agent.identity import AgentConfig
 from common.schema.episode.generation import (
     LLMEpisodeDecision,
     LLMEpisodeWindowDecision,
 )
-from common.schema.ingestion.contracts import EpisodeEligibility
+from common.schema.ingestion.contracts import IngestionCommit
 from common.schema.primitives import Message
 from common.schema.settings import (
-    DLQSettings,
     EpisodeSettings,
     IngestionSettings,
     RedisConnectionSettings,
 )
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.executor import AgentExecutor
+from core.agent.orchestrator import AgentOrchestrator
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.recovery.dlq_state import DLQ_STATUS_COMPLETED
-from core.ingestion.recovery.replay_job import DLQReplayJob
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
+from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
+from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
-from runtime.session_runtime import SessionRuntime as Session
-from infrastructure.job.base import JobContext
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
-from infrastructure.work_record import WorkRecord
+from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
 from tests.fixtures.ingestion import ingestion_policy
 
@@ -54,7 +52,9 @@ class _DeterministicEpisodeLLM:
                 LLMEpisodeDecision(
                     action="create",
                     summary="The accepted message is now durable episodic memory.",
-                    new_developments=["The complete server path is grounded in its source."],
+                    new_developments=[
+                        "The complete server path is grounded in its source."
+                    ],
                     message_influences=[
                         {
                             "message_id": "m1",
@@ -71,6 +71,9 @@ class _DeterministicEmbeddingService:
     async def encode(self, texts):
         assert len(texts) == 1
         return [[0.25] * 1024]
+
+    async def encode_single(self, text):
+        return [0.25] * 1024
 
 
 class _DeterministicAgentLLM:
@@ -128,6 +131,43 @@ class _DeterministicAgentLLM:
         return "The source is grounded and retrievable."
 
 
+class _DeterministicDocumentAgentLLM(_DeterministicAgentLLM):
+    """Drive the canonical runtime through document search and synthesis."""
+
+    def __init__(self):
+        super().__init__()
+        self.steps = [
+            (
+                "search_documents",
+                '{"query": "violet launch phrase", "limit": 1}',
+                "document-search-1",
+            ),
+            (
+                "submit_answer",
+                '{"content": "The document records the violet launch phrase."}',
+                "answer-1",
+            ),
+            (
+                "submit_answer",
+                '{"content": "The document records the violet launch phrase."}',
+                "answer-2",
+            ),
+        ]
+
+
+class _StaticAgentManager:
+    """Small durable-agent boundary substitute for a deterministic runtime test."""
+
+    def __init__(self, config: AgentConfig):
+        self._config = config
+
+    async def get_default_agent_id(self) -> str:
+        return self._config.id
+
+    async def get_agent(self, agent_id: str) -> AgentConfig | None:
+        return self._config if agent_id == self._config.id else None
+
+
 class _NoEntityProcessor:
     """Complete the pipeline boundary without requiring an external LLM."""
 
@@ -136,7 +176,7 @@ class _NoEntityProcessor:
         self.user_name = user_name
         self.knowledge_store = object()
 
-    def capture_policy(self, _settings):
+    def capture_policy(self):
         return ingestion_policy()
 
     def open_batch(self, messages, session_text, *, session_id, policy, batch_id=None):
@@ -159,13 +199,9 @@ class _NoEntityProcessor:
             alias_updated_ids=[],
             entity_message_map={},
             alias_updates={},
-            candidate_suggestions=[],
         )
         batch.set_relationship_observations([])
         batch.complete()
-
-    async def move_to_dead_letter(self, *args, **kwargs):
-        raise AssertionError("the deterministic success path must not use the DLQ")
 
 
 class _SignalCounter:
@@ -174,45 +210,6 @@ class _SignalCounter:
 
     def signal(self):
         self.calls += 1
-
-
-class _CheckpointDlqProcessor(_NoEntityProcessor):
-    """Use the production DLQ serializer with the deterministic processor."""
-
-    def __init__(self, project_id, user_name, store, redis):
-        super().__init__(project_id, user_name)
-        self._dlq_pipeline = IngestionPipeline(
-            project_id=project_id,
-            redis_client=redis,
-            llm=None,
-            entities=None,
-            processor=None,
-            cpu_executor=None,
-            user_name=user_name,
-            compiled_domain=make_domain_config().compile(),
-            get_next_ent_id=None,
-            knowledge_store=store,
-        )
-
-    async def move_to_dead_letter(self, *args, **kwargs):
-        return await self._dlq_pipeline.move_to_dead_letter(*args, **kwargs)
-
-
-class _FailOnceEvalRedis:
-    """Delegate to real Redis while dropping one checkpoint execution."""
-
-    def __init__(self, client):
-        self.client = client
-        self.fail_eval = True
-
-    def __getattr__(self, name):
-        return getattr(self.client, name)
-
-    async def eval(self, *args, **kwargs):
-        if self.fail_eval:
-            self.fail_eval = False
-            raise ConnectionError("ConnectionError: simulated checkpoint outage")
-        return await self.client.eval(*args, **kwargs)
 
 
 @pytest.fixture
@@ -272,46 +269,26 @@ async def real_server_scope():
 
 
 def _session(resources, *, user_name, project_id, session_id):
-    context = Session(user_name, [], resources)
+    context = Session(user_name, resources)
     context.session_id = session_id
     context.project_id = project_id
     context.project = SimpleNamespace(
         scheduler=object(),
         record_session_activity=lambda: asyncio.sleep(0),
+        readable_project_ids=[project_id],
     )
     return context
 
 
 def _prepared_graph_callback(store):
     async def write_graph(batch: IngestionBatch):
-        eligible_messages = [
-            EpisodeEligibility(message_id=int(message["id"]))
-            for message in batch.messages
-        ]
-        graph_work = WorkRecord.for_graph_write(batch.scope)
-        graph_work.mark_running()
-        batch.set_graph_write_buffers(
-            graph_work_unit=graph_work,
-            safe_entity_ids=set(),
-            graph_alias_updates=[],
-            entity_writes=[],
-            relationship_writes=[],
-            message_entity_refs=[],
-            eligible_messages=eligible_messages,
-            skipped_relationships=[],
-            zombie_entity_ids=set(),
-            dirty_entity_ids=set(),
+        return await store.commit_ingestion(
+            IngestionCommit(
+                scope=batch.scope,
+                batch_id=batch.batch_id,
+                message_ids=tuple(int(message["id"]) for message in batch.messages),
+            )
         )
-        batch.seal_for_commit()
-        await store.write_batch(
-            [],
-            [],
-            eligible_messages=batch.eligible_messages,
-            scope=batch.scope,
-        )
-        graph_work.mark_succeeded("Prepared graph write persisted")
-        batch.mark_graph_committed()
-        return True, None
 
     return write_graph
 
@@ -340,10 +317,14 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
     monkeypatch.setattr(
         Session,
         "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            ),
+        ),
     )
     context = _session(
         resources,
@@ -357,7 +338,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         session_id=scope["session_id"],
         knowledge_store=store,
         processor=processor,
-        redis=redis,
         get_session_context=context.get_conversation_context,
         write_to_graph=_prepared_graph_callback(store),
         settings=IngestionSettings(
@@ -365,7 +345,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             batch_debounce_seconds=0,
             batch_timeout=10,
             ingestion_batch_settle_delay_seconds=0,
-            checkpoint_interval=1,
         ),
     )
     context.consumer = worker
@@ -391,12 +370,8 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         accepted = accepted_messages[-1]
         await worker.flush()
 
-        assert await redis.llen(RedisKeys.buffer(scope["user_name"], scope["session_id"])) == 0
-        assert await redis.get(
-            RedisKeys.last_processed(scope["user_name"], scope["session_id"])
-        ) == str(accepted.id)
         message = await postgres.fetch_one(
-            "SELECT role, content, episode_eligible FROM messages "
+            "SELECT role, content, episode_eligible, ingestion_state FROM messages "
             "WHERE message_id = %s",
             (accepted.id,),
         )
@@ -404,11 +379,12 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             "role": "user",
             "content": "The complete server path must remain grounded.",
             "episode_eligible": True,
+            "ingestion_state": "processed",
         }
 
         episode_job = EpisodeJob(
             knowledge_store=store,
-            settings=EpisodeSettings(max_message_count=8),
+            settings=EpisodeSettings(),
             episode_window_size=8,
             llm=_DeterministicEpisodeLLM(),
             embedding_service=_DeterministicEmbeddingService(),
@@ -435,10 +411,21 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             scope["project_id"],
             [scope["project_id"]],
         )
+        retrieval = KnowledgeRetrieval(
+            project_id=scope["project_id"],
+            readable_project_ids=[scope["project_id"]],
+            user_name=scope["user_name"],
+            entities=resolver,
+            embedding_service=resolver.embedding_service,
+            knowledge_store=store,
+            postgres=postgres,
+            redis=redis,
+        )
         tools = Tools(
             scope["user_name"],
             resolver,
             scope["session_id"],
+            knowledge_retrieval=retrieval,
             knowledge_store=store,
             postgres=postgres,
             redis=redis,
@@ -475,7 +462,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
                     run,
                     _DeterministicAgentLLM(),
                     tools,
-                ).execute(enabled_tools=["search_messages"])
+                ).execute()
             ]
         finally:
             await tools.close()
@@ -517,6 +504,158 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_redis
 @pytest.mark.no_network
+async def test_real_document_request_persists_document_source_provenance(
+    real_server_scope,
+    monkeypatch,
+):
+    """One canonical turn carries document-tool evidence through to durable answer refs."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    redis = scope["redis"]
+    embedding = _DeterministicEmbeddingService()
+    llm = _DeterministicDocumentAgentLLM()
+    store = KnowledgeStore(postgres, embedding)
+    resources = SimpleNamespace(
+        postgres=postgres,
+        redis=redis,
+        knowledge_store=store,
+        embedding=embedding,
+        llm_service=llm,
+    )
+    monkeypatch.setattr(
+        Session,
+        "current_config",
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            )
+        ),
+    )
+
+    documents = DocumentService(
+        project_id=scope["project_id"],
+        postgres_client=postgres,
+        embedding_service=embedding,
+        document_rerank_enabled=False,
+    )
+    document = await documents.submit_document(
+        content=b"The violet launch phrase is durable and documented.\n",
+        original_name="launch-note.md",
+        relative_path="notes/launch-note.md",
+        visibility_scope="project",
+    )
+    assert document["status"] == "indexed"
+
+    resolver = EntityResolver(
+        store,
+        embedding,
+        scope["project_id"],
+        [scope["project_id"]],
+    )
+    retrieval = KnowledgeRetrieval(
+        project_id=scope["project_id"],
+        readable_project_ids=[scope["project_id"]],
+        user_name=scope["user_name"],
+        entities=resolver,
+        embedding_service=embedding,
+        knowledge_store=store,
+        postgres=postgres,
+        redis=redis,
+    )
+    context = _session(
+        resources,
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
+        session_id=scope["session_id"],
+    )
+    context.project = SimpleNamespace(
+        scheduler=object(),
+        record_session_activity=lambda: asyncio.sleep(0),
+        readable_project_ids=[scope["project_id"]],
+        entities=resolver,
+        compiled_domain=make_domain_config().compile(),
+        knowledge_retrieval=retrieval,
+        workspace_service=None,
+    )
+    context.document_service = documents
+    context.consumer = _SignalCounter()
+
+    agent = AgentConfig(
+        id="document-flow-agent",
+        name="Document Flow Agent",
+        persona={
+            "attention_bias": "evidence",
+            "reasoning_style": "methodical",
+            "social_temperament": "calm",
+            "communication_signature": "clear",
+            "productive_flaw": "overexplains",
+        },
+        enabled_tools=["search_documents"],
+    )
+    orchestrator = AgentOrchestrator(
+        _StaticAgentManager(agent),
+        config_provider=ConfigManager,
+    )
+
+    events = [
+        event
+        async for event in context.run_agent_stream(
+            Message(
+                content="What is the violet launch phrase?",
+                timestamp=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
+            ),
+            orchestrator=orchestrator,
+            enabled_tools=["search_documents"],
+        )
+    ]
+
+    assert not [event for event in events if event["event"] == "error"]
+    response = next(event for event in events if event["event"] == "response")
+    assert any(event["event"] == "tool_end" for event in events)
+    assert len(response["data"]["source_ref_ids"]) == 1
+
+    answer = await store.get_assistant_message_with_sources(
+        response["data"]["assistant_message_id"],
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
+        session_id=scope["session_id"],
+    )
+    assert answer is not None
+    assert len(answer.sources_consulted) == 1
+    source = answer.sources_consulted[0]
+    assert source.source_kind == "text_document"
+    assert source.document_id == document["document_id"]
+    assert source.source_project_id == scope["project_id"]
+    assert source.contributing_message_id == response["data"]["assistant_message_id"]
+
+    source_row = await postgres.fetch_one(
+        """
+            SELECT project_id, source_project_id, document_id::text AS document_id, content_hash,
+               encounter_kind, tool_call_id
+        FROM message_source_refs
+        WHERE source_ref_id = %s
+        """,
+        (response["data"]["source_ref_ids"][0],),
+    )
+    assert source_row == {
+        "project_id": scope["project_id"],
+        "source_project_id": scope["project_id"],
+        "document_id": document["document_id"],
+        "content_hash": document["content_hash"],
+        "encounter_kind": "document_search",
+        "tool_call_id": "document-search-1",
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.requires_redis
+@pytest.mark.no_network
 async def test_real_concurrent_sessions_accept_one_message_once(
     real_server_scope,
     monkeypatch,
@@ -534,10 +673,14 @@ async def test_real_concurrent_sessions_accept_one_message_once(
     monkeypatch.setattr(
         Session,
         "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            ),
+        ),
     )
     contexts = [
         _session(
@@ -566,9 +709,12 @@ async def test_real_concurrent_sessions_accept_one_message_once(
         (scope["session_id"],),
     )
     assert rows == [{"message_id": results[0].id, "content": "same accepted turn"}]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
+    assert (
+        await scope["redis"].get(
+            RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
+        )
+        == "1"
+    )
 
 
 @pytest.mark.integration
@@ -593,10 +739,14 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
     monkeypatch.setattr(
         Session,
         "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            ),
+        ),
     )
     context = _session(
         resources,
@@ -610,7 +760,6 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
         session_id=scope["session_id"],
         knowledge_store=real_store,
         processor=processor,
-        redis=scope["redis"],
         get_session_context=context.get_conversation_context,
         write_to_graph=_prepared_graph_callback(real_store),
         settings=IngestionSettings(
@@ -618,7 +767,6 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
             batch_debounce_seconds=0,
             batch_timeout=10,
             ingestion_batch_settle_delay_seconds=0,
-            checkpoint_interval=1,
         ),
     )
     context.consumer = worker
@@ -637,106 +785,5 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
             "SELECT ingestion_state FROM messages WHERE message_id = %s",
             (accepted.id,),
         ) == {"ingestion_state": "processed"}
-        assert await scope["redis"].get(
-            RedisKeys.last_processed(scope["user_name"], scope["session_id"])
-        ) == str(accepted.id)
-    finally:
-        await worker.stop()
-
-
-@pytest.mark.integration
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
-@pytest.mark.no_network
-async def test_real_worker_checkpoint_failure_replays_through_dlq(
-    real_server_scope,
-    monkeypatch,
-):
-    """A checkpoint outage becomes a real DLQ item and replays once."""
-
-    scope = real_server_scope
-    real_store = KnowledgeStore(scope["postgres"], _DeterministicEmbeddingService())
-    redis_proxy = _FailOnceEvalRedis(scope["redis"])
-    resources = SimpleNamespace(
-        postgres=scope["postgres"],
-        redis=scope["redis"],
-        knowledge_store=real_store,
-        embedding=_DeterministicEmbeddingService(),
-    )
-    monkeypatch.setattr(
-        Session,
-        "current_config",
-        property(lambda self: SimpleNamespace(developer_settings=SimpleNamespace(
-            limits=SimpleNamespace(conversation_context_turns=100),
-            ingestion=SimpleNamespace(message_edit_window_seconds=1),
-        )),),
-    )
-    context = _session(
-        resources,
-        user_name=scope["user_name"],
-        project_id=scope["project_id"],
-        session_id=scope["session_id"],
-    )
-    processor = _CheckpointDlqProcessor(
-        scope["project_id"], scope["user_name"], real_store, redis_proxy
-    )
-    worker = IngestionWorker(
-        user_name=scope["user_name"],
-        session_id=scope["session_id"],
-        knowledge_store=real_store,
-        processor=processor,
-        redis=redis_proxy,
-        get_session_context=context.get_conversation_context,
-        write_to_graph=_prepared_graph_callback(real_store),
-        settings=IngestionSettings(
-            batch_size=1,
-            batch_debounce_seconds=0,
-            batch_timeout=10,
-            ingestion_batch_settle_delay_seconds=0,
-            checkpoint_interval=1,
-        ),
-    )
-    context.consumer = worker
-    worker.start()
-
-    try:
-        accepted = await context.add(
-            Message(
-                content="Retry this checkpoint boundary.",
-                timestamp=datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc),
-            )
-        )
-        await asyncio.sleep(1.05)
-        await worker.flush()
-
-        dlq_key = RedisKeys.dlq(scope["user_name"], scope["project_id"])
-        queued = await scope["redis"].lrange(dlq_key, 0, -1)
-        assert len(queued) == 1
-        assert json.loads(queued[0])["stage"] == "checkpoint"
-        assert await scope["redis"].llen(
-            RedisKeys.buffer(scope["user_name"], scope["session_id"])
-        ) == 0
-
-        replay = DLQReplayJob(
-            entities=SimpleNamespace(project_id=scope["project_id"]),
-            processor=SimpleNamespace(knowledge_store=real_store),
-            write_to_graph=None,
-            redis_client=scope["redis"],
-            settings=DLQSettings(max_attempts=2),
-        )
-        monkeypatch.setattr("core.ingestion.recovery.replay_job.emit", lambda *a, **k: asyncio.sleep(0))
-        result = await replay.execute(
-            JobContext(scope["user_name"], scope["project_id"])
-        )
-
-        assert result.summary == "Processed 1: 1 retried, 0 parked"
-        assert await scope["redis"].get(
-            RedisKeys.last_processed(scope["user_name"], scope["session_id"])
-        ) == str(accepted.id)
-        assert await scope["redis"].hget(
-            RedisKeys.dlq_state(scope["user_name"], scope["project_id"]),
-            json.loads(queued[0])["dlq_id"],
-        ) == DLQ_STATUS_COMPLETED
     finally:
         await worker.stop()

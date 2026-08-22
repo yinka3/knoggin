@@ -183,7 +183,7 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
     knowledge_store = KnowledgeStore(real_postgres_client, embedding_service)
     job = EpisodeJob(
         knowledge_store=knowledge_store,
-        settings=EpisodeSettings(max_message_count=8),
+        settings=EpisodeSettings(),
         episode_window_size=8,
         llm=DeterministicEpisodeLLM(),
         embedding_service=embedding_service,

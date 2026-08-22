@@ -6,11 +6,14 @@ from psycopg.errors import CheckViolation, ForeignKeyViolation
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from tests.fixtures.fakes import RecordingPostgresClient
 
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000101"
 TEXT_DOCUMENT_ID = "00000000-0000-0000-0000-000000000102"
+CROSS_PROJECT_DOCUMENT_ID = "00000000-0000-0000-0000-000000000103"
+CROSS_PROJECT_SESSION_DOCUMENT_ID = "00000000-0000-0000-0000-000000000104"
 SOURCE_REF_ID = "00000000-0000-0000-0000-000000000201"
 CONTENT_HASH = "b" * 64
 
@@ -21,6 +24,7 @@ def document_candidate(**overrides) -> SourceReferenceCandidate:
         "session_id": "session-1",
         "source_kind": "pdf_document",
         "document_id": DOCUMENT_ID,
+        "source_project_id": "project-1",
         "content_hash": CONTENT_HASH,
         "locator": {"kind": "pdf_page", "page": 2},
         "excerpt": "The retrieved second-page passage.",
@@ -57,6 +61,7 @@ def text_document_candidate(**overrides) -> SourceReferenceCandidate:
         "session_id": "session-1",
         "source_kind": "text_document",
         "document_id": TEXT_DOCUMENT_ID,
+        "source_project_id": "project-1",
         "content_hash": "d" * 64,
         "locator": {"kind": "text_lines", "start_line": 4, "end_line": 6},
         "excerpt": "The exact Markdown passage.",
@@ -142,6 +147,7 @@ def persisted_row(candidate: SourceReferenceCandidate, **overrides):
         "message_id": 101,
         "source_kind": candidate.source_kind,
         "document_id": candidate.document_id,
+        "source_project_id": candidate.source_project_id,
         "canonical_url": candidate.canonical_url,
         "source_message_id": candidate.source_message_id,
         "content_hash": candidate.content_hash,
@@ -172,6 +178,7 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
+        readable_project_ids=["project-1"],
     )
 
     assert [reference.source_ref_id for reference in references] == [SOURCE_REF_ID]
@@ -182,14 +189,17 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
     assert "document.visibility_scope = 'project'" in query
     assert "ON CONFLICT (idempotency_key) DO UPDATE" in query
     assert params[1:4] == ("project-1", "session-1", 101)
-    assert params[16] == SourceReferenceWriter.idempotency_key(candidate)
-    assert params[-8:] == (
+    assert params[17] == SourceReferenceWriter.idempotency_key(candidate)
+    assert params[-11:] == (
         101,
         "project-1",
         "session-1",
         "ada",
         DOCUMENT_ID,
         DOCUMENT_ID,
+        "project-1",
+        CONTENT_HASH,
+        ["project-1"],
         "project-1",
         "session-1",
     )
@@ -208,6 +218,7 @@ async def test_writer_rejects_candidate_scope_mismatch_before_starting_a_transac
             user_name="ada",
             project_id="project-1",
             session_id="session-1",
+            readable_project_ids=["project-1"],
         )
 
     assert client.calls == []
@@ -272,6 +283,35 @@ async def test_reader_marks_a_deleted_document_source_unavailable():
     )
 
     assert references[0].source_status == "unavailable"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_marks_a_replaced_document_version_unavailable():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                persisted_row(
+                    candidate,
+                    document_status="indexed",
+                    document_content_hash="a" * 64,
+                )
+            ]
+        ]
+    )
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].source_status == "unavailable"
+    assert references[0].excerpt == candidate.excerpt
+    assert "document.content_hash AS document_content_hash" in client.calls[0][1]
 
 
 @pytest.mark.storage
@@ -446,6 +486,7 @@ async def test_real_postgres_document_tombstone_preserves_message_provenance(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
+        readable_project_ids=["project-1"],
     )
     retried = await writer.write_for_assistant_message(
         101,
@@ -453,6 +494,7 @@ async def test_real_postgres_document_tombstone_preserves_message_provenance(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
+        readable_project_ids=["project-1"],
     )
 
     assert first[0].source_ref_id == retried[0].source_ref_id
@@ -489,6 +531,190 @@ async def test_real_postgres_document_tombstone_preserves_message_provenance(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_real_postgres_provenance_uses_captured_cross_project_document_scope(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-2', 'ada', 'project-2')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, visibility_scope, source_kind,
+            original_name, relative_path, extension, size_bytes, content_hash
+        ) VALUES (
+            %s, 'project-2', 'project', 'manual_upload',
+            'shared.pdf', '/shared.pdf', '.pdf', 10, %s
+        )
+        """,
+        (CROSS_PROJECT_DOCUMENT_ID, "e" * 64),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, session_id, visibility_scope, source_kind,
+            original_name, relative_path, extension, size_bytes, content_hash
+        ) VALUES (
+            %s, 'project-2', 'session-2', 'session', 'manual_upload',
+            'private.pdf', '/private.pdf', '.pdf', 10, %s
+        )
+        """,
+        (CROSS_PROJECT_SESSION_DOCUMENT_ID, "f" * 64),
+    )
+    writer = SourceReferenceWriter(real_postgres_client)
+    reader = SourceReferenceReader(real_postgres_client)
+    readable_scope = ["project-1", "project-2"]
+    shared = document_candidate(
+        document_id=CROSS_PROJECT_DOCUMENT_ID,
+        source_project_id="project-2",
+        content_hash="e" * 64,
+    )
+
+    references = await writer.write_for_assistant_message(
+        101,
+        [shared],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        readable_project_ids=readable_scope,
+    )
+
+    assert references[0].project_id == "project-1"
+    assert references[0].source_project_id == "project-2"
+    presented = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    assert presented[0].source_project_id == "project-2"
+    assert presented[0].source_status == "available"
+    with pytest.raises(ValueError, match="not visible"):
+        await writer.write_for_assistant_message(
+            101,
+            [
+                document_candidate(
+                    document_id=CROSS_PROJECT_SESSION_DOCUMENT_ID,
+                    source_project_id="project-2",
+                    content_hash="f" * 64,
+                    agent_run_id="private-run",
+                    tool_call_id="private-call",
+                )
+            ],
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+            readable_project_ids=readable_scope,
+        )
+    with pytest.raises(ValueError, match="captured readable scope"):
+        await writer.write_for_assistant_message(
+            101,
+            [shared],
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+            readable_project_ids=["project-1"],
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_preserves_cross_project_provenance_after_source_deletion(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-2', 'ada', 'project-2')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, visibility_scope, source_kind,
+            original_name, relative_path, extension, size_bytes, content_hash
+        ) VALUES (
+            %s, 'project-2', 'project', 'manual_upload',
+            'shared.pdf', '/shared.pdf', '.pdf', 10, %s
+        )
+        """,
+        (CROSS_PROJECT_DOCUMENT_ID, "e" * 64),
+    )
+    candidate = document_candidate(
+        document_id=CROSS_PROJECT_DOCUMENT_ID,
+        source_project_id="project-2",
+        content_hash="e" * 64,
+    )
+    writer = SourceReferenceWriter(real_postgres_client)
+    await writer.write_for_assistant_message(
+        101,
+        [candidate],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        readable_project_ids=["project-1", "project-2"],
+    )
+
+    deleted = await ProjectDeletionWriter(real_postgres_client).delete_project(
+        user_name="ada",
+        project_id="project-2",
+    )
+    sources = await SourceReferenceReader(real_postgres_client).get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert deleted == {"entities": 0, "projects": 1}
+    assert len(sources) == 1
+    assert sources[0].document_id == CROSS_PROJECT_DOCUMENT_ID
+    assert sources[0].source_project_id == "project-2"
+    assert sources[0].excerpt == candidate.excerpt
+    assert sources[0].source_status == "unavailable"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_marks_replaced_document_provenance_unavailable(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    document = document_candidate()
+    await SourceReferenceWriter(real_postgres_client).write_for_assistant_message(
+        101,
+        [document],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        readable_project_ids=["project-1"],
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET content_hash = %s WHERE document_id = %s",
+        ("a" * 64, DOCUMENT_ID),
+    )
+
+    sources = await SourceReferenceReader(real_postgres_client).get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert sources[0].source_status == "unavailable"
+    assert sources[0].excerpt == document.excerpt
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
     real_postgres_client,
 ):
@@ -510,6 +736,7 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
+        readable_project_ids=["project-1"],
     )
     await real_postgres_client.execute(
         """
@@ -603,13 +830,13 @@ async def test_real_postgres_enforces_source_shape_and_project_scoped_document_f
             """
             INSERT INTO public.message_source_refs (
                 source_ref_id, project_id, session_id, message_id, source_kind,
-                document_id, content_hash, locator, excerpt, metadata,
+                document_id, source_project_id, content_hash, locator, excerpt, metadata,
                 encounter_kind, agent_run_id, tool_call_id, result_position,
                 idempotency_key
             )
             VALUES (
                 '00000000-0000-0000-0000-000000000202',
-                'project-1', 'session-1', 101, 'pdf_document', %s, %s,
+                'project-1', 'session-1', 101, 'pdf_document', %s, 'project-1', %s,
                 '{"kind":"search_result"}', 'excerpt', %s,
                 'document_search', 'run-invalid', 'call-invalid', 0,
                 'invalid-shape'
@@ -623,13 +850,13 @@ async def test_real_postgres_enforces_source_shape_and_project_scoped_document_f
             """
             INSERT INTO public.message_source_refs (
                 source_ref_id, project_id, session_id, message_id, source_kind,
-                document_id, content_hash, locator, excerpt, metadata,
+                document_id, source_project_id, content_hash, locator, excerpt, metadata,
                 encounter_kind, agent_run_id, tool_call_id, result_position,
                 idempotency_key
             )
             VALUES (
                 '00000000-0000-0000-0000-000000000203',
-                'project-2', 'session-2', 201, 'pdf_document', %s, %s, %s,
+                'project-2', 'session-2', 201, 'pdf_document', %s, 'project-2', %s, %s,
                 'excerpt', %s, 'document_search', 'run-cross-project',
                 'call-cross-project', 0, 'cross-project-document'
             )
@@ -644,6 +871,7 @@ async def test_real_postgres_enforces_source_shape_and_project_scoped_document_f
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
+        readable_project_ids=["project-1"],
     )
     await real_postgres_client.execute(
         "DELETE FROM public.messages "

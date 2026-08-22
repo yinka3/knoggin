@@ -19,6 +19,7 @@ from core.knowledge.documents import (
     storage as storage_module,
 )
 from core.knowledge.documents.constants import document_extension
+from infrastructure.background_work import BackgroundWorkRejected
 
 
 class MemoryPostgres:
@@ -51,6 +52,17 @@ class MemoryPostgres:
             row["visibility_scope"] == "project"
             or (
                 row["visibility_scope"] == "session" and row["session_id"] == session_id
+            )
+        )
+
+    @staticmethod
+    def _read_visible(row, readable_project_ids, project_id, session_id):
+        return row["project_id"] in readable_project_ids and (
+            row["visibility_scope"] == "project"
+            or (
+                row["project_id"] == project_id
+                and row["visibility_scope"] == "session"
+                and row["session_id"] == session_id
             )
         )
 
@@ -288,21 +300,28 @@ class MemoryPostgres:
             return [
                 deepcopy(row)
                 for row in self.rows
-                if row["project_id"] == project_id and row["status"] == "queued"
+                if row["project_id"] == project_id
+                and row["status"] == "queued"
+                and row.get("source_id") is None
             ][:limit]
         if "FROM public.project_document_scan_settings" in query:
             row = self.scan_settings.get(params[0])
             return [deepcopy(row)] if row else []
         if "FROM public.document_folder_uploads" in query:
             if "folder_root_id = %s" in query:
-                folder_root_id, project_id, session_id = params
+                folder_root_id, readable_project_ids, project_id, session_id = params
                 return [
                     deepcopy(folder)
                     for folder in self.folders
                     if folder["folder_root_id"] == folder_root_id
-                    and self._visible(folder, project_id, session_id)
+                    and self._read_visible(
+                        folder,
+                        readable_project_ids,
+                        project_id,
+                        session_id,
+                    )
                 ]
-            project_id, session_id, *filters = params
+            readable_project_ids, project_id, session_id, *filters = params
             scope = None
             if "visibility_scope = %s" in query:
                 scope = filters.pop(0)
@@ -310,18 +329,28 @@ class MemoryPostgres:
             folders = [
                 deepcopy(folder)
                 for folder in reversed(self.folders)
-                if self._visible(folder, project_id, session_id)
+                if self._read_visible(
+                    folder,
+                    readable_project_ids,
+                    project_id,
+                    session_id,
+                )
                 and (scope is None or folder["visibility_scope"] == scope)
             ]
             return folders[:limit]
         if "dc.extracted_text" in query:
-            document_id, content_hash, project_id, session_id = params
+            document_id, content_hash, readable_project_ids, project_id, session_id = params
             document = next(
                 (
                     row
                     for row in self.rows
                     if row["document_id"] == document_id
-                    and self._visible(row, project_id, session_id)
+                    and self._read_visible(
+                        row,
+                        readable_project_ids,
+                        project_id,
+                        session_id,
+                    )
                 ),
                 None,
             )
@@ -332,13 +361,18 @@ class MemoryPostgres:
                 return []
             return [{"extracted_text": cached[1]}]
         if "FROM public.document_content" in query:
-            document_id, project_id, session_id = params
+            document_id, readable_project_ids, project_id, session_id = params
             document = next(
                 (
                     row
                     for row in self.rows
                     if row["document_id"] == document_id
-                    and self._visible(row, project_id, session_id)
+                    and self._read_visible(
+                        row,
+                        readable_project_ids,
+                        project_id,
+                        session_id,
+                    )
                 ),
                 None,
             )
@@ -354,13 +388,17 @@ class MemoryPostgres:
             and "pd.original_name" in query
             and "pd.content_hash" not in query
         ):
-            project_id, folder_root_id, session_id, *path_filters = params
+            folder_root_id, readable_project_ids, project_id, session_id, *path_filters = params
             rows = [
                 row
                 for row in self.rows
-                if row["project_id"] == project_id
-                and row.get("folder_root_id") == folder_root_id
-                and self._visible(row, project_id, session_id)
+                if row.get("folder_root_id") == folder_root_id
+                and self._read_visible(
+                    row,
+                    readable_project_ids,
+                    project_id,
+                    session_id,
+                )
             ]
             if path_filters:
                 prefix = path_filters[0]
@@ -394,14 +432,17 @@ class MemoryPostgres:
         if "LIMIT 2" in query and (
             "pd.document_id = %s" in query or "pd.relative_path = %s" in query
         ):
-            selector_value, project_id, session_id = params
+            selector_value, readable_project_ids, project_id, session_id = params
             selector_key = (
                 "document_id" if "pd.document_id = %s" in query else "relative_path"
             )
             results = []
             for row in reversed(self.rows):
-                if row[selector_key] == selector_value and self._visible(
-                    row, project_id, session_id
+                if row[selector_key] == selector_value and self._read_visible(
+                    row,
+                    readable_project_ids,
+                    project_id,
+                    session_id,
                 ):
                     result = dict(row)
                     result["chunk_count"] = sum(
@@ -411,7 +452,7 @@ class MemoryPostgres:
                     results.append(result)
             return results[:2]
 
-        project_id, session_id, *filters = params
+        readable_project_ids, project_id, session_id, *filters = params
         scope = None
         if "pd.visibility_scope = %s" in query:
             scope = filters.pop(0)
@@ -425,7 +466,12 @@ class MemoryPostgres:
         rows = [
             row
             for row in self.rows
-            if self._visible(row, project_id, session_id)
+            if self._read_visible(
+                row,
+                readable_project_ids,
+                project_id,
+                session_id,
+            )
             and (scope is None or row["visibility_scope"] == scope)
             and (folder_root_id is None or row.get("folder_root_id") == folder_root_id)
             and (
@@ -687,50 +733,6 @@ class MemoryCursor:
             ]
             return
 
-        if (
-            normalized.startswith("SELECT document_id, version_number")
-            and "FOR UPDATE" in normalized
-        ):
-            document_id, project_id, visibility_scope, session_id = params
-            row = next(
-                (
-                    row
-                    for row in self.postgres.rows
-                    if row["document_id"] == document_id
-                    and row["project_id"] == project_id
-                    and row["visibility_scope"] == visibility_scope
-                    and (
-                        visibility_scope == "project"
-                        or row["session_id"] == session_id
-                    )
-                ),
-                None,
-            )
-            self.result = (
-                None
-                if row is None
-                else {
-                    "document_id": row["document_id"],
-                    "version_number": row.get("version_number", 1),
-                }
-            )
-            return
-
-        if (
-            normalized.startswith("SELECT document_id")
-            and "WHERE replaces_document_id = %s" in normalized
-        ):
-            predecessor_id = params[0]
-            self.result = next(
-                (
-                    {"document_id": row["document_id"]}
-                    for row in self.postgres.rows
-                    if row.get("replaces_document_id") == predecessor_id
-                ),
-                None,
-            )
-            return
-
         if normalized.startswith("SELECT") and "FOR UPDATE" in normalized:
             document_id, project_id, session_id = params
             row = next(
@@ -807,6 +809,8 @@ class MemoryCursor:
             row.update(
                 {
                     "status": "deleted",
+                    "source_id": None,
+                    "folder_root_id": None,
                     "deleted_at": row.get("deleted_at") or "deleted-now",
                     "indexed_at": None,
                     "error_message": None,
@@ -1059,7 +1063,7 @@ class MemoryCursor:
                     )
                 self.result = None
                 return
-            if "'manual_upload'" in normalized and "'uploaded'" in normalized:
+            if "'manual_upload'" in normalized and "'queued'" in normalized:
                 (
                     document_id,
                     project_id,
@@ -1070,8 +1074,6 @@ class MemoryCursor:
                     extension,
                     size_bytes,
                     content_hash,
-                    replaces_document_id,
-                    version_number,
                     created_at,
                     updated_at,
                 ) = params
@@ -1088,9 +1090,7 @@ class MemoryCursor:
                         "extension": extension,
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
-                        "status": "uploaded",
-                        "replaces_document_id": replaces_document_id,
-                        "version_number": version_number,
+                        "status": "queued",
                         "deleted_at": None,
                         "indexed_at": None,
                         "error_message": None,
@@ -1101,7 +1101,7 @@ class MemoryCursor:
                 )
                 self.result = None
                 return
-            if "'folder_upload'" in normalized and "'uploaded'" in normalized:
+            if "'folder_upload'" in normalized and "'queued'" in normalized:
                 (
                     document_id,
                     project_id,
@@ -1129,7 +1129,7 @@ class MemoryCursor:
                         "extension": extension,
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
-                        "status": "uploaded",
+                        "status": "queued",
                         "indexed_at": None,
                         "error_message": None,
                         "created_at": created_at,
@@ -1723,7 +1723,7 @@ async def test_workspace_batch_embeds_chunks_across_files(document_harness):
         ],
     )
 
-    await service._index_workspace_source_batch(
+    await service.indexer._index_workspace_source_batch(
         source_id=source["source_id"],
         session_id=None,
     )
@@ -1759,9 +1759,10 @@ async def test_workspace_batch_prepares_files_with_bounded_concurrency(
             active -= 1
 
     service._run_blocking = tracked_to_thread
-    service._indexing_policy = DocumentIndexPolicy.capture(
+    service.indexer._run_blocking = tracked_to_thread
+    service.indexer.update_policy(DocumentIndexPolicy.capture(
         workspace_prepare_concurrency=2,
-    )
+    ))
     source = await service.create_workspace_source(display_name="knoggin")
     await service.sync_workspace_source(
         source_id=source["source_id"],
@@ -1773,7 +1774,7 @@ async def test_workspace_batch_prepares_files_with_bounded_concurrency(
     active = 0
     peak_active = 0
 
-    await service._index_workspace_source_batch(
+    await service.indexer._index_workspace_source_batch(
         source_id=source["source_id"],
         session_id=None,
     )
@@ -1807,7 +1808,7 @@ async def test_workspace_indexing_status_reports_manifest_and_live_progress(
     assert queued["last_manifest_excluded_count"] == 1
     assert queued["last_manifest_excluded_reason_counts"] == {"default_file_ignore": 1}
 
-    await service._index_workspace_source_batch(
+    await service.indexer._index_workspace_source_batch(
         source_id=source["source_id"],
         session_id=None,
     )
@@ -1832,7 +1833,7 @@ async def test_workspace_indexing_continues_in_fair_document_batches(
             return await operation()
 
     service, postgres = document_harness
-    service._background_work = ImmediateBackgroundWork()
+    service.indexer._background_work = ImmediateBackgroundWork()
     source = await service.create_workspace_source(display_name="knoggin")
     entries = [
         FolderUploadEntry(
@@ -1847,7 +1848,7 @@ async def test_workspace_indexing_continues_in_fair_document_batches(
         entries=entries,
     )
     for _ in range(10):
-        tasks = list(service._background_tasks)
+        tasks = list(service.indexer._background_tasks)
         if not tasks:
             break
         await asyncio.gather(*tasks)
@@ -1876,7 +1877,7 @@ async def test_add_document_stores_bytes_and_persists_metadata(document_harness)
     assert metadata["extension"] == ".md"
     assert metadata["size_bytes"] == len(content)
     assert metadata["content_hash"] == hashlib.sha256(content).hexdigest()
-    assert metadata["status"] == "uploaded"
+    assert metadata["status"] == "queued"
     assert metadata["folder_root_id"] is None
     assert metadata["source_kind"] == "manual_upload"
     assert metadata["chunk_count"] == 0
@@ -2048,7 +2049,7 @@ async def test_list_documents_normalizes_database_timestamps(document_harness):
             "extension": ".md",
             "size_bytes": 5,
             "content_hash": "hash",
-            "status": "uploaded",
+            "status": "queued",
             "created_at": timestamp,
             "updated_at": timestamp,
             "chunk_count": 0,
@@ -2078,7 +2079,7 @@ async def test_get_document_info_resolves_visible_document_without_storage_key(
 
     assert info["document_id"] == uploaded["document_id"]
     assert info["relative_path"] == "docs/notes.txt"
-    assert info["status"] == "uploaded"
+    assert info["status"] == "queued"
     assert "storage_key" not in info
 
 
@@ -2276,6 +2277,8 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
     assert tombstone["status"] == "deleted"
     assert tombstone["deleted_at"]
     assert tombstone["content_hash"] == first["content_hash"]
+    assert tombstone["source_id"] is None
+    assert tombstone["folder_root_id"] is None
     assert second["document_id"] in [row["document_id"] for row in postgres.rows]
     assert all(
         chunk["document_id"] != first["document_id"] for chunk in postgres.chunks
@@ -2318,7 +2321,7 @@ async def test_delete_document_enforces_project_and_session_visibility():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_reupload_requires_explicit_replacement_or_separate_confirmation(
+async def test_reupload_after_delete_creates_a_new_independent_document(
     document_harness,
 ):
     service, postgres = document_harness
@@ -2328,79 +2331,18 @@ async def test_reupload_requires_explicit_replacement_or_separate_confirmation(
     )
     await service.delete_document(document_id=original["document_id"])
 
-    confirmation = await service.add_document(
-        content=b"second version",
-        original_name="notes.txt",
-    )
-    assert confirmation["confirmation_required"] is True
-    assert confirmation["replacement_candidates"][0]["document_id"] == original[
-        "document_id"
-    ]
-    assert len(postgres.rows) == 1
-
     replacement = await service.add_document(
         content=b"second version",
         original_name="notes.txt",
-        replace_document_id=original["document_id"],
     )
-    assert replacement["replaces_document_id"] == original["document_id"]
-    assert replacement["version_number"] == 2
-
-    separate = await service.add_document(
-        content=b"third version",
-        original_name="notes.txt",
-        confirm_as_separate=True,
-    )
-    assert separate["replaces_document_id"] is None
-    assert separate["version_number"] == 1
+    assert replacement["document_id"] != original["document_id"]
+    assert replacement["status"] == "queued"
+    assert len(postgres.rows) == 2
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_reupload_cannot_fork_a_document_replacement_chain(document_harness):
-    service, _ = document_harness
-    original = await service.add_document(content=b"first", original_name="notes.txt")
-    await service.delete_document(document_id=original["document_id"])
-    await service.add_document(
-        content=b"second",
-        original_name="notes.txt",
-        replace_document_id=original["document_id"],
-    )
-
-    with pytest.raises(ValueError, match="already has a replacement"):
-        await service.add_document(
-            content=b"another second",
-            original_name="notes.txt",
-            replace_document_id=original["document_id"],
-        )
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_replacement_candidates_do_not_cross_visibility_scopes(document_harness):
-    service, _ = document_harness
-    original = await service.add_document(
-        content=b"private",
-        original_name="notes.txt",
-        session_id="session-1",
-        visibility_scope="session",
-    )
-    await service.delete_document(
-        document_id=original["document_id"],
-        session_id="session-1",
-    )
-
-    project_upload = await service.add_document(
-        content=b"project version",
-        original_name="notes.txt",
-        visibility_scope="project",
-    )
-    assert project_upload["replaces_document_id"] is None
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_recovery_requeues_interrupted_document_indexing(document_harness):
+async def test_indexer_recovery_requeues_interrupted_document_indexing(document_harness):
     service, postgres = document_harness
     await service.add_document(
         content=b"alpha beta gamma",
@@ -2408,11 +2350,120 @@ async def test_recovery_requeues_interrupted_document_indexing(document_harness)
     )
     postgres.rows[0]["status"] = "indexing"
 
-    recovered = await service.recover_pending_indexes()
+    recovered = await service.indexer.recover_pending_indexes()
 
     assert recovered == 1
     assert postgres.rows[0]["status"] == "indexed"
-    assert service.indexing_snapshot()["last_recovery_requeued"] == 1
+    assert service.indexer.indexing_snapshot()["last_recovery_requeued"] == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_start_drains_more_than_one_recovery_batch(document_harness):
+    service, postgres = document_harness
+    for index in range(17):
+        await service.add_document(
+            content=f"document {index}".encode(),
+            original_name=f"notes-{index}.md",
+        )
+
+    await service.indexer.start()
+    for _ in range(100):
+        if {row["status"] for row in postgres.rows} == {"indexed"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert {row["status"] for row in postgres.rows} == {"indexed"}
+    await service.shutdown()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_retries_document_admission_after_temporary_rejection(
+    document_harness,
+):
+    class RejectOnceBackgroundWork:
+        def __init__(self):
+            self.calls = 0
+            self.admitted = asyncio.Event()
+
+        async def submit(self, project_id, operation, *, name, coalesce_key):
+            self.calls += 1
+            if self.calls == 1:
+                raise BackgroundWorkRejected(
+                    project_id=project_id,
+                    name=name,
+                    reason="global_queue_full",
+                    limit=1,
+                    queued=1,
+                )
+            self.admitted.set()
+            return await operation()
+
+    service, postgres = document_harness
+    background_work = RejectOnceBackgroundWork()
+    service.indexer._background_work = background_work
+    service.indexer.update_policy(DocumentIndexPolicy.capture(inline_index_max_bytes=1))
+    await service.indexer.start()
+    document = await service.add_document(
+        content=b"this document must be admitted in the background",
+        original_name="notes.md",
+    )
+
+    await service.schedule_document_index(document_id=document["document_id"])
+    await asyncio.wait_for(background_work.admitted.wait(), timeout=1)
+    for _ in range(100):
+        if postgres.rows[0]["status"] == "indexed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert background_work.calls >= 2
+    assert postgres.rows[0]["status"] == "indexed"
+    await service.shutdown()
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_retries_workspace_admission_after_temporary_rejection(
+    document_harness,
+):
+    class RejectOnceBackgroundWork:
+        def __init__(self):
+            self.calls = 0
+            self.admitted = asyncio.Event()
+
+        async def submit(self, project_id, operation, *, name, coalesce_key):
+            self.calls += 1
+            if self.calls == 1:
+                raise BackgroundWorkRejected(
+                    project_id=project_id,
+                    name=name,
+                    reason="global_queue_full",
+                    limit=1,
+                    queued=1,
+                )
+            self.admitted.set()
+            return await operation()
+
+    service, postgres = document_harness
+    background_work = RejectOnceBackgroundWork()
+    service.indexer._background_work = background_work
+    await service.indexer.start()
+    source = await service.create_workspace_source(display_name="knoggin")
+
+    await service.sync_workspace_source(
+        source_id=source["source_id"],
+        entries=[FolderUploadEntry(relative_path="src/main.py", content=b"pass")],
+    )
+    await asyncio.wait_for(background_work.admitted.wait(), timeout=1)
+    for _ in range(100):
+        if postgres.rows and postgres.rows[0]["status"] == "indexed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert background_work.calls >= 2
+    assert postgres.rows[0]["status"] == "indexed"
+    await service.shutdown()
 
 
 @pytest.mark.storage
@@ -2482,9 +2533,10 @@ async def test_document_service_search_embeds_query_and_enforces_visibility(
     assert "websearch_to_tsquery('simple', %s)" in sql
     assert "ts_rank_cd(vc.search_vector, sq.terms)" in sql
     assert "1.0 / (60 + sc.semantic_rank)" in sql
-    assert params[0:4] == (
+    assert params[0:5] == (
         "alpha question",
         json.dumps([0.1] * 1024),
+        ["project-1"],
         "project-1",
         "session-1",
     )
@@ -2553,7 +2605,7 @@ async def test_document_service_search_applies_document_filter(document_harness)
 
     _, sql, params = postgres.calls[-1]
     assert "AND pd.document_id = %s" in sql
-    assert params[4] == "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
+    assert params[5] == "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
 
 
 @pytest.mark.storage
@@ -2703,7 +2755,7 @@ async def test_cancelled_document_index_releases_its_durable_claim(document_harn
         started.set()
         await asyncio.Event().wait()
 
-    service._run_blocking = wait_for_cancellation
+    service.indexer._run_blocking = wait_for_cancellation
     task = asyncio.create_task(
         service.index_document(document_id=uploaded["document_id"])
     )
@@ -2920,6 +2972,28 @@ async def test_index_document_is_idempotent_after_success(document_harness):
     assert second["chunk_count"] == first["chunk_count"]
     assert service._embedding.calls == calls_after_first
     assert postgres.chunks == chunks_after_first
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_index_document_does_not_publish_after_content_changes(document_harness):
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
+    original_encode = service._embedding.encode
+
+    async def change_content_hash(values):
+        embeddings = await original_encode(values)
+        postgres.rows[0]["content_hash"] = "b" * 64
+        postgres.rows[0]["status"] = "queued"
+        return embeddings
+
+    service._embedding.encode = change_content_hash
+
+    result = await service.index_document(document_id=uploaded["document_id"])
+
+    assert result["status"] == "queued"
+    assert result["content_hash"] == "b" * 64
+    assert postgres.chunks == []
 
 
 @pytest.mark.storage
@@ -3208,12 +3282,12 @@ async def test_accept_folder_rejects_unknown_and_excluded_selections(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_accept_folder_preparation_failure_leaves_no_state(
+async def test_accept_folder_indexing_failure_retains_admitted_state(
     document_harness,
 ):
     service, postgres = document_harness
 
-    with pytest.raises(ValueError, match="valid UTF-8"):
+    with pytest.raises(RuntimeError, match="valid UTF-8"):
         await service.accept_folder(
             folder_name="repo",
             entries=[
@@ -3225,15 +3299,16 @@ async def test_accept_folder_preparation_failure_leaves_no_state(
             selected_paths=["broken.txt"],
         )
 
-    assert postgres.folders == []
-    assert postgres.rows == []
+    assert len(postgres.folders) == 1
+    assert len(postgres.rows) == 1
+    assert postgres.rows[0]["status"] == "failed"
     assert postgres.chunks == []
-    assert postgres.contents == {}
+    assert postgres.contents[postgres.rows[0]["document_id"]] == b"\xff"
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
+async def test_accept_folder_persists_all_raw_bytes_before_index_failure(
     monkeypatch,
     document_harness,
 ):
@@ -3263,10 +3338,11 @@ async def test_accept_folder_rolls_back_rows_chunks_and_bytes(
             selected_paths=["a.txt", "b.txt"],
         )
 
-    assert postgres.folders == []
-    assert postgres.rows == []
-    assert postgres.chunks == []
-    assert postgres.contents == {}
+    assert len(postgres.folders) == 1
+    assert len(postgres.rows) == 2
+    assert len(postgres.chunks) == 1
+    assert {row["status"] for row in postgres.rows} == {"indexed", "failed"}
+    assert set(postgres.contents.values()) == {b"alpha", b"beta"}
 
 
 @pytest.mark.storage

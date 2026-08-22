@@ -132,7 +132,6 @@ def make_harness():
 
     processor = IngestionPipeline(
         project_id="project-1",
-        redis_client=None,
         llm=FakeLLM(),
         entities=entities,
         processor=None,

@@ -97,27 +97,6 @@ class WorkRecord:
         )
 
     @classmethod
-    def for_dlq_replay(
-        cls,
-        scope: ExecutionScope,
-        *,
-        stage: str,
-        attempt: int,
-        priority: int = 80,
-    ) -> "WorkRecord":
-        return cls(
-            id=uuid4().hex,
-            kind="dlq_replay",
-            user_name=scope.user_name,
-            project_id=scope.project_id,
-            session_id=scope.session_id,
-            priority=priority,
-            attempt=attempt,
-            stage=stage,
-            metadata={"stage": stage},
-        )
-
-    @classmethod
     def for_model_operation(
         cls,
         kind: str,
@@ -295,7 +274,7 @@ class WorkRecord:
 
     @classmethod
     def from_snapshot(cls, payload: dict[str, Any]) -> "WorkRecord":
-        """Hydrate runtime telemetry from a validated DLQ snapshot."""
+        """Hydrate runtime telemetry from a validated snapshot."""
 
         if not isinstance(payload, dict):
             raise TypeError("WorkRecord snapshot must be a dictionary")

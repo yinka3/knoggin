@@ -821,7 +821,7 @@ class LLMService:
     def _structured_validation_error_details(
         model: str, exc: InstructorRetryException
     ) -> Dict[str, str]:
-        """Preserve bounded model-output diagnostics for the retry/DLQ path."""
+        """Preserve bounded model-output diagnostics for retry handling."""
 
         details = {"model": model, "error": str(exc)}
         last_completion = getattr(exc, "last_completion", None)

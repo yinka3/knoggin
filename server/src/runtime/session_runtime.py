@@ -21,7 +21,7 @@ from common.utils.core_utils import (
 from common.utils.events import emit
 from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.ingestion.batch import IngestionBatch
-from core.ingestion.graph_commit import write_batch_callback
+from core.ingestion.graph_commit import write_ingestion_batch_to_graph
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.documents import DocumentService
@@ -55,9 +55,11 @@ class SessionRuntime:
         user_name: str,
         resources: RuntimeResources,
         health_service: Any | None = None,
+        agent_orchestrator: Any | None = None,
     ):
         self.resources = resources
         self.health_service = health_service
+        self.agent_orchestrator = agent_orchestrator
         self.user_name: str = user_name
         self.model: Optional[str] = None
         self.agent_id: Optional[str] = None
@@ -227,25 +229,18 @@ class SessionRuntime:
                 self.current_config.developer_settings.limits.conversation_context_turns,
                 up_to_msg_id=accepted.id - 1,
             )
+            orchestrator = orchestrator or self.agent_orchestrator
             if orchestrator is None:
-                from core.agent.orchestrator import Orchestrator
-
-                orchestrator = Orchestrator()
+                raise RuntimeError("Session has no application-owned AgentOrchestrator")
 
             response_seen = False
             async for event in orchestrator.run_stream(
                 user_query=accepted.content.strip(),
-                user_name=self.user_name,
-                session_id=self.session_id,
                 context=self,
                 user_timezone=user_timezone,
-                model=model or self.model,
-                agent_id=agent_id or self.agent_id,
-                enabled_tools=(
-                    enabled_tools
-                    if enabled_tools is not None
-                    else self.enabled_tools
-                ),
+                model=model,
+                agent_id=agent_id,
+                enabled_tools=enabled_tools,
                 request_document_focus=document_focus,
                 conversation_history=history,
                 user_message_id=accepted.id,
@@ -724,9 +719,12 @@ class SessionRuntime:
                 ]
 
                 if source_candidates:
+                    if self.project is None:
+                        raise RuntimeError("Session project runtime is unavailable")
                     return await self.knowledge_store.save_assistant_message_with_source_refs(
                         agent_msg_batch[0],
                         source_candidates,
+                        readable_project_ids=self.project.readable_project_ids,
                     )
                 else:
                     await self.knowledge_store.save_message_logs(agent_msg_batch)
@@ -777,15 +775,11 @@ class SessionRuntime:
 
     async def _write_to_graph_callback(
         self, batch: IngestionBatch
-    ) -> tuple[bool, str | None]:
-        return await write_batch_callback(
+    ):
+        return await write_ingestion_batch_to_graph(
             batch,
             knowledge_store=self.knowledge_store,
             entities=self.project.entities,
-            session_id=self.session_id,
-            project_id=self.project_id,
-            user_name=self.user_name,
-            redis_client=self.redis_client,
         )
 
     async def refresh_session_ttls(self):

@@ -1,17 +1,47 @@
 """Read-only queries for the document knowledge base."""
 
 import json
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
+from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.postgres_client import PostgresClient
 
 
 class DocumentReader:
-    """All SELECT queries scoped to a single project."""
+    """Read document content in one active project and its readable projects."""
 
-    def __init__(self, client: PostgresClient, project_id: str) -> None:
+    def __init__(
+        self,
+        client: PostgresClient,
+        project_id: str,
+        readable_project_ids: Optional[Iterable[str]] = None,
+    ) -> None:
         self._client = client
-        self._project_id = project_id
+        self._project_id = require_scope_value(
+            project_id, "project_id", "DocumentReader"
+        )
+        self._readable_project_ids = require_visible_project_ids(
+            readable_project_ids or [self._project_id], "DocumentReader"
+        )
+        if self._project_id not in self._readable_project_ids:
+            raise ValueError("DocumentReader readable_project_ids must include project_id")
+
+    def _document_visibility_sql(self, alias: str = "pd") -> str:
+        """Return the active-session and cross-project document read policy."""
+        return f"""
+              AND {alias}.project_id = ANY(%s)
+              AND (
+                  {alias}.visibility_scope = 'project'
+                  OR (
+                      {alias}.project_id = %s
+                      AND {alias}.visibility_scope = 'session'
+                      AND {alias}.session_id = %s
+                  )
+              )
+        """
+
+    def _document_visibility_params(self, session_id: Optional[str]) -> tuple:
+        return (self._readable_project_ids, self._project_id, session_id)
 
     @staticmethod
     def _escape_like(value: str) -> str:
@@ -288,68 +318,14 @@ class DocumentReader:
             WHERE """
             + selector
             + """
-              AND pd.project_id = %s
               AND pd.status <> 'deleted'
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
+            """
+            + self._document_visibility_sql()
+            + """
             ORDER BY pd.created_at DESC, pd.document_id DESC
             LIMIT 2
             """,
-            (selector_value, self._project_id, session_id),
-        )
-
-    async def find_deleted_replacement_candidates(
-        self,
-        *,
-        original_name: str,
-        relative_path: str,
-        session_id: Optional[str],
-        visibility_scope: str,
-    ) -> List[Dict]:
-        """Return deleted visible files that may be explicitly replaced."""
-
-        return await self._client.fetch_all(
-            """
-            SELECT
-                document_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                original_name,
-                relative_path,
-                content_hash,
-                version_number,
-                deleted_at
-            FROM public.project_documents
-            WHERE project_id = %s
-              AND status = 'deleted'
-              AND visibility_scope = %s
-              AND (
-                  relative_path = %s
-                  OR lower(original_name) = lower(%s)
-              )
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
-            ORDER BY deleted_at DESC NULLS LAST, document_id DESC
-            LIMIT 5
-            """,
-            (
-                self._project_id,
-                visibility_scope,
-                relative_path,
-                original_name,
-                session_id,
-            ),
+            (selector_value, *self._document_visibility_params(session_id)),
         )
 
     async def fetch_document_content(
@@ -366,17 +342,12 @@ class DocumentReader:
             JOIN public.project_documents AS pd
                 ON pd.document_id = dc.document_id
             WHERE dc.document_id = %s
-              AND pd.project_id = %s
               AND pd.status <> 'deleted'
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
+            """
+            + self._document_visibility_sql()
+            + """
             """,
-            (document_id, self._project_id, session_id),
+            (document_id, *self._document_visibility_params(session_id)),
         )
         if not rows:
             return None
@@ -400,17 +371,12 @@ class DocumentReader:
               AND pd.content_hash = %s
               AND dc.extracted_content_hash = pd.content_hash
               AND dc.extracted_text IS NOT NULL
-              AND pd.project_id = %s
               AND pd.status <> 'deleted'
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
+            """
+            + self._document_visibility_sql()
+            + """
             """,
-            (document_id, content_hash, self._project_id, session_id),
+            (document_id, content_hash, *self._document_visibility_params(session_id)),
         )
         return rows[0]["extracted_text"] if rows else None
 
@@ -540,17 +506,10 @@ class DocumentReader:
             FROM public.project_documents AS pd
             LEFT JOIN public.document_chunks AS dc
                 ON dc.document_id = pd.document_id
-            WHERE pd.project_id = %s
-              AND pd.status <> 'deleted'
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
+            WHERE pd.status <> 'deleted'
         """
-        params: list = [self._project_id, session_id]
+        params: list = list(self._document_visibility_params(session_id))
+        query += self._document_visibility_sql()
         if visibility_scope is not None:
             query += " AND pd.visibility_scope = %s"
             params.append(visibility_scope)
@@ -600,16 +559,11 @@ class DocumentReader:
                 indexed_at
             FROM public.document_folder_uploads
             WHERE folder_root_id = %s
-              AND project_id = %s
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
+            """
+            + self._document_visibility_sql(alias="document_folder_uploads")
+            + """
             """,
-            (folder_root_id, self._project_id, session_id),
+            (folder_root_id, *self._document_visibility_params(session_id)),
         )
         return rows[0] if rows else None
 
@@ -640,16 +594,10 @@ class DocumentReader:
                 created_at,
                 indexed_at
             FROM public.document_folder_uploads
-            WHERE project_id = %s
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
+            WHERE TRUE
         """
-        params: list = [self._project_id, session_id]
+        params: list = list(self._document_visibility_params(session_id))
+        query += self._document_visibility_sql(alias="document_folder_uploads")
         if visibility_scope is not None:
             query += " AND visibility_scope = %s"
             params.append(visibility_scope)
@@ -671,6 +619,7 @@ class DocumentReader:
         query = """
             SELECT
                 pd.document_id,
+                pd.project_id,
                 pd.folder_root_id,
                 pd.original_name,
                 pd.relative_path,
@@ -681,18 +630,11 @@ class DocumentReader:
             FROM public.project_documents AS pd
             LEFT JOIN public.document_chunks AS dc
                 ON dc.document_id = pd.document_id
-            WHERE pd.project_id = %s
-              AND pd.folder_root_id = %s
+            WHERE pd.folder_root_id = %s
               AND pd.status <> 'deleted'
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
         """
-        params: list = [self._project_id, folder_root_id, session_id]
+        query += self._document_visibility_sql()
+        params: list = [folder_root_id, *self._document_visibility_params(session_id)]
         if path_prefix is not None:
             escaped = self._escape_like(path_prefix)
             query += (
@@ -736,6 +678,7 @@ class DocumentReader:
                 SELECT
                     dc.chunk_id,
                     dc.document_id,
+                    pd.project_id,
                     pd.folder_root_id,
                     pd.original_name,
                     pd.relative_path,
@@ -759,17 +702,11 @@ class DocumentReader:
                 FROM public.document_chunks AS dc
                 JOIN public.project_documents AS pd
                     ON pd.document_id = dc.document_id
-                WHERE pd.project_id = %s
-              AND pd.status = 'indexed'
-              AND (
-                  pd.visibility_scope = 'project'
-                  OR (
-                      pd.visibility_scope = 'session'
-                      AND pd.session_id = %s
-                  )
-              )
+                WHERE pd.status = 'indexed'
         """
-        params: list = [query_text, embedding_json, self._project_id, session_id]
+        params: list = [query_text, embedding_json]
+        sql += self._document_visibility_sql()
+        params.extend(self._document_visibility_params(session_id))
         if document_filter is not None:
             sql += " AND pd.document_id = %s"
             params.append(document_filter)
@@ -828,6 +765,7 @@ class DocumentReader:
             )
             SELECT
                 vc.document_id,
+                vc.project_id,
                 vc.folder_root_id,
                 vc.original_name,
                 vc.relative_path,

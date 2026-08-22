@@ -44,6 +44,22 @@ class ConflictService:
             metadata=metadata,
             existing_conflict_id=existing_conflict_id,
         )
+        await self.notify_detection(
+            user_name=user_name,
+            project_id=project_id,
+            origin=origin,
+            result=result,
+        )
+        return result
+
+    @staticmethod
+    async def notify_detection(
+        *,
+        user_name: str,
+        project_id: str,
+        origin: ConflictOrigin,
+        result: ConflictWriteResult,
+    ) -> None:
         if result.should_notify:
             await emit(
                 project_id,
@@ -58,7 +74,6 @@ class ConflictService:
                     "evidence_added": result.evidence_added,
                 },
             )
-        return result
 
     async def resolve(
         self,

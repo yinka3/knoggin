@@ -9,7 +9,6 @@ from tests.fixtures.fakes import FakeRedis
 def test_session_scoped_keys_include_runtime_cleanup_targets():
     keys = RedisKeys.session_keys("ada", "session-1")
 
-    assert RedisKeys.buffer("ada", "session-1") in keys
     assert RedisKeys.message_content("ada", "session-1") in keys
     assert RedisKeys.recent_conversation("ada", "session-1") in keys
     assert RedisKeys.conversation("ada", "session-1") in keys
@@ -60,8 +59,6 @@ def test_project_cleanup_inventory_covers_fixed_and_variable_key_families():
     patterns = RedisKeys.project_cleanup_patterns("ada", "project-1")
 
     assert RedisKeys.dirty_entities("ada", "project-1") in keys
-    assert RedisKeys.dlq_state("ada", "project-1") in keys
-    assert RedisKeys.dlq_completed("ada", "project-1") in keys
     assert RedisKeys.project_sessions("ada", "project-1") in keys
     assert RedisKeys.community_discussion_active("ada", "project-1") in keys
     assert "last_profile_update:ada:project-1:*" in patterns

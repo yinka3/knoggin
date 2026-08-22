@@ -10,12 +10,10 @@ from common.exceptions import ToolExecutionError
 from common.schema.agent.tool_contracts import (
     READ_CAPABILITY,
     TOOL_SCHEMAS,
-    TOOL_SCHEMAS_BY_NAME,
-    get_schema_capability,
     validate_tool_arguments,
 )
 from core.agent.tool_references import resolve_agent_tool_arguments
-from core.agent.tools.registry import TOOL_DISPATCH, Tools
+from core.agent.tools.registry import Tools, get_tool_definition
 
 _TOOL_PARAM_TYPES: Dict[str, Dict[str, str]] = {}
 for _schema in TOOL_SCHEMAS:
@@ -104,32 +102,23 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return "Loaded folder upload summary", 1
         return "No results", 0
 
-    if tool_name == "request_replanning":
-        return "Requested a new plan", 1
-
     return "Completed", 1
 
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
-
-    if name == "request_clarification":
-        return {"clarification": args.get("question", "Could you clarify?")}
-    if name == "request_replanning":
-        return {"replanning": args.get("reason", "No reason provided")}
-
-    dispatch_entry = TOOL_DISPATCH.get(name)
-    if dispatch_entry is None:
+    definition = get_tool_definition(name)
+    if definition is None or definition.dispatch is None:
         raise ToolExecutionError(name, f"Unknown tool: {name}")
 
-    method_name, param_keys = dispatch_entry
+    method_name, param_keys = definition.dispatch
     method = getattr(tools, method_name, None)
     if method is None:
         raise ToolExecutionError(name, f"Tool method not found: {method_name}")
 
     active_schemas = getattr(tools, "active_tool_schemas", {})
-    schema = active_schemas.get(name) or TOOL_SCHEMAS_BY_NAME.get(name)
+    schema = active_schemas.get(name) or definition.schema
     authorization = getattr(tools, "tool_authorization", None)
-    capability = get_schema_capability(schema) if schema else READ_CAPABILITY
+    capability = definition.capability if schema else READ_CAPABILITY
 
     logger.info(f"[TOOL CALL] {name}: {json.dumps(args, default=str)}")
     audit_id = None
@@ -225,16 +214,16 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 error="Tool execution was rejected.",
             )
         raise
-    except Exception as e:
+    except Exception:
         if audit_id:
             await _safe_finish_tool_audit(
                 tools,
                 audit_id,
                 status="failed",
-                error=str(e),
+                error="Tool execution failed.",
             )
-        logger.error(f"Tool {name} failed: {e}")
-        raise ToolExecutionError(name, str(e))
+        logger.exception("Tool {} failed", name)
+        raise ToolExecutionError(name, "Tool execution failed")
 
 
 def _redact_audit_value(value):
@@ -281,7 +270,6 @@ async def _start_tool_audit(
             run_id,
             tool_name,
             capability,
-            confirmation_state,
             arguments,
             status
         ) VALUES (
@@ -293,7 +281,6 @@ async def _start_tool_audit(
             %(run_id)s,
             %(tool_name)s,
             %(capability)s,
-            %(confirmation_state)s,
             %(arguments)s::jsonb,
             'started'
         )
@@ -307,7 +294,6 @@ async def _start_tool_audit(
             "run_id": authorization.run_id,
             "tool_name": tool_name,
             "capability": capability,
-            "confirmation_state": authorization.confirmation_state,
             "arguments": json.dumps(
                 _redact_audit_value(arguments),
                 default=str,

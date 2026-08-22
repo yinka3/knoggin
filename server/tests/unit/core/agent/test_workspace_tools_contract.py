@@ -9,7 +9,7 @@ from common.schema.agent.tool_contracts import (
     get_schema_capability,
     validate_tool_arguments,
 )
-from core.agent.internals import execute_tool
+from core.agent.tool_runtime import execute_tool
 from core.agent.tools.registry import ToolPermissions, get_default_tool_limits
 from core.agent.tools.workspace import WorkspaceTools
 

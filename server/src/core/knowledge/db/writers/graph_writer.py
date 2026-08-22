@@ -1,20 +1,51 @@
 import json
 from contextlib import asynccontextmanager
-from typing import Dict, List, Optional
+from functools import wraps
+from typing import Dict, List, Optional, Sequence
 
 from loguru import logger
+from psycopg import Error as PsycopgError
 
 from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
-    normalize_relationship_type,
+    AliasUpdate,
+    EntityWrite,
+    EpisodeEligibility,
+    ExecutionScope,
+    GraphWriteSummary,
+    IngestionCommit,
+    MessageEntityRef,
+    RelationshipWrite,
     relationship_identity,
 )
-from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
+from common.scoping import (
+    IDENTITY_ENTITY_ID,
+    IDENTITY_SCOPE,
+    require_scope_value,
+)
 from common.utils.time_utils import get_now_ms
 from core.knowledge.db.writers.age_projection_writer import (
     AgeProjectionWriter,
 )
 from infrastructure.postgres_client import PostgresClient
+
+
+def _storage_write(operation: str):
+    """Translate infrastructure failures without hiding contract violations."""
+
+    def decorate(method):
+        @wraps(method)
+        async def wrapped(self, *args, **kwargs):
+            try:
+                return await method(self, *args, **kwargs)
+            except (StorageWriteError, TypeError, ValueError):
+                raise
+            except PsycopgError as exc:
+                self._raise_storage_write(operation, exc)
+
+        return wrapped
+
+    return decorate
 
 
 class GraphWriter:
@@ -34,434 +65,292 @@ class GraphWriter:
             details={"error_type": type(exc).__name__},
         ) from exc
 
+    @staticmethod
+    def _require_project_id(project_id: str, operation: str) -> str:
+        return require_scope_value(project_id, "project_id", operation)
+
+    @staticmethod
+    def _normalized_identity_value(value: object) -> str:
+        return str(value or "").strip().strip('"').casefold()
+
     @asynccontextmanager
-    async def _merge_cursor(self, cur):
+    async def _cursor_context(self, cur=None):
         if cur is not None:
             yield cur
             return
         async with self.client.transaction() as transaction_cursor:
             yield transaction_cursor
 
-    @staticmethod
-    def _require_project_id(project_id: str, operation: str) -> str:
-        return require_scope_value(project_id, "project_id", operation)
+    @_storage_write("ensure_identity_entity")
+    async def ensure_identity_entity(
+        self, user_name: str, aliases: Optional[List[str]] = None
+    ) -> Dict:
+        """Persist and validate the identity-scoped entity reserved at ID 1."""
+        user_name = str(user_name or "").strip()
+        if not user_name:
+            raise ValueError("Identity requires a non-empty configured user name")
+        canonical_key = self._normalized_identity_value(user_name)
+        clean_aliases = []
+        seen_aliases = {canonical_key}
+        for alias in aliases or []:
+            clean_alias = str(alias or "").strip()
+            alias_key = self._normalized_identity_value(clean_alias)
+            if clean_alias and alias_key not in seen_aliases:
+                clean_aliases.append(clean_alias)
+                seen_aliases.add(alias_key)
 
-    @staticmethod
-    def _merge_evidence_refs(existing: List, incoming: List) -> List:
-        merged = []
-        seen = set()
-        for ref in (existing or []) + (incoming or []):
-            key = json.dumps(ref, sort_keys=True) if isinstance(ref, dict) else str(ref)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(ref)
-        return merged
+        now_ms = self._current_time_ms()
+        identity = {
+            "id": IDENTITY_ENTITY_ID,
+            "user_name": user_name,
+            "project_id": IDENTITY_SCOPE,
+            "canonical_name": user_name,
+            "aliases": clean_aliases,
+            "type": "person",
+            "topic": "Identity",
+            "now": now_ms,
+        }
 
-    @staticmethod
-    def _relationship_id(
-        project_id: str,
-        entity_a_id: int,
-        entity_b_id: int,
-        relationship_type: str,
-        *,
-        symmetric: bool = True,
-    ) -> str:
-        return relationship_identity(
-            project_id,
-            entity_a_id,
-            entity_b_id,
-            relationship_type,
-            symmetric=symmetric,
-        )
-
-    @staticmethod
-    def _clean_string(value):
-        if isinstance(value, str):
-            return value.strip('"')
-        return value
-
-    @classmethod
-    def _dedupe_aliases(cls, *alias_groups) -> List[str]:
-        aliases = []
-        seen = set()
-        for group in alias_groups:
-            if group is None:
-                continue
-            values = group if isinstance(group, list) else [group]
-            for value in values:
-                alias = cls._clean_string(value)
-                if not alias or alias in seen:
-                    continue
-                seen.add(alias)
-                aliases.append(alias)
-        return aliases
-
-    @staticmethod
-    def _normalize_evidence_refs(value) -> List[Dict]:
-        if not value:
-            return []
-        refs = json.loads(value) if isinstance(value, str) else value
-        if isinstance(refs, dict):
-            refs = [refs]
-        return [ref for ref in refs if ref]
-
-    @classmethod
-    def _relationship_projection_params(cls, rows: List[Dict]) -> List[Dict]:
-        params = []
-        for row in rows:
-            params.append(
-                {
-                    "relationship_id": row["relationship_id"],
-                    "project_id": row["project_id"],
-                    "entity_a_id": int(row["entity_a_id"]),
-                    "entity_b_id": int(row["entity_b_id"]),
-                    "relationship_type": normalize_relationship_type(
-                        row["relationship_type"]
-                    ),
-                }
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (IDENTITY_ENTITY_ID,),
             )
-            params[-1]["symmetric"] = bool(row.get("symmetric", False))
-        return params
+            await cur.execute(
+                """
+                SELECT entity_id, user_name, project_id, canonical_name
+                FROM entities
+                WHERE entity_id = %s
+                FOR UPDATE
+                """,
+                (IDENTITY_ENTITY_ID,),
+            )
+            existing = await cur.fetchone()
+            if existing and (
+                existing["project_id"] != IDENTITY_SCOPE
+                or self._normalized_identity_value(existing["user_name"])
+                != canonical_key
+                or self._normalized_identity_value(existing["canonical_name"])
+                != canonical_key
+            ):
+                raise RuntimeError(
+                    "Entity ID 1 is occupied by a non-identity entity; "
+                    "reset the development database before startup"
+                )
 
-    async def delete_relationship(
-        self,
-        entity_a_id: int,
-        entity_b_id: int,
-        *,
-        relationship_type: str,
-        project_id: str,
-    ) -> bool:
-        project_id = self._require_project_id(project_id, "delete_relationship")
-        relationship_id = self._relationship_id(
-            project_id,
-            entity_a_id,
-            entity_b_id,
-            relationship_type,
-        )
-        try:
-            async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                INSERT INTO entities (
+                    entity_id,
+                    user_name,
+                    project_id,
+                    canonical_name,
+                    type,
+                    topic,
+                    last_mentioned_ms,
+                    embedding
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NULL)
+                ON CONFLICT (entity_id) DO UPDATE SET
+                    user_name = EXCLUDED.user_name,
+                    project_id = EXCLUDED.project_id,
+                    canonical_name = EXCLUDED.canonical_name,
+                    type = EXCLUDED.type,
+                    topic = EXCLUDED.topic,
+                    last_mentioned_ms = EXCLUDED.last_mentioned_ms
+                """,
+                (
+                    IDENTITY_ENTITY_ID,
+                    user_name,
+                    IDENTITY_SCOPE,
+                    user_name,
+                    "person",
+                    "Identity",
+                    now_ms,
+                ),
+            )
+            await cur.execute(
+                "DELETE FROM entity_aliases WHERE entity_id = %s",
+                (IDENTITY_ENTITY_ID,),
+            )
+            for alias in clean_aliases:
                 await cur.execute(
                     """
-                    DELETE FROM relationships
-                    WHERE relationship_id = %s
-                    RETURNING relationship_id
+                    INSERT INTO entity_aliases (entity_id, alias)
+                    VALUES (%s, %s)
+                    ON CONFLICT (entity_id, alias) DO NOTHING
                     """,
-                    (relationship_id,),
+                    (IDENTITY_ENTITY_ID, alias),
                 )
-                canonical_record = await cur.fetchone()
-                projected_deleted = await self.projection.delete_relationship(
-                    cur,
-                    relationship_id,
-                    project_id,
-                )
+            await self.projection.project_identity(cur, identity)
 
-            return bool(canonical_record or projected_deleted)
-        except Exception as e:
-            self._raise_storage_write("delete_relationship", e)
+        return identity
 
-    async def merge_entities(
+    @_storage_write("write_batch")
+    async def write_batch(
         self,
-        primary_id: int,
-        secondary_id: int,
+        entities: Sequence[EntityWrite],
+        relationships: Sequence[RelationshipWrite],
         *,
-        project_id: str,
-        final_topic: Optional[str] = None,
+        message_entity_refs: Sequence[MessageEntityRef] = (),
+        eligible_messages: Sequence[EpisodeEligibility] = (),
+        scope: ExecutionScope,
         cur=None,
     ) -> bool:
-        project_id = self._require_project_id(project_id, "merge_entities")
-        if primary_id == secondary_id:
-            logger.warning(f"Self-merge rejected: {primary_id}")
-            return False
-        if primary_id == IDENTITY_ENTITY_ID or secondary_id == IDENTITY_ENTITY_ID:
-            logger.warning(
-                f"Identity entity merge rejected: {primary_id} <- {secondary_id}"
-            )
-            return False
+        """Persist typed graph commands inside one explicit execution scope."""
 
-        using_existing_cursor = cur is not None
-        try:
-            async with self._merge_cursor(cur) as cur:
-                await cur.execute(
-                    """
-                    SELECT pg_advisory_xact_lock(
-                        hashtextextended(%s, 0)
-                    )
-                    """,
-                    (project_id,),
-                )
-                await cur.execute(
-                    """
-                    SELECT
-                        p.canonical_name AS p_name,
-                        p.topic AS p_topic,
-                        p.last_mentioned_ms AS p_last,
-                        s.canonical_name AS s_name,
-                        s.last_mentioned_ms AS s_last,
-                        COALESCE(
-                            array_agg(DISTINCT p_alias.alias)
-                            FILTER (WHERE p_alias.alias IS NOT NULL),
-                            ARRAY[]::text[]
-                        ) AS p_aliases,
-                        COALESCE(
-                            array_agg(DISTINCT s_alias.alias)
-                            FILTER (WHERE s_alias.alias IS NOT NULL),
-                            ARRAY[]::text[]
-                        ) AS s_aliases
-                    FROM entities p
-                    JOIN entities s
-                      ON s.entity_id = %s
-                     AND s.project_id = %s
-                    LEFT JOIN entity_aliases p_alias
-                      ON p_alias.entity_id = p.entity_id
-                    LEFT JOIN entity_aliases s_alias
-                      ON s_alias.entity_id = s.entity_id
-                    WHERE p.entity_id = %s
-                      AND p.project_id = %s
-                    GROUP BY
-                        p.entity_id,
-                        p.canonical_name,
-                        p.topic,
-                        p.last_mentioned_ms,
-                        s.entity_id,
-                        s.canonical_name,
-                        s.last_mentioned_ms
-                    """,
-                    (
-                        secondary_id,
-                        project_id,
-                        primary_id,
-                        project_id,
-                    ),
-                )
-                check = await cur.fetchone()
+        if not isinstance(scope, ExecutionScope):
+            raise TypeError("write_batch requires an ExecutionScope")
+        user_name = require_scope_value(scope.user_name, "user_name", "graph write")
+        session_id = require_scope_value(scope.session_id, "session_id", "graph write")
+        project_id = self._require_project_id(scope.project_id, "graph write")
+        now_ms = self._current_time_ms()
 
-                if not check:
-                    logger.error(
-                        "Merge failed: one or both entities not found "
-                        f"({primary_id}, {secondary_id})"
-                    )
-                    return False
-
-                s_name_raw = self._clean_string(check["s_name"])
-                primary_topic = self._clean_string(check["p_topic"]) or "General"
-                final_topic = self._clean_string(final_topic) or primary_topic
-                p_last = int(check["p_last"] or 0)
-                s_last = int(check["s_last"] or 0)
-
-                combined_aliases = self._dedupe_aliases(
-                    check.get("p_aliases"),
-                    check.get("s_aliases"),
-                    [s_name_raw],
-                )
-                new_last = s_last if s_last > p_last else p_last
-                await cur.execute(
-                    """
-                    UPDATE entities
-                    SET topic = %s,
-                        last_mentioned_ms = %s
-                    WHERE entity_id = %s
-                      AND project_id = %s
-                    """,
-                    (
-                        final_topic,
-                        new_last,
-                        primary_id,
-                        project_id,
-                    ),
-                )
-                for alias in combined_aliases:
-                    if not alias:
-                        continue
-                    await cur.execute(
-                        """
-                        INSERT INTO entity_aliases (entity_id, alias)
-                        VALUES (%s, %s)
-                        ON CONFLICT (entity_id, alias) DO NOTHING
-                        """,
-                        (primary_id, alias),
-                    )
-
-                await cur.execute(
-                    """
-                    DELETE FROM message_entity_refs secondary_ref
-                    WHERE secondary_ref.entity_id = %s
-                      AND EXISTS (
-                          SELECT 1
-                          FROM message_entity_refs primary_ref
-                          WHERE primary_ref.message_id = secondary_ref.message_id
-                            AND primary_ref.entity_id = %s
-                      )
-                    """,
-                    (secondary_id, primary_id),
-                )
-                await cur.execute(
-                    """
-                    UPDATE message_entity_refs
-                    SET entity_id = %s
-                    WHERE entity_id = %s
-                    """,
-                    (primary_id, secondary_id),
-                )
-                await cur.execute(
-                    """
-                    INSERT INTO episode_entities (
-                        episode_id,
-                        project_id,
-                        entity_id,
-                        prominence_weight,
-                        role,
-                        is_focus_entity,
-                        source_message_count
-                    )
-                    SELECT
-                        ee.episode_id,
-                        ee.project_id,
-                        %s,
-                        ee.prominence_weight,
-                        ee.role,
-                        ee.is_focus_entity,
-                        ee.source_message_count
-                    FROM episode_entities ee
-                    JOIN episodes episode
-                      ON episode.episode_id = ee.episode_id
-                     AND episode.project_id = ee.project_id
-                    WHERE ee.entity_id = %s
-                      AND episode.project_id = %s
-                    ON CONFLICT (episode_id, entity_id) DO UPDATE SET
-                        prominence_weight = GREATEST(
-                            episode_entities.prominence_weight,
-                            EXCLUDED.prominence_weight
-                        ),
-                        role = COALESCE(
-                            episode_entities.role,
-                            EXCLUDED.role
-                        ),
-                        is_focus_entity = (
-                            episode_entities.is_focus_entity
-                            OR EXCLUDED.is_focus_entity
-                        ),
-                        source_message_count = GREATEST(
-                            episode_entities.source_message_count,
-                            EXCLUDED.source_message_count
+        async with self._cursor_context(cur) as cur:
+            if entities:
+                entity_params = []
+                for entity in entities:
+                    if not isinstance(entity, EntityWrite):
+                        raise TypeError("entities must be EntityWrite instances")
+                    if entity.entity_id == IDENTITY_ENTITY_ID:
+                        raise ValueError(
+                            "Identity entity writes must use ensure_identity_entity"
                         )
-                    """,
-                    (primary_id, secondary_id, project_id),
-                )
-                await cur.execute(
-                    """
-                    DELETE FROM episode_entities ee
-                    USING episodes episode
-                    WHERE ee.episode_id = episode.episode_id
-                      AND ee.project_id = episode.project_id
-                      AND ee.entity_id = %s
-                      AND episode.project_id = %s
-                    """,
-                    (secondary_id, project_id),
-                )
-                await cur.execute(
-                    """
-                    WITH source_stats AS (
-                        SELECT
-                            em.episode_id,
-                            COUNT(DISTINCT em.message_id) AS source_message_count,
-                            COALESCE(
-                                SUM(em.influence_weight),
-                                0.0
-                            ) AS prominence_weight,
-                            MIN(m.timestamp_ms) AS first_seen_at_ms,
-                            MAX(m.timestamp_ms) AS last_seen_at_ms
-                        FROM episode_messages em
-                        JOIN episodes episode
-                          ON episode.episode_id = em.episode_id
-                         AND episode.project_id = em.project_id
-                        JOIN messages m
-                          ON m.message_id = em.message_id
-                         AND m.project_id = em.project_id
-                         AND m.session_id = em.session_id
-                        JOIN message_entity_refs mer
-                          ON mer.message_id = em.message_id
-                        WHERE mer.entity_id = %s
-                          AND episode.project_id = %s
-                        GROUP BY em.episode_id
+
+                    entity_params.append(
+                        {
+                            "id": entity.entity_id,
+                            "user_name": user_name,
+                            "project_id": project_id,
+                            "canonical_name": entity.canonical_name,
+                            "aliases": list(entity.aliases),
+                            "type": entity.entity_type,
+                            "topic": entity.topic,
+                            "embedding": entity.embedding,
+                            "now": now_ms,
+                        }
                     )
-                    UPDATE episode_entities ee
-                    SET
-                        source_message_count = source_stats.source_message_count,
-                        prominence_weight = GREATEST(
-                            ee.prominence_weight,
-                            source_stats.prominence_weight
-                        ),
-                        first_seen_at = CASE
-                            WHEN source_stats.first_seen_at_ms IS NULL THEN NULL
-                            ELSE to_timestamp(
-                                source_stats.first_seen_at_ms / 1000.0
-                            )
-                        END,
-                        last_seen_at = CASE
-                            WHEN source_stats.last_seen_at_ms IS NULL THEN NULL
-                            ELSE to_timestamp(
-                                source_stats.last_seen_at_ms / 1000.0
-                            )
-                        END
-                    FROM source_stats
-                    WHERE ee.episode_id = source_stats.episode_id
-                      AND ee.entity_id = %s
-                    """,
-                    (primary_id, project_id, primary_id),
-                )
 
-                await cur.execute(
-                    """
-                    SELECT *
-                    FROM relationships
-                    WHERE project_id = %s
-                      AND (
-                          entity_a_id = %s
-                          OR entity_b_id = %s
-                      )
-                    """,
-                    (project_id, secondary_id, secondary_id),
-                )
-                canonical_relationships = await cur.fetchall()
-                for rel in canonical_relationships:
-                    old_relationship_id = rel["relationship_id"]
-                    rel_a = int(rel["entity_a_id"])
-                    rel_b = int(rel["entity_b_id"])
-                    target_id = rel_b if rel_a == secondary_id else rel_a
-
-                    if target_id == primary_id:
+                    if entity.is_new:
                         await cur.execute(
                             """
-                            DELETE FROM relationship_observations
-                            WHERE relationship_id = %s
-                              AND project_id = %s
+                            INSERT INTO entities (
+                                entity_id,
+                                user_name,
+                                project_id,
+                                canonical_name,
+                                type,
+                                topic,
+                                last_mentioned_ms,
+                                embedding
+                            )
+                            VALUES (
+                                %s, %s, %s, %s, %s, %s, %s, %s::vector
+                            )
+                            ON CONFLICT (entity_id) DO UPDATE SET
+                                canonical_name = EXCLUDED.canonical_name,
+                                type = EXCLUDED.type,
+                                topic = EXCLUDED.topic,
+                                last_mentioned_ms = EXCLUDED.last_mentioned_ms,
+                                embedding = EXCLUDED.embedding
+                            WHERE entities.project_id = EXCLUDED.project_id
+                            RETURNING entity_id
                             """,
-                            (old_relationship_id, project_id),
+                            (
+                                entity.entity_id,
+                                user_name,
+                                project_id,
+                                entity.canonical_name,
+                                entity.entity_type,
+                                entity.topic,
+                                now_ms,
+                                json.dumps(entity.embedding) if entity.embedding else None,
+                            ),
                         )
-                        await cur.execute(
-                            """
-                            DELETE FROM relationships
-                            WHERE relationship_id = %s
-                            """,
-                            (old_relationship_id,),
-                        )
-                        continue
-
-                    symmetric = bool(rel.get("symmetric", False))
-                    if symmetric:
-                        new_a, new_b = sorted((primary_id, target_id))
-                    elif rel["entity_a_id"] == secondary_id:
-                        new_a, new_b = primary_id, target_id
+                        if await cur.fetchone() is None:
+                            raise RuntimeError(
+                                f"Entity {entity.entity_id} already exists "
+                                f"outside project {project_id}"
+                            )
                     else:
-                        new_a, new_b = target_id, primary_id
-                    new_relationship_id = self._relationship_id(
+                        await cur.execute(
+                            """
+                            UPDATE entities
+                            SET canonical_name = %s,
+                                type = COALESCE(type, %s),
+                                topic = %s,
+                                last_mentioned_ms = %s,
+                                embedding = COALESCE(%s::vector, embedding)
+                            WHERE entity_id = %s
+                              AND (
+                                  project_id = %s
+                                  OR entity_id = %s
+                              )
+                            RETURNING entity_id
+                            """,
+                            (
+                                entity.canonical_name,
+                                entity.entity_type,
+                                entity.topic,
+                                now_ms,
+                                json.dumps(entity.embedding) if entity.embedding else None,
+                                entity.entity_id,
+                                project_id,
+                                IDENTITY_ENTITY_ID,
+                            ),
+                        )
+
+                        persisted = await cur.fetchone()
+                        if not persisted:
+                            raise RuntimeError(
+                                f"Existing entity {entity.entity_id} was not "
+                                f"found in project {project_id}"
+                            )
+
+                    for alias in entity.aliases:
+                        if not alias:
+                            continue
+                        await cur.execute(
+                            """
+                            INSERT INTO entity_aliases (entity_id, alias)
+                            VALUES (%s, %s)
+                            ON CONFLICT (entity_id, alias) DO NOTHING
+                            """,
+                            (entity.entity_id, alias),
+                        )
+
+                await self.projection.project_entities(cur, entity_params)
+
+            if message_entity_refs:
+                await self._write_message_entity_refs(
+                    cur,
+                    message_entity_refs,
+                    scope,
+                )
+
+            # Graph writes are part of an ingestion claim, not its durable
+            # completion boundary.  MessageLifecycleWriter marks the claimed
+            # user turns episode-ready only after the claim finishes.
+
+            if relationships:
+                rel_params = []
+                for relationship in relationships:
+                    if not isinstance(relationship, RelationshipWrite):
+                        raise TypeError(
+                            "relationships must be RelationshipWrite instances"
+                        )
+                    relationship_id = relationship_identity(
                         project_id,
-                        new_a,
-                        new_b,
-                        rel["relationship_type"],
-                        symmetric=symmetric,
+                        relationship.entity_a_id,
+                        relationship.entity_b_id,
+                        relationship.relationship_type,
+                        symmetric=relationship.symmetric,
                     )
+                    evidence_ref = {
+                        "user_name": user_name,
+                        "session_id": session_id,
+                        "message_id": relationship.message_id,
+                    }
                     await cur.execute(
                         """
                         INSERT INTO relationships (
@@ -471,94 +360,81 @@ class GraphWriter:
                             entity_a_id,
                             entity_b_id,
                             relationship_type,
-                            canonical_relationship_type,
-                            observed_relationship_label,
-                            domain_status,
-                            "symmetric",
-                            weight,
-                            confidence,
-                            context,
-                            last_seen_ms
+                            "symmetric"
                         )
-                        VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s
+                        SELECT
+                            %s, %s, %s, %s, %s, %s, %s
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM entities
+                            WHERE entity_id = %s
+                              AND (
+                                  project_id = %s
+                                  OR entity_id = %s
+                              )
+                        )
+                        AND EXISTS (
+                            SELECT 1
+                            FROM entities
+                            WHERE entity_id = %s
+                              AND (
+                                  project_id = %s
+                                  OR entity_id = %s
+                              )
                         )
                         ON CONFLICT (relationship_id) DO UPDATE SET
-                            weight = relationships.weight + EXCLUDED.weight,
-                            confidence = GREATEST(
-                                relationships.confidence,
-                                EXCLUDED.confidence
-                            ),
-                            relationship_type = COALESCE(
-                                EXCLUDED.relationship_type,
-                                relationships.relationship_type
-                            ),
-                            canonical_relationship_type = COALESCE(
-                                EXCLUDED.canonical_relationship_type,
-                                relationships.canonical_relationship_type
-                            ),
-                            observed_relationship_label = COALESCE(
-                                EXCLUDED.observed_relationship_label,
-                                relationships.observed_relationship_label
-                            ),
-                            domain_status = EXCLUDED.domain_status,
-                            "symmetric" = EXCLUDED."symmetric",
-                            context = COALESCE(
-                                EXCLUDED.context,
-                                relationships.context
-                            ),
-                            last_seen_ms = GREATEST(
-                                COALESCE(relationships.last_seen_ms, 0),
-                                COALESCE(EXCLUDED.last_seen_ms, 0)
-                            )
+                            relationship_id = EXCLUDED.relationship_id
+                        RETURNING relationship_id
                         """,
                         (
-                            new_relationship_id,
-                            rel["user_name"],
+                            relationship_id,
+                            user_name,
                             project_id,
-                            new_a,
-                            new_b,
-                            rel.get("relationship_type"),
-                            rel.get("canonical_relationship_type"),
-                            rel.get("observed_relationship_label")
-                            or rel.get("relationship_type"),
-                            rel.get("domain_status") or "unrecognized",
-                            bool(rel.get("symmetric", False)),
-                            rel["weight"],
-                            rel["confidence"],
-                            rel["context"],
-                            rel["last_seen_ms"],
+                            relationship.entity_a_id,
+                            relationship.entity_b_id,
+                            relationship.relationship_type,
+                            relationship.symmetric,
+                            relationship.entity_a_id,
+                            project_id,
+                            IDENTITY_ENTITY_ID,
+                            relationship.entity_b_id,
+                            project_id,
+                            IDENTITY_ENTITY_ID,
                         ),
                     )
+                    record = await cur.fetchone()
+                    if not record:
+                        raise ValueError(
+                            "Relationship endpoints must exist in the "
+                            f"project scope: {project_id}/"
+                            f"{relationship.entity_a_id}/"
+                            f"{relationship.entity_b_id}"
+                        )
+
                     await cur.execute(
                         """
-                        WITH rewritten AS (
-                            SELECT
-                                project_id,
-                                user_name,
-                                session_id,
-                                message_id,
-                                CASE
-                                    WHEN source_entity_id = %s THEN %s
-                                    ELSE source_entity_id
-                                END AS rewritten_source_id,
-                                CASE
-                                    WHEN target_entity_id = %s THEN %s
-                                    ELSE target_entity_id
-                                END AS rewritten_target_id,
-                                source_type,
-                                target_type,
-                                observed_relationship_label,
-                                canonical_relationship_type,
-                                domain_status,
-                                confidence,
-                                context,
-                                observed_at_ms
-                            FROM relationship_observations
-                            WHERE relationship_id = %s
-                              AND project_id = %s
+                        SELECT message_id
+                        FROM messages
+                        WHERE message_id = %s
+                          AND user_name = %s
+                          AND session_id = %s
+                          AND project_id = %s
+                        """,
+                        (
+                            evidence_ref["message_id"],
+                            user_name,
+                            session_id,
+                            project_id,
+                        ),
+                    )
+                    if await cur.fetchone() is None:
+                        raise ValueError(
+                            "Relationship evidence message must exist in the "
+                            "relationship project scope"
                         )
+
+                    await cur.execute(
+                        """
                         INSERT INTO relationship_observations (
                             relationship_id,
                             project_id,
@@ -572,33 +448,16 @@ class GraphWriter:
                             observed_relationship_label,
                             canonical_relationship_type,
                             domain_status,
+                            domain_version,
+                            "symmetric",
                             confidence,
                             context,
                             observed_at_ms
                         )
-                        SELECT
-                            %s,
-                            project_id,
-                            user_name,
-                            session_id,
-                            message_id,
-                            CASE WHEN %s
-                                THEN LEAST(rewritten_source_id, rewritten_target_id)
-                                ELSE rewritten_source_id
-                            END,
-                            CASE WHEN %s
-                                THEN GREATEST(rewritten_source_id, rewritten_target_id)
-                                ELSE rewritten_target_id
-                            END,
-                            source_type,
-                            target_type,
-                            observed_relationship_label,
-                            canonical_relationship_type,
-                            domain_status,
-                            confidence,
-                            context,
-                            observed_at_ms
-                        FROM rewritten
+                        VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s
+                        )
                         ON CONFLICT (
                             project_id,
                             user_name,
@@ -608,12 +467,13 @@ class GraphWriter:
                             target_entity_id,
                             observed_relationship_label
                         ) DO UPDATE SET
-                            relationship_id = EXCLUDED.relationship_id,
                             canonical_relationship_type = COALESCE(
                                 EXCLUDED.canonical_relationship_type,
                                 relationship_observations.canonical_relationship_type
                             ),
                             domain_status = EXCLUDED.domain_status,
+                            domain_version = EXCLUDED.domain_version,
+                            "symmetric" = EXCLUDED."symmetric",
                             confidence = GREATEST(
                                 relationship_observations.confidence,
                                 EXCLUDED.confidence
@@ -628,230 +488,544 @@ class GraphWriter:
                             )
                         """,
                         (
-                            secondary_id,
-                            primary_id,
-                            secondary_id,
-                            primary_id,
-                            old_relationship_id,
+                            relationship_id,
                             project_id,
-                            new_relationship_id,
-                            bool(rel.get("symmetric", False)),
-                            bool(rel.get("symmetric", False)),
+                            user_name,
+                            session_id,
+                            evidence_ref["message_id"],
+                            relationship.source_entity_id,
+                            relationship.target_entity_id,
+                            relationship.source_type,
+                            relationship.target_type,
+                            relationship.observed_label,
+                            relationship.canonical_type,
+                            relationship.domain_status,
+                            relationship.domain_version,
+                            relationship.symmetric,
+                            relationship.confidence,
+                            relationship.context,
+                            now_ms,
                         ),
                     )
-                    await cur.execute(
-                        """
-                        INSERT INTO episode_relationships (
-                            episode_id,
-                            project_id,
-                            relationship_id,
-                            prominence_weight,
-                            is_central_relationship,
-                            source_message_count
-                        )
-                        SELECT
-                            episode_id,
-                            project_id,
-                            %s,
-                            prominence_weight,
-                            is_central_relationship,
-                            source_message_count
-                        FROM episode_relationships
-                        WHERE relationship_id = %s
-                          AND project_id = %s
-                        ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
-                            prominence_weight = GREATEST(
-                                episode_relationships.prominence_weight,
-                                EXCLUDED.prominence_weight
-                            ),
-                            is_central_relationship = (
-                                episode_relationships.is_central_relationship
-                                OR EXCLUDED.is_central_relationship
-                            ),
-                            source_message_count = GREATEST(
-                                episode_relationships.source_message_count,
-                                EXCLUDED.source_message_count
-                            )
-                        """,
-                        (new_relationship_id, old_relationship_id, project_id),
-                    )
-                    await cur.execute(
-                        """
-                        WITH source_stats AS (
-                            SELECT
-                                em.episode_id,
-                                COUNT(DISTINCT em.message_id) AS source_message_count,
-                                COALESCE(
-                                    SUM(em.influence_weight),
-                                    0.0
-                                ) AS prominence_weight
-                            FROM episode_messages em
-                            JOIN relationship_observations rer
-                              ON rer.message_id = em.message_id
-                             AND rer.project_id = em.project_id
-                             AND rer.session_id = em.session_id
-                             AND rer.relationship_id = %s
-                             AND rer.project_id = %s
-                            GROUP BY em.episode_id
-                        )
-                        UPDATE episode_relationships er
-                        SET
-                            source_message_count = source_stats.source_message_count,
-                            prominence_weight = GREATEST(
-                                er.prominence_weight,
-                                source_stats.prominence_weight
-                            )
-                        FROM source_stats
-                        WHERE er.episode_id = source_stats.episode_id
-                          AND er.relationship_id = %s
-                        """,
-                        (new_relationship_id, project_id, new_relationship_id),
-                    )
-                    if new_relationship_id != old_relationship_id:
-                        await cur.execute(
-                            """
-                            DELETE FROM relationship_observations
-                            WHERE relationship_id = %s
-                              AND project_id = %s
-                            """,
-                            (old_relationship_id, project_id),
-                        )
-                        await cur.execute(
-                            """
-                            DELETE FROM relationships
-                            WHERE relationship_id = %s
-                            """,
-                            (old_relationship_id,),
-                        )
 
-                await cur.execute(
-                    """
-                    SELECT
-                        rel.relationship_id,
-                        rel.user_name,
-                        rel.project_id,
-                        rel.entity_a_id,
-                        rel.entity_b_id,
-                        rel.relationship_type,
-                        rel.canonical_relationship_type,
-                        rel.observed_relationship_label,
-                        rel.domain_status,
-                        rel.symmetric,
-                        rel.weight,
-                        rel.confidence,
-                        rel.context,
-                        rel.last_seen_ms,
-                        COALESCE(
-                            json_agg(
-                                json_build_object(
-                                    'project_id', ref.project_id,
-                                    'user_name', ref.user_name,
-                                    'session_id', ref.session_id,
-                                    'message_id', ref.message_id
-                                )
-                            )
-                            FILTER (
-                                WHERE ref.relationship_id IS NOT NULL
-                            ),
-                            '[]'
-                        ) AS evidence_refs
-                    FROM relationships rel
-                    LEFT JOIN relationship_observations ref
-                      ON ref.relationship_id = rel.relationship_id
-                     AND ref.project_id = rel.project_id
-                    WHERE rel.project_id = %s
-                      AND (
-                          rel.entity_a_id = %s
-                          OR rel.entity_b_id = %s
-                      )
-                    GROUP BY rel.relationship_id
-                    """,
-                    (project_id, primary_id, primary_id),
-                )
-                relationship_projection_rows = await cur.fetchall()
-                relationship_projection = self._relationship_projection_params(
-                    relationship_projection_rows
-                )
+                    rel_params.append(
+                        {
+                            "relationship_id": relationship_id,
+                            "project_id": project_id,
+                            "entity_a_id": relationship.entity_a_id,
+                            "entity_b_id": relationship.entity_b_id,
+                            "relationship_type": relationship.relationship_type,
+                            "symmetric": relationship.symmetric,
+                        }
+                    )
 
-                await cur.execute(
-                    """
-                    SELECT
-                        (
-                            SELECT count(*)
-                            FROM message_entity_refs
-                            WHERE entity_id = %s
-                        ) AS message_ref_count,
-                        (
-                            SELECT count(*)
-                            FROM episode_entities
-                            WHERE entity_id = %s
-                        ) AS episode_entity_count,
-                        (
-                            SELECT count(*)
-                            FROM relationships
-                            WHERE entity_a_id = %s
-                               OR entity_b_id = %s
-                        ) AS relationship_count
-                    """,
-                    (
-                        secondary_id,
-                        secondary_id,
-                        secondary_id,
-                        secondary_id,
+                await self.projection.project_relationships(cur, rel_params)
+
+        return True
+
+    @_storage_write("commit_ingestion")
+    async def commit_ingestion(self, commit: IngestionCommit) -> GraphWriteSummary:
+        """Persist one claimed ingestion result and complete its messages atomically."""
+
+        if not isinstance(commit, IngestionCommit):
+            raise TypeError("commit_ingestion requires an IngestionCommit")
+        scope = commit.scope
+        user_name = require_scope_value(
+            scope.user_name, "user_name", "ingestion commit"
+        )
+        session_id = require_scope_value(
+            scope.session_id, "session_id", "ingestion commit"
+        )
+        project_id = self._require_project_id(scope.project_id, "ingestion commit")
+
+        async with self.client.transaction() as cur:
+            await self._verify_ingestion_claim(
+                cur,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                batch_id=commit.batch_id,
+                message_ids=commit.message_ids,
+            )
+            await self.write_batch(
+                commit.entity_writes,
+                commit.relationship_writes,
+                message_entity_refs=commit.message_entity_refs,
+                scope=scope,
+                cur=cur,
+            )
+            await self.update_entity_aliases(
+                self._alias_update_map(commit.alias_updates),
+                project_id=project_id,
+                cur=cur,
+            )
+            await self._complete_ingestion_claim(
+                cur,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                batch_id=commit.batch_id,
+                message_ids=commit.message_ids,
+            )
+
+        return GraphWriteSummary(
+            entities_written=len(commit.entity_writes),
+            relationships_written=len(commit.relationship_writes),
+            aliases_updated=len(self._alias_update_map(commit.alias_updates)),
+        )
+
+    @staticmethod
+    def _alias_update_map(alias_updates: Sequence[AliasUpdate]) -> Dict[int, List[str]]:
+        merged: Dict[int, List[str]] = {}
+        for update in alias_updates:
+            aliases = merged.setdefault(update.entity_id, [])
+            for alias in update.aliases:
+                if alias not in aliases:
+                    aliases.append(alias)
+        return merged
+
+    async def _verify_ingestion_claim(
+        self,
+        cur,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_id: str,
+        message_ids: Sequence[int],
+    ) -> None:
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM public.messages AS message
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND role = 'user'
+              AND ingestion_state = 'claimed'
+              AND ingestion_claim_id = %s
+            FOR UPDATE
+            """,
+            (user_name, project_id, session_id, batch_id),
+        )
+        claimed_ids = {int(row["message_id"]) for row in await cur.fetchall()}
+        if claimed_ids != set(message_ids):
+            raise ValueError("Ingestion commit no longer owns the exact claimed messages")
+
+    async def _complete_ingestion_claim(
+        self,
+        cur,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        batch_id: str,
+        message_ids: Sequence[int],
+    ) -> None:
+        await cur.execute(
+            """
+            UPDATE public.messages
+            SET ingestion_state = 'processed',
+                ingestion_claim_id = NULL,
+                ingestion_claimed_at_ms = NULL,
+                ingestion_last_failure_stage = NULL,
+                ingestion_last_failure_code = NULL,
+                ingestion_last_failure_at_ms = NULL,
+                ingestion_last_error_summary = NULL,
+                episode_eligible = TRUE
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND role = 'user'
+              AND message_id = ANY(%s)
+              AND ingestion_state = 'claimed'
+              AND ingestion_claim_id = %s
+            """,
+            (
+                user_name,
+                project_id,
+                session_id,
+                list(message_ids),
+                batch_id,
+            ),
+        )
+        if cur.rowcount != len(message_ids):
+            raise RuntimeError("Ingestion claim no longer belongs to this worker")
+
+    async def _write_message_entity_refs(
+        self,
+        cur,
+        references: Sequence[MessageEntityRef],
+        scope: ExecutionScope,
+    ) -> None:
+        user_name = require_scope_value(
+            scope.user_name, "user_name", "message-entity write"
+        )
+        session_id = require_scope_value(
+            scope.session_id, "session_id", "message-entity write"
+        )
+        project_id = self._require_project_id(scope.project_id, "message-entity write")
+        if any(not isinstance(reference, MessageEntityRef) for reference in references):
+            raise TypeError("message_entity_refs must be MessageEntityRef instances")
+        normalized_references = {
+            (reference.message_id, reference.entity_id) for reference in references
+        }
+        if any(
+            message_id <= 0 or entity_id <= 0
+            for message_id, entity_id in normalized_references
+        ):
+            raise ValueError("Message-entity references require positive IDs")
+
+        message_ids = sorted({message_id for message_id, _ in normalized_references})
+        entity_ids = sorted({entity_id for _, entity_id in normalized_references})
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM messages
+            WHERE message_id = ANY(%s)
+              AND user_name = %s
+              AND session_id = %s
+              AND project_id = %s
+            """,
+            (message_ids, user_name, session_id, project_id),
+        )
+        scoped_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
+        if scoped_message_ids != set(message_ids):
+            raise ValueError("Message-entity references include messages outside scope")
+
+        await cur.execute(
+            """
+            SELECT entity_id
+            FROM entities
+            WHERE entity_id = ANY(%s)
+              AND (project_id = %s OR entity_id = %s)
+            """,
+            (entity_ids, project_id, IDENTITY_ENTITY_ID),
+        )
+        scoped_entity_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
+        if scoped_entity_ids != set(entity_ids):
+            raise ValueError("Message-entity references include entities outside scope")
+
+        for message_id, entity_id in sorted(normalized_references):
+            await cur.execute(
+                """
+                INSERT INTO message_entity_refs (message_id, entity_id)
+                VALUES (%s, %s)
+                ON CONFLICT (message_id, entity_id) DO NOTHING
+                """,
+                (message_id, entity_id),
+            )
+
+    async def _mark_episode_eligible_messages(
+        self,
+        cur,
+        eligible_messages: Sequence[EpisodeEligibility],
+        scope: ExecutionScope,
+    ) -> None:
+        user_name = require_scope_value(
+            scope.user_name, "user_name", "episode eligibility write"
+        )
+        session_id = require_scope_value(
+            scope.session_id, "session_id", "episode eligibility write"
+        )
+        project_id = self._require_project_id(
+            scope.project_id, "episode eligibility write"
+        )
+        eligibility_by_message_id: Dict[int, EpisodeEligibility] = {}
+        for eligibility in eligible_messages:
+            if not isinstance(eligibility, EpisodeEligibility):
+                raise TypeError(
+                    "eligible_messages must be EpisodeEligibility instances"
+                )
+            message_id = int(eligibility.message_id)
+            prior = eligibility_by_message_id.get(message_id)
+            if (
+                prior
+                and prior.episode_type
+                and eligibility.episode_type
+                and prior.episode_type != eligibility.episode_type
+            ):
+                raise ValueError(
+                    "Episode eligibility has conflicting types for one message"
+                )
+            eligibility_by_message_id[message_id] = EpisodeEligibility(
+                message_id=message_id,
+                episode_type=eligibility.episode_type
+                or (prior.episode_type if prior else None),
+            )
+        normalized_message_ids = sorted(eligibility_by_message_id)
+        if any(message_id <= 0 for message_id in normalized_message_ids):
+            raise ValueError("Episode-eligible messages require positive IDs")
+
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM messages
+            WHERE message_id = ANY(%s)
+              AND user_name = %s
+              AND session_id = %s
+              AND project_id = %s
+            """,
+            (normalized_message_ids, user_name, session_id, project_id),
+        )
+        scoped_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
+        if scoped_message_ids != set(normalized_message_ids):
+            raise ValueError("Episode-eligible messages include messages outside scope")
+
+        for message_id in normalized_message_ids:
+            eligibility = eligibility_by_message_id[message_id]
+            await cur.execute(
+                """
+                UPDATE messages
+                SET episode_eligible = TRUE,
+                    episode_type = COALESCE(%s, episode_type)
+                WHERE message_id = %s
+                  AND user_name = %s
+                  AND session_id = %s
+                  AND project_id = %s
+                """,
+                (
+                    eligibility.episode_type,
+                    message_id,
+                    user_name,
+                    session_id,
+                    project_id,
+                ),
+            )
+
+    @_storage_write("update_entity_canonical_name")
+    async def update_entity_canonical_name(
+        self, entity_id: int, canonical_name: str, *, project_id: str
+    ) -> None:
+        project_id = self._require_project_id(
+            project_id,
+            "update_entity_canonical_name",
+        )
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE entities
+                SET canonical_name = %s
+                WHERE entity_id = %s
+                  AND (project_id = %s OR entity_id = %s)
+                """,
+                (
+                    canonical_name,
+                    entity_id,
+                    project_id,
+                    IDENTITY_ENTITY_ID,
+                ),
+            )
+
+            cypher = """
+            MATCH (e:Entity {id: $id})
+            WHERE e.project_id = $project_id OR e.id = $identity_entity_id
+            SET e.canonical_name = $canonical_name
+            RETURN e.id
+            """
+            await cur.execute(
+                self.client.build_cypher(cypher),
+                (
+                    json.dumps(
+                        {
+                            "id": entity_id,
+                            "canonical_name": canonical_name,
+                            "project_id": project_id,
+                            "identity_entity_id": IDENTITY_ENTITY_ID,
+                        }
                     ),
-                )
-                remaining = await cur.fetchone() or {}
-                if any(
-                    int(remaining.get(field, 0))
-                    for field in (
-                        "message_ref_count",
-                        "episode_entity_count",
-                        "relationship_count",
-                    )
-                ):
-                    raise RuntimeError(
-                        "Merge left canonical dependencies on secondary "
-                        f"entity {secondary_id}"
+                ),
+            )
+
+    @_storage_write("update_entity_embedding")
+    async def update_entity_embedding(
+        self, entity_id: int, embedding: List[float], *, project_id: str
+    ) -> None:
+        project_id = self._require_project_id(project_id, "update_entity_embedding")
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE entities
+                SET embedding = %s::vector
+                WHERE entity_id = %s
+                  AND (project_id = %s OR entity_id = %s)
+                """,
+                (json.dumps(embedding), entity_id, project_id, IDENTITY_ENTITY_ID),
+            )
+    @_storage_write("update_entity_aliases")
+    async def update_entity_aliases(
+        self, alias_updates: Dict[int, List[str]], *, project_id: str, cur=None
+    ) -> None:
+        project_id = self._require_project_id(project_id, "update_entity_aliases")
+        if not alias_updates:
+            return
+
+        params = [
+            {"id": entity_id, "aliases": aliases}
+            for entity_id, aliases in alias_updates.items()
+            if aliases
+        ]
+        if not params:
+            return
+
+        async with self._cursor_context(cur) as cur:
+            for item in params:
+                for alias in item["aliases"]:
+                    await cur.execute(
+                        """
+                        INSERT INTO entity_aliases (entity_id, alias)
+                        SELECT %s, %s
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM entities
+                            WHERE entity_id = %s
+                              AND (
+                                  project_id = %s
+                                  OR entity_id = %s
+                              )
+                        )
+                        ON CONFLICT (entity_id, alias) DO NOTHING
+                        """,
+                        (
+                            item["id"],
+                            alias,
+                            item["id"],
+                            project_id,
+                            IDENTITY_ENTITY_ID,
+                        ),
                     )
 
-                await self.projection.update_merged_entity(
-                    cur,
-                    primary_id,
-                    project_id,
-                    combined_aliases,
-                    new_last,
-                )
-                await self.projection.replace_relationships_for_entities(
-                    cur,
-                    project_id,
-                    [primary_id, secondary_id],
-                    relationship_projection,
-                )
-                await self.projection.delete_entity_projection(
-                    cur,
-                    secondary_id,
-                    project_id,
-                )
+            cypher = """
+            UNWIND $batch AS data
+            MATCH (e:Entity {id: data.id})
+            WHERE e.project_id = $project_id OR e.id = $identity_entity_id
+            WITH e,
+                coalesce(e.aliases, []) + coalesce(data.aliases, [])
+                AS all_aliases
+            WITH e,
+                CASE WHEN size(all_aliases) = 0
+                     THEN [null]
+                     ELSE all_aliases
+                END AS safe_aliases
+            UNWIND safe_aliases AS alias
+            WITH e, collect(DISTINCT alias) AS merged_aliases
+            WITH e,
+                [x IN merged_aliases WHERE x IS NOT NULL] AS final_aliases
+            SET e.aliases = final_aliases
+            RETURN count(e)
+            """
+            await cur.execute(
+                self.client.build_cypher(cypher),
+                (
+                    json.dumps(
+                        {
+                            "batch": params,
+                            "project_id": project_id,
+                            "identity_entity_id": IDENTITY_ENTITY_ID,
+                        }
+                    ),
+                ),
+            )
 
-                await cur.execute(
-                    """
-                    DELETE FROM entities
-                    WHERE entity_id = %s
-                      AND project_id = %s
-                    RETURNING entity_id
-                    """,
-                    (secondary_id, project_id),
-                )
-                deleted_secondary = await cur.fetchone()
-                if not deleted_secondary:
-                    raise RuntimeError(
-                        f"Secondary entity {secondary_id} disappeared "
-                        "before merge deletion"
-                    )
+    async def _delete_entity_aggregate(
+        self,
+        entity_ids: List[int],
+        project_id: str,
+    ) -> List[int]:
+        unique_ids = sorted(
+            {
+                int(entity_id)
+                for entity_id in entity_ids
+                if int(entity_id) != IDENTITY_ENTITY_ID
+            }
+        )
+        if not unique_ids:
+            return []
 
-                logger.info(f"Merged entity {secondary_id} into {primary_id}")
-                return True
-        except Exception as e:
-            if using_existing_cursor:
-                raise
-            self._raise_storage_write("merge_entities", e)
+        async with self.client.transaction() as cur:
+            return await self._delete_entity_aggregate_with_cursor(
+                cur,
+                unique_ids,
+                project_id,
+            )
+
+    async def _delete_entity_aggregate_with_cursor(
+        self,
+        cur,
+        entity_ids: List[int],
+        project_id: str,
+    ) -> List[int]:
+        if not entity_ids:
+            return []
+
+        await cur.execute(
+            """
+            DELETE FROM entities
+            WHERE entity_id = ANY(%s)
+              AND project_id = %s
+              AND entity_id <> %s
+            RETURNING entity_id
+            """,
+            (entity_ids, project_id, IDENTITY_ENTITY_ID),
+        )
+        deleted_ids = sorted(int(row["entity_id"]) for row in await cur.fetchall())
+        await self.projection.delete_entities_projection(
+            cur,
+            deleted_ids,
+            project_id,
+        )
+        return deleted_ids
+
+    @_storage_write("delete_selected_project_entities")
+    async def delete_selected_project_entities(
+        self,
+        entity_ids: Sequence[int],
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> List[int]:
+        """Delete explicitly selected, project-owned derived entities atomically."""
+
+        project_id = self._require_project_id(
+            project_id,
+            "delete_selected_project_entities",
+        )
+        if not user_name or not user_name.strip():
+            raise ValueError("delete_selected_project_entities requires user_name")
+        normalized_ids: list[int] = []
+        for entity_id in entity_ids:
+            if not isinstance(entity_id, int) or isinstance(entity_id, bool):
+                raise TypeError("entity_ids must contain integer IDs")
+            if entity_id <= 0:
+                raise ValueError("entity_ids must contain positive IDs")
+            normalized_ids.append(entity_id)
+        selected_ids = sorted(set(normalized_ids))
+        if not selected_ids:
+            raise ValueError("Entity cleanup requires at least one selected entity")
+        if IDENTITY_ENTITY_ID in selected_ids:
+            raise ValueError("The reserved identity entity cannot be deleted")
+
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT entity_id
+                FROM public.entities
+                WHERE entity_id = ANY(%s)
+                  AND user_name = %s
+                  AND project_id = %s
+                FOR UPDATE
+                """,
+                (selected_ids, user_name, project_id),
+            )
+            owned_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
+            missing_ids = sorted(set(selected_ids) - owned_ids)
+            if missing_ids:
+                raise ValueError(
+                    "Entity cleanup selection contains IDs outside the project: "
+                    f"{missing_ids}"
+                )
+            return await self._delete_entity_aggregate_with_cursor(
+                cur,
+                selected_ids,
+                project_id,
+            )
