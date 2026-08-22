@@ -43,6 +43,7 @@ from .constants import (
     WORKSPACE_PREPARE_CONCURRENCY,
     document_extension,
 )
+from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
 from .scanning import build_folder_preview, normalize_relative_path
 from .storage import (
@@ -91,6 +92,14 @@ class DocumentService:
             workspace_prepare_concurrency=workspace_prepare_concurrency,
         )
         self._run_blocking = blocking_runner
+        self._indexer = DocumentIndexer(
+            project_id=project_id,
+            reader=self._reader,
+            writer=self._writer,
+            embedding_service=embedding_service,
+            policy=self._indexing_policy,
+            blocking_runner=blocking_runner,
+        )
         if not isinstance(document_rerank_enabled, bool):
             raise ValueError("document_rerank_enabled must be a boolean")
         if (
@@ -1338,7 +1347,7 @@ class DocumentService:
             "chunk_count": 0,
         }
 
-    async def index_document(
+    async def _legacy_index_document(
         self,
         *,
         document_id: str,
@@ -1419,6 +1428,28 @@ class DocumentService:
             raise RuntimeError(
                 f"Failed to index document: {error_message}"
             ) from exc
+
+    async def index_document(
+        self,
+        *,
+        document_id: str,
+        session_id: Optional[str] = None,
+        policy: Optional[DocumentIndexPolicy] = None,
+    ) -> Dict:
+        """Delegate document derivation to this project's DocumentIndexer."""
+
+        row = await self._indexer.index_document(
+            document_id=document_id,
+            session_id=session_id,
+            policy=policy,
+        )
+        return self._public_metadata(row)
+
+    @property
+    def indexer(self) -> DocumentIndexer:
+        """Expose the project-owned indexer for runtime lifecycle ownership."""
+
+        return self._indexer
 
     async def submit_document(
         self,

@@ -2703,7 +2703,7 @@ async def test_cancelled_document_index_releases_its_durable_claim(document_harn
         started.set()
         await asyncio.Event().wait()
 
-    service._run_blocking = wait_for_cancellation
+    service.indexer._run_blocking = wait_for_cancellation
     task = asyncio.create_task(
         service.index_document(document_id=uploaded["document_id"])
     )
