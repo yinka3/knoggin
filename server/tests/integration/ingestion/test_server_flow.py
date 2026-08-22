@@ -24,12 +24,14 @@ from common.schema.settings import (
 )
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.executor import AgentExecutor
+from core.agent.orchestrator import AgentOrchestrator
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
+from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.retrieval import KnowledgeRetrieval
@@ -68,6 +70,9 @@ class _DeterministicEmbeddingService:
     async def encode(self, texts):
         assert len(texts) == 1
         return [[0.25] * 1024]
+
+    async def encode_single(self, text):
+        return [0.25] * 1024
 
 
 class _DeterministicAgentLLM:
@@ -123,6 +128,43 @@ class _DeterministicAgentLLM:
 
     async def generate_text(self, **_kwargs):
         return "The source is grounded and retrievable."
+
+
+class _DeterministicDocumentAgentLLM(_DeterministicAgentLLM):
+    """Drive the canonical runtime through document search and synthesis."""
+
+    def __init__(self):
+        super().__init__()
+        self.steps = [
+            (
+                "search_documents",
+                '{"query": "violet launch phrase", "limit": 1}',
+                "document-search-1",
+            ),
+            (
+                "submit_answer",
+                '{"content": "The document records the violet launch phrase."}',
+                "answer-1",
+            ),
+            (
+                "submit_answer",
+                '{"content": "The document records the violet launch phrase."}',
+                "answer-2",
+            ),
+        ]
+
+
+class _StaticAgentManager:
+    """Small durable-agent boundary substitute for a deterministic runtime test."""
+
+    def __init__(self, config: AgentConfig):
+        self._config = config
+
+    async def get_default_agent_id(self) -> str:
+        return self._config.id
+
+    async def get_agent(self, agent_id: str) -> AgentConfig | None:
+        return self._config if agent_id == self._config.id else None
 
 
 class _NoEntityProcessor:
@@ -232,6 +274,7 @@ def _session(resources, *, user_name, project_id, session_id):
     context.project = SimpleNamespace(
         scheduler=object(),
         record_session_activity=lambda: asyncio.sleep(0),
+        readable_project_ids=[project_id],
     )
     return context
 
@@ -453,6 +496,155 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         assert answer.sources_consulted[0].source_message_id == accepted.id
     finally:
         await worker.stop()
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.requires_redis
+@pytest.mark.no_network
+async def test_real_document_request_persists_document_source_provenance(
+    real_server_scope,
+    monkeypatch,
+):
+    """One canonical turn carries document-tool evidence through to durable answer refs."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    redis = scope["redis"]
+    embedding = _DeterministicEmbeddingService()
+    llm = _DeterministicDocumentAgentLLM()
+    store = KnowledgeStore(postgres, embedding)
+    resources = SimpleNamespace(
+        postgres=postgres,
+        redis=redis,
+        knowledge_store=store,
+        embedding=embedding,
+        llm_service=llm,
+    )
+    monkeypatch.setattr(
+        Session,
+        "current_config",
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            )
+        ),
+    )
+
+    documents = DocumentService(
+        project_id=scope["project_id"],
+        postgres_client=postgres,
+        embedding_service=embedding,
+        document_rerank_enabled=False,
+    )
+    document = await documents.submit_document(
+        content=b"The violet launch phrase is durable and documented.\n",
+        original_name="launch-note.md",
+        relative_path="notes/launch-note.md",
+        visibility_scope="project",
+    )
+    assert document["status"] == "indexed"
+
+    resolver = EntityResolver(
+        store,
+        embedding,
+        scope["project_id"],
+        [scope["project_id"]],
+    )
+    retrieval = KnowledgeRetrieval(
+        project_id=scope["project_id"],
+        readable_project_ids=[scope["project_id"]],
+        user_name=scope["user_name"],
+        entities=resolver,
+        embedding_service=embedding,
+        knowledge_store=store,
+        postgres=postgres,
+        redis=redis,
+    )
+    context = _session(
+        resources,
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
+        session_id=scope["session_id"],
+    )
+    context.project = SimpleNamespace(
+        scheduler=object(),
+        record_session_activity=lambda: asyncio.sleep(0),
+        readable_project_ids=[scope["project_id"]],
+        entities=resolver,
+        compiled_domain=make_domain_config().compile(),
+        knowledge_retrieval=retrieval,
+        workspace_service=None,
+    )
+    context.document_service = documents
+    context.consumer = _SignalCounter()
+
+    agent = AgentConfig(
+        id="document-flow-agent",
+        name="Document Flow Agent",
+        persona={
+            "attention_bias": "evidence",
+            "reasoning_style": "methodical",
+            "social_temperament": "calm",
+            "communication_signature": "clear",
+            "productive_flaw": "overexplains",
+        },
+        enabled_tools=["search_documents"],
+    )
+    orchestrator = AgentOrchestrator(_StaticAgentManager(agent))
+
+    events = [
+        event
+        async for event in context.run_agent_stream(
+            Message(
+                content="What is the violet launch phrase?",
+                timestamp=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
+            ),
+            orchestrator=orchestrator,
+            enabled_tools=["search_documents"],
+        )
+    ]
+
+    assert not [event for event in events if event["event"] == "error"]
+    response = next(event for event in events if event["event"] == "response")
+    assert any(event["event"] == "tool_end" for event in events)
+    assert len(response["data"]["source_ref_ids"]) == 1
+
+    answer = await store.get_assistant_message_with_sources(
+        response["data"]["assistant_message_id"],
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
+        session_id=scope["session_id"],
+    )
+    assert answer is not None
+    assert len(answer.sources_consulted) == 1
+    source = answer.sources_consulted[0]
+    assert source.source_kind == "text_document"
+    assert source.document_id == document["document_id"]
+    assert source.source_project_id == scope["project_id"]
+    assert source.contributing_message_id == response["data"]["assistant_message_id"]
+
+    source_row = await postgres.fetch_one(
+        """
+            SELECT project_id, source_project_id, document_id::text AS document_id, content_hash,
+               encounter_kind, tool_call_id
+        FROM message_source_refs
+        WHERE source_ref_id = %s
+        """,
+        (response["data"]["source_ref_ids"][0],),
+    )
+    assert source_row == {
+        "project_id": scope["project_id"],
+        "source_project_id": scope["project_id"],
+        "document_id": document["document_id"],
+        "content_hash": document["content_hash"],
+        "encounter_kind": "document_search",
+        "tool_call_id": "document-search-1",
+    }
 
 
 @pytest.mark.integration

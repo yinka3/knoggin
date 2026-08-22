@@ -152,6 +152,12 @@ def _localize_tool_data(
     for key, item in value.items():
         prefix = field_prefixes.get(key)
         if prefix is not None:
+            # Folder-owned document fields are intentionally nullable for
+            # ordinary uploads.  No compact handle is registered for an
+            # absent ID, and the model should see that absence unchanged.
+            if item is None:
+                localized[key] = None
+                continue
             localized[key] = _localize_uuid_value(
                 actual_to_short_by_prefix[prefix], item
             )
