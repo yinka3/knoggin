@@ -4,6 +4,7 @@ from typing import List, Mapping, Optional, Union
 
 from loguru import logger
 
+from common.schema.agent.community_tools import AAC_DEFAULT_ENABLED_TOOLS
 from common.schema.agent.identity import AgentConfig, PersonaProfile
 from common.utils.agent_identity import (
     build_brain_snapshot_summary,
@@ -226,6 +227,93 @@ class AgentManager:
 
         logger.info(f"Created agent: {name} ({agent_id})")
         return await self.get_agent(agent_id)
+
+    async def create_specialist(
+        self,
+        *,
+        parent_id: str,
+        name: str,
+        persona: Union[PersonaProfile, Mapping[str, str]],
+        brain: Optional[str] = None,
+        model: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+    ) -> AgentConfig:
+        """Create a user-owned specialist while preserving parent ancestry."""
+
+        parent_id = self._require_agent_id(parent_id, "parent_id")
+        parent = await self.get_agent(parent_id)
+        if parent is None:
+            raise ValueError("Parent agent does not exist for this user")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Specialist name must not be blank")
+        if len(name.strip()) > 100:
+            raise ValueError("Specialist name must be 100 characters or fewer")
+
+        persona_profile = PersonaProfile.from_value(persona)
+        specialist_id = f"spawned_{uuid.uuid4().hex}"
+        candidate = AgentConfig(
+            id=specialist_id,
+            name=name.strip(),
+            persona=persona_profile,
+            brain=normalize_agent_brain(brain or "", persona_profile.to_markdown()),
+            model=model,
+            temperature=0.7,
+            enabled_tools=(
+                list(AAC_DEFAULT_ENABLED_TOOLS)
+                if enabled_tools is None
+                else enabled_tools
+            ),
+            aac_enabled=False,
+            spawned_by=parent_id,
+        )
+        self._validate_enabled_tools(candidate.enabled_tools)
+        await self.pg.execute(
+            """
+            WITH inserted AS (
+                INSERT INTO public.agents (
+                    agent_id, user_name, name, persona, brain,
+                    model, temperature, enabled_tools, is_default,
+                    aac_enabled, spawned_by
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s,
+                    %(brain)s, %(model)s, %(temperature)s, %(enabled_tools)s,
+                    false, false, %(spawned_by)s
+                )
+                RETURNING agent_id, user_name, brain_revision, brain
+            )
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
+            )
+            SELECT agent_id, brain_revision, user_name, COALESCE(brain, ''),
+                   'aac_spawn', 'specialist_spawn', %(change_summary)s
+            FROM inserted
+            """,
+            {
+                "agent_id": specialist_id,
+                "user_name": self.user_name,
+                "name": candidate.name,
+                "persona": candidate.persona_markdown,
+                "brain": candidate.brain,
+                "model": candidate.model,
+                "temperature": candidate.temperature,
+                "enabled_tools": json.dumps(candidate.enabled_tools),
+                "spawned_by": parent_id,
+                "change_summary": build_brain_snapshot_summary(
+                    "specialist_spawn"
+                ),
+            },
+        )
+        created = await self.get_agent(specialist_id)
+        if created is None:
+            raise RuntimeError("Specialist was not returned after creation")
+        return created
+
+    @staticmethod
+    def _require_agent_id(value: object, field: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must not be blank")
+        return value.strip()
 
     async def update_agent(
         self,
