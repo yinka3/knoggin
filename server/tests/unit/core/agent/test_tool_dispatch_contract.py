@@ -3,9 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
-from common.schema.agent.tool_contracts import TOOL_SCHEMAS_BY_NAME
+from common.schema.agent.tool_contracts import (
+    TOOL_SCHEMAS_BY_NAME,
+    get_filtered_schemas,
+)
 from core.agent.tool_runtime import execute_tool
 from core.agent.tools.memory import MemoryTools
+from core.agent.tools.registry import get_tool_definition
 
 
 class DispatchTools:
@@ -43,6 +47,14 @@ class DispatchTools:
             ("read_document", document_id, relative_path, start_line, end_line)
         )
         return [{"document_id": document_id, "content": "lines"}]
+
+    async def read_web_page(
+        self, url, start_line=None, max_lines=150, query=None, page_number=None
+    ):
+        self.calls.append(
+            ("read_web_page", url, start_line, max_lines, query, page_number)
+        )
+        return [{"url": url, "content": "page lines"}]
 
     async def list_folder_uploads(self, visibility_scope=None, limit=25):
         self.calls.append(
@@ -100,6 +112,21 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         "read_document",
         {"document_id": "file-1", "start_line": "2", "end_line": "4"},
     )
+    page_content = await execute_tool(
+        tools,
+        "read_web_page",
+        {"url": "https://example.test/report", "start_line": "2", "max_lines": "5"},
+    )
+    targeted_page_content = await execute_tool(
+        tools,
+        "read_web_page",
+        {"url": "https://example.test/report", "query": "cost assumptions"},
+    )
+    pdf_page_content = await execute_tool(
+        tools,
+        "read_web_page",
+        {"url": "https://example.test/report.pdf", "page_number": "2"},
+    )
     uploads = await execute_tool(
         tools,
         "list_folder_uploads",
@@ -137,6 +164,15 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     assert file_content == {
         "data": [{"document_id": "file-1", "content": "lines"}]
     }
+    assert page_content == {
+        "data": [{"url": "https://example.test/report", "content": "page lines"}]
+    }
+    assert targeted_page_content == {
+        "data": [{"url": "https://example.test/report", "content": "page lines"}]
+    }
+    assert pdf_page_content == {
+        "data": [{"url": "https://example.test/report.pdf", "content": "page lines"}]
+    }
     assert uploads == {"data": [{"folder_root_id": "folder-1"}]}
     assert summary == {"data": {"folder_root_id": "folder-1"}}
     assert tree == {"data": [{"name": "src", "type": "directory"}]}
@@ -147,12 +183,54 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         ("get_recent_activity", "Knoggin", 48),
         ("search_entity", "99", 2),
         ("read_document", "file-1", None, 2, 4),
+        ("read_web_page", "https://example.test/report", 2, 5, None, None),
+        (
+            "read_web_page",
+            "https://example.test/report",
+            None,
+            150,
+            "cost assumptions",
+            None,
+        ),
+        ("read_web_page", "https://example.test/report.pdf", None, 150, None, 2),
         ("list_folder_uploads", "project", 7),
         ("get_folder_upload_summary", "folder-1"),
         ("list_folder_tree", "folder-1", "src", 4, False),
         ("episode_check", "What changed?", "7"),
         ("read_episode", "42"),
     ]
+
+
+@pytest.mark.no_network
+def test_read_web_page_registry_definition_matches_schema_and_default_limit():
+    definition = get_tool_definition("read_web_page")
+
+    assert definition is not None
+    assert definition.default_limit == 6
+    assert definition.schema == TOOL_SCHEMAS_BY_NAME["read_web_page"]
+    assert definition.dispatch == (
+        "read_web_page",
+        ("url", "start_line", "max_lines", "query", "page_number"),
+    )
+
+
+@pytest.mark.no_network
+def test_read_web_page_is_available_by_default_and_allowlists_opt_in_explicitly():
+    default_names = {
+        schema["function"]["name"] for schema in get_filtered_schemas()
+    }
+    search_only_names = {
+        schema["function"]["name"]
+        for schema in get_filtered_schemas(enabled_tools=["web_search"])
+    }
+    enabled_names = {
+        schema["function"]["name"]
+        for schema in get_filtered_schemas(enabled_tools=["read_web_page"])
+    }
+
+    assert "read_web_page" in default_names
+    assert "read_web_page" not in search_only_names
+    assert "read_web_page" in enabled_names
 
 
 @pytest.mark.no_network

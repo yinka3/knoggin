@@ -46,11 +46,7 @@ class SearchableDocumentService:
         document_id=None,
         relative_path=None,
     ):
-        return next(
-            item
-            for item in self.files
-            if item["document_id"] == document_id
-        )
+        return next(item for item in self.files if item["document_id"] == document_id)
 
     async def search(
         self,
@@ -127,9 +123,7 @@ class ReadOnlyDocumentService:
         document_id=None,
         relative_path=None,
     ):
-        self.calls.append(
-            ("get_document_info", session_id, document_id, relative_path)
-        )
+        self.calls.append(("get_document_info", session_id, document_id, relative_path))
         return {
             "document_id": document_id or "file-1",
             "relative_path": relative_path or "docs/notes.md",
@@ -230,8 +224,7 @@ class ReadOnlyDocumentService:
 @pytest.mark.no_network
 def test_folder_document_tool_schemas_expose_expected_filters():
     schemas = {
-        schema["function"]["name"]: schema["function"]
-        for schema in TOOL_SCHEMAS
+        schema["function"]["name"]: schema["function"] for schema in TOOL_SCHEMAS
     }
 
     assert {
@@ -241,18 +234,14 @@ def test_folder_document_tool_schemas_expose_expected_filters():
         "list_folder_tree",
         "search_documents",
     }.issubset(schemas)
-    assert set(
-        schemas["list_documents"]["parameters"]["properties"]
-    ) == {
+    assert set(schemas["list_documents"]["parameters"]["properties"]) == {
         "folder_root_id",
         "path_prefix",
         "visibility_scope",
         "limit",
         "use_focus",
     }
-    assert set(
-        schemas["search_documents"]["parameters"]["properties"]
-    ) == {
+    assert set(schemas["search_documents"]["parameters"]["properties"]) == {
         "query",
         "document_name",
         "relative_path",
@@ -744,6 +733,94 @@ async def test_search_documents_adds_docx_paragraph_source_context():
 
     assert result["source_context"]["source_kind"] == "text_document"
     assert result["source_context"]["locator"] == stored_chunk["locator"]
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("extension", "locator", "expected_source_kind"),
+    [
+        (
+            ".csv",
+            {"kind": "csv_rows", "start_row": 1, "end_row": 2},
+            "text_document",
+        ),
+        (
+            ".py",
+            {
+                "kind": "code_lines",
+                "start_line": 4,
+                "end_line": 5,
+                "symbol_name": "Beta",
+            },
+            "text_document",
+        ),
+        (
+            ".md",
+            {
+                "kind": "text_lines",
+                "start_line": 4,
+                "end_line": 5,
+                "section_path": ["Overview", "Risks"],
+            },
+            "text_document",
+        ),
+        (
+            ".ipynb",
+            {"kind": "text_lines", "start_line": 1, "end_line": 2},
+            "text_document",
+        ),
+    ],
+)
+def test_search_documents_adds_exact_source_context_for_each_text_strategy(
+    extension,
+    locator,
+    expected_source_kind,
+):
+    result = SearchTools._with_document_source_context(
+        {
+            "document_id": "file-1",
+            "project_id": "project-1",
+            "original_name": f"source{extension}",
+            "relative_path": f"docs/source{extension}",
+            "extension": extension,
+            "content_hash": "e" * 64,
+            "chunk_index": 2,
+            "content": "The exact searchable passage.",
+            "locator": locator,
+        }
+    )
+
+    assert result["source_context"] == {
+        "source_kind": expected_source_kind,
+        "document_id": "file-1",
+        "source_project_id": "project-1",
+        "content_hash": "e" * 64,
+        "locator": locator,
+        "excerpt": "The exact searchable passage.",
+        "metadata": {
+            "document_name": f"source{extension}",
+            "relative_path": f"docs/source{extension}",
+            "extension": extension,
+            "chunk_index": 2,
+        },
+    }
+
+
+@pytest.mark.no_network
+def test_ocr_image_results_remain_searchable_without_unreliable_source_context():
+    result = {
+        "document_id": "image-1",
+        "project_id": "project-1",
+        "original_name": "scan.png",
+        "relative_path": "scans/scan.png",
+        "extension": ".png",
+        "content_hash": "f" * 64,
+        "content": "OCR passage",
+        "start_line": 1,
+        "end_line": 1,
+    }
+
+    assert SearchTools._with_document_source_context(result) == result
 
 
 @pytest.mark.no_network

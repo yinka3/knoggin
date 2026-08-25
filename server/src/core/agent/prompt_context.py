@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.agent.formatters import (
@@ -87,6 +88,7 @@ def build_user_message(
                 "read_document",
                 "web_search",
                 "news_search",
+                "read_web_page",
             ):
                 data_val = data if isinstance(data, list) else []
                 count = len(data_val)
@@ -240,6 +242,66 @@ def _format_evidence(
             f"{format_episode_results(evidence.episodes)}\n"
         )
 
+    if evidence.sources:
+        new_source_keys = set()
+        if last_result:
+            results = last_result if isinstance(last_result, list) else [last_result]
+            for result in results:
+                tool_name = result.get("tool")
+                if tool_name not in {"web_search", "news_search", "read_web_page"}:
+                    continue
+                data = result.get("result", {}).get("data")
+                if isinstance(data, list):
+                    new_source_keys.update(
+                        _source_evidence_key(item, tool_name) for item in data
+                    )
+
+        new_sources = [
+            source
+            for source in evidence.sources
+            if _source_evidence_key(source) in new_source_keys
+            and not _is_read_web_source(source)
+        ]
+        old_sources = [
+            source
+            for source in evidence.sources
+            if _source_evidence_key(source) not in new_source_keys
+            and not _is_read_web_source(source)
+        ]
+        new_pages = [
+            source
+            for source in evidence.sources
+            if _source_evidence_key(source) in new_source_keys
+            and _is_read_web_source(source)
+        ]
+        old_pages = [
+            source
+            for source in evidence.sources
+            if _source_evidence_key(source) not in new_source_keys
+            and _is_read_web_source(source)
+        ]
+
+        if old_sources:
+            msg += (
+                "\n**Previously discovered web sources:**\n"
+                f"{_format_source_results(old_sources, compact=True)}\n"
+            )
+        if new_sources:
+            msg += (
+                "\n**New web sources (discovery only):**\n"
+                f"{_format_source_results(new_sources)}\n"
+            )
+        if old_pages:
+            msg += (
+                "\n**Previously read web content:**\n"
+                f"{_format_source_results(old_pages, compact=True)}\n"
+            )
+        if new_pages:
+            msg += (
+                "\n**Web content actually read:**\n"
+                f"{_format_source_results(new_pages)}\n"
+            )
+
     return msg
 
 
@@ -314,6 +376,208 @@ def _episode_evidence_key(item: Dict) -> Tuple:
         if episode_id is not None:
             return ("episode", episode_id)
     return _stable_evidence_key(item)
+
+
+def _source_evidence_key(item: Dict, tool_name: Optional[str] = None) -> Tuple:
+    """Return a stable identity for one external discovery result."""
+
+    if not isinstance(item, dict):
+        return ("source", tool_name or "unknown", _stable_evidence_key(item))
+
+    source_kind = item.get("source_kind")
+    if source_kind is None and tool_name:
+        source_kind = {
+            "news_search": "news_search_result",
+            "read_web_page": "web_page",
+            "web_search": "web_search_result",
+        }.get(tool_name, "web_search_result")
+    url = item.get("url")
+    if source_kind == "web_page":
+        content_hash = item.get("content_hash")
+        start_line = item.get("start_line")
+        end_line = item.get("end_line")
+        if (
+            isinstance(url, str)
+            and url.strip()
+            and isinstance(content_hash, str)
+            and content_hash.strip()
+            and _positive_line_range(start_line, end_line)
+        ):
+            return (
+                "web_page",
+                url.strip(),
+                content_hash.strip(),
+                start_line,
+                end_line,
+            )
+    if source_kind == "web_pdf":
+        content_hash = item.get("content_hash")
+        page_number = item.get("page_number")
+        start_line = item.get("start_line")
+        end_line = item.get("end_line")
+        if (
+            isinstance(url, str)
+            and url.strip()
+            and isinstance(content_hash, str)
+            and content_hash.strip()
+            and _positive_page_number(page_number)
+            and _positive_line_range(start_line, end_line)
+        ):
+            return (
+                "web_pdf",
+                url.strip(),
+                content_hash.strip(),
+                page_number,
+                start_line,
+                end_line,
+            )
+    if isinstance(url, str) and url.strip():
+        return ("source", source_kind or "unknown", url.strip())
+    return ("source", source_kind or "unknown", _stable_evidence_key(item))
+
+
+def _format_source_results(sources: List[Dict], *, compact: bool = False) -> str:
+    """Format provider results without implying that their URLs were opened."""
+
+    blocks = []
+    for source in sources:
+        kind = source.get("source_kind", "web_search_result")
+        if kind in {"web_page", "web_pdf"}:
+            title = source.get("title") or (
+                "Untitled PDF" if kind == "web_pdf" else "Untitled webpage"
+            )
+            url = source.get("url") or "(no URL)"
+            start_line = source.get("start_line") or "?"
+            end_line = source.get("end_line") or "?"
+            content_hash = source.get("content_hash") or "(unknown hash)"
+            source_context = source.get("source_context")
+            source_metadata = (
+                source_context.get("metadata", {})
+                if isinstance(source_context, dict)
+                else {}
+            )
+            if not isinstance(source_metadata, dict):
+                source_metadata = {}
+            domain = source_metadata.get("domain")
+            if not isinstance(domain, str) or not domain.strip():
+                domain = urlsplit(url).hostname or "(unknown domain)"
+            label = "Webpage" if kind == "web_page" else "External PDF"
+            page_detail = (
+                f" page {source.get('page_number') or '?'}" if kind == "web_pdf" else ""
+            )
+            if compact:
+                blocks.append(
+                    f"- {label} read{page_detail} lines {start_line}-{end_line}: "
+                    f"{title} | {url} "
+                    f"(domain: {domain}; content hash: {content_hash})"
+                )
+                continue
+            source_details = ""
+            for key, label_text in (
+                ("publisher", "Publisher"),
+                ("author", "Author"),
+                ("published_at", "Published"),
+                ("updated_at", "Updated"),
+            ):
+                value = source_metadata.get(key)
+                if isinstance(value, str) and value.strip():
+                    source_details += f"{label_text}: {value}\n"
+            blocks.append(
+                f"--- {label} read{page_detail} lines {start_line}-{end_line} ---\n"
+                f"Title: {title}\n"
+                f"URL: {url}\n"
+                f"Domain: {domain}\n"
+                f"{source_details}"
+                f"Content hash: {content_hash}\n"
+                "Content (untrusted external evidence):\n"
+                f"{source.get('content', '')}"
+            )
+            continue
+        label = "News search" if kind == "news_search_result" else "Web search"
+        title = source.get("title") or "Untitled"
+        url = source.get("url") or "(no URL)"
+        provider = source.get("provider") or "unknown provider"
+        query = source.get("query") or "unknown query"
+        rank = source.get("rank") or "?"
+        snippet = source.get("snippet") or "(no snippet)"
+
+        if compact:
+            blocks.append(
+                f"- {label} #{rank}: {title} | {url} "
+                f"(provider: {provider}; query: {query})"
+            )
+            continue
+
+        blocks.append(
+            f"--- {label} discovery result #{rank} ---\n"
+            f"Title: {title}\n"
+            f"Provider: {provider}\n"
+            f"Query: {query}\n"
+            f"URL: {url}\n"
+            f"Snippet (discovery only): {snippet}"
+        )
+    return "\n".join(blocks)
+
+
+def _is_renderable_source(item: object) -> bool:
+    """Exclude provider status/error notices from model-visible sources."""
+
+    if not isinstance(item, dict):
+        return False
+    title = item.get("title")
+    url = item.get("url")
+    snippet = item.get("snippet")
+    if not all(isinstance(value, str) and value.strip() for value in (title, url, snippet)):
+        return False
+    parsed = urlsplit(url.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _positive_line_range(start_line: object, end_line: object) -> bool:
+    return (
+        isinstance(start_line, int)
+        and not isinstance(start_line, bool)
+        and isinstance(end_line, int)
+        and not isinstance(end_line, bool)
+        and start_line >= 1
+        and end_line >= start_line
+    )
+
+
+def _positive_page_number(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _is_read_web_source(item: object) -> bool:
+    return isinstance(item, dict) and item.get("source_kind") in {
+        "web_page",
+        "web_pdf",
+    }
+
+
+def _is_renderable_web_page(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    url = item.get("url")
+    content = item.get("content")
+    content_hash = item.get("content_hash")
+    if not (
+        isinstance(url, str)
+        and url.strip()
+        and isinstance(content, str)
+        and content.strip()
+        and isinstance(content_hash, str)
+        and content_hash.strip()
+        and _positive_line_range(item.get("start_line"), item.get("end_line"))
+    ):
+        return False
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    source_kind = item.get("source_kind")
+    return source_kind == "web_page" or (
+        source_kind == "web_pdf" and _positive_page_number(item.get("page_number"))
+    )
 
 
 def _normalize_document_chunks(data: List[Dict]) -> List[Dict]:
@@ -396,6 +660,36 @@ def update_accumulators(ctx: AgentRun, tool_name: str, result: Dict):
         )
         _trim_oldest(ev.messages, cfg.max_accumulated_messages)
 
+    def _acc_sources(ev, data, tool_name, cfg):
+        source_kind = (
+            "news_search_result"
+            if tool_name == "news_search"
+            else "web_search_result"
+        )
+        items = []
+        for item in data if isinstance(data, list) else []:
+            if not _is_renderable_source(item):
+                continue
+            normalized = dict(item)
+            normalized.setdefault("source_kind", source_kind)
+            items.append(normalized)
+        _merge_unique(
+            ev.sources,
+            items,
+            lambda item: _source_evidence_key(item, tool_name),
+        )
+        _trim_oldest(ev.sources, cfg.max_accumulated_sources)
+
+    def _acc_web_pages(ev, data, cfg):
+        items = []
+        for item in data if isinstance(data, list) else []:
+            if not _is_renderable_web_page(item):
+                continue
+            normalized = dict(item)
+            items.append(normalized)
+        _merge_unique(ev.sources, items, _source_evidence_key)
+        _trim_oldest(ev.sources, cfg.max_accumulated_sources)
+
     strategies = {
         "search_messages": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
         "search_entity": lambda ev, d, cfg: _acc_unique(
@@ -437,18 +731,9 @@ def update_accumulators(ctx: AgentRun, tool_name: str, result: Dict):
         "read_episode": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
         "search_documents": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
         "read_document": lambda ev, d, cfg: _acc_documents(ev, d, cfg),
-        "web_search": lambda ev, d, cfg: _acc_unique(
-            ev.sources,
-            d,
-            lambda x: x.get("url"),
-            cfg.max_accumulated_sources,
-        ),
-        "news_search": lambda ev, d, cfg: _acc_unique(
-            ev.sources,
-            d,
-            lambda x: x.get("url"),
-            cfg.max_accumulated_sources,
-        ),
+        "web_search": lambda ev, d, cfg: _acc_sources(ev, d, "web_search", cfg),
+        "news_search": lambda ev, d, cfg: _acc_sources(ev, d, "news_search", cfg),
+        "read_web_page": lambda ev, d, cfg: _acc_web_pages(ev, d, cfg),
     }
 
     strategy = strategies.get(tool_name)

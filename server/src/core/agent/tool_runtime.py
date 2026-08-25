@@ -85,11 +85,13 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
     if tool_name in ("read_brain", "list_brain_snapshots", "read_brain_snapshot"):
         return "Brain loaded", 1
 
-    if tool_name in ("search_documents", "read_document"):
+    if tool_name in ("search_documents", "read_document", "read_web_page"):
         count = len(data) if isinstance(data, list) else 0
         if count > 0 and "error" not in (data[0] if data else {}):
             if tool_name == "read_document":
                 return "Read document content", 1
+            if tool_name == "read_web_page":
+                return "Read web content", 1
             return f"Found {count} relevant chunks", count
         return "No results", 0
 

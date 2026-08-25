@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from psycopg.errors import CheckViolation, ForeignKeyViolation
+from psycopg.errors import CheckViolation
 
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
@@ -133,6 +133,44 @@ def news_candidate(**overrides) -> SourceReferenceCandidate:
         "encounter_kind": "news_search",
         "agent_run_id": "run-news",
         "tool_call_id": "call-news",
+        "result_position": 0,
+    }
+    payload.update(overrides)
+    return SourceReferenceCandidate.model_validate(payload)
+
+
+def web_page_candidate(**overrides) -> SourceReferenceCandidate:
+    payload = {
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "source_kind": "web_page",
+        "canonical_url": "https://example.test/report",
+        "content_hash": "f" * 64,
+        "locator": {"kind": "text_lines", "start_line": 151, "end_line": 220},
+        "excerpt": "Canonical webpage text observed in this exact range.",
+        "metadata": {"title": "Research report"},
+        "encounter_kind": "web_read",
+        "agent_run_id": "run-web-read",
+        "tool_call_id": "call-web-read",
+        "result_position": 0,
+    }
+    payload.update(overrides)
+    return SourceReferenceCandidate.model_validate(payload)
+
+
+def web_pdf_candidate(**overrides) -> SourceReferenceCandidate:
+    payload = {
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "source_kind": "web_pdf",
+        "canonical_url": "https://example.test/report.pdf",
+        "content_hash": "a" * 64,
+        "locator": {"kind": "pdf_page", "page": 2},
+        "excerpt": "Canonical external PDF text observed on page two.",
+        "metadata": {"title": "Research report"},
+        "encounter_kind": "web_read",
+        "agent_run_id": "run-web-pdf-read",
+        "tool_call_id": "call-web-pdf-read",
         "result_position": 0,
     }
     payload.update(overrides)
@@ -330,6 +368,51 @@ async def test_reader_marks_web_results_as_search_result_snippets():
 
     assert references[0].source_status == "search_result_snippet"
     assert references[0].canonical_url == "https://example.test/release"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_marks_read_web_page_sources_available_without_refetching():
+    candidate = web_page_candidate()
+    client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].source_status == "available"
+    assert references[0].canonical_url == "https://example.test/report"
+    assert references[0].locator.model_dump(exclude_none=True) == {
+        "kind": "text_lines",
+        "start_line": 151,
+        "end_line": 220,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_marks_read_external_pdf_sources_available_without_refetching():
+    candidate = web_pdf_candidate()
+    client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].source_status == "available"
+    assert references[0].canonical_url == "https://example.test/report.pdf"
+    assert references[0].locator.model_dump(exclude_none=True) == {
+        "kind": "pdf_page",
+        "page": 2,
+    }
 
 
 @pytest.mark.storage
@@ -728,6 +811,8 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
         pasted_text_candidate(),
         web_candidate(),
         news_candidate(),
+        web_page_candidate(),
+        web_pdf_candidate(),
     ]
 
     await writer.write_for_assistant_message(
@@ -741,9 +826,9 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
     await real_postgres_client.execute(
         """
         INSERT INTO public.episodes (
-            episode_id, project_id, session_id, summary, source_message_count
+            episode_id, project_id, summary, source_message_count
         )
-        VALUES ('episode-1', 'project-1', 'session-1', 'Summary', 1)
+        VALUES ('episode-1', 'project-1', 'Summary', 1)
         """
     )
     await real_postgres_client.execute(
@@ -776,12 +861,16 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
         "user_pasted_text",
         "web_search_result",
         "news_search_result",
+        "web_page",
+        "web_pdf",
     ]
-    assert [source.source_status for source in answer.sources_consulted[-2:]] == [
+    assert [source.source_status for source in answer.sources_consulted[-4:]] == [
         "search_result_snippet",
         "search_result_snippet",
+        "available",
+        "available",
     ]
-    assert [source.contributing_message_id for source in episode_sources] == [101] * 6
+    assert [source.contributing_message_id for source in episode_sources] == [101] * 8
 
     await real_postgres_client.execute(
         "DELETE FROM public.messages "
@@ -804,7 +893,7 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_real_postgres_enforces_source_shape_and_project_scoped_document_fk(
+async def test_real_postgres_enforces_source_shape_without_source_document_fk(
     real_postgres_client,
 ):
     await _seed_scope(real_postgres_client)
@@ -845,24 +934,27 @@ async def test_real_postgres_enforces_source_shape_and_project_scoped_document_f
             (DOCUMENT_ID, CONTENT_HASH, valid_metadata),
         )
 
-    with pytest.raises(ForeignKeyViolation):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO public.message_source_refs (
-                source_ref_id, project_id, session_id, message_id, source_kind,
-                document_id, source_project_id, content_hash, locator, excerpt, metadata,
-                encounter_kind, agent_run_id, tool_call_id, result_position,
-                idempotency_key
-            )
-            VALUES (
-                '00000000-0000-0000-0000-000000000203',
-                'project-2', 'session-2', 201, 'pdf_document', %s, 'project-2', %s, %s,
-                'excerpt', %s, 'document_search', 'run-cross-project',
-                'call-cross-project', 0, 'cross-project-document'
-            )
-            """,
-            (DOCUMENT_ID, CONTENT_HASH, valid_locator, valid_metadata),
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.message_source_refs (
+            source_ref_id, project_id, session_id, message_id, source_kind,
+            document_id, source_project_id, content_hash, locator, excerpt, metadata,
+            encounter_kind, agent_run_id, tool_call_id, result_position,
+            idempotency_key
         )
+        VALUES (
+            '00000000-0000-0000-0000-000000000203',
+            'project-2', 'session-2', 201, 'pdf_document', %s, 'project-2', %s, %s,
+            'excerpt', %s, 'document_search', 'run-cross-project',
+            'call-cross-project', 0, 'cross-project-document'
+        )
+        """,
+        (DOCUMENT_ID, CONTENT_HASH, valid_locator, valid_metadata),
+    )
+    await real_postgres_client.execute(
+        "DELETE FROM public.message_source_refs WHERE source_ref_id = %s",
+        ("00000000-0000-0000-0000-000000000203",),
+    )
 
     writer = SourceReferenceWriter(real_postgres_client)
     await writer.write_for_assistant_message(

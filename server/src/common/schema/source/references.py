@@ -30,6 +30,8 @@ SourceKind = Literal[
     "user_pasted_text",
     "web_search_result",
     "news_search_result",
+    "web_page",
+    "web_pdf",
 ]
 EncounterKind = Literal[
     "document_search",
@@ -37,6 +39,7 @@ EncounterKind = Literal[
     "user_pasted_text",
     "web_search",
     "news_search",
+    "web_read",
 ]
 
 
@@ -177,6 +180,34 @@ class SourceReferenceCandidate(BaseModel):
             self._require_metadata("discovery_snippet")
             if self.metadata["discovery_snippet"] is not True:
                 raise ValueError("search result metadata must mark discovery_snippet")
+
+        elif self.source_kind in {"web_page", "web_pdf"}:
+            if (
+                self.document_id is not None
+                or self.source_project_id is not None
+                or self.source_message_id is not None
+            ):
+                raise ValueError("external web sources cannot include document or source message")
+            if self.canonical_url is None:
+                raise ValueError("external web sources require canonical_url")
+            if self.tool_call_id is None:
+                raise ValueError("tool-derived sources require tool_call_id")
+            if self.encounter_kind != "web_read":
+                raise ValueError("external web sources require the web_read encounter kind")
+            if self.source_kind == "web_page" and not isinstance(
+                self.locator, TextLineLocator
+            ):
+                raise ValueError("web pages require a text line locator")
+            if self.source_kind == "web_pdf" and not isinstance(
+                self.locator, PdfPageLocator
+            ):
+                raise ValueError("web PDFs require a PDF page locator")
+            if self.metadata.get("discovery_snippet") is True:
+                raise ValueError(
+                    "external web sources cannot be marked as discovery snippets"
+                )
+            if "title" in self.metadata:
+                self._require_text_metadata("title")
 
         return self
 

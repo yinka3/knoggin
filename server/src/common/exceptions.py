@@ -27,6 +27,13 @@ class DependencyError(KnogginError):
         super().__init__(message, code="dependency_error", details=details)
 
 
+class NotFoundError(KnogginError):
+    """Raised when a requested user-owned resource does not exist."""
+
+    def __init__(self, resource: str = "resource"):
+        super().__init__(f"Requested {resource} was not found", code="not_found")
+
+
 class StorageError(KnogginError):
     """Base class for failures at a durable persistence boundary."""
 

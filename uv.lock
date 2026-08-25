@@ -3883,11 +3883,13 @@ name = "server"
 version = "0.1.0"
 source = { editable = "server" }
 dependencies = [
+    { name = "beautifulsoup4" },
     { name = "cachetools" },
     { name = "ddgs" },
     { name = "duckduckgo-search" },
     { name = "en-core-web-md" },
     { name = "gliner" },
+    { name = "httpcore" },
     { name = "httpx" },
     { name = "huggingface-hub", extra = ["cli"] },
     { name = "instructor" },
@@ -3941,11 +3943,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "cachetools", specifier = ">=5.4.0" },
     { name = "ddgs", specifier = ">=9.11.3" },
     { name = "duckduckgo-search", specifier = ">=8.0.0" },
     { name = "en-core-web-md", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" },
     { name = "gliner", specifier = ">=0.2.22" },
+    { name = "httpcore", specifier = ">=1.0.9" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", extras = ["cli"], specifier = ">=0.36.0" },
     { name = "instructor", specifier = ">=1.14.5" },

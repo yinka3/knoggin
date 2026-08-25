@@ -20,6 +20,10 @@ from common.schema.agent.stream import (
     StreamToolCall,
     StreamUsage,
 )
+from common.schema.artifacts import (
+    ArtifactDraft,
+    default_artifact_from_answer,
+)
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
@@ -267,11 +271,20 @@ class AgentExecutor:
                             )
                             step_failed = True
                             break
-                        response = self._wrap_final_response(
-                            content=content,
-                            usage=dict(self.ctx.usage),
-                            sources_consulted=list(self.ctx.source_candidates),
-                        )
+                        artifact = None
+                        raw_artifact = submit.args.get("artifact")
+                        if raw_artifact is not None:
+                            try:
+                                artifact = ArtifactDraft.model_validate(
+                                    raw_artifact
+                                )
+                            except Exception as exc:
+                                self._record_step_error(
+                                    f"Invalid submit_answer artifact: {exc}",
+                                    "formatting",
+                                )
+                                step_failed = True
+                                break
 
                         if phase is not _AgentPhase.SYNTHESIZE:
                             logger.info(
@@ -280,6 +293,17 @@ class AgentExecutor:
                             needs_final_synthesis = True
                             break
 
+                        artifact = self._complete_artifact(content, artifact)
+                        response = self._wrap_final_response(
+                            content=content,
+                            usage=dict(self.ctx.usage),
+                            sources_consulted=list(self.ctx.source_candidates),
+                            artifact=(
+                                artifact.model_dump(mode="json")
+                                if artifact is not None
+                                else None
+                            ),
+                        )
                         await self._finalize_successfully(content)
                         yield response
                         return
@@ -684,19 +708,39 @@ class AgentExecutor:
         content: str,
         usage: StreamUsage,
         sources_consulted: List[SourceReferenceCandidate],
+        artifact: Optional[Dict] = None,
     ) -> ResponseEvent:
         event: ResponseEvent = {
             "event": "response",
             "data": {
                 "content": content,
                 "usage": usage,
+                "research_mode": self.ctx.research_profile.mode,
             },
         }
         if sources_consulted:
             event["data"]["sources_consulted"] = [
                 candidate.model_dump(mode="json") for candidate in sources_consulted
             ]
+        if artifact is not None:
+            event["data"]["artifact"] = artifact
         return event
+
+    def _complete_artifact(
+        self,
+        content: str,
+        artifact: ArtifactDraft | None,
+    ) -> ArtifactDraft | None:
+        """Apply the selected mode's final artifact policy."""
+
+        profile = self.ctx.research_profile
+        expected_kind = profile.default_artifact_kind
+        if artifact is None and expected_kind is not None:
+            artifact = default_artifact_from_answer(content, kind=expected_kind)
+        elif artifact is not None and expected_kind is not None:
+            if artifact.kind != expected_kind:
+                artifact = artifact.model_copy(update={"kind": expected_kind})
+        return artifact
 
     async def _finalize_successfully(self, content: str) -> None:
         """Seal a successful run, then persist its agent's completion clock."""
@@ -725,6 +769,7 @@ class AgentExecutor:
         if self.ctx.has_any():
             summary = await self._generate_fallback_summary()
             content = summary or "I found information but couldn't summarize it."
+            artifact = self._complete_artifact(content, None)
             await self._finalize_successfully(content)
             event = {
                 "event": "response",
@@ -732,8 +777,11 @@ class AgentExecutor:
                     "content": content,
                     "usage": dict(self.ctx.usage),
                     "fallback": True,
+                    "research_mode": self.ctx.research_profile.mode,
                 },
             }
+            if artifact is not None:
+                event["data"]["artifact"] = artifact.model_dump(mode="json")
             if self.ctx.source_candidates:
                 event["data"]["sources_consulted"] = [
                     candidate.model_dump(mode="json")

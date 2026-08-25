@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -24,10 +24,14 @@ from pydantic import ValidationError
 from common.exceptions import (
     DependencyError,
     LLMProviderError,
+    NotFoundError,
     StorageError,
     ToolExecutionError,
 )
 from common.schema.public import (
+    ArtifactListResponse,
+    ArtifactResponse,
+    ArtifactRevisionResponse,
     CreateProjectRequest,
     CreateSessionRequest,
     MessageAcceptance,
@@ -81,6 +85,34 @@ class ApplicationPort(Protocol):
         user_name: str,
         request: StartRunRequest,
     ) -> AsyncIterator[object]: ...
+
+    async def list_artifacts(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str | None = None,
+        limit: int = 50,
+    ) -> Any: ...
+
+    async def get_artifact(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        artifact_id: str,
+        session_id: str | None = None,
+    ) -> Any: ...
+
+    async def get_artifact_revision(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        artifact_id: str,
+        revision: int,
+        session_id: str | None = None,
+    ) -> Any: ...
 
 
 class UnsupportedOperation(RuntimeError):
@@ -201,13 +233,78 @@ def _run_result(value: Any) -> RunResult:
     if isinstance(value, RunResult):
         return value
     data = _as_data(value)
+    artifact_value = _value(data, "artifact")
     return RunResult.model_validate(
         {
             "run_id": _value(data, "run_id", "id"),
             "content": _value(data, "content", "response", default=""),
             "sources": tuple(_value(data, "sources", default=[]) or []),
             "usage": _value(data, "usage"),
+            "research_mode": _value(data, "research_mode", default="normal"),
+            "assistant_message_id": _value(data, "assistant_message_id"),
+            "source_ref_ids": tuple(_value(data, "source_ref_ids", default=[]) or []),
+            "artifact": (
+                _artifact_response(artifact_value).model_dump(mode="json")
+                if artifact_value is not None
+                else None
+            ),
         }
+    )
+
+
+def _artifact_response(value: Any) -> ArtifactResponse:
+    if isinstance(value, ArtifactResponse):
+        return value
+    data = _as_data(value)
+    return ArtifactResponse.model_validate(
+        {
+            "artifact_id": str(_value(data, "artifact_id", "id")),
+            "project_id": _value(data, "project_id"),
+            "session_id": _value(data, "session_id"),
+            "originating_message_id": _value(
+                data, "originating_message_id", "message_id"
+            ),
+            "kind": _value(data, "kind"),
+            "title": _value(data, "title"),
+            "status": _value(data, "status"),
+            "current_revision": _value(data, "current_revision", default=1),
+            "created_at": _value(data, "created_at"),
+            "updated_at": _value(data, "updated_at"),
+        }
+    )
+
+
+def _artifact_revision_response(value: Any) -> ArtifactRevisionResponse:
+    if isinstance(value, ArtifactRevisionResponse):
+        return value
+    data = _as_data(value)
+    return ArtifactRevisionResponse.model_validate(
+        {
+            "artifact_id": str(_value(data, "artifact_id", "id")),
+            "revision": _value(data, "revision"),
+            "schema_version": _value(data, "schema_version", default=1),
+            "kind": _value(data, "kind"),
+            "title": _value(data, "title"),
+            "blocks": tuple(_value(data, "blocks", default=[]) or []),
+            "status": _value(data, "status"),
+            "markdown": _value(data, "markdown"),
+            "content_hash": _value(data, "content_hash"),
+            "created_at": _value(data, "created_at"),
+        }
+    )
+
+
+def _artifact_list_response(value: Any) -> ArtifactListResponse:
+    if isinstance(value, ArtifactListResponse):
+        return value
+    if value is None:
+        values = []
+    elif isinstance(value, Mapping) and "artifacts" in value:
+        values = value["artifacts"] or []
+    else:
+        values = value
+    return ArtifactListResponse(
+        artifacts=tuple(_artifact_response(item) for item in values)
     )
 
 
@@ -242,11 +339,15 @@ def _status_for_error(error: Exception) -> int:
     if isinstance(error, PublicOperationError):
         if error.error.code == "invalid_request":
             return 422
+        if error.error.code == "not_found":
+            return 404
         return 503 if error.error.retryable else 502
     if isinstance(error, UnsupportedOperation):
         return 501
     if isinstance(error, (ValueError, ValidationError, RequestValidationError)):
         return 422
+    if isinstance(error, NotFoundError):
+        return 404
     if isinstance(
         error,
         (DependencyError, StorageError, LLMProviderError),
@@ -372,6 +473,91 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             )
         except Exception as exc:
             raise exc
+
+    @app.get(
+        "/v1/projects/{project_id}/artifacts",
+        response_model=ArtifactListResponse,
+    )
+    async def list_artifacts(
+        project_id: str,
+        request: Request,
+        session_id: str | None = None,
+        limit: int = Query(50, ge=1, le=200),
+        user_name: str = Depends(current_user),
+    ) -> ArtifactListResponse:
+        method = getattr(port, "list_artifacts", None) or getattr(
+            port, "list_project_artifacts", None
+        )
+        if method is None:
+            raise UnsupportedOperation("artifact listing is not configured")
+        value = await _call(
+            method,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+        return _artifact_list_response(value)
+
+    @app.get(
+        "/v1/projects/{project_id}/artifacts/{artifact_id}/revisions/{revision}",
+        response_model=ArtifactRevisionResponse,
+    )
+    async def get_artifact_revision(
+        project_id: str,
+        artifact_id: str,
+        request: Request,
+        revision: int = Path(..., ge=1),
+        session_id: str | None = None,
+        user_name: str = Depends(current_user),
+    ) -> ArtifactRevisionResponse:
+        method = getattr(port, "get_artifact_revision", None) or getattr(
+            port, "get_project_artifact_revision", None
+        )
+        if method is None:
+            raise UnsupportedOperation("artifact revision reads are not configured")
+        value = await _call(
+            method,
+            user_name=user_name,
+            project_id=project_id,
+            artifact_id=artifact_id,
+            revision=revision,
+            session_id=session_id,
+        )
+        if value is None:
+            raise PublicOperationError(
+                PublicError(code="not_found", message="The artifact was not found.")
+            )
+        return _artifact_revision_response(value)
+
+    @app.get(
+        "/v1/projects/{project_id}/artifacts/{artifact_id}",
+        response_model=ArtifactResponse,
+    )
+    async def get_artifact(
+        project_id: str,
+        artifact_id: str,
+        request: Request,
+        session_id: str | None = None,
+        user_name: str = Depends(current_user),
+    ) -> ArtifactResponse:
+        method = getattr(port, "get_artifact", None) or getattr(
+            port, "get_project_artifact", None
+        )
+        if method is None:
+            raise UnsupportedOperation("artifact reads are not configured")
+        value = await _call(
+            method,
+            user_name=user_name,
+            project_id=project_id,
+            artifact_id=artifact_id,
+            session_id=session_id,
+        )
+        if value is None:
+            raise PublicOperationError(
+                PublicError(code="not_found", message="The artifact was not found.")
+            )
+        return _artifact_response(value)
 
     @app.post("/v1/runs", response_model=RunResult)
     async def run(

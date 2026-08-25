@@ -307,7 +307,7 @@ class SourceReferenceReader:
                 )
                 else "available"
             )
-        elif reference.source_kind == "user_pasted_text":
+        elif reference.source_kind in {"user_pasted_text", "web_page", "web_pdf"}:
             source_status = "available"
         else:
             source_status = "search_result_snippet"

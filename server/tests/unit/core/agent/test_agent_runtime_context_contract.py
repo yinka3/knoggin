@@ -98,6 +98,208 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
 
 
 @pytest.mark.no_network
+def test_build_user_message_renders_discovered_sources_for_next_step():
+    ctx = make_ctx(user_query="Research the latest profile behavior changes")
+    result_data = [
+        {
+            "title": "Profile behavior release notes",
+            "url": "https://example.test/release-notes",
+            "snippet": "The release changed profile behavior.",
+            "provider": "brave",
+            "query": "profile behavior changes",
+            "rank": 1,
+            "source_kind": "web_search_result",
+        },
+        {
+            "title": "Profile behavior news",
+            "url": "https://example.test/news",
+            "snippet": "A news report describes the change.",
+            "provider": "brave",
+            "query": "profile behavior changes",
+            "rank": 2,
+            "source_kind": "news_search_result",
+        },
+    ]
+    update_accumulators(ctx, "web_search", {"data": result_data[:1]})
+    update_accumulators(ctx, "news_search", {"data": result_data[1:]})
+
+    message = build_user_message(
+        ctx,
+        last_result=[
+            {"tool": "web_search", "result": {"data": result_data[:1]}},
+            {"tool": "news_search", "result": {"data": result_data[1:]}},
+        ],
+    )
+
+    assert "**New web sources (discovery only):**" in message
+    assert "Title: Profile behavior release notes" in message
+    assert "Provider: brave" in message
+    assert "Query: profile behavior changes" in message
+    assert "URL: https://example.test/release-notes" in message
+    assert "Snippet (discovery only): The release changed profile behavior." in message
+    assert "--- News search discovery result #2 ---" in message
+
+
+@pytest.mark.no_network
+def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
+    ctx = make_ctx()
+    source = {
+        "title": "Useful source",
+        "url": "https://example.test/source",
+        "snippet": "The source contains useful context.",
+        "provider": "duckduckgo",
+        "query": "useful context",
+        "rank": 1,
+    }
+    update_accumulators(ctx, "web_search", {"data": [source]})
+    update_accumulators(
+        ctx,
+        "search_entity",
+        {"data": [{"id": 1, "canonical_name": "Ada"}]},
+    )
+
+    message = build_user_message(
+        ctx,
+        last_result={
+            "tool": "search_entity",
+            "result": {"data": [{"id": 1, "canonical_name": "Ada"}]},
+        },
+    )
+
+    assert "**Previously discovered web sources:**" in message
+    assert "Useful source" in message
+    assert "https://example.test/source" in message
+    assert "The source contains useful context." not in message
+
+
+@pytest.mark.no_network
+def test_update_accumulators_skips_non_source_search_status_items():
+    ctx = make_ctx()
+
+    update_accumulators(
+        ctx,
+        "web_search",
+        {
+            "data": [
+                {"title": "No Results", "url": "", "snippet": "Nothing found."},
+                {
+                    "title": "Useful source",
+                    "url": "https://example.test/source",
+                    "snippet": "Useful snippet.",
+                },
+            ]
+        },
+    )
+
+    assert [item["url"] for item in ctx.sources] == [
+        "https://example.test/source"
+    ]
+
+
+@pytest.mark.no_network
+def test_compact_evidence_trims_sources_with_other_evidence():
+    ctx = make_ctx()
+    ctx.sources = [
+        {
+            "title": f"Source {index}",
+            "url": f"https://example.test/{index}",
+            "snippet": f"Snippet {index}",
+        }
+        for index in range(6)
+    ]
+
+    ctx.compact_evidence("Condensed source evidence")
+
+    assert ctx.evidence_summary == "Condensed source evidence"
+    assert [item["title"] for item in ctx.sources] == [
+        "Source 1",
+        "Source 2",
+        "Source 3",
+        "Source 4",
+        "Source 5",
+    ]
+
+
+@pytest.mark.no_network
+def test_read_web_page_ranges_remain_distinct_and_visible_after_later_tool_calls():
+    ctx = make_ctx()
+    page_hash = "a" * 64
+    first_range = {
+        "title": "Research report",
+        "url": "https://example.test/report",
+        "content": "First observed range.",
+        "start_line": 1,
+        "end_line": 1,
+        "content_hash": page_hash,
+        "source_kind": "web_page",
+    }
+    second_range = {
+        **first_range,
+        "content": "Second observed range.",
+        "start_line": 2,
+        "end_line": 2,
+    }
+    update_accumulators(ctx, "read_web_page", {"data": [first_range]})
+    update_accumulators(ctx, "read_web_page", {"data": [second_range]})
+    update_accumulators(
+        ctx,
+        "search_entity",
+        {"data": [{"id": 1, "canonical_name": "Ada"}]},
+    )
+
+    later_message = build_user_message(
+        ctx,
+        last_result={
+            "tool": "search_entity",
+            "result": {"data": [{"id": 1, "canonical_name": "Ada"}]},
+        },
+    )
+
+    assert "**Previously read web content:**" in later_message
+    assert "Webpage read lines 1-1" in later_message
+    assert "Webpage read lines 2-2" in later_message
+    assert "First observed range." not in later_message
+    assert "Second observed range." not in later_message
+
+    current_message = build_user_message(
+        ctx,
+        last_result={"tool": "read_web_page", "result": {"data": [second_range]}},
+    )
+
+    assert "**Web content actually read:**" in current_message
+    assert "Content (untrusted external evidence):" in current_message
+    assert "Second observed range." in current_message
+    assert "**Previously read web content:**" in current_message
+    assert "First observed range." not in current_message
+
+
+@pytest.mark.no_network
+def test_read_external_pdf_page_is_rendered_as_read_content_not_discovery():
+    ctx = make_ctx()
+    pdf_page = {
+        "title": "External report",
+        "url": "https://example.test/report.pdf",
+        "content": "The observed PDF page passage.",
+        "page_number": 2,
+        "start_line": 1,
+        "end_line": 1,
+        "content_hash": "b" * 64,
+        "source_kind": "web_pdf",
+    }
+
+    update_accumulators(ctx, "read_web_page", {"data": [pdf_page]})
+    message = build_user_message(
+        ctx,
+        last_result={"tool": "read_web_page", "result": {"data": [pdf_page]}},
+    )
+
+    assert "**Web content actually read:**" in message
+    assert "External PDF read page 2 lines 1-1" in message
+    assert "The observed PDF page passage." in message
+    assert "discovery only" not in message
+
+
+@pytest.mark.no_network
 def test_build_user_message_omits_participants_outside_community():
     ctx = make_ctx(
         is_community=False,
@@ -246,12 +448,42 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
     update_accumulators(
         ctx,
         "web_search",
-        {"data": [{"url": "https://example.test/a"}, {"url": "https://example.test/a"}]},
+        {
+            "data": [
+                {
+                    "title": "Example A",
+                    "url": "https://example.test/a",
+                    "snippet": "A useful web result.",
+                    "provider": "brave",
+                    "query": "profile behavior",
+                    "rank": 1,
+                },
+                {
+                    "title": "Example A duplicate",
+                    "url": "https://example.test/a",
+                    "snippet": "A duplicate web result.",
+                    "provider": "brave",
+                    "query": "profile behavior",
+                    "rank": 2,
+                },
+            ]
+        },
     )
     update_accumulators(
         ctx,
         "news_search",
-        {"data": [{"url": "https://example.test/news"}]},
+        {
+            "data": [
+                {
+                    "title": "Example News",
+                    "url": "https://example.test/news",
+                    "snippet": "A useful news result.",
+                    "provider": "brave",
+                    "query": "profile behavior",
+                    "rank": 1,
+                }
+            ]
+        },
     )
 
     assert ctx.profiles == [{"id": 1, "canonical_name": "Ada"}]
@@ -273,8 +505,24 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         ),
     ]
     assert ctx.sources == [
-        {"url": "https://example.test/a"},
-        {"url": "https://example.test/news"},
+        {
+            "title": "Example A",
+            "url": "https://example.test/a",
+            "snippet": "A useful web result.",
+            "provider": "brave",
+            "query": "profile behavior",
+            "rank": 1,
+            "source_kind": "web_search_result",
+        },
+        {
+            "title": "Example News",
+            "url": "https://example.test/news",
+            "snippet": "A useful news result.",
+            "provider": "brave",
+            "query": "profile behavior",
+            "rank": 1,
+            "source_kind": "news_search_result",
+        },
     ]
 
 
@@ -334,8 +582,16 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
         "web_search",
         {
             "data": [
-                {"url": "https://example.test/old"},
-                {"url": "https://example.test/new"},
+                {
+                    "title": "Old result",
+                    "url": "https://example.test/old",
+                    "snippet": "Old snippet.",
+                },
+                {
+                    "title": "New result",
+                    "url": "https://example.test/new",
+                    "snippet": "New snippet.",
+                },
             ]
         },
     )
@@ -370,7 +626,14 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
     ]
     assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
     assert ctx.episodes == [{"id": "episode-2"}]
-    assert ctx.sources == [{"url": "https://example.test/new"}]
+    assert ctx.sources == [
+        {
+            "title": "New result",
+            "url": "https://example.test/new",
+            "snippet": "New snippet.",
+            "source_kind": "web_search_result",
+        }
+    ]
     assert [message["chunk_index"] for message in ctx.messages] == [2, 3]
 
 
@@ -423,6 +686,11 @@ def test_update_accumulators_ignores_errors_and_empty_results():
             "read_document",
             {"data": [{"content": "lines"}]},
             ("Read document content", 1),
+        ),
+        (
+            "read_web_page",
+            {"data": [{"content": "lines"}]},
+            ("Read web content", 1),
         ),
         ("anything_else", {"data": {"ok": True}}, ("Completed", 1)),
         ("anything_else", {"data": None}, ("No results", 0)),

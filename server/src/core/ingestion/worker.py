@@ -6,6 +6,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 from loguru import logger
 
 from common.exceptions import (
+    ConfigurationError,
     DependencyError,
     LLMBudgetExceededError,
     LLMProviderError,
@@ -133,7 +134,10 @@ class IngestionWorker:
     @staticmethod
     def _classify_failure(exc: Exception) -> tuple[bool, str, str]:
         code = str(getattr(exc, "code", "") or type(exc).__name__)
-        if isinstance(exc, LLMResponseError | ValueError | TypeError):
+        if isinstance(
+            exc,
+            ConfigurationError | LLMResponseError | ValueError | TypeError,
+        ):
             return False, "pipeline", code
         if isinstance(
             exc,

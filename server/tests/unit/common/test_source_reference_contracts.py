@@ -109,6 +109,75 @@ def test_search_candidates_are_explicitly_discovery_snippets(
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_web_page_candidate_is_read_evidence_with_line_coordinates():
+    candidate = SourceReferenceCandidate.model_validate(
+        _candidate(
+            source_kind="web_page",
+            document_id=None,
+            canonical_url="https://example.test/report",
+            locator={"kind": "text_lines", "start_line": 151, "end_line": 220},
+            excerpt="Canonical page text observed in this range.",
+            metadata={"title": "Quarterly report"},
+            encounter_kind="web_read",
+        )
+    )
+
+    assert candidate.source_kind == "web_page"
+    assert candidate.locator == TextLineLocator(start_line=151, end_line=220)
+    assert candidate.metadata["title"] == "Quarterly report"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_external_web_pdf_candidate_is_read_evidence_with_page_coordinates():
+    candidate = SourceReferenceCandidate.model_validate(
+        _candidate(
+            source_kind="web_pdf",
+            document_id=None,
+            canonical_url="https://example.test/report.pdf",
+            locator={"kind": "pdf_page", "page": 3},
+            excerpt="The externally fetched PDF's third-page passage.",
+            metadata={"title": "Quarterly report"},
+            encounter_kind="web_read",
+        )
+    )
+
+    assert candidate.source_kind == "web_pdf"
+    assert candidate.locator == PdfPageLocator(page=3)
+    assert candidate.metadata["title"] == "Quarterly report"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"encounter_kind": "web_search"}, "web_read encounter kind"),
+        (
+            {"locator": {"kind": "search_result", "provider": "x", "query": "q", "rank": 1}},
+            "text line locator",
+        ),
+        ({"metadata": {"discovery_snippet": True}}, "cannot be marked"),
+    ],
+)
+def test_web_page_candidate_rejects_discovery_or_incompatible_shapes(overrides, error):
+    payload = _candidate(
+        source_kind="web_page",
+        document_id=None,
+        canonical_url="https://example.test/report",
+        locator={"kind": "text_lines", "start_line": 1, "end_line": 2},
+        excerpt="Page text.",
+        metadata={"title": "Report"},
+        encounter_kind="web_read",
+    )
+    payload.update(overrides)
+
+    with pytest.raises(ValidationError, match=error):
+        SourceReferenceCandidate.model_validate(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 @pytest.mark.parametrize(
     "payload, error",
     [

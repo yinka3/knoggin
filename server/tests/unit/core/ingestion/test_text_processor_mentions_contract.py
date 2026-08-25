@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from common.conf.domain_config import DomainConfig
-from common.exceptions import LLMProviderError
+from common.exceptions import LLMProviderError, LLMResponseError
 from common.schema.ingestion.contracts import ExtractionTrace
 from common.schema.ingestion.extraction import EntityExtraction, EntityMention
 from common.schema.settings import TextProcessorSettings
@@ -410,7 +410,7 @@ async def test_extract_mentions_llm_disabled_returns_known_and_gliner_only():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_extract_mentions_llm_failure_falls_back_and_records_issue():
+async def test_extract_mentions_propagates_llm_provider_failure():
     processor, _ = make_processor(
         gliner_matches={MESSAGES[0]["message"]: [("Linear", "tool")]},
         llm_raises=True,
@@ -419,18 +419,25 @@ async def test_extract_mentions_llm_failure_falls_back_and_records_issue():
     trace = ExtractionTrace()
     issues = []
 
-    result = await extract(processor, trace=trace, issues=issues)
+    with pytest.raises(LLMProviderError, match="fake ner failure"):
+        await extract(processor, trace=trace, issues=issues)
 
-    assert result == [(1, "Linear", "Tools", "Tools")]
-    assert trace.fallbacks == [
-        {
-            "stage": "ner",
-            "fallback": "empty_mentions",
-            "error_code": "llm_provider_error",
-        }
-    ]
-    assert [issue.code for issue in issues] == ["llm_extraction_failed"]
-    assert issues[0].metadata["error_code"] == "llm_provider_error"
+    assert trace.fallbacks == []
+    assert issues == []
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_mentions_rejects_missing_llm_result():
+    processor, _ = make_processor(llm_ner=True)
+
+    async def return_no_result(**_kwargs):
+        return None
+
+    processor.llm_client.generate_structured = return_no_result
+
+    with pytest.raises(LLMResponseError, match="VP-01 extraction returned no result"):
+        await extract(processor, trace=ExtractionTrace(), issues=[])
 
 
 @pytest.mark.ingestion
@@ -590,6 +597,34 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
     result = await extract(processor, trace=trace, issues=issues)
 
     assert result == [(1, "Alice", "Identity", "Identity")]
+    assert trace.llm_mentions_rejected == 1
+    assert [issue.code for issue in issues] == ["duplicate_mention"]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_mentions_rejects_overlapping_llm_mentions():
+    processor, _ = make_processor(
+        llm_response=EntityExtraction(
+            mentions=[
+                make_entity("OpenAI", msg_id="m1"),
+                make_entity("OpenAI, Inc.", msg_id="m1"),
+            ]
+        ),
+        llm_ner=True,
+    )
+
+    async def run_model_work(operation, **_kwargs):
+        return operation()
+
+    processor._run_model_work = run_model_work
+    trace = ExtractionTrace()
+    issues = []
+
+    result = await extract(processor, trace=trace, issues=issues)
+
+    assert result == [(1, "OpenAI", "Tools", "Tools")]
+    assert trace.llm_mentions_accepted == 1
     assert trace.llm_mentions_rejected == 1
     assert [issue.code for issue in issues] == ["duplicate_mention"]
 

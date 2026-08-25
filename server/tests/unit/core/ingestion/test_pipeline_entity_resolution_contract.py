@@ -1,9 +1,12 @@
 """Shared fakes for the batch-processor contract tests."""
 
-from common.exceptions import LLMProviderError
+import pytest
+
+from common.exceptions import LLMProviderError, StorageReadError
 from core.ingestion.pipeline import IngestionPipeline
 from core.knowledge.entity.resolver import EntityResolver
 from tests.fixtures.factories import make_domain_config
+from tests.fixtures.ingestion import ingestion_policy
 
 
 class FakeEmbeddingService:
@@ -164,3 +167,57 @@ async def seed_entity(
 
 def vector_for(embedding, text):
     return tuple(embedding._vector_for(text))
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolution_propagates_entity_id_allocation_failure():
+    _, entities, _, _ = make_harness()
+
+    async def fail_allocation():
+        raise RuntimeError("entity allocator unavailable")
+
+    with pytest.raises(RuntimeError, match="entity allocator unavailable"):
+        await entities.resolve_mentions(
+            [(1, "Grace", "person", "Identity")],
+            messages=MESSAGES,
+            policy=ingestion_policy(),
+            allocate_entity_id=fail_allocation,
+            issues=[],
+        )
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_resolution_propagates_pending_entity_embedding_failure():
+    _, entities, _, embedding = make_harness()
+    embedding.fail_single_prefixes.add("Grace")
+
+    async def allocate_entity_id():
+        return 1001
+
+    with pytest.raises(RuntimeError, match="embedding failed for Grace"):
+        await entities.resolve_mentions(
+            [(1, "Grace", "person", "Identity")],
+            messages=MESSAGES,
+            policy=ingestion_policy(),
+            allocate_entity_id=allocate_entity_id,
+            issues=[],
+        )
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_ingestion_candidate_search_propagates_vector_storage_failure():
+    _, entities, knowledge_store, _ = make_harness()
+
+    async def fail_vector_search(*_args, **_kwargs):
+        raise StorageReadError("search_entities_by_embedding")
+
+    knowledge_store.search_entities_by_embedding = fail_vector_search
+
+    with pytest.raises(StorageReadError, match="search_entities_by_embedding"):
+        await entities.candidate_entries_for_mentions(
+            [(1, "Grace", "person", "Identity")],
+            policy=ingestion_policy(),
+        )

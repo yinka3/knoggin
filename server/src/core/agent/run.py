@@ -7,12 +7,16 @@ reasoning loop.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 from uuid import uuid4
 
 from common.schema.agent.identity import AgentConfig
+from common.schema.agent.research import (
+    DEFAULT_RESEARCH_PROFILES,
+    ResearchProfile,
+)
 from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
@@ -84,6 +88,22 @@ class AgentRunLimits:
             tool_limits=tuple((defaults | overrides).items()),
         )
 
+    def for_research_profile(self, profile: ResearchProfile) -> "AgentRunLimits":
+        """Scale the existing executor budget for a selected research mode."""
+
+        return replace(
+            self,
+            max_calls=self.max_calls * profile.tool_call_budget_multiplier,
+            max_attempts=self.max_attempts * profile.attempt_budget_multiplier,
+            max_accumulated_sources=(
+                self.max_accumulated_sources * profile.source_budget_multiplier
+            ),
+            tool_limits=tuple(
+                (name, limit * profile.tool_call_budget_multiplier)
+                for name, limit in self.tool_limits
+            ),
+        )
+
     def get_tool_limit(self, tool_name: str, default: int = 6) -> int:
         limits = dict(self.tool_limits)
         if tool_name in limits:
@@ -112,6 +132,9 @@ class AgentRun:
     additional_tool_schemas: Tuple[Dict[str, Any], ...]
     tool_runtime: ToolRuntime
     limits: AgentRunLimits
+    research_profile: ResearchProfile = field(
+        default_factory=lambda: DEFAULT_RESEARCH_PROFILES["normal"]
+    )
     history: List[Dict] = field(default_factory=list)
     document_focus: Optional[DocumentFocus] = None
     hot_topics: List[str] = field(default_factory=list)
@@ -394,6 +417,7 @@ class AgentRun:
         self.messages = self.messages[-5:]
         self.profiles = self.profiles[-5:]
         self.graph = self.graph[-15:]
+        self.sources = self.sources[-5:]
         self.episodes = []
         self.paths = []
 

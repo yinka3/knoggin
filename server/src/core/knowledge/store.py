@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
+from common.schema.artifacts import ArtifactDraft, ArtifactReference, ArtifactRevision
 from common.schema.episode.models import Episode, EpisodeCheckpoint
 from common.schema.ingestion.contracts import (
     EntityWrite,
@@ -33,6 +34,7 @@ from core.knowledge.conflicts import (
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
+from core.knowledge.db.readers.artifact_reader import ArtifactReader
 from core.knowledge.db.readers.conflict_discovery_reader import (
     ConflictDiscoveryReader,
 )
@@ -47,6 +49,7 @@ from core.knowledge.db.readers.relationship_observation_reader import (
     RelationshipObservationReader,
 )
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
+from core.knowledge.db.writers.artifact_writer import ArtifactWriter
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
 from core.knowledge.db.writers.entity_merge_writer import EntityMergeWriter
 from core.knowledge.db.writers.entity_reclassification_writer import (
@@ -126,6 +129,7 @@ class KnowledgeStore:
             reviews=self._human_review_writer,
         )
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
+        self._artifact_writer = ArtifactWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
@@ -133,6 +137,7 @@ class KnowledgeStore:
         self._knowledge_query_reader = KnowledgeQueryReader(self._postgres_client)
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
+        self._artifact_reader = ArtifactReader(self._postgres_client)
         self._relationship_observation_reader = RelationshipObservationReader(
             self._postgres_client
         )
@@ -158,7 +163,7 @@ class KnowledgeStore:
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
+        session_id: str | None = None,
         message_id: int,
         content: str,
     ) -> int:
@@ -175,7 +180,7 @@ class KnowledgeStore:
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
+        session_id: str | None = None,
         message_id: int,
         revision: int,
     ) -> str:
@@ -327,20 +332,21 @@ class KnowledgeStore:
         candidates: List[SourceReferenceCandidate],
         *,
         readable_project_ids: List[str],
+        artifact: ArtifactDraft | None = None,
     ) -> List[SourceReference]:
-        """Persist one assistant message and its source audit trail together."""
+        """Persist one assistant message, sources, and artifact atomically."""
 
         if message.get("role") != "assistant":
             raise ValueError(
                 "source references can only be saved for assistant messages"
             )
-        if not candidates:
+        if not candidates and artifact is None:
             await self.save_message_logs([message])
             return []
 
         async with self._postgres_client.transaction() as cur:
             await self._message_writer.save_message_logs([message], cur=cur)
-            return await self._source_reference_writer.write_for_assistant_message(
+            references = await self._source_reference_writer.write_for_assistant_message(
                 message["id"],
                 candidates,
                 user_name=message["user_name"],
@@ -349,6 +355,80 @@ class KnowledgeStore:
                 readable_project_ids=readable_project_ids,
                 cursor=cur,
             )
+            if artifact is not None:
+                await self._artifact_writer.write_for_assistant_message(
+                    message["id"],
+                    artifact,
+                    user_name=message["user_name"],
+                    project_id=message["project_id"],
+                    session_id=message["session_id"],
+                    cursor=cur,
+                )
+            return references
+
+    async def get_project_artifact(
+        self,
+        artifact_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str | None = None,
+    ) -> ArtifactReference | None:
+        return await self._artifact_reader.get_artifact(
+            artifact_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def list_project_artifacts(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str | None = None,
+        limit: int = 50,
+    ) -> List[ArtifactReference]:
+        return await self._artifact_reader.list_project_artifacts(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
+        )
+
+    async def get_message_artifact(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> ArtifactReference | None:
+        """Read the artifact attached to one committed assistant message."""
+
+        return await self._artifact_reader.get_for_assistant_message(
+            message_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_project_artifact_revision(
+        self,
+        artifact_id: str,
+        revision: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str | None = None,
+    ) -> ArtifactRevision | None:
+        return await self._artifact_reader.get_revision(
+            artifact_id,
+            revision,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
 
     async def write_message_source_refs(
         self,

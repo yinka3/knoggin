@@ -1,7 +1,7 @@
 import pytest
 
 from common.conf.domain_config import DomainConfig
-from common.exceptions import LLMProviderError
+from common.exceptions import LLMProviderError, LLMResponseError
 from common.schema.ingestion.contracts import (
     ExtractionTrace,
 )
@@ -263,6 +263,29 @@ async def test_extract_connections_resolves_local_msg_id_to_real_message_id():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_extract_connections_preserves_message_roles_in_prompt():
+    processor, entities = make_processor()
+    await seed_connection_entities(entities)
+    messages = [
+        {"id": 41, "message": "Ada met Alice.", "role": "user"},
+        {"id": 99, "message": "Alice joined the project.", "role": "assistant"},
+    ]
+
+    await extract(
+        processor,
+        entity_msg_map={101: [41], 102: [41], 103: [41]},
+        messages=messages,
+        trace=ExtractionTrace(),
+        issues=[],
+    )
+
+    prompt = processor.llm.calls[0]["user"]
+    assert '[MSG m1] [USER]: "Ada met Alice."' in prompt
+    assert '[MSG m2] [AGENT]: "Alice joined the project."' in prompt
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_extract_connections_accepts_known_alias_names_from_llm():
     response = RelationshipExtraction(
         connections=[relationship(entity_b=" Bob ")],
@@ -286,28 +309,35 @@ async def test_extract_connections_accepts_known_alias_names_from_llm():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_extract_connections_llm_failure_records_fallback_and_issue():
+async def test_extract_connections_propagates_llm_provider_failure():
     processor, entities = make_processor(raise_error=True)
     await seed_connection_entities(entities)
     trace = ExtractionTrace()
     issues = []
 
-    observations = await extract(
-        processor,
-        trace=trace,
-        issues=issues,
-    )
+    with pytest.raises(LLMProviderError, match="fake connection failure"):
+        await extract(
+            processor,
+            trace=trace,
+            issues=issues,
+        )
 
-    assert observations == []
-    assert trace.fallbacks == [
-        {
-            "stage": "connections",
-            "fallback": "empty_connections",
-            "error_code": "llm_provider_error",
-        }
-    ]
-    assert [issue.code for issue in issues] == ["llm_extraction_failed"]
-    assert issues[0].metadata["error_code"] == "llm_provider_error"
+    assert trace.fallbacks == []
+    assert issues == []
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_connections_rejects_missing_llm_result():
+    processor, entities = make_processor()
+    await seed_connection_entities(entities)
+    processor.llm.response = None
+
+    with pytest.raises(
+        LLMResponseError,
+        match="VP-02 connection extraction returned no result",
+    ):
+        await extract(processor, trace=ExtractionTrace(), issues=[])
 
 
 @pytest.mark.ingestion

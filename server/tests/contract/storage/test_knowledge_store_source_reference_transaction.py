@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.store import KnowledgeStore
 
@@ -33,6 +34,15 @@ class SourceReferenceWriter:
     async def write_for_assistant_message(self, message_id, candidates, **kwargs):
         self.calls.append((message_id, candidates, kwargs))
         return ["reference"]
+
+
+class ArtifactWriter:
+    def __init__(self):
+        self.calls = []
+
+    async def write_for_assistant_message(self, message_id, artifact, **kwargs):
+        self.calls.append((message_id, artifact, kwargs))
+        return "artifact"
 
 
 def _candidate():
@@ -86,6 +96,53 @@ async def test_assistant_message_and_source_refs_share_one_transaction():
                 "project_id": "project-1",
                 "session_id": "session-1",
                 "readable_project_ids": ["project-1"],
+                "cursor": client.cursor,
+            },
+        )
+    ]
+
+
+@pytest.mark.no_network
+async def test_assistant_message_sources_and_artifact_share_one_transaction():
+    client = TransactionClient()
+    message_writer = MessageWriter()
+    source_writer = SourceReferenceWriter()
+    artifact_writer = ArtifactWriter()
+    store = object.__new__(KnowledgeStore)
+    store._postgres_client = client
+    store._message_writer = message_writer
+    store._source_reference_writer = source_writer
+    store._artifact_writer = artifact_writer
+    message = {
+        "id": 10,
+        "role": "assistant",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "session_id": "session-1",
+    }
+    artifact = ArtifactDraft(
+        title="Saved artifact",
+        blocks=(MarkdownArtifactBlock(content="Durable"),),
+    )
+
+    references = await store.save_assistant_message_with_source_refs(
+        message,
+        [],
+        readable_project_ids=["project-1"],
+        artifact=artifact,
+    )
+
+    assert references == ["reference"]
+    assert client.transaction_count == 1
+    assert message_writer.calls == [([message], client.cursor)]
+    assert artifact_writer.calls == [
+        (
+            10,
+            artifact,
+            {
+                "user_name": "ada",
+                "project_id": "project-1",
+                "session_id": "session-1",
                 "cursor": client.cursor,
             },
         )

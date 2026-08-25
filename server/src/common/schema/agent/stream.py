@@ -18,6 +18,8 @@ from typing import (
 
 from pydantic import ConfigDict, Field, StrictBool, StrictInt, TypeAdapter
 
+from common.schema.agent.research import ResearchMode
+
 
 class _StrictStreamDict(TypedDict):
     """Typed dictionary that also forbids unknown keys during validation."""
@@ -134,6 +136,10 @@ class ResponseData(_StrictStreamDict):
     content: str
     usage: StreamUsage
     sources_consulted: NotRequired[List[Dict[str, Any]]]
+    # Internal engine handoff.  Public run projections will expose a narrower
+    # artifact reference/read contract once the API layer is added.
+    artifact: NotRequired[Dict[str, Any]]
+    research_mode: NotRequired[ResearchMode]
     fallback: NotRequired[StrictBool]
 
 

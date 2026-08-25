@@ -49,6 +49,13 @@ USAGE = {
                 "content": "The roadmap is ready.",
                 "usage": USAGE,
                 "sources_consulted": [],
+                "artifact": {
+                    "schema_version": 1,
+                    "kind": "general",
+                    "title": "Roadmap",
+                    "blocks": [{"kind": "markdown", "content": "Ready."}],
+                    "status": "complete",
+                },
             },
         },
         {

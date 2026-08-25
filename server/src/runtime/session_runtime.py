@@ -8,7 +8,9 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.schema.agent.research import ResearchMode
 from common.schema.agent.stream import AgentExecutionEvent
+from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
@@ -98,6 +100,23 @@ class SessionRuntime:
         async with self._message_add_lock:
             return await self._add_user_message(msg)
 
+    async def accept_message(self, msg: Message) -> tuple[Message, bool]:
+        """Durably accept one user message without starting an agent run.
+
+        The public application port exposes message acceptance separately from
+        execution.  Keep that operation on the session runtime so it uses the
+        same idempotency key, lifecycle writer, and worker wake-up path as
+        ``run_agent_stream``.
+        """
+
+        if self._closed or self._agent_runs_closed:
+            raise RuntimeError("Session is shutting down")
+        if not self.project or not self.project.scheduler or not self.consumer:
+            raise RuntimeError("Session is not fully initialized for message ingestion")
+
+        async with self._message_add_lock:
+            return await self._accept_user_message(msg)
+
     def agent_run_snapshot(self) -> dict[str, object]:
         """Return the bounded, session-owned state of agent execution."""
 
@@ -159,6 +178,7 @@ class SessionRuntime:
         document_focus: Optional[DocumentFocus] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
         idempotency_key: Optional[str] = None,
+        research_mode: ResearchMode = "normal",
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run the canonical server-owned message-to-answer workflow.
 
@@ -230,6 +250,7 @@ class SessionRuntime:
                 conversation_history=history,
                 user_message_id=accepted.id,
                 pasted_text_spans=pasted_text_spans,
+                research_mode=research_mode,
             ):
                 if event["event"] == "response":
                     if response_seen:
@@ -244,6 +265,7 @@ class SessionRuntime:
                         metadata=self._assistant_response_metadata(response),
                         user_msg_id=accepted.id,
                         source_candidates=self._response_source_candidates(response),
+                        artifact=self._response_artifact(response),
                     )
                     response = dict(response)
                     response["assistant_message_id"] = commit["message_id"]
@@ -296,6 +318,8 @@ class SessionRuntime:
         """Persist server-owned response metadata, not client presentation state."""
 
         metadata = {"usage": response["usage"]}
+        if response.get("research_mode"):
+            metadata["research_mode"] = response["research_mode"]
         if response.get("fallback"):
             metadata["fallback"] = True
         return metadata
@@ -316,8 +340,21 @@ class SessionRuntime:
             for candidate in raw_candidates
         ]
 
+    @staticmethod
+    def _response_artifact(response: Dict[str, Any]) -> ArtifactDraft | None:
+        raw_artifact = response.get("artifact")
+        if raw_artifact is None:
+            return None
+        return ArtifactDraft.model_validate(raw_artifact)
+
     async def _add_user_message(self, msg: Message) -> Message:
         """Durably accept and idempotently enqueue one user message."""
+
+        accepted, _created = await self._accept_user_message(msg)
+        return accepted
+
+    async def _accept_user_message(self, msg: Message) -> tuple[Message, bool]:
+        """Persist one user message and report whether it was newly created."""
 
         msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
@@ -343,11 +380,11 @@ class SessionRuntime:
             # worker wake failed.  A duplicate request is always safe to use
             # as another wake-up edge because the durable queue is canonical.
             self.consumer.signal()
-            return msg
+            return msg, False
 
         self.consumer.signal()
 
-        return msg
+        return msg, True
 
     @staticmethod
     def _normalize_timestamp(timestamp: datetime) -> datetime:
@@ -382,6 +419,7 @@ class SessionRuntime:
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
+        artifact: ArtifactDraft | None = None,
     ) -> dict[str, Any]:
         """Add assistant turn to conversation log."""
         if metadata is None:
@@ -397,6 +435,7 @@ class SessionRuntime:
                 metadata=metadata,
                 user_msg_id=user_msg_id,
                 source_candidates=source_candidates,
+                artifact=artifact,
             )
         except Exception:
             try:
@@ -439,6 +478,7 @@ class SessionRuntime:
         metadata: Optional[dict] = None,
         user_msg_id: Optional[int] = None,
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
+        artifact: ArtifactDraft | None = None,
     ) -> List[SourceReference]:
         """Write an assistant message log, raising after bounded retries."""
         max_retries = 3
@@ -463,13 +503,21 @@ class SessionRuntime:
                     }
                 ]
 
-                if source_candidates:
+                if source_candidates or artifact is not None:
                     if self.project is None:
                         raise RuntimeError("Session project runtime is unavailable")
-                    return await self.knowledge_store.save_assistant_message_with_source_refs(
+                    save = self.knowledge_store.save_assistant_message_with_source_refs
+                    kwargs = {
+                        "readable_project_ids": self.project.readable_project_ids,
+                    }
+                    # Keep the existing source-only fake/store contract usable;
+                    # the new field is sent only when an artifact exists.
+                    if artifact is not None:
+                        kwargs["artifact"] = artifact
+                    return await save(
                         agent_msg_batch[0],
-                        source_candidates,
-                        readable_project_ids=self.project.readable_project_ids,
+                        source_candidates or [],
+                        **kwargs,
                     )
                 else:
                     await self.knowledge_store.save_message_logs(agent_msg_batch)

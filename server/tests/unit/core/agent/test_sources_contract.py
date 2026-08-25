@@ -1,9 +1,12 @@
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
 from common.schema.source.references import SourceReferenceCandidate
+from core.agent.executor import _ToolCall
 from core.agent.sources.pasted_text import build_pasted_text_candidates
+from core.agent.sources.tool_results import capture_tool_source_candidates
 from core.agent.tools.search import SearchTools
 
 
@@ -86,6 +89,10 @@ def test_web_result_source_context_is_a_discovery_snippet_candidate():
 
     source_context = results[0]["source_context"]
     assert "_source_provider" not in results[0]
+    assert results[0]["source_kind"] == "web_search_result"
+    assert results[0]["provider"] == "brave"
+    assert results[0]["query"] == "quarterly revenue"
+    assert results[0]["rank"] == 1
     assert source_context["canonical_url"] == "https://example.test/news?q=q2"
     assert source_context["excerpt"] == "Revenue rose 18 percent."
     assert source_context["locator"] == {
@@ -128,3 +135,82 @@ def test_search_adapter_excludes_notices_errors_and_incomplete_results(result):
     )
 
     assert "source_context" not in results[0]
+
+
+@pytest.mark.no_network
+def test_read_web_page_source_context_is_captured_as_read_evidence():
+    ctx = SimpleNamespace(
+        project_id="project-1",
+        session_id="session-1",
+        run_id="run-web-read",
+    )
+    content_hash = "d" * 64
+    result = {
+        "data": [
+            {
+                "title": "Report",
+                "url": "https://example.test/report",
+                "content": "Observed page text.",
+                "source_context": {
+                    "source_kind": "web_page",
+                    "canonical_url": "https://example.test/report",
+                    "content_hash": content_hash,
+                    "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+                    "excerpt": "Observed page text.",
+                    "metadata": {"title": "Report"},
+                },
+            }
+        ]
+    }
+
+    candidates = capture_tool_source_candidates(
+        ctx,
+        _ToolCall(name="read_web_page", call_id="call-web-read"),
+        result,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].source_kind == "web_page"
+    assert candidates[0].encounter_kind == "web_read"
+    assert candidates[0].locator.model_dump(exclude_none=True) == {
+        "kind": "text_lines",
+        "start_line": 1,
+        "end_line": 1,
+    }
+
+
+@pytest.mark.no_network
+def test_read_external_pdf_source_context_is_captured_with_page_locator():
+    ctx = SimpleNamespace(
+        project_id="project-1",
+        session_id="session-1",
+        run_id="run-web-pdf-read",
+    )
+    result = {
+        "data": [
+            {
+                "source_context": {
+                    "source_kind": "web_pdf",
+                    "canonical_url": "https://example.test/report.pdf",
+                    "content_hash": "e" * 64,
+                    "locator": {"kind": "pdf_page", "page": 2},
+                    "excerpt": "Observed PDF page text.",
+                    "metadata": {"title": "Report"},
+                }
+            }
+        ]
+    }
+
+    candidates = capture_tool_source_candidates(
+        ctx,
+        _ToolCall(name="read_web_page", call_id="call-web-pdf-read"),
+        result,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].source_kind == "web_pdf"
+    assert candidates[0].encounter_kind == "web_read"
+    assert candidates[0].locator.model_dump(exclude_none=True) == {
+        "kind": "pdf_page",
+        "page": 2,
+    }

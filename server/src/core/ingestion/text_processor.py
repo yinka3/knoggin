@@ -6,7 +6,7 @@ import spacy
 from gliner import GLiNER
 from spacy.matcher import PhraseMatcher
 
-from common.exceptions import ConfigurationError, LLMBudgetExceededError, LLMError
+from common.exceptions import LLMBudgetExceededError, LLMResponseError
 from common.schema.ingestion.contracts import (
     ValidationIssue,
 )
@@ -474,21 +474,8 @@ class TextProcessor:
             # Do not turn an explicit spending pause into permanently empty
             # durable knowledge.  The worker will retry this batch after reset.
             raise
-        except (ConfigurationError, LLMError) as e:
-            trace.fallbacks.append(
-                {
-                    "stage": "ner",
-                    "fallback": "empty_mentions",
-                    "error_code": e.code,
-                }
-            )
-            record_issue(
-                code="llm_extraction_failed",
-                message=f"VP-01 extraction failed: {e}",
-                severity="warning",
-                metadata={"error_code": e.code, **e.details},
-            )
-            ner_result = None
+        if ner_result is None:
+            raise LLMResponseError("VP-01 extraction returned no result")
 
         vp01_count = 0
         valid_msg_ids = covered_texts.keys()
@@ -573,6 +560,7 @@ class TextProcessor:
                             metadata={"msg_id": actual_msg_id},
                         )
                         continue
+                    covered_texts[actual_msg_id].add(entity.name.casefold())
                     output.append(
                         (actual_msg_id, entity.name, canonical_type, derived_topic)
                     )
