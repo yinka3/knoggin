@@ -385,3 +385,66 @@ async def test_private_specialists_cannot_publish_or_spawn_without_promotion(mon
     assert captured["run"].is_community is False
     assert {"save_insight", "vote_insight", "remove_insight_vote", "spawn_specialist", "consult_specialist"}.isdisjoint(visible_tools)
     assert {"search_documents", "search_insights", "edit_brain"}.issubset(visible_tools)
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_aac_participants_cannot_reexpose_project_tools_from_agent_settings(
+    monkeypatch,
+):
+    resources = FakeResources()
+    manager = AgentManager(resources, user_name="ada")
+    agent = await manager.create_agent(
+        "Researcher",
+        "Careful",
+        enabled_tools=[
+            "search_documents",
+            "create_workspace_file",
+            "update_workspace_file",
+            "append_workspace_file",
+        ],
+    )
+    context = await AACReadContext.create(
+        user_name="ada",
+        postgres=resources.postgres,
+        knowledge_store=resources.knowledge_store,
+        embedding_service=resources.embedding,
+    )
+    runtime = AACRuntime(
+        user_name="ada",
+        resources=resources,
+        agent_manager=manager,
+        read_context=context,
+        store=AACStore(resources.postgres),
+        config_provider=_provider(),
+        seeder=FakeSeeder(SeedDecision("SKIP")),
+    )
+    captured = {}
+
+    class CapturingExecutor:
+        def __init__(self, run, *_args, **_kwargs):
+            captured["run"] = run
+
+        async def execute(self):
+            yield {"event": "response", "data": {"content": "Reviewed."}}
+
+    monkeypatch.setattr("core.community.runtime.AgentExecutor", CapturingExecutor)
+
+    await runtime._agent_turn(
+        discussion_id="discussion-1",
+        topic="Review evidence",
+        agent=agent,
+        history=[],
+        participants=[agent.id],
+        budget=AACTokenBudget(100),
+    )
+
+    visible_tools = {
+        schema["function"]["name"] for schema in captured["run"].tool_runtime.schemas
+    }
+    assert "search_documents" in visible_tools
+    assert {
+        "create_workspace_file",
+        "update_workspace_file",
+        "append_workspace_file",
+    }.isdisjoint(visible_tools)

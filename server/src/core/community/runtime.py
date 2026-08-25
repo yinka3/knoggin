@@ -469,7 +469,10 @@ class AACRuntime:
                 )
             ),
         )
-        enabled = list(agent.enabled_tools or AAC_DEFAULT_ENABLED_TOOLS)
+        configured_tools = agent.enabled_tools or AAC_DEFAULT_ENABLED_TOOLS
+        enabled = [
+            name for name in configured_tools if name in AAC_DEFAULT_ENABLED_TOOLS
+        ]
         if is_specialist:
             enabled = [
                 name for name in enabled if name in self._SPECIALIST_ENABLED_TOOLS
