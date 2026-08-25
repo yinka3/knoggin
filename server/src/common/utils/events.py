@@ -118,15 +118,3 @@ def emit_sync(
 
     task = loop.create_task(coro)
     task.add_done_callback(_log_failure)
-
-
-async def emit_community(
-    user_name: str,
-    component: str,
-    event: str,
-    data: dict[str, Any] | None = None,
-) -> None:
-    """Log a community lifecycle fact without delivering it to clients."""
-
-    del data
-    logger.debug("Community event {}.{} for user {}", component, event, user_name)

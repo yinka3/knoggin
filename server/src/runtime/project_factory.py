@@ -12,7 +12,6 @@ from common.scoping import (
     require_scope_value,
     require_visible_project_ids,
 )
-from core.community.community_job import AACJob
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.db.readers.document_reader import DocumentReader
@@ -322,4 +321,3 @@ class ProjectRuntimeFactory:
                 "developer_settings.jobs.conflict_discovery",
             )
         )
-        scheduler.register(AACJob(runtime, self.resources))

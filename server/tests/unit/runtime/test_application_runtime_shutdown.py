@@ -168,7 +168,7 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
             calls.append("ensure_default_agent")
 
     class RecordingAgentOrchestrator:
-        def __init__(self, manager):
+        def __init__(self, manager, **_kwargs):
             assert isinstance(manager, RecordingAgentManager)
             calls.append("agent_orchestrator")
 

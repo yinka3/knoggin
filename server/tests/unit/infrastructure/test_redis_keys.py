@@ -26,9 +26,6 @@ def test_user_and_project_scoped_keys_do_not_collide():
     assert RedisKeys.community_agent_memory(
         "ada", "agent-1"
     ) != RedisKeys.community_agent_memory("grace", "agent-1")
-    assert RedisKeys.community_discussion_active(
-        "ada", "project-1"
-    ) != RedisKeys.community_discussion_active("ada", "project-2")
     assert RedisKeys.maintenance_attempts(
         "ada", "project-1", "topic_evaluation:project-1"
     ) != RedisKeys.maintenance_attempts(
@@ -60,7 +57,6 @@ def test_project_cleanup_inventory_covers_fixed_and_variable_key_families():
 
     assert RedisKeys.dirty_entities("ada", "project-1") in keys
     assert RedisKeys.project_sessions("ada", "project-1") in keys
-    assert RedisKeys.community_discussion_active("ada", "project-1") in keys
     assert "last_profile_update:ada:project-1:*" in patterns
     assert "merge_intent:ada:project-1:*" in patterns
     assert "job_lease:ada:project-1:*" not in patterns

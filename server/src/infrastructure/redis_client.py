@@ -161,7 +161,6 @@ class RedisKeys:
             "merge_intents_index",
             "maintenance_attempts",
             "maintenance_cooldown",
-            "community_discussion_active",
             "dirty_entities",
         }
     )
@@ -212,7 +211,6 @@ class RedisKeys:
             RedisKeys.project_heartbeat_counter(user, project_id),
             RedisKeys.dirty_entities(user, project_id),
             RedisKeys.project_sessions(user, project_id),
-            RedisKeys.community_discussion_active(user, project_id),
         ]
 
     @staticmethod
@@ -304,10 +302,6 @@ class RedisKeys:
     @staticmethod
     def agent_directives(user: str, agent_id: str) -> str:
         return f"agent_directives:{user}:{agent_id}"
-
-    @staticmethod
-    def community_discussion_active(user: str, project_id: str) -> str:
-        return f"community:discussion:active:{user}:{project_id}"
 
     @staticmethod
     def community_agent_memory(user_name: str, agent_id: str) -> str:

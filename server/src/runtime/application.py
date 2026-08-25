@@ -13,6 +13,7 @@ from common.conf.manager import ConfigManager
 from common.utils.time_utils import get_now
 from core.agent.orchestrator import AgentOrchestrator
 from core.agent.services.agent_manager import AgentManager
+from core.community.runtime import AACRuntime
 from core.health.service import RuntimeHealthService
 from core.project.project_manager import ProjectManager
 from core.session.session_manager import SessionManager
@@ -51,10 +52,12 @@ class ApplicationShutdownCoordinator:
         sessions: ShutdownOwner,
         projects: ShutdownOwner,
         resources: ShutdownOwner,
+        aac_runtime: ShutdownOwner | None = None,
     ) -> None:
         self._sessions = sessions
         self._projects = projects
         self._resources = resources
+        self._aac_runtime = aac_runtime
         self._lock = asyncio.Lock()
         self._shutdown_task: asyncio.Task[None] | None = None
 
@@ -73,11 +76,17 @@ class ApplicationShutdownCoordinator:
 
     async def _shutdown(self) -> None:
         failures: list[ShutdownFailure] = []
-        for phase, owner in (
-            ("sessions", self._sessions),
-            ("projects", self._projects),
-            ("resources", self._resources),
-        ):
+        owners = []
+        if self._aac_runtime is not None:
+            owners.append(("aac", self._aac_runtime))
+        owners.extend(
+            (
+                ("sessions", self._sessions),
+                ("projects", self._projects),
+                ("resources", self._resources),
+            )
+        )
+        for phase, owner in owners:
             try:
                 logger.info(f"Application shutdown phase started: {phase}")
                 await owner.shutdown()
@@ -99,6 +108,7 @@ class ApplicationRuntime:
     sessions: SessionManager
     agent_manager: AgentManager
     agent_orchestrator: AgentOrchestrator
+    aac_runtime: ShutdownOwner | None = None
     shutdown_coordinator: ApplicationShutdownCoordinator = field(init=False)
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
@@ -118,6 +128,7 @@ class ApplicationRuntime:
             sessions=self.sessions,
             projects=self.projects,
             resources=self.resources,
+            aac_runtime=self.aac_runtime,
         )
 
     @classmethod
@@ -151,14 +162,32 @@ class ApplicationRuntime:
                 project_manager=projects,
                 agent_orchestrator=agent_orchestrator,
             )
+            aac_runtime = None
+            if all(
+                getattr(resources, dependency, None) is not None
+                for dependency in ("postgres", "embedding", "redis", "knowledge_store")
+            ):
+                aac_runtime = await AACRuntime.create(
+                    user_name=user_name,
+                    resources=resources,
+                    agent_manager=agent_manager,
+                    config_provider=ConfigManager,
+                )
+                await aac_runtime.start()
             return cls(
                 resources=resources,
                 projects=projects,
                 sessions=sessions,
                 agent_manager=agent_manager,
                 agent_orchestrator=agent_orchestrator,
+                aac_runtime=aac_runtime,
             )
         except Exception:
+            if "aac_runtime" in locals() and aac_runtime is not None:
+                try:
+                    await aac_runtime.shutdown()
+                except Exception:
+                    logger.exception("AAC runtime cleanup failed during application startup")
             try:
                 await resources.shutdown()
             except Exception:

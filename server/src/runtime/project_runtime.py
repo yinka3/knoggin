@@ -19,8 +19,6 @@ class ProjectRuntime:
     Holds the runtime shared resources for a Project.
     """
 
-    COMMUNITY_TASK_SHUTDOWN_TIMEOUT = 30.0
-
     def __init__(
         self,
         project_id: str,
@@ -64,7 +62,6 @@ class ProjectRuntime:
         self.workspace_service = workspace_service
 
         self.episode_job: Optional[Any] = None
-        self._community_task: Optional[asyncio.Task] = None
         self.config_unsubscribers: list[Any] = []
         self._shutdown_lock = asyncio.Lock()
         self._closing = False
@@ -72,33 +69,6 @@ class ProjectRuntime:
 
     def add_config_unsubscriber(self, unsubscribe):
         self.config_unsubscribers.append(unsubscribe)
-
-    def track_community_task(self, task: asyncio.Task) -> None:
-        """Associate the project's one long-running AAC task with its runtime."""
-        self._community_task = task
-        task.add_done_callback(self._clear_community_task)
-
-    def _clear_community_task(self, task: asyncio.Task) -> None:
-        if self._community_task is task:
-            self._community_task = None
-
-    async def _stop_community_task(self) -> None:
-        task = self._community_task
-        self._community_task = None
-        if task is None or task.done():
-            return
-
-        logger.info(f"Cancelling AAC discussion for {self.project_id}")
-        task.cancel()
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(task, return_exceptions=True),
-                timeout=self.COMMUNITY_TASK_SHUTDOWN_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Timed out waiting for AAC discussion shutdown for {self.project_id}"
-            )
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""
@@ -123,7 +93,6 @@ class ProjectRuntime:
                         )
                     ),
                 ),
-                ("community", self._stop_community_task),
             ):
                 if shutdown is None:
                     continue

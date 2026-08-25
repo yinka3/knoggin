@@ -356,7 +356,15 @@ class AACRuntime:
             agent_manager=self.agent_manager,
             discussion_id=discussion_id,
             agent_id=agent.id,
-            specialist_runner=None,
+            specialist_runner=(
+                None
+                if not participants
+                else self._specialist_runner(
+                    discussion_id=discussion_id,
+                    topic=topic,
+                    budget=budget,
+                )
+            ),
         )
         enabled = list(agent.enabled_tools or AAC_DEFAULT_ENABLED_TOOLS)
         additional = [
@@ -399,6 +407,19 @@ class AACRuntime:
         finally:
             await tools.close()
         return response.strip() if isinstance(response, str) and response.strip() else None
+
+    def _specialist_runner(self, *, discussion_id: str, topic: str, budget: AACTokenBudget):
+        async def run_specialist(agent: AgentConfig, question: str) -> object:
+            return await self._agent_turn(
+                discussion_id=discussion_id,
+                topic=f"{topic}\nPrivate specialist question: {question}",
+                agent=agent,
+                history=[],
+                participants=[],
+                budget=budget,
+            ) or ""
+
+        return run_specialist
 
     async def _enabled_participants(self) -> list[str]:
         settings = self._community_settings()
