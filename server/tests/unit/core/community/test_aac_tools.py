@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from core.agent.services.agent_manager import AgentManager
 from core.community.aac_store import AACStore
 from core.community.tools import AACTools
@@ -99,3 +100,13 @@ async def test_aac_tools_persist_local_insights_and_only_consult_owned_specialis
     with pytest.raises(ValueError, match="own specialists"):
         await tools.consult_specialist(outsider.id, "No")
     await tools.close()
+
+
+def test_save_insight_contract_exposes_shared_and_private_visibility():
+    schema = next(
+        item for item in AAC_SPECIFIC_SCHEMAS if item["function"]["name"] == "save_insight"
+    )
+    visibility = schema["function"]["parameters"]["properties"]["visibility"]
+
+    assert visibility["enum"] == ["shared", "private"]
+    assert visibility["default"] == "shared"

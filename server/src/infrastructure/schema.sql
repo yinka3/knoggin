@@ -95,13 +95,30 @@ CREATE TABLE IF NOT EXISTS public.aac_discussions (
     user_name TEXT NOT NULL,
     topic TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
+    end_reason TEXT,
     token_budget BIGINT NOT NULL CHECK (token_budget >= 0),
     tokens_used BIGINT NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMPTZ,
     CONSTRAINT aac_discussions_status_check
-        CHECK (status IN ('active', 'completed', 'stopped', 'interrupted', 'failed'))
+        CHECK (status IN ('active', 'completed', 'stopped', 'interrupted', 'failed')),
+    CONSTRAINT aac_discussions_end_reason_check
+        CHECK (end_reason IS NULL OR end_reason IN (
+            'completed', 'token_budget', 'user_stopped', 'no_participants',
+            'shutdown', 'failed', 'startup_recovery', 'interrupted'
+        ))
 );
+
+ALTER TABLE public.aac_discussions
+    ADD COLUMN IF NOT EXISTS end_reason TEXT;
+
+ALTER TABLE public.aac_discussions
+    DROP CONSTRAINT IF EXISTS aac_discussions_end_reason_check,
+    ADD CONSTRAINT aac_discussions_end_reason_check
+        CHECK (end_reason IS NULL OR end_reason IN (
+            'completed', 'token_budget', 'user_stopped', 'no_participants',
+            'shutdown', 'failed', 'startup_recovery', 'interrupted'
+        ));
 
 CREATE INDEX IF NOT EXISTS aac_discussions_user_started_idx
 ON public.aac_discussions(user_name, started_at DESC);

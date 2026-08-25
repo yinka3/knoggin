@@ -14,6 +14,18 @@ from infrastructure.postgres_client import PostgresClient
 _DISCUSSION_TERMINAL_STATUSES = frozenset(
     {"completed", "stopped", "interrupted", "failed"}
 )
+_DISCUSSION_END_REASONS = frozenset(
+    {
+        "completed",
+        "token_budget",
+        "user_stopped",
+        "no_participants",
+        "shutdown",
+        "failed",
+        "startup_recovery",
+        "interrupted",
+    }
+)
 _TIMELINE_KINDS = frozenset({"agent_message", "system_event"})
 _INSIGHT_VISIBILITIES = frozenset({"shared", "private"})
 _VOTES = frozenset({"up", "down"})
@@ -153,17 +165,21 @@ class AACStore:
         discussion_id: str,
         user_name: str,
         status: str,
+        end_reason: str,
         tokens_used: int,
     ) -> None:
-        """Persist a terminal status and final approximate token total."""
+        """Persist a terminal status, reason, and final approximate token total."""
 
         if status not in _DISCUSSION_TERMINAL_STATUSES:
             raise ValueError(f"Unsupported AAC terminal status: {status}")
+        if end_reason not in _DISCUSSION_END_REASONS:
+            raise ValueError(f"Unsupported AAC discussion end reason: {end_reason}")
         updated = await self._write(
             "finish_aac_discussion",
             """
             UPDATE public.aac_discussions
             SET status = %(status)s,
+                end_reason = %(end_reason)s,
                 tokens_used = GREATEST(tokens_used, %(tokens_used)s),
                 ended_at = NOW()
             WHERE discussion_id = %(discussion_id)s AND user_name = %(user_name)s
@@ -173,6 +189,7 @@ class AACStore:
                 "discussion_id": self._text(discussion_id, "discussion_id"),
                 "user_name": self._text(user_name, "user_name"),
                 "status": status,
+                "end_reason": end_reason,
                 "tokens_used": self._nonnegative(tokens_used, "tokens_used"),
             },
         )
@@ -186,7 +203,9 @@ class AACStore:
             "interrupt_active_aac_discussions",
             """
             UPDATE public.aac_discussions
-            SET status = 'interrupted', ended_at = NOW()
+            SET status = 'interrupted',
+                end_reason = 'startup_recovery',
+                ended_at = NOW()
             WHERE user_name = %(user_name)s AND status = 'active'
             """,
             {"user_name": self._text(user_name, "user_name")},
@@ -203,7 +222,7 @@ class AACStore:
         return await self._read(
             "list_aac_discussions",
             """
-            SELECT discussion_id, topic, status, token_budget, tokens_used,
+            SELECT discussion_id, topic, status, end_reason, token_budget, tokens_used,
                    started_at, ended_at
             FROM public.aac_discussions
             WHERE user_name = %(user_name)s

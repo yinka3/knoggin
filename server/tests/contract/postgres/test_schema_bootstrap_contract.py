@@ -30,6 +30,8 @@ def test_schema_keeps_aac_state_user_owned_and_insights_retention_independent():
     assert "CREATE TABLE IF NOT EXISTS public.aac_timeline" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS public.aac_insights" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS public.aac_insight_votes" in SCHEMA_SQL
+    assert "end_reason TEXT" in SCHEMA_SQL
+    assert "ADD COLUMN IF NOT EXISTS end_reason TEXT" in SCHEMA_SQL
     assert """discussion_id TEXT REFERENCES public.aac_discussions(discussion_id)
         ON DELETE SET NULL""" in SCHEMA_SQL
     assert """discussion_id TEXT NOT NULL REFERENCES public.aac_discussions(discussion_id)

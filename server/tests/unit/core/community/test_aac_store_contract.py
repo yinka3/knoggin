@@ -49,6 +49,7 @@ async def test_aac_store_persists_user_level_discussion_and_timeline():
         discussion_id="discussion-1",
         user_name="ada",
         status="completed",
+        end_reason="token_budget",
         tokens_used=51_200,
     )
 
@@ -67,6 +68,8 @@ async def test_aac_store_persists_user_level_discussion_and_timeline():
     assert timeline_params["agent_id"] == "agent-1"
     finish_query, finish_params = postgres.write_calls[2]
     assert "status = 'active'" in finish_query
+    assert "end_reason = %(end_reason)s" in finish_query
+    assert finish_params["end_reason"] == "token_budget"
     assert finish_params["tokens_used"] == 51_200
 
 
@@ -199,6 +202,17 @@ async def test_aac_store_allows_only_other_agents_to_vote_on_shared_insights():
                 "content": "Nope",
             },
             "timeline kind",
+        ),
+        (
+            "finish_discussion",
+            {
+                "discussion_id": "discussion-1",
+                "user_name": "ada",
+                "status": "completed",
+                "end_reason": "unknown",
+                "tokens_used": 0,
+            },
+            "end reason",
         ),
         (
             "create_insight",
