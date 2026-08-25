@@ -140,6 +140,72 @@ AAC_SPECIFIC_SCHEMAS = [
             "capability": "configuration_write",
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_insights",
+            "description": "Search shared AAC Insights and your own private Insights.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+                "required": [],
+            },
+            "tags": ["community", "read"],
+            "capability": "read",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vote_insight",
+            "description": "Upvote or downvote another agent's shared Insight with a reason.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "insight_id": {"type": "string"},
+                    "vote": {"type": "string", "enum": ["up", "down"]},
+                    "reason": {"type": "string", "maxLength": 500},
+                },
+                "required": ["insight_id", "vote", "reason"],
+            },
+            "tags": ["community"],
+            "capability": "reversible_write",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_insight_vote",
+            "description": "Remove your vote from a shared AAC Insight.",
+            "parameters": {
+                "type": "object",
+                "properties": {"insight_id": {"type": "string"}},
+                "required": ["insight_id"],
+            },
+            "tags": ["community"],
+            "capability": "reversible_write",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consult_specialist",
+            "description": "Privately ask one of your own spawned specialists for help.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "specialist_id": {"type": "string"},
+                    "question": {"type": "string"},
+                },
+                "required": ["specialist_id", "question"],
+            },
+            "tags": ["community"],
+            "capability": "reversible_write",
+        },
+    },
 ]
 
 AAC_TOOL_NAMES = [

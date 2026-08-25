@@ -145,6 +145,10 @@ TOOL_DEFINITIONS = {
     ),
     "save_insight": _definition("save_insight", default_limit=4),
     "spawn_specialist": _definition("spawn_specialist", default_limit=2),
+    "search_insights": _definition("search_insights", default_limit=4),
+    "vote_insight": _definition("vote_insight", default_limit=4),
+    "remove_insight_vote": _definition("remove_insight_vote", default_limit=4),
+    "consult_specialist": _definition("consult_specialist", default_limit=2),
 }
 
 

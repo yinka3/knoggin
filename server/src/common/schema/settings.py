@@ -233,6 +233,7 @@ class SearchAPIKeySettings(ConfigModel):
 class CommunitySettings(ConfigModel):
     enabled: bool = Field(False)
     interval_minutes: int = Field(30, ge=1)
+    token_budget: int = Field(50_000_000, ge=0)
     max_turns: int = Field(10, ge=1)
     seeding_timeout_seconds: int = Field(300, ge=1)
     seeding_agent_id: Optional[str] = None
