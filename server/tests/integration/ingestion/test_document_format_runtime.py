@@ -8,12 +8,13 @@ from common.schema.agent.identity import AgentConfig
 from common.schema.public import StartRunRequest, validate_public_stream
 from core.agent.orchestrator import AgentOrchestrator
 from core.knowledge.documents import DocumentService
+from core.knowledge.documents import storage as document_storage
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
 from runtime.api_port import ApplicationRuntimePort
 from runtime.session_runtime import SessionRuntime as Session
-from tests.fixtures.documents import build_docx_bytes, build_pdf_bytes
+from tests.fixtures.documents import build_docx_bytes, build_pdf_bytes, build_png_bytes
 from tests.fixtures.factories import make_domain_config
 from tests.integration.ingestion.test_server_flow import (
     _DeterministicDocumentAgentLLM,
@@ -92,6 +93,7 @@ def _runtime_document_cases():
                 },
             },
         ),
+        ("launch.png", build_png_bytes(), None),
     ]
 
 
@@ -102,7 +104,7 @@ def _runtime_document_cases():
 @pytest.mark.parametrize(
     ("original_name", "content", "expected_source"),
     _runtime_document_cases(),
-    ids=["markdown", "pdf", "docx", "csv", "python"],
+    ids=["markdown", "pdf", "docx", "csv", "python", "ocr-image"],
 )
 async def test_public_runtime_preserves_format_specific_document_provenance(
     real_server_scope,
@@ -113,6 +115,11 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
 ):
     scope = real_server_scope
     postgres = scope["postgres"]
+    monkeypatch.setattr(
+        document_storage.pytesseract,
+        "image_to_string",
+        lambda _: "The violet launch phrase is durable.\n",
+    )
     embedding = _DeterministicEmbeddingService()
     llm = _DeterministicDocumentAgentLLM()
     store = KnowledgeStore(postgres, embedding)
@@ -228,13 +235,26 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     )
 
     source_events = [event for event in public_events if event.type == "source.added"]
+    response = public_events[-1]
+    if expected_source is None:
+        assert source_events == []
+        assert response.result.source_ref_ids == ()
+        answer = await store.get_assistant_message_with_sources(
+            response.result.assistant_message_id,
+            user_name=scope["user_name"],
+            project_id=scope["project_id"],
+            session_id=scope["session_id"],
+        )
+        assert answer is not None
+        assert answer.sources_consulted == ()
+        return
+
     assert len(source_events) == 1
     assert source_events[0].source.document_id == document["document_id"]
     assert source_events[0].source.source_kind == expected_source["source_kind"]
     assert source_events[0].source.excerpt == expected_source["excerpt"]
     assert source_events[0].source.locator.model_dump() == expected_source["locator"]
 
-    response = public_events[-1]
     assert len(response.result.source_ref_ids) == 1
     answer = await store.get_assistant_message_with_sources(
         response.result.assistant_message_id,
