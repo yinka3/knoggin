@@ -4,7 +4,6 @@ import pytest
 
 from common.schema.document import dump_document_focus
 from core.session.session_manager import SessionManager
-from infrastructure.redis_client import RedisKeys
 from tests.fixtures.fakes import FakeProjectManager, FakeResources, FakeSession
 
 
@@ -210,36 +209,30 @@ async def test_deactivate_releases_exact_session_lease(session_manager):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_delete_marks_transient_cleanup_only_after_durable_delete(
+async def test_delete_returns_after_durable_delete(
     monkeypatch,
     session_manager,
 ):
-    manager, resources, _, _ = session_manager
+    manager, _, _, _ = session_manager
     calls = []
 
     async def delete_session(**kwargs):
         calls.append(kwargs)
 
     monkeypatch.setattr(manager._session_deletion_writer, "delete_session", delete_session)
-    key = RedisKeys.session_memory("ada", "session-1", "notes")
-    await resources.redis.set(key, "cache")
-
-    await manager.delete_session_data("session-1")
+    assert await manager.delete_session_data("session-1") is None
 
     assert calls == [{"user_name": "ada", "session_id": "session-1"}]
-    assert await resources.redis.get(key) is None
     assert "session-1" not in manager._deleting_session_ids
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_failed_durable_delete_keeps_cache_and_clears_deleting_marker(
+async def test_failed_durable_delete_clears_deleting_marker(
     monkeypatch,
     session_manager,
 ):
-    manager, resources, _, _ = session_manager
-    key = RedisKeys.session_memory("ada", "session-1", "notes")
-    await resources.redis.set(key, "cache")
+    manager, _, _, _ = session_manager
 
     async def unavailable(**_kwargs):
         raise RuntimeError("database unavailable")
@@ -249,7 +242,6 @@ async def test_failed_durable_delete_keeps_cache_and_clears_deleting_marker(
     with pytest.raises(RuntimeError, match="database unavailable"):
         await manager.delete_session_data("session-1")
 
-    assert await resources.redis.get(key) == "cache"
     assert "session-1" not in manager._deleting_session_ids
 
 

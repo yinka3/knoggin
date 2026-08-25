@@ -27,9 +27,9 @@ from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWri
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.store import KnowledgeStore
-from runtime.session_runtime import SessionRuntime as Session
 from infrastructure.postgres_client import PostgresClient
 from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer
 
@@ -314,12 +314,6 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_red
             "project_id": project_id,
             "session_id": session_id,
         }
-        assert await redis.get(
-            RedisKeys.heartbeat_counter(user_name, session_id)
-        ) == "1"
-        assert await redis.get(
-            RedisKeys.project_heartbeat_counter(user_name, project_id)
-        ) == "1"
         assert activity_calls == [session_id]
         assert context.consumer.signaled == 1
 

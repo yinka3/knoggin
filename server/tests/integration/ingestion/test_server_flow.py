@@ -709,12 +709,6 @@ async def test_real_concurrent_sessions_accept_one_message_once(
         (scope["session_id"],),
     )
     assert rows == [{"message_id": results[0].id, "content": "same accepted turn"}]
-    assert (
-        await scope["redis"].get(
-            RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-        )
-        == "1"
-    )
 
 
 @pytest.mark.integration

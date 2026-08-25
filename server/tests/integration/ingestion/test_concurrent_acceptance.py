@@ -8,7 +8,6 @@ import pytest
 
 from common.schema.primitives import Message
 from core.knowledge.store import KnowledgeStore
-from infrastructure.redis_client import RedisKeys
 from runtime.session_runtime import SessionRuntime as Session
 from tests.integration.ingestion.test_server_flow import (
     _DeterministicEmbeddingService,
@@ -101,9 +100,6 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
     assert await _message_rows(scope) == [
         {"message_id": results[0].id, "content": "same concurrent submission"}
     ]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
 
 
 @pytest.mark.integration
@@ -111,29 +107,29 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_enqueue_failure_keeps_durable_pending_claim_for_retry(
+async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
     real_server_scope, monkeypatch
 ):
-    """A durable PostgreSQL write survives a Redis signal outage."""
+    """A durable PostgreSQL write survives a local worker wake failure."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
     context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     timestamp = datetime(2026, 8, 1, 16, 1, tzinfo=timezone.utc)
-    original_incr = scope["redis"].incr
+    original_signal = context.consumer.signal
     calls = 0
 
-    async def fail_once(*args, **kwargs):
+    def fail_once():
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise ConnectionError("simulated signal outage")
-        return await original_incr(*args, **kwargs)
+            raise RuntimeError("simulated local wake outage")
+        original_signal()
 
-    monkeypatch.setattr(scope["redis"], "incr", fail_once)
+    monkeypatch.setattr(context.consumer, "signal", fail_once)
     message = Message(content="signal retry", timestamp=timestamp)
 
-    with pytest.raises(ConnectionError, match="signal outage"):
+    with pytest.raises(RuntimeError, match="local wake outage"):
         await context.add(message)
 
     assert await _message_rows(scope) == [
@@ -172,9 +168,6 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
     assert await _message_rows(scope) == [
         {"message_id": first.id, "content": "response was lost"}
     ]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
 
 
 @pytest.mark.integration
@@ -182,34 +175,27 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_restart_reuses_a_pending_acceptance_claim(
+async def test_real_restart_reuses_durable_acceptance(
     real_server_scope, monkeypatch
 ):
-    """A new runtime can finish a durable acceptance left pending by a crash."""
+    """A new runtime receives the original durable acceptance ID."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
     first_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     timestamp = datetime(2026, 8, 1, 16, 3, tzinfo=timezone.utc)
-    original_incr = scope["redis"].incr
-
-    async def fail_signal(*_args, **_kwargs):
-        raise ConnectionError("runtime stopped before signal")
-
-    monkeypatch.setattr(scope["redis"], "incr", fail_signal)
-    with pytest.raises(ConnectionError, match="runtime stopped"):
-        await first_runtime.add(
-            Message(content="restart pending claim", timestamp=timestamp)
-        )
-    monkeypatch.setattr(scope["redis"], "incr", original_incr)
+    first = await first_runtime.add(
+        Message(content="restart durable acceptance", timestamp=timestamp)
+    )
 
     restarted = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     retried = await restarted.add(
-        Message(content="restart pending claim", timestamp=timestamp)
+        Message(content="restart durable acceptance", timestamp=timestamp)
     )
 
+    assert retried.id == first.id
     assert await _message_rows(scope) == [
-        {"message_id": retried.id, "content": "restart pending claim"}
+        {"message_id": retried.id, "content": "restart durable acceptance"}
     ]
     assert restarted.consumer.calls == 1
 

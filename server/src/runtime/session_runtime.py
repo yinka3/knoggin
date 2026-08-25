@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -24,14 +23,8 @@ from core.ingestion.graph_commit import write_ingestion_batch_to_graph
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.documents import DocumentService
-from infrastructure.redis_client import (
-    SESSION_RUNTIME_TTL_SECONDS,
-    RedisKeys,
-)
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
-
-SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS
 
 
 class SessionRuntime:
@@ -87,10 +80,6 @@ class SessionRuntime:
     @property
     def current_config(self) -> RootConfig:
         return ConfigManager.get().config
-
-    @property
-    def redis_client(self):
-        return self.resources.redis
 
     @property
     def knowledge_store(self):
@@ -354,24 +343,9 @@ class SessionRuntime:
             # worker wake failed.  A duplicate request is always safe to use
             # as another wake-up edge because the durable queue is canonical.
             self.consumer.signal()
-            await self.refresh_session_ttls()
             return msg
 
-        try:
-            await self._record_conversation_message(
-                message_id=msg.id,
-                role="user",
-                content=msg.content.strip(),
-                timestamp=msg.timestamp,
-                user_msg_id=msg.id,
-                metadata=msg.metadata,
-            )
-            await self._signal_user_message()
-        except Exception:
-            raise
-
         self.consumer.signal()
-        await self.refresh_session_ttls()
 
         return msg
 
@@ -380,63 +354,6 @@ class SessionRuntime:
         if timestamp.tzinfo is None:
             return timestamp.replace(tzinfo=timezone.utc)
         return timestamp.astimezone(timezone.utc)
-
-    async def _record_conversation_message(
-        self,
-        message_id: int,
-        role: str,
-        content: str,
-        timestamp: datetime,
-        user_msg_id: Optional[int] = None,
-        metadata: Optional[dict] = None,
-    ) -> None:
-        """Atomically cache one canonical message and its conversation position."""
-        normalized_timestamp = self._normalize_timestamp(timestamp)
-        timestamp_iso = normalized_timestamp.isoformat()
-        message_key = str(message_id)
-
-        payload = {
-            "message_id": message_id,
-            "role": role,
-            "role_label": "Assistant" if role == "assistant" else "User",
-            "content": content,
-            "timestamp": timestamp_iso,
-            "metadata": metadata,
-            "user_msg_id": user_msg_id,
-        }
-        content_payload = {
-            "id": message_id,
-            "message": content,
-            "content": content,
-            "timestamp": timestamp_iso,
-            "role": role,
-        }
-        max_history = (
-            self.current_config.developer_settings.limits.conversation_context_turns
-            or 100
-        )
-
-        pipe = self.redis_client.pipeline()
-        pipe.hset(
-            RedisKeys.conversation(self.user_name, self.session_id),
-            message_key,
-            json.dumps(payload),
-        )
-        pipe.zadd(
-            RedisKeys.recent_conversation(self.user_name, self.session_id),
-            {message_key: normalized_timestamp.timestamp()},
-        )
-        pipe.hset(
-            RedisKeys.message_content(self.user_name, self.session_id),
-            f"msg_{message_id}",
-            json.dumps(content_payload),
-        )
-        pipe.zremrangebyrank(
-            RedisKeys.recent_conversation(self.user_name, self.session_id),
-            0,
-            -(max_history + 1),
-        )
-        await pipe.execute()
 
     async def _persist_user_turn(self, msg: Message, *, acceptance_key: str):
         """Durably create an editable canonical user message and revision one."""
@@ -458,17 +375,6 @@ class SessionRuntime:
             ),
         )
 
-    async def _signal_user_message(self):
-        """Refresh operational counters; Postgres owns the ingestion queue."""
-        await self.redis_client.incr(
-            RedisKeys.heartbeat_counter(self.user_name, self.session_id)
-        )
-        if not self.project_id:
-            raise RuntimeError("Session cannot enqueue messages without project_id")
-        await self.redis_client.incr(
-            RedisKeys.project_heartbeat_counter(self.user_name, self.project_id)
-        )
-
     async def add_assistant_turn(
         self,
         content: str,
@@ -483,15 +389,6 @@ class SessionRuntime:
 
         timestamp = self._normalize_timestamp(timestamp)
         message_id = await self.knowledge_store.allocate_message_id()
-        await self._record_conversation_message(
-            message_id=message_id,
-            role="assistant",
-            content=content,
-            timestamp=timestamp,
-            metadata=metadata,
-            user_msg_id=user_msg_id,
-        )
-
         try:
             source_references = await self._persist_assistant_message_log(
                 message_id,
@@ -510,7 +407,6 @@ class SessionRuntime:
                     f"failure for message {message_id}: {cleanup_exc}"
                 )
             raise
-        await self.refresh_session_ttls()
         return {
             "message_id": message_id,
             "source_ref_ids": [
@@ -521,8 +417,7 @@ class SessionRuntime:
         }
 
     async def _delete_conversation_message(self, message_id: int) -> None:
-        """Remove all staged Postgres and Redis state for one canonical message."""
-        # Delete from Postgres
+        """Remove one staged canonical message after persistence failure."""
         query = (
             "DELETE FROM public.messages WHERE user_name = %(user_name)s "
             "AND session_id = %(session_id)s AND message_id = %(message_id)s"
@@ -535,22 +430,6 @@ class SessionRuntime:
                 "message_id": message_id,
             },
         )
-
-        message_key = str(message_id)
-        pipe = self.redis_client.pipeline()
-        pipe.hdel(
-            RedisKeys.conversation(self.user_name, self.session_id),
-            message_key,
-        )
-        pipe.zrem(
-            RedisKeys.recent_conversation(self.user_name, self.session_id),
-            message_key,
-        )
-        pipe.hdel(
-            RedisKeys.message_content(self.user_name, self.session_id),
-            f"msg_{message_id}",
-        )
-        await pipe.execute()
 
     async def _persist_assistant_message_log(
         self,
@@ -647,13 +526,6 @@ class SessionRuntime:
             knowledge_store=self.knowledge_store,
             entities=self.project.entities,
         )
-
-    async def refresh_session_ttls(self):
-        """Refresh TTLs on all fixed session-scoped Redis keys."""
-        pipe = self.redis_client.pipeline()
-        for key in RedisKeys.session_keys(self.user_name, self.session_id):
-            pipe.expire(key, SESSION_KEY_TTL)
-        await pipe.execute()
 
     async def shutdown(self) -> None:
         """Stop all session-owned work without skipping later cleanup phases."""
