@@ -8,7 +8,7 @@ from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import fetch_conversation_turns
 from infrastructure.redis_client import RedisKeys
-from runtime.session_runtime import MAX_LOCAL_DURABLE_MESSAGE_CLAIMS, SessionRuntime
+from runtime.session_runtime import SessionRuntime
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
 
@@ -132,6 +132,9 @@ async def test_context_add_persists_editable_turn_maps_and_signals_consumer(cont
                 "timestamp": timestamp.timestamp() * 1000,
                 "metadata": {},
                 "user_msg_id": 1,
+                "acceptance_key": (
+                    "content:4922391fe82054bfa5ad28b1e1a03bf0077f12fc578a324f37ca7263209dc0bf"
+                ),
                 "lifecycle_state": "editable",
                 "ingestion_state": "waiting_for_seal",
                 "episode_eligible": False,
@@ -164,7 +167,7 @@ async def test_context_add_persists_editable_turn_maps_and_signals_consumer(cont
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_context_add_deduplicates_same_message_timestamp_and_session(context):
-    ctx, _ = context
+    ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
     first = await ctx.add(Message(content="hello", timestamp=timestamp))
@@ -172,7 +175,8 @@ async def test_context_add_deduplicates_same_message_timestamp_and_session(conte
 
     assert first.id == 1
     assert second.id == 1
-    assert ctx.consumer.signaled == 1
+    assert ctx.consumer.signaled == 2
+    assert len(resources.knowledge_store.saved_message_logs) == 1
 
 
 @pytest.mark.runtime
@@ -226,18 +230,18 @@ async def test_conversation_message_uses_one_pipeline_and_normalizes_offset(cont
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_releases_dedup_claim_after_failure(context, monkeypatch):
+async def test_context_add_retries_after_durable_acceptance_write_failure(context, monkeypatch):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     original_persist = ctx._persist_user_turn
     attempts = 0
 
-    async def fail_once(msg):
+    async def fail_once(msg, *, acceptance_key):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise ConnectionError("temporary Redis failure")
-        await original_persist(msg)
+        return await original_persist(msg, acceptance_key=acceptance_key)
 
     monkeypatch.setattr(ctx, "_persist_user_turn", fail_once)
 
@@ -250,7 +254,7 @@ async def test_context_add_releases_dedup_claim_after_failure(context, monkeypat
     assert ctx.consumer.signaled == 1
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_keeps_durable_pending_claim_and_recovers_signal_failure(
+async def test_context_add_reuses_durable_acceptance_after_signal_failure(
     context, monkeypatch
 ):
     ctx, resources = context
@@ -270,52 +274,27 @@ async def test_context_add_keeps_durable_pending_claim_and_recovers_signal_failu
     with pytest.raises(ConnectionError, match="temporary signal failure"):
         await ctx.add(Message(content="hello", timestamp=timestamp))
 
-    dedup_keys = [
-        key
-        for key in resources.redis.strings
-        if key.startswith("msg_dedup:ada:session-1:")
-    ]
-    assert len(dedup_keys) == 1
-    dedup_key = dedup_keys[0]
-    assert await resources.redis.get(dedup_key) == "pending:1"
-
     retried = await ctx.add(Message(content="hello", timestamp=timestamp))
 
     assert retried.id == 1
-    assert await resources.redis.get(dedup_key) == "accepted:1"
     assert ctx.consumer.signaled == 1
     assert [
         batch[0]["id"] for batch in resources.knowledge_store.saved_message_logs
     ] == [
         1,
     ]
-
-
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_durable_retry_hints_are_bounded(context):
-    ctx, _resources = context
-
-    for index in range(MAX_LOCAL_DURABLE_MESSAGE_CLAIMS + 1):
-        ctx._remember_durable_message(f"dedup:{index}", index)
-
-    assert len(ctx._durable_message_claims) == MAX_LOCAL_DURABLE_MESSAGE_CLAIMS
-    assert "dedup:0" not in ctx._durable_message_claims
-    assert (
-        ctx._durable_message_claims[f"dedup:{MAX_LOCAL_DURABLE_MESSAGE_CLAIMS}"]
-        == MAX_LOCAL_DURABLE_MESSAGE_CLAIMS
-    )
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_context_add_keeps_claim_after_message_is_queued(context):
+async def test_context_add_persists_a_durable_acceptance_key(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
     accepted = await ctx.add(Message(content="hello", timestamp=timestamp))
 
     assert accepted.id == 1
+    assert resources.knowledge_store.saved_message_logs[0][0]["acceptance_key"].startswith(
+        "content:"
+    )
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_context_assistant_turn_uses_canonical_message_sequence(context):

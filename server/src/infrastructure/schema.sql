@@ -251,6 +251,7 @@ CREATE TABLE IF NOT EXISTS public.messages (
     ) STORED,
     user_msg_id BIGINT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    acceptance_key TEXT,
     timestamp_ms BIGINT,
     lifecycle_state TEXT NOT NULL DEFAULT 'sealed'
         CHECK (lifecycle_state IN ('editable', 'sealed', 'superseded')),
@@ -289,6 +290,9 @@ ALTER TABLE public.messages
     ) STORED;
 
 ALTER TABLE public.messages
+    ADD COLUMN IF NOT EXISTS acceptance_key TEXT;
+
+ALTER TABLE public.messages
     ADD COLUMN IF NOT EXISTS ingestion_attempt_count INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS ingestion_last_failure_stage TEXT,
     ADD COLUMN IF NOT EXISTS ingestion_last_failure_code TEXT,
@@ -304,6 +308,10 @@ ON public.messages USING gin (search_tsvector);
 CREATE INDEX IF NOT EXISTS messages_ingestion_queue_idx
 ON public.messages(user_name, session_id, message_id)
 WHERE role = 'user' AND ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'blocked');
+
+CREATE UNIQUE INDEX IF NOT EXISTS messages_acceptance_key_idx
+ON public.messages(user_name, session_id, acceptance_key)
+WHERE acceptance_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.message_revisions (
     user_name TEXT NOT NULL,

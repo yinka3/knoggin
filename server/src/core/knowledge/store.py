@@ -59,6 +59,7 @@ from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
+    MessageAcceptance,
     MessageLifecycleWriter,
 )
 from core.knowledge.db.writers.message_writer import MessageWriter
@@ -147,8 +148,8 @@ class KnowledgeStore:
 
     async def create_editable_user_message(
         self, message: Dict, *, edit_window_seconds: int
-    ) -> None:
-        await self._message_lifecycle_writer.create_editable_user_message(
+    ) -> MessageAcceptance:
+        return await self._message_lifecycle_writer.create_editable_user_message(
             message, edit_window_seconds=edit_window_seconds
         )
 

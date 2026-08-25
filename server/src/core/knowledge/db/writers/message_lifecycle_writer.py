@@ -19,6 +19,14 @@ class IngestionClaim:
     messages: List[Dict[str, Any]]
 
 
+@dataclass(frozen=True, slots=True)
+class MessageAcceptance:
+    """The canonical result of accepting a user-message request."""
+
+    message_id: int
+    created: bool
+
+
 class MessageLifecycleWriter:
     """Keep message editing and ingestion eligibility in Postgres.
 
@@ -35,7 +43,7 @@ class MessageLifecycleWriter:
 
     async def create_editable_user_message(
         self, message: Dict[str, Any], *, edit_window_seconds: int
-    ) -> None:
+    ) -> MessageAcceptance:
         now_ms = self._now_ms()
         row = {
             **message,
@@ -62,7 +70,31 @@ class MessageLifecycleWriter:
             )
             if await cur.fetchone() is None:
                 raise ValueError("Cannot create a message in a deleted session")
-            await self.message_writer.save_message_logs([row], cur=cur)
+            inserted_id = await self.message_writer.accept_editable_user_message(
+                row, cur=cur
+            )
+            if inserted_id is None:
+                await cur.execute(
+                    """
+                    SELECT message_id
+                    FROM public.messages
+                    WHERE user_name = %s
+                      AND session_id = %s
+                      AND acceptance_key = %s
+                    """,
+                    (
+                        row["user_name"],
+                        row["session_id"],
+                        row["acceptance_key"],
+                    ),
+                )
+                accepted = await cur.fetchone()
+                if accepted is None:
+                    raise RuntimeError("Accepted user message could not be reloaded")
+                return MessageAcceptance(
+                    message_id=int(accepted["message_id"]),
+                    created=False,
+                )
             await cur.execute(
                 """
                 INSERT INTO public.message_revisions (
@@ -75,11 +107,12 @@ class MessageLifecycleWriter:
                     row["user_name"],
                     row["session_id"],
                     row["project_id"],
-                    row["id"],
+                    inserted_id,
                     row["content"],
                     now_ms,
                 ),
             )
+        return MessageAcceptance(message_id=inserted_id, created=True)
 
     async def edit_user_message(
         self,

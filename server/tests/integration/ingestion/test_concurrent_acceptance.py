@@ -1,4 +1,4 @@
-"""Real PostgreSQL/Redis acceptance and idempotency contracts."""
+"""Real durable acceptance and idempotency contracts."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -8,8 +8,8 @@ import pytest
 
 from common.schema.primitives import Message
 from core.knowledge.store import KnowledgeStore
-from runtime.session_runtime import SessionRuntime as Session
 from infrastructure.redis_client import RedisKeys
+from runtime.session_runtime import SessionRuntime as Session
 from tests.integration.ingestion.test_server_flow import (
     _DeterministicEmbeddingService,
     _session,
@@ -136,23 +136,13 @@ async def test_real_enqueue_failure_keeps_durable_pending_claim_for_retry(
     with pytest.raises(ConnectionError, match="signal outage"):
         await context.add(message)
 
-    dedup_keys = []
-    async for key in scope["redis"].scan_iter(
-        match=RedisKeys.message_dedup_pattern(scope["user_name"], scope["session_id"])
-    ):
-        dedup_keys.append(key)
-    assert len(dedup_keys) == 1
-    assert await scope["redis"].get(dedup_keys[0]) == f"pending:{message.id}"
     assert await _message_rows(scope) == [
         {"message_id": message.id, "content": "signal retry"}
     ]
 
     retried = await context.add(Message(content="signal retry", timestamp=timestamp))
     assert retried.id == message.id
-    assert await scope["redis"].get(dedup_keys[0]) == f"accepted:{message.id}"
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
+    assert context.consumer.calls == 1
 
 
 @pytest.mark.integration
@@ -221,9 +211,7 @@ async def test_real_restart_reuses_a_pending_acceptance_claim(
     assert await _message_rows(scope) == [
         {"message_id": retried.id, "content": "restart pending claim"}
     ]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
+    assert restarted.consumer.calls == 1
 
 
 @pytest.mark.integration
@@ -231,45 +219,24 @@ async def test_real_restart_reuses_a_pending_acceptance_claim(
 @pytest.mark.requires_pgvector
 @pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_acceptance_claim_expiry_is_reclaimable(
+async def test_real_durable_acceptance_does_not_expire(
     real_server_scope, monkeypatch
 ):
-    """An expired pending claim can be reclaimed by a later runtime."""
+    """A retry remains bound to its durable acceptance indefinitely."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
     context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
     timestamp = datetime(2026, 8, 1, 16, 4, tzinfo=timezone.utc)
-    original_incr = scope["redis"].incr
+    first = await context.add(Message(content="durable acceptance", timestamp=timestamp))
+    retried = await context.add(
+        Message(content="durable acceptance", timestamp=timestamp)
+    )
 
-    async def fail_signal(*_args, **_kwargs):
-        raise ConnectionError("claim owner stopped")
-
-    monkeypatch.setattr(scope["redis"], "incr", fail_signal)
-    with pytest.raises(ConnectionError, match="claim owner stopped"):
-        await context.add(Message(content="expired claim", timestamp=timestamp))
-    monkeypatch.setattr(scope["redis"], "incr", original_incr)
-
-    dedup_keys = [
-        key
-        async for key in scope["redis"].scan_iter(
-            match=RedisKeys.message_dedup_pattern(
-                scope["user_name"], scope["session_id"]
-            )
-        )
+    assert retried.id == first.id
+    assert await _message_rows(scope) == [
+        {"message_id": first.id, "content": "durable acceptance"}
     ]
-    assert len(dedup_keys) == 1
-    digest = dedup_keys[0]
-    await scope["redis"].expire(digest, 1)
-    await asyncio.sleep(1.2)
-    assert await scope["redis"].get(digest) is None
-
-    # The five-minute acceptance claim is an intentionally bounded Redis
-    # idempotency window. Once it expires, the deterministic key is reclaimable
-    # and the caller receives a new durable acceptance identity.
-    retried = await context.add(Message(content="expired claim", timestamp=timestamp))
-    assert retried.id > 0
-    assert len(await _message_rows(scope)) == 2
 
 
 @pytest.mark.integration

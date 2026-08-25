@@ -9,6 +9,7 @@ from typing import Any
 
 from common.schema.settings import RedisConnectionSettings
 from common.utils.time_utils import get_now_iso
+from core.knowledge.db.writers.message_lifecycle_writer import MessageAcceptance
 from infrastructure.redis_client import AsyncRedisClient
 
 
@@ -427,6 +428,7 @@ class FakeKnowledgeStore:
         self.next_message_id = 1
         self.embedding_rebuild_calls = []
         self.reset_claimed_ingestion_calls = []
+        self.accepted_message_ids = {}
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -461,6 +463,10 @@ class FakeKnowledgeStore:
         return True
 
     async def create_editable_user_message(self, message, *, edit_window_seconds):
+        acceptance_key = message["acceptance_key"]
+        existing_id = self.accepted_message_ids.get(acceptance_key)
+        if existing_id is not None:
+            return MessageAcceptance(message_id=existing_id, created=False)
         row = {
             **message,
             "lifecycle_state": "editable",
@@ -469,6 +475,8 @@ class FakeKnowledgeStore:
             "edit_window_seconds": edit_window_seconds,
         }
         self.saved_message_logs.append([row])
+        self.accepted_message_ids[acceptance_key] = message["id"]
+        return MessageAcceptance(message_id=message["id"], created=True)
 
     async def reset_claimed_ingestion(self, *, user_name, project_id, session_id):
         self.reset_claimed_ingestion_calls.append(
