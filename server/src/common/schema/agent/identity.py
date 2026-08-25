@@ -64,10 +64,13 @@ class AgentConfig:
     temperature: float = 0.7
     enabled_tools: Optional[List[str]] = None
     is_default: bool = False
-    is_spawned: bool = False
+    # AAC participation is opt-in so creating an agent never begins autonomous
+    # model work without the user's explicit choice.
+    aac_enabled: bool = False
     spawned_by: Optional[str] = None
     brain_revision: int = 1
     created_at: datetime = field(default_factory=get_now)
+    last_turn_at: Optional[datetime] = None
 
     def __post_init__(self):
         self.id = self._require_text(self.id, "id")
@@ -76,6 +79,8 @@ class AgentConfig:
         self.temperature = self._validate_temperature(self.temperature)
         self.brain_revision = self._validate_brain_revision(self.brain_revision)
         self.enabled_tools = self._normalize_enabled_tools(self.enabled_tools)
+        if self.spawned_by is not None:
+            self.spawned_by = self._require_text(self.spawned_by, "spawned_by")
 
     @staticmethod
     def _require_text(value: object, field_name: str) -> str:
@@ -136,10 +141,13 @@ class AgentConfig:
             "temperature": self.temperature,
             "enabled_tools": self.enabled_tools,
             "is_default": self.is_default,
-            "is_spawned": self.is_spawned,
+            "aac_enabled": self.aac_enabled,
             "spawned_by": self.spawned_by,
             "brain_revision": self.brain_revision,
             "created_at": self.created_at.isoformat(),
+            "last_turn_at": (
+                self.last_turn_at.isoformat() if self.last_turn_at is not None else None
+            ),
         }
 
     @property
@@ -152,11 +160,20 @@ class AgentConfig:
         """Internal representation persisted in Postgres and sent to the model."""
         return self.persona.to_markdown()
 
+    @property
+    def is_spawned(self) -> bool:
+        """Whether this normal durable agent has a recorded AAC parent."""
+
+        return self.spawned_by is not None
+
     @classmethod
     def from_dict(cls, data: Dict) -> "AgentConfig":
         created = data.get("created_at")
         if isinstance(created, str):
             created = parse_iso_time(created)
+        last_turn_at = data.get("last_turn_at")
+        if isinstance(last_turn_at, str):
+            last_turn_at = parse_iso_time(last_turn_at)
         persona_value = data.get("persona_profile")
         if persona_value is None:
             persona_value = data["persona"]
@@ -169,8 +186,9 @@ class AgentConfig:
             temperature=data.get("temperature", 0.7),
             enabled_tools=data.get("enabled_tools"),
             is_default=data.get("is_default", False),
-            is_spawned=data.get("is_spawned", False),
+            aac_enabled=data.get("aac_enabled", False),
             spawned_by=data.get("spawned_by"),
             brain_revision=data.get("brain_revision", 1),
             created_at=created or get_now(),
+            last_turn_at=last_turn_at,
         )

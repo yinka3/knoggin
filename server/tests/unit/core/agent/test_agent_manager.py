@@ -67,6 +67,36 @@ async def test_agent_manager_create_update_and_lookup_preserves_config(manager):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_agent_manager_keeps_aac_participation_user_owned_and_opt_in(manager):
+    agent_manager, resources = manager
+
+    created = await agent_manager.create_agent("Researcher", "Careful")
+    enabled = await agent_manager.set_aac_enabled(created.id, True)
+
+    assert created.aac_enabled is False
+    assert enabled.aac_enabled is True
+    assert enabled.is_spawned is False
+    stored = resources.postgres.agents[created.id]
+    assert stored["aac_enabled"] is True
+    assert "project_id" not in stored
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+def test_agent_config_derives_specialist_status_from_parent():
+    specialist = AgentConfig(
+        id="specialist-1",
+        name="Evidence steward",
+        persona="Careful",
+        spawned_by="parent-1",
+    )
+
+    assert specialist.is_spawned is True
+    assert "is_spawned" not in specialist.to_dict()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_agent_manager_preserves_explicit_empty_tool_allowlist(manager):
     agent_manager, resources = manager
 

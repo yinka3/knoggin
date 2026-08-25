@@ -171,7 +171,7 @@ async def test_spawn_specialist_persists_agent_and_initial_brain(monkeypatch):
     assert "INSERT INTO public.agents" in write[1]
     assert "INSERT INTO public.agent_brain_snapshots" in write[1]
     assert params["change_summary"] == "Spawned specialist Brain"
-    assert params["project_id"] == "project-1"
+    assert "project_id" not in params
     assert params["model"] == "test-agent-model"
     assert params["enabled_tools"]
     assert params["spawned_by"] == "agent-1"

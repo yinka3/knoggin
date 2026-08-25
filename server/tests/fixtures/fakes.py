@@ -586,10 +586,11 @@ class FakePostgresClient:
             "temperature": data.get("temperature", 0.7),
             "enabled_tools": data.get("enabled_tools"),
             "is_default": data.get("is_default", False),
-            "is_spawned": data.get("is_spawned", False),
+            "aac_enabled": data.get("aac_enabled", False),
             "spawned_by": data.get("spawned_by"),
             "brain_revision": data.get("brain_revision", 1),
             "created_at": data.get("created_at", get_now_iso()),
+            "last_turn_at": data.get("last_turn_at"),
         }
 
     def upsert_project(self, project_id, status="active", user_name="ada"):
@@ -754,7 +755,7 @@ class FakePostgresClient:
             ids = set(params.get("agent_ids") or [])
             rows = [row for row in rows if row["agent_id"] in ids]
             if "count(*)" in normalized:
-                return [{"count": sum(1 for row in rows if row.get("is_spawned"))}]
+                return [{"count": sum(1 for row in rows if row.get("spawned_by"))}]
         return rows[:1] if "limit 1" in normalized else rows
 
     def _execute_against_stores(self, query, params):
@@ -920,7 +921,6 @@ class FakePostgresClient:
             self.agents[agent_id] = {
                 "agent_id": agent_id,
                 "user_name": params.get("user_name"),
-                "project_id": params.get("project_id"),
                 "name": params.get("name"),
                 "persona": params.get("persona"),
                 "brain": params.get("brain"),
@@ -930,10 +930,11 @@ class FakePostgresClient:
                 if isinstance(params.get("enabled_tools"), str)
                 else params.get("enabled_tools"),
                 "is_default": "%(enabled_tools)s, true" in normalized,
-                "is_spawned": "true, %(spawned_by)s" in normalized,
+                "aac_enabled": "true, %(spawned_by)s" in normalized,
                 "spawned_by": params.get("spawned_by"),
                 "brain_revision": 1,
                 "created_at": get_now_iso(),
+                "last_turn_at": None,
             }
             return
 
@@ -954,7 +955,15 @@ class FakePostgresClient:
             row = self.agents.get(agent_id)
             if not row:
                 return
-            for field in ("name", "brain", "model", "temperature", "enabled_tools"):
+            for field in (
+                "name",
+                "brain",
+                "model",
+                "temperature",
+                "enabled_tools",
+                "aac_enabled",
+                "last_turn_at",
+            ):
                 if field in params:
                     value = params[field]
                     if field == "enabled_tools" and isinstance(value, str):

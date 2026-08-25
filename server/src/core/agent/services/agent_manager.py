@@ -10,6 +10,7 @@ from common.utils.agent_identity import (
     normalize_agent_brain,
     should_snapshot_brain_revision,
 )
+from common.utils.time_utils import parse_iso_time
 from core.agent.tools.registry import get_registered_tool_names
 
 _UNSET = object()
@@ -32,10 +33,15 @@ def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
         temperature=row["temperature"] if row["temperature"] is not None else 0.7,
         enabled_tools=row["enabled_tools"],
         is_default=bool(row["is_default"]),
-        is_spawned=bool(row["is_spawned"]),
+        aac_enabled=bool(row.get("aac_enabled", False)),
         spawned_by=row["spawned_by"],
         brain_revision=int(row.get("brain_revision", 1)),
         created_at=row["created_at"],
+        last_turn_at=(
+            parse_iso_time(row["last_turn_at"])
+            if isinstance(row.get("last_turn_at"), str)
+            else row.get("last_turn_at")
+        ),
     )
 
 
@@ -59,8 +65,8 @@ class AgentManager:
         """List all agents for the user."""
         query = '''
             SELECT agent_id, name, persona, brain, model, temperature,
-                   enabled_tools, is_default, is_spawned, spawned_by,
-                   brain_revision, created_at
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
             FROM public.agents
             WHERE user_name = %(user_name)s
         '''
@@ -72,8 +78,8 @@ class AgentManager:
         """Get agent by ID."""
         query = '''
             SELECT agent_id, name, persona, brain, model, temperature,
-                   enabled_tools, is_default, is_spawned, spawned_by,
-                   brain_revision, created_at
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
             FROM public.agents
             WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
         '''
@@ -90,8 +96,8 @@ class AgentManager:
         """Get agent by name (case-insensitive)."""
         query = '''
             SELECT agent_id, name, persona, brain, model, temperature,
-                   enabled_tools, is_default, is_spawned, spawned_by,
-                   brain_revision, created_at
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
             FROM public.agents
             WHERE user_name = %(user_name)s AND LOWER(name) = LOWER(%(name)s)
             LIMIT 1
@@ -186,7 +192,7 @@ class AgentManager:
             WITH inserted AS (
                 INSERT INTO public.agents (
                 agent_id, user_name, name, persona, brain,
-                model, temperature, enabled_tools, is_default, is_spawned
+                model, temperature, enabled_tools, is_default, aac_enabled
                 ) VALUES (
                     %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
                     %(model)s, %(temperature)s, %(enabled_tools)s, false, false
@@ -253,10 +259,11 @@ class AgentManager:
                 enabled_tools if enabled_tools is not _UNSET else config.enabled_tools
             ),
             is_default=config.is_default,
-            is_spawned=config.is_spawned,
+            aac_enabled=config.aac_enabled,
             spawned_by=config.spawned_by,
             brain_revision=config.brain_revision,
             created_at=config.created_at,
+            last_turn_at=config.last_turn_at,
         )
         self._validate_enabled_tools(candidate.enabled_tools)
 
@@ -357,6 +364,32 @@ class AgentManager:
             },
         )
         logger.info(f"Updated agent persona from settings: {config.name} ({agent_id})")
+        return await self.get_agent(agent_id)
+
+    async def set_aac_enabled(
+        self,
+        agent_id: str,
+        enabled: bool,
+    ) -> Optional[AgentConfig]:
+        """Set whether this durable agent may be selected for AAC discussion."""
+
+        if not isinstance(enabled, bool):
+            raise ValueError("AAC participation must be a boolean")
+        config = await self.get_agent(agent_id)
+        if not config:
+            return None
+        await self.pg.execute(
+            """
+            UPDATE public.agents
+            SET aac_enabled = %(aac_enabled)s, updated_at = now()
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {
+                "user_name": self.user_name,
+                "agent_id": agent_id,
+                "aac_enabled": enabled,
+            },
+        )
         return await self.get_agent(agent_id)
 
     async def delete_agent(self, agent_id: str) -> bool:

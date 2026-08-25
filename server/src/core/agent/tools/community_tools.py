@@ -107,13 +107,13 @@ class CommunityTools(Tools):
                     """
             WITH new_agent AS (
                 INSERT INTO public.agents (
-                    agent_id, user_name, project_id, name, persona, brain,
-                    model, temperature, enabled_tools, is_default, is_spawned,
+                    agent_id, user_name, name, persona, brain,
+                    model, temperature, enabled_tools, is_default, aac_enabled,
                     spawned_by
                 ) VALUES (
-                    %(agent_id)s, %(user_name)s, %(project_id)s, %(name)s,
-                    %(persona)s, %(brain)s, %(model)s, 0.7,
-                    %(enabled_tools)s, false, true, %(spawned_by)s
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s,
+                    %(brain)s, %(model)s, 0.7,
+                    %(enabled_tools)s, false, false, %(spawned_by)s
                 )
                 RETURNING agent_id, user_name, brain_revision, brain
             )
@@ -134,7 +134,6 @@ class CommunityTools(Tools):
                     {
                         "agent_id": agent_id,
                         "user_name": self.user_name,
-                        "project_id": self.project_id,
                         "name": clean_name,
                         "persona": persona_markdown,
                         "brain": brain,
@@ -189,7 +188,7 @@ class CommunityTools(Tools):
             FROM public.agents
             WHERE user_name = %(user_name)s
               AND agent_id = ANY(%(agent_ids)s)
-              AND is_spawned = true
+              AND spawned_by IS NOT NULL
             """,
             {
                 "user_name": self.user_name,

@@ -61,7 +61,6 @@ CREATE TABLE IF NOT EXISTS public.project_read_scopes (
 CREATE TABLE IF NOT EXISTS public.agents (
     agent_id TEXT PRIMARY KEY,
     user_name TEXT NOT NULL,
-    project_id TEXT REFERENCES public.projects(project_id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     persona TEXT,
     brain TEXT,
@@ -69,12 +68,21 @@ CREATE TABLE IF NOT EXISTS public.agents (
     temperature DOUBLE PRECISION,
     enabled_tools JSONB,
     is_default BOOLEAN NOT NULL DEFAULT false,
-    is_spawned BOOLEAN NOT NULL DEFAULT false,
+    aac_enabled BOOLEAN NOT NULL DEFAULT false,
     spawned_by TEXT,
     brain_revision INTEGER NOT NULL DEFAULT 1 CHECK (brain_revision >= 1),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_turn_at TIMESTAMPTZ
 );
+
+-- AAC agents are application-owned. This unreleased schema may drop the
+-- former project coupling and redundant spawned flag outright.
+ALTER TABLE public.agents
+    DROP COLUMN IF EXISTS project_id,
+    DROP COLUMN IF EXISTS is_spawned,
+    ADD COLUMN IF NOT EXISTS aac_enabled BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS last_turn_at TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS agents_one_default_per_user_idx
 ON public.agents(user_name)
