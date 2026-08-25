@@ -25,6 +25,17 @@ def test_schema_drops_obsolete_ingestion_tables():
     assert "DROP TABLE IF EXISTS public.parked_dlq_items;" in SCHEMA_SQL
 
 
+def test_schema_keeps_aac_state_user_owned_and_insights_retention_independent():
+    assert "CREATE TABLE IF NOT EXISTS public.aac_discussions" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS public.aac_timeline" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS public.aac_insights" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS public.aac_insight_votes" in SCHEMA_SQL
+    assert """discussion_id TEXT REFERENCES public.aac_discussions(discussion_id)
+        ON DELETE SET NULL""" in SCHEMA_SQL
+    assert """discussion_id TEXT NOT NULL REFERENCES public.aac_discussions(discussion_id)
+        ON DELETE CASCADE""" in SCHEMA_SQL
+
+
 def _conninfo_for_database(database: str) -> str:
     params = conninfo_to_dict(DB_URL)
     params["dbname"] = database

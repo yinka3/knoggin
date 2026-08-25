@@ -88,6 +88,68 @@ CREATE UNIQUE INDEX IF NOT EXISTS agents_one_default_per_user_idx
 ON public.agents(user_name)
 WHERE is_default;
 
+-- AAC is durable user-level discussion state, intentionally separate from the
+-- canonical knowledge graph and from any individual project lifecycle.
+CREATE TABLE IF NOT EXISTS public.aac_discussions (
+    discussion_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    token_budget BIGINT NOT NULL CHECK (token_budget >= 0),
+    tokens_used BIGINT NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at TIMESTAMPTZ,
+    CONSTRAINT aac_discussions_status_check
+        CHECK (status IN ('active', 'completed', 'stopped', 'interrupted', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS aac_discussions_user_started_idx
+ON public.aac_discussions(user_name, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.aac_timeline (
+    timeline_id TEXT PRIMARY KEY,
+    discussion_id TEXT NOT NULL REFERENCES public.aac_discussions(discussion_id)
+        ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    agent_id TEXT,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT aac_timeline_kind_check
+        CHECK (kind IN ('agent_message', 'system_event'))
+);
+
+CREATE INDEX IF NOT EXISTS aac_timeline_discussion_created_idx
+ON public.aac_timeline(discussion_id, created_at, timeline_id);
+
+CREATE TABLE IF NOT EXISTS public.aac_insights (
+    insight_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    discussion_id TEXT REFERENCES public.aac_discussions(discussion_id)
+        ON DELETE SET NULL,
+    author_agent_id TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'shared',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT aac_insights_visibility_check
+        CHECK (visibility IN ('shared', 'private'))
+);
+
+CREATE INDEX IF NOT EXISTS aac_insights_user_visibility_created_idx
+ON public.aac_insights(user_name, visibility, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.aac_insight_votes (
+    insight_id TEXT NOT NULL REFERENCES public.aac_insights(insight_id)
+        ON DELETE CASCADE,
+    voter_agent_id TEXT NOT NULL,
+    vote TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (insight_id, voter_agent_id),
+    CONSTRAINT aac_insight_votes_vote_check CHECK (vote IN ('up', 'down')),
+    CONSTRAINT aac_insight_votes_reason_check CHECK (length(trim(reason)) > 0)
+);
+
 DROP TABLE IF EXISTS public.agent_brain_revisions;
 
 CREATE TABLE IF NOT EXISTS public.agent_brain_snapshots (
