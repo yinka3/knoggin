@@ -104,6 +104,12 @@ class SourceReferenceWriter:
 
         if candidate.tool_call_id is not None:
             origin = f"tool:{candidate.tool_call_id}:{candidate.result_position}"
+        elif candidate.encounter_kind == "document_selection":
+            origin = (
+                "selection:"
+                f"{candidate.document_id}:{candidate.content_hash}:"
+                f"{candidate.locator.model_dump_json()}"
+            )
         else:
             locator = candidate.locator
             origin = (

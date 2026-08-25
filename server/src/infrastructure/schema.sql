@@ -1954,6 +1954,7 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
         CHECK (encounter_kind IN (
             'document_search',
             'document_read',
+            'document_selection',
             'user_pasted_text',
             'web_search',
             'news_search',
@@ -1980,8 +1981,12 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
                 AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
+                AND (
+                    (tool_call_id IS NOT NULL
+                        AND encounter_kind IN ('document_search', 'document_read'))
+                    OR (tool_call_id IS NULL
+                        AND encounter_kind = 'document_selection')
+                )
                 AND locator ->> 'kind' = 'pdf_page'
                 AND jsonb_typeof(locator -> 'page') = 'number'
                 AND locator ->> 'page' ~ '^[1-9][0-9]*$'
@@ -1993,8 +1998,12 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
                 AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
+                AND (
+                    (tool_call_id IS NOT NULL
+                        AND encounter_kind IN ('document_search', 'document_read'))
+                    OR (tool_call_id IS NULL
+                        AND encounter_kind = 'document_selection')
+                )
                 AND (
                     (
                         locator ->> 'kind' IN ('text_lines', 'code_lines')
@@ -2150,6 +2159,7 @@ ALTER TABLE public.message_source_refs
         CHECK (encounter_kind IN (
             'document_search',
             'document_read',
+            'document_selection',
             'user_pasted_text',
             'web_search',
             'news_search',
@@ -2170,8 +2180,12 @@ ALTER TABLE public.message_source_refs
                 AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
+                AND (
+                    (tool_call_id IS NOT NULL
+                        AND encounter_kind IN ('document_search', 'document_read'))
+                    OR (tool_call_id IS NULL
+                        AND encounter_kind = 'document_selection')
+                )
                 AND locator ->> 'kind' = 'pdf_page'
                 AND jsonb_typeof(locator -> 'page') = 'number'
                 AND locator ->> 'page' ~ '^[1-9][0-9]*$'
@@ -2183,8 +2197,12 @@ ALTER TABLE public.message_source_refs
                 AND source_project_id IS NOT NULL
                 AND canonical_url IS NULL
                 AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
+                AND (
+                    (tool_call_id IS NOT NULL
+                        AND encounter_kind IN ('document_search', 'document_read'))
+                    OR (tool_call_id IS NULL
+                        AND encounter_kind = 'document_selection')
+                )
                 AND (
                     (
                         locator ->> 'kind' IN ('text_lines', 'code_lines')

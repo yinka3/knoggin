@@ -5,6 +5,7 @@ import pytest
 
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.executor import _ToolCall
+from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.sources.tool_results import capture_tool_source_candidates
 from core.agent.tools.search import SearchTools
@@ -69,6 +70,34 @@ def test_pasted_text_rejects_invalid_client_spans():
             agent_run_id="run-1",
             spans=[{"start_char": 0, "end_char": 999}],
         )
+
+
+@pytest.mark.no_network
+def test_document_selection_becomes_a_non_tool_source_candidate():
+    candidate = build_document_selection_candidate(
+        project_id="project-1",
+        session_id="session-1",
+        agent_run_id="run-selection",
+        selection_context={
+            "document_id": "document-1",
+            "project_id": "project-2",
+            "document_name": "notes.py",
+            "relative_path": "docs/notes.py",
+            "extension": ".py",
+            "content_hash": "a" * 64,
+            "locator": {
+                "kind": "code_lines",
+                "start_line": 4,
+                "end_line": 6,
+            },
+            "excerpt": "4: def answer():\n5:     return 42",
+        },
+    )
+
+    assert candidate.encounter_kind == "document_selection"
+    assert candidate.tool_call_id is None
+    assert candidate.source_project_id == "project-2"
+    assert candidate.metadata["selection"] is True
 
 
 @pytest.mark.no_network

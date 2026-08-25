@@ -565,7 +565,11 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
         async def resolve_document_selection(self, **kwargs):
             return {
                 "document_id": "document-1",
+                "project_id": "project-1",
                 "relative_path": "docs/notes.py",
+                "document_name": "notes.py",
+                "extension": ".py",
+                "chunk_index": "lines:2-3",
                 "content_hash": "a" * 64,
                 "locator": {
                     "kind": "code_lines",
@@ -600,7 +604,11 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
     )
     assert selection_context == {
         "document_id": "document-1",
+        "project_id": "project-1",
         "relative_path": "docs/notes.py",
+        "document_name": "notes.py",
+        "extension": ".py",
+        "chunk_index": "lines:2-3",
         "content_hash": "a" * 64,
         "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
         "excerpt": "2: def useful():\n3:     return 42",

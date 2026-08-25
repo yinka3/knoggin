@@ -16,9 +16,11 @@ from common.schema.document import (
     dump_document_focus,
     parse_document_focus,
 )
+from common.schema.source.references import SourceReferenceCandidate
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
+from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
 
@@ -168,17 +170,13 @@ class AgentOrchestrator:
                 history=conversation_history or [],
                 document_focus=effective_document_focus,
                 document_selection_context=document_selection_context,
-                initial_source_candidates=(
-                    build_pasted_text_candidates(
-                        project_id=context.project_id or "",
-                        session_id=context.session_id,
-                        source_message_id=user_message_id,
-                        message_content=incoming_user_query,
-                        agent_run_id=run_id,
-                        spans=pasted_text_spans,
-                    )
-                    if user_message_id is not None
-                    else []
+                initial_source_candidates=self._initial_source_candidates(
+                    context=context,
+                    run_id=run_id,
+                    user_message_id=user_message_id,
+                    message_content=incoming_user_query,
+                    pasted_text_spans=pasted_text_spans,
+                    selection_context=document_selection_context,
                 ),
             )
 
@@ -268,6 +266,39 @@ class AgentOrchestrator:
 
         return tools
 
+    @staticmethod
+    def _initial_source_candidates(
+        *,
+        context: SessionRuntime,
+        run_id: str,
+        user_message_id: Optional[int],
+        message_content: str,
+        pasted_text_spans: Optional[List[Dict]],
+        selection_context: Optional[Dict],
+    ) -> List[SourceReferenceCandidate]:
+        candidates = (
+            build_pasted_text_candidates(
+                project_id=context.project_id or "",
+                session_id=context.session_id,
+                source_message_id=user_message_id,
+                message_content=message_content,
+                agent_run_id=run_id,
+                spans=pasted_text_spans,
+            )
+            if user_message_id is not None
+            else []
+        )
+        if selection_context is not None:
+            candidates.append(
+                build_document_selection_candidate(
+                    project_id=context.project_id or "",
+                    session_id=context.session_id,
+                    agent_run_id=run_id,
+                    selection_context=selection_context,
+                )
+            )
+        return candidates
+
     async def _resolve_document_focus(
         self,
         context: SessionRuntime,
@@ -335,7 +366,11 @@ class AgentOrchestrator:
         )
         return {
             "document_id": result["document_id"],
+            "project_id": result["project_id"],
             "relative_path": result["relative_path"],
+            "document_name": result["document_name"],
+            "extension": result["extension"],
+            "chunk_index": result.get("chunk_index"),
             "content_hash": result["content_hash"],
             "locator": result["locator"],
             "excerpt": result["content"],

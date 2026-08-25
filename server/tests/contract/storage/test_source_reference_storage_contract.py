@@ -75,6 +75,23 @@ def text_document_candidate(**overrides) -> SourceReferenceCandidate:
     return SourceReferenceCandidate.model_validate(payload)
 
 
+def document_selection_candidate(**overrides) -> SourceReferenceCandidate:
+    return text_document_candidate(
+        locator={"kind": "code_lines", "start_line": 4, "end_line": 6},
+        excerpt="4: def answer():\n5:     return 42",
+        metadata={
+            "document_name": "notes.py",
+            "relative_path": "docs/notes.py",
+            "extension": ".py",
+            "selection": True,
+        },
+        encounter_kind="document_selection",
+        agent_run_id="run-selection",
+        tool_call_id=None,
+        **overrides,
+    )
+
+
 def docx_document_candidate(**overrides) -> SourceReferenceCandidate:
     return text_document_candidate(
         locator={
@@ -277,6 +294,28 @@ async def test_writer_uses_stable_idempotency_for_tool_and_pasted_origins():
     )
     assert SourceReferenceWriter.idempotency_key(pasted) == (
         SourceReferenceWriter.idempotency_key(pasted)
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_writer_accepts_server_resolved_document_selection_candidates():
+    candidate = document_selection_candidate()
+    client = RecordingPostgresClient(fetch_one_results=[persisted_row(candidate)])
+
+    references = await SourceReferenceWriter(client).write_for_assistant_message(
+        101,
+        [candidate],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        readable_project_ids=["project-1"],
+    )
+
+    assert references[0].encounter_kind == "document_selection"
+    assert references[0].tool_call_id is None
+    assert SourceReferenceWriter.idempotency_key(candidate) == (
+        SourceReferenceWriter.idempotency_key(candidate)
     )
 
 
