@@ -103,11 +103,13 @@ class AgentExecutor:
         tools: Tools,
         *,
         on_successful_completion: Callable[[str], Awaitable[object]] | None = None,
+        aac_budget: object | None = None,
     ):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
         self._on_successful_completion = on_successful_completion
+        self._aac_budget = aac_budget
         install_tool_runtime(
             tools,
             ctx.tool_runtime,
@@ -400,8 +402,9 @@ class AgentExecutor:
                 tools=list(self.ctx.tool_runtime.schemas),
                 model=model or self.llm.agent_model,
                 temperature=self.ctx.temperature,
-            reasoning=reasoning,
-        ):
+                reasoning=reasoning,
+                aac_budget=self._aac_budget,
+            ):
                 if event["event"] == "tool_calls":
                     saw_tool_calls = True
                     yield event
@@ -775,6 +778,7 @@ class AgentExecutor:
             ),
             user=prompt,
             temperature=0.3,
+            aac_budget=self._aac_budget,
         )
 
     async def _manage_context_size(self):
@@ -829,6 +833,7 @@ class AgentExecutor:
                 ),
                 user=prompt,
                 temperature=0.0,  # Strict factual summary
+                aac_budget=self._aac_budget,
             )
         except (ConfigurationError, LLMError) as e:
             logger.error(f"Failed to summarize evidence: {e}")
