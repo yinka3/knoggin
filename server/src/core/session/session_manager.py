@@ -460,10 +460,18 @@ class SessionManager:
         session_id: str,
     ) -> Optional[dict]:
         """Return validated persisted document focus without resuming a session."""
-        query = "SELECT document_focus FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
+        query = """
+            SELECT document_focus
+            FROM public.sessions
+            WHERE user_name = %(user_name)s
+              AND session_id = %(session_id)s
+              AND status = 'open'
+        """
         rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "session_id": session_id})
 
-        if not rows or not rows[0].get("document_focus"):
+        if not rows:
+            raise FileNotFoundError("Session not found")
+        if not rows[0].get("document_focus"):
             return None
         focus = rows[0]["document_focus"]
 

@@ -154,6 +154,35 @@ async def test_resume_reconstructs_all_durable_session_configuration(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_document_focus_read_is_durable_and_excludes_closed_sessions(
+    session_manager,
+):
+    manager, resources, _, _ = session_manager
+    focus = {
+        "mode": "pinned",
+        "target_type": "document",
+        "document_id": "document-1",
+        "relative_path": "docs/notes.md",
+        "created_at": "2026-08-20T12:00:00+00:00",
+    }
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "document_focus": json.dumps(focus),
+        "status": "open",
+    }
+
+    assert await manager.get_document_focus("session-1") == focus
+    assert manager._active_sessions == {}
+
+    resources.postgres.sessions["session-1"]["status"] = "closed"
+    with pytest.raises(FileNotFoundError, match="Session not found"):
+        await manager.get_document_focus("session-1")
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_resume_failure_releases_the_exact_acquired_lease(
     monkeypatch,
     session_manager,

@@ -15,12 +15,14 @@ from uuid import uuid4
 
 from common.conf.domain_config import DomainConfig
 from common.exceptions import NotFoundError
+from common.schema.document import DocumentSelection, create_document_focus
 from common.schema.primitives import Message
 from common.schema.public import (
     ArtifactListResponse,
     ArtifactResponse,
     CreateProjectRequest,
     CreateSessionRequest,
+    DocumentFocusResponse,
     MessageAcceptance,
     MessageDeltaEvent,
     ProjectResponse,
@@ -29,6 +31,7 @@ from common.schema.public import (
     RunFailedEvent,
     RunResult,
     RunStartedEvent,
+    SetDocumentFocusRequest,
     SourceAddedEvent,
     StartRunRequest,
     SubmitMessageRequest,
@@ -155,6 +158,111 @@ class ApplicationRuntimePort:
             idempotent=not created,
         )
 
+    async def get_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+    ) -> DocumentFocusResponse | None:
+        self._require_user(user_name)
+        try:
+            focus = await self.runtime.sessions.get_document_focus(session_id)
+        except FileNotFoundError as exc:
+            raise NotFoundError("session") from exc
+        return None if focus is None else DocumentFocusResponse.model_validate(focus)
+
+    async def set_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+        request: SetDocumentFocusRequest,
+    ) -> DocumentFocusResponse:
+        self._require_user(user_name)
+        target = request.model_dump()
+        try:
+            focus = await self.runtime.sessions.set_document_focus(
+                session_id,
+                document_id=(
+                    target["document_id"]
+                    if target["target_type"] == "document"
+                    else None
+                ),
+                folder_root_id=(
+                    target["folder_root_id"]
+                    if target["target_type"] != "document"
+                    else None
+                ),
+                path_prefix=(
+                    target["path_prefix"]
+                    if target["target_type"] == "subtree"
+                    else None
+                ),
+            )
+        except FileNotFoundError as exc:
+            raise NotFoundError("session") from exc
+        return DocumentFocusResponse.model_validate(focus)
+
+    async def clear_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+    ) -> None:
+        self._require_user(user_name)
+        try:
+            await self.runtime.sessions.clear_document_focus(session_id)
+        except FileNotFoundError as exc:
+            raise NotFoundError("session") from exc
+
+    async def _request_document_focus(
+        self,
+        *,
+        session: Any,
+        request: StartRunRequest,
+    ):
+        """Resolve untrusted run focus into the internal server-owned model."""
+        requested = request.document_focus
+        if requested is None:
+            return None
+        document_service = getattr(session, "document_service", None)
+        if document_service is None:
+            raise RuntimeError("Session document service is unavailable")
+
+        target = await document_service.resolve_focus_target(
+            session_id=session.session_id,
+            document_id=(
+                requested.document_id
+                if requested.target_type == "document"
+                else None
+            ),
+            folder_root_id=(
+                requested.folder_root_id
+                if requested.target_type != "document"
+                else None
+            ),
+            path_prefix=(
+                requested.path_prefix
+                if requested.target_type == "subtree"
+                else None
+            ),
+        )
+        if requested.target_type == "document" and requested.selection is not None:
+            resolved = await document_service.resolve_document_selection(
+                document_id=requested.document_id,
+                selection=requested.selection,
+                session_id=session.session_id,
+            )
+            target["selection"] = DocumentSelection(
+                content_hash=resolved["content_hash"],
+                locator=resolved["locator"],
+            )
+        return create_document_focus(
+            mode="request",
+            created_at=datetime.now(timezone.utc),
+            **target,
+        )
+
     async def list_artifacts(
         self,
         *,
@@ -219,6 +327,10 @@ class ApplicationRuntimePort:
             user_name=user_name,
             session_id=request.session_id,
         )
+        document_focus = await self._request_document_focus(
+            session=session,
+            request=request,
+        )
         run_id = str(uuid4())
         sequence = 0
 
@@ -241,6 +353,7 @@ class ApplicationRuntimePort:
             model=request.model,
             agent_id=request.agent_id,
             enabled_tools=request.enabled_tools,
+            document_focus=document_focus,
             research_mode=request.research_mode,
         ):
             event_name = raw_event.get("event") if isinstance(raw_event, Mapping) else None

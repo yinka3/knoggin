@@ -62,6 +62,7 @@ class FakeApplication:
         self.calls = []
         self.fail_projects = False
         self.artifact, self.artifact_revision = _artifact_payloads()
+        self.document_focus = None
 
     async def create_project(self, *, user_name, request: CreateProjectRequest):
         self.calls.append(("project", user_name, request))
@@ -96,6 +97,30 @@ class FakeApplication:
     ):
         self.calls.append(("message", user_name, session_id, request))
         return MessageAcceptance(message_id=42, idempotent=False)
+
+    async def get_document_focus(self, *, user_name, session_id):
+        self.calls.append(("document_focus_get", user_name, session_id))
+        return self.document_focus
+
+    async def set_document_focus(self, *, user_name, session_id, request):
+        self.calls.append(("document_focus_set", user_name, session_id, request))
+        target = request.model_dump()
+        self.document_focus = {
+            "mode": "pinned",
+            "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+            "target_type": target["target_type"],
+            "document_id": target.get("document_id"),
+            "relative_path": "docs/notes.py"
+            if target["target_type"] == "document"
+            else None,
+            "folder_root_id": target.get("folder_root_id"),
+            "path_prefix": target.get("path_prefix"),
+        }
+        return self.document_focus
+
+    async def clear_document_focus(self, *, user_name, session_id):
+        self.calls.append(("document_focus_clear", user_name, session_id))
+        self.document_focus = None
 
     async def run_stream(self, *, user_name, request: StartRunRequest):
         self.calls.append(("run", user_name, request))
@@ -218,6 +243,56 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
         "run",
     ]
     assert port.calls[-1][2].research_mode == "research"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_document_focus_routes_keep_selection_request_only():
+    port = FakeApplication()
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        initial = await client.get(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+        )
+        set_focus = await client.put(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+            json={"target_type": "document", "document_id": "document-1"},
+        )
+        rejected_selection = await client.put(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+            json={
+                "target_type": "document",
+                "document_id": "document-1",
+                "selection": {
+                    "content_hash": "a" * 64,
+                    "locator": {
+                        "kind": "text_lines",
+                        "start_line": 1,
+                        "end_line": 1,
+                    },
+                },
+            },
+        )
+        cleared = await client.delete(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+        )
+
+    assert initial.status_code == 200
+    assert initial.json() is None
+    assert set_focus.status_code == 200
+    assert set_focus.json()["relative_path"] == "docs/notes.py"
+    assert rejected_selection.status_code == 422
+    assert cleared.status_code == 204
+    assert [call[0] for call in port.calls] == [
+        "document_focus_get",
+        "document_focus_set",
+        "document_focus_clear",
+    ]
 
 
 @pytest.mark.unit

@@ -34,6 +34,7 @@ from common.schema.public import (
     ArtifactRevisionResponse,
     CreateProjectRequest,
     CreateSessionRequest,
+    DocumentFocusResponse,
     MessageAcceptance,
     ProjectResponse,
     PublicError,
@@ -41,6 +42,7 @@ from common.schema.public import (
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
+    SetDocumentFocusRequest,
     StartRunRequest,
     SubmitMessageRequest,
     to_public_error,
@@ -78,6 +80,28 @@ class ApplicationPort(Protocol):
         session_id: str,
         request: SubmitMessageRequest,
     ) -> MessageAcceptance | Mapping[str, Any]: ...
+
+    async def get_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+    ) -> DocumentFocusResponse | Mapping[str, Any] | None: ...
+
+    async def set_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+        request: SetDocumentFocusRequest,
+    ) -> DocumentFocusResponse | Mapping[str, Any]: ...
+
+    async def clear_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+    ) -> None: ...
 
     async def run_stream(
         self,
@@ -227,6 +251,12 @@ def _message_acceptance(value: Any) -> MessageAcceptance:
             "idempotent": _value(data, "idempotent", default=False),
         }
     )
+
+
+def _document_focus_response(value: Any) -> DocumentFocusResponse:
+    if isinstance(value, DocumentFocusResponse):
+        return value
+    return DocumentFocusResponse.model_validate(_as_data(value))
 
 
 def _run_result(value: Any) -> RunResult:
@@ -473,6 +503,53 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             )
         except Exception as exc:
             raise exc
+
+    @app.get(
+        "/v1/sessions/{session_id}/document-focus",
+        response_model=DocumentFocusResponse | None,
+    )
+    async def get_document_focus(
+        session_id: str,
+        request: Request,
+        user_name: str = Depends(current_user),
+    ) -> DocumentFocusResponse | None:
+        value = await _call(
+            port.get_document_focus,
+            user_name=user_name,
+            session_id=session_id,
+        )
+        return None if value is None else _document_focus_response(value)
+
+    @app.put(
+        "/v1/sessions/{session_id}/document-focus",
+        response_model=DocumentFocusResponse,
+    )
+    async def set_document_focus(
+        session_id: str,
+        body: SetDocumentFocusRequest,
+        request: Request,
+        user_name: str = Depends(current_user),
+    ) -> DocumentFocusResponse:
+        return _document_focus_response(
+            await _call(
+                port.set_document_focus,
+                user_name=user_name,
+                session_id=session_id,
+                request=body,
+            )
+        )
+
+    @app.delete("/v1/sessions/{session_id}/document-focus", status_code=204)
+    async def clear_document_focus(
+        session_id: str,
+        request: Request,
+        user_name: str = Depends(current_user),
+    ) -> None:
+        await _call(
+            port.clear_document_focus,
+            user_name=user_name,
+            session_id=session_id,
+        )
 
     @app.get(
         "/v1/projects/{project_id}/artifacts",

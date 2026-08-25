@@ -10,11 +10,36 @@ from common.schema.primitives import Message
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
+    SetDocumentFocusDocument,
     StartRunRequest,
     SubmitMessageRequest,
     validate_public_stream,
 )
 from runtime.api_port import ApplicationRuntimePort
+
+
+class FakeDocumentService:
+    def __init__(self):
+        self.calls = []
+
+    async def resolve_focus_target(self, **kwargs):
+        self.calls.append(("focus", kwargs))
+        return {
+            "target_type": "document",
+            "document_id": kwargs["document_id"],
+            "relative_path": "docs/notes.py",
+        }
+
+    async def resolve_document_selection(self, **kwargs):
+        self.calls.append(("selection", kwargs))
+        return {
+            "content_hash": kwargs["selection"].content_hash,
+            "locator": {
+                "kind": "code_lines",
+                "start_line": 2,
+                "end_line": 3,
+            },
+        }
 
 
 class FakeSession:
@@ -28,6 +53,7 @@ class FakeSession:
     def __init__(self):
         self.accepted: list[Message] = []
         self.run_calls: list[dict] = []
+        self.document_service = FakeDocumentService()
 
     async def accept_message(self, message):
         self.accepted.append(message)
@@ -103,6 +129,8 @@ class FakeSessions:
     def __init__(self, session):
         self.session = session
         self.create_calls = []
+        self.document_focus = None
+        self.focus_calls = []
 
     async def create_session(self, **kwargs):
         self.create_calls.append(kwargs)
@@ -110,6 +138,35 @@ class FakeSessions:
 
     async def get_or_resume_session(self, session_id):
         return self.session if session_id == self.session.session_id else None
+
+    async def get_document_focus(self, session_id):
+        self.focus_calls.append(("get", session_id))
+        return self.document_focus
+
+    async def set_document_focus(self, session_id, **kwargs):
+        self.focus_calls.append(("set", session_id, kwargs))
+        target_type = (
+            "document"
+            if kwargs["document_id"] is not None
+            else "subtree"
+            if kwargs["path_prefix"] is not None
+            else "folder_upload"
+        )
+        self.document_focus = {
+            "mode": "pinned",
+            "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+            "target_type": target_type,
+            "document_id": kwargs["document_id"],
+            "relative_path": "docs/notes.py" if kwargs["document_id"] else None,
+            "folder_root_id": kwargs["folder_root_id"],
+            "path_prefix": kwargs["path_prefix"],
+        }
+        return self.document_focus
+
+    async def clear_document_focus(self, session_id):
+        self.focus_calls.append(("clear", session_id))
+        self.document_focus = None
+        return True
 
 
 @pytest.fixture
@@ -197,3 +254,58 @@ async def test_runtime_port_rejects_other_user_and_missing_session(port):
             session_id="missing",
             request=SubmitMessageRequest(content="hello"),
         )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_runtime_port_routes_pinned_and_request_document_focus(port):
+    application, runtime, session = port
+
+    pinned = await application.set_document_focus(
+        user_name="ada",
+        session_id="session-1",
+        request=SetDocumentFocusDocument(
+            target_type="document",
+            document_id="document-1",
+        ),
+    )
+    assert pinned.target_type == "document"
+    assert pinned.relative_path == "docs/notes.py"
+    assert await application.get_document_focus(
+        user_name="ada",
+        session_id="session-1",
+    ) == pinned
+
+    events = [
+        event
+        async for event in application.run_stream(
+            user_name="ada",
+            request=StartRunRequest(
+                session_id="session-1",
+                query="Explain the selection",
+                document_focus={
+                    "target_type": "document",
+                    "document_id": "document-1",
+                    "selection": {
+                        "content_hash": "a" * 64,
+                        "locator": {
+                            "kind": "code_lines",
+                            "start_line": 2,
+                            "end_line": 3,
+                            "symbol_name": "client-must-not-control-this",
+                        },
+                    },
+                },
+            ),
+        )
+    ]
+
+    assert validate_public_stream(events, require_terminal=True)[-1].type == "run.completed"
+    request_focus = session.run_calls[0]["document_focus"]
+    assert request_focus.mode == "request"
+    assert request_focus.relative_path == "docs/notes.py"
+    assert request_focus.selection.locator.symbol_name is None
+    assert runtime.sessions.focus_calls[-1] == ("get", "session-1")
+
+    await application.clear_document_focus(user_name="ada", session_id="session-1")
+    assert runtime.sessions.focus_calls[-1] == ("clear", "session-1")

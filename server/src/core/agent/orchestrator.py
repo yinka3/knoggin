@@ -291,6 +291,8 @@ class AgentOrchestrator:
                     else None
                 ),
             )
+            if persisted.target_type == "document" and persisted.selection is not None:
+                target["selection"] = persisted.selection
             return create_document_focus(
                 mode=("request" if persisted.mode == "request" else "pinned"),
                 created_at=persisted.created_at,

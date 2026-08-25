@@ -545,6 +545,46 @@ async def test_orchestrator_ignores_stale_document_focus():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_orchestrator_preserves_canonical_request_document_selection():
+    context = FakeSession()
+
+    class FocusDocumentService:
+        async def resolve_focus_target(self, **kwargs):
+            assert kwargs == {
+                "session_id": "session-1",
+                "document_id": "document-1",
+                "folder_root_id": None,
+                "path_prefix": None,
+            }
+            return {
+                "target_type": "document",
+                "document_id": "document-1",
+                "relative_path": "docs/notes.py",
+            }
+
+    context.document_service = FocusDocumentService()
+    focus = {
+        "mode": "request",
+        "target_type": "document",
+        "document_id": "document-1",
+        "relative_path": "docs/notes.py",
+        "selection": {
+            "content_hash": "a" * 64,
+            "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
+        },
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+
+    loaded = await make_orchestrator(context)._resolve_document_focus(context, focus)
+
+    assert loaded is not None
+    assert loaded.mode == "request"
+    assert loaded.selection is not None
+    assert loaded.selection.locator.kind == "code_lines"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
     monkeypatch,
 ):
