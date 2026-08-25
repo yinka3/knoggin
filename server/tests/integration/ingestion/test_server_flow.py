@@ -679,6 +679,204 @@ async def test_real_document_request_persists_document_source_provenance(
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
+async def test_real_document_selection_request_persists_selection_provenance(
+    real_server_scope,
+    monkeypatch,
+):
+    """A selected passage is resolved, answered, and retained as provenance."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    embedding = _DeterministicEmbeddingService()
+    llm = _DeterministicDocumentAgentLLM()
+    store = KnowledgeStore(postgres, embedding)
+    resources = SimpleNamespace(
+        postgres=postgres,
+        knowledge_store=store,
+        embedding=embedding,
+        llm_service=llm,
+    )
+    monkeypatch.setattr(
+        Session,
+        "current_config",
+        property(
+            lambda self: SimpleNamespace(
+                developer_settings=SimpleNamespace(
+                    limits=SimpleNamespace(conversation_context_turns=100),
+                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
+                )
+            )
+        ),
+    )
+
+    documents = DocumentService(
+        project_id=scope["project_id"],
+        postgres_client=postgres,
+        embedding_service=embedding,
+        document_rerank_enabled=False,
+    )
+    document = await documents.submit_document(
+        content=b"# Notes\nThe violet launch phrase is durable and documented.\n",
+        original_name="launch-note.md",
+        relative_path="notes/launch-note.md",
+        visibility_scope="project",
+    )
+    assert document["status"] == "indexed"
+
+    resolver = EntityResolver(
+        store,
+        embedding,
+        scope["project_id"],
+        [scope["project_id"]],
+    )
+    retrieval = KnowledgeRetrieval(
+        project_id=scope["project_id"],
+        readable_project_ids=[scope["project_id"]],
+        user_name=scope["user_name"],
+        entities=resolver,
+        embedding_service=embedding,
+        knowledge_store=store,
+        postgres=postgres,
+    )
+    context = _session(
+        resources,
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
+        session_id=scope["session_id"],
+    )
+    context.project = SimpleNamespace(
+        scheduler=object(),
+        record_session_activity=lambda: asyncio.sleep(0),
+        readable_project_ids=[scope["project_id"]],
+        entities=resolver,
+        compiled_domain=make_domain_config().compile(),
+        knowledge_retrieval=retrieval,
+        workspace_service=None,
+    )
+    context.document_service = documents
+    context.consumer = _SignalCounter()
+
+    agent = AgentConfig(
+        id="selected-document-agent",
+        name="Selected Document Agent",
+        persona={
+            "attention_bias": "evidence",
+            "reasoning_style": "methodical",
+            "social_temperament": "calm",
+            "communication_signature": "clear",
+            "productive_flaw": "overexplains",
+        },
+        enabled_tools=["search_documents"],
+    )
+    context.agent_orchestrator = AgentOrchestrator(
+        _StaticAgentManager(agent),
+        config_provider=ConfigManager,
+    )
+    application = ApplicationRuntimePort(
+        SimpleNamespace(
+            sessions=_StaticSessionManager(context),
+            resources=resources,
+        )
+    )
+
+    events = [
+        event
+        async for event in application.run_stream(
+            user_name=scope["user_name"],
+            request=StartRunRequest(
+                session_id=scope["session_id"],
+                query="What does the selected passage say?",
+                enabled_tools=["search_documents"],
+                document_focus={
+                    "target_type": "document",
+                    "document_id": document["document_id"],
+                    "selection": {
+                        "content_hash": document["content_hash"],
+                        "locator": {
+                            "kind": "text_lines",
+                            "start_line": 2,
+                            "end_line": 2,
+                        },
+                    },
+                },
+            ),
+        )
+    ]
+
+    public_events = validate_public_stream(events, require_terminal=True)
+    assert public_events[-1].type == "run.completed"
+    assert not [event for event in public_events if event.type == "run.failed"]
+    assert any(
+        event.type == "tool.completed"
+        and event.tool_name == "search_documents"
+        and event.succeeded
+        for event in public_events
+    )
+
+    response = public_events[-1]
+    assert response.type == "run.completed"
+    answer = await store.get_assistant_message_with_sources(
+        response.result.assistant_message_id,
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
+        session_id=scope["session_id"],
+    )
+    assert answer is not None
+    selected_excerpt = "2: The violet launch phrase is durable and documented."
+    assert any(
+        source.document_id == document["document_id"]
+        and source.excerpt == selected_excerpt
+        for source in answer.sources_consulted
+    )
+
+    selection_row = await postgres.fetch_one(
+        """
+        SELECT project_id, source_project_id, document_id::text AS document_id,
+               content_hash, locator, excerpt, encounter_kind, tool_call_id
+        FROM message_source_refs
+        WHERE message_id = %s AND encounter_kind = 'document_selection'
+        """,
+        (response.result.assistant_message_id,),
+    )
+    assert selection_row == {
+        "project_id": scope["project_id"],
+        "source_project_id": scope["project_id"],
+        "document_id": document["document_id"],
+        "content_hash": document["content_hash"],
+        "locator": {
+            "kind": "text_lines",
+            "start_line": 2,
+            "end_line": 2,
+        },
+        "excerpt": selected_excerpt,
+        "encounter_kind": "document_selection",
+        "tool_call_id": None,
+    }
+
+    await documents.delete_document(
+        document_id=document["document_id"],
+        session_id=None,
+    )
+    after_delete = await store.get_assistant_message_with_sources(
+        response.result.assistant_message_id,
+        user_name=scope["user_name"],
+        project_id=scope["project_id"],
+        session_id=scope["session_id"],
+    )
+    assert after_delete is not None
+    deleted_selection = next(
+        source
+        for source in after_delete.sources_consulted
+        if source.document_id == document["document_id"]
+        and source.excerpt == selected_excerpt
+    )
+    assert deleted_selection.source_status == "unavailable"
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
 async def test_real_concurrent_sessions_accept_one_message_once(
     real_server_scope,
     monkeypatch,
