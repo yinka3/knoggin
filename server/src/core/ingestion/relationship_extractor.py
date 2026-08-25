@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Set, Tuple
 
 from common.conf.relationship_config import normalize_relationship
-from common.exceptions import ConfigurationError, LLMBudgetExceededError, LLMError
+from common.exceptions import LLMBudgetExceededError, LLMResponseError
 from common.schema.ingestion.contracts import RelationshipObservation, ValidationIssue
 from common.schema.ingestion.extraction import RelationshipExtraction
 from common.utils.core_utils import format_vp02_input
@@ -198,38 +198,8 @@ class RelationshipExtractor:
             # extraction result.  Let the durable worker leave this batch ready
             # for retry after the user resets or increases the budget.
             raise
-        except (ConfigurationError, LLMError) as e:
-            if trace is not None:
-                trace.fallbacks.append(
-                    {
-                        "stage": "connections",
-                        "fallback": "empty_connections",
-                        "error_code": e.code,
-                    }
-                )
-            self._record_issue(
-                issues,
-                stage="connections",
-                code="llm_extraction_failed",
-                message=f"VP-02 connection extraction failed: {e}",
-                severity="warning",
-                metadata={"error_code": e.code, **e.details},
-            )
-            return []
-
         if conn_result is None:
-            if trace is not None:
-                trace.fallbacks.append(
-                    {"stage": "connections", "fallback": "empty_connections"}
-                )
-            self._record_issue(
-                issues,
-                stage="connections",
-                code="llm_extraction_failed",
-                message="VP-02 connection extraction returned no result",
-                severity="warning",
-            )
-            return []
+            raise LLMResponseError("VP-02 connection extraction returned no result")
 
         if not conn_result.connections and not conn_result.user_connections:
             if trace is not None:

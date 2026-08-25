@@ -1,5 +1,6 @@
 import pytest
 
+from common.exceptions import ConfigurationError, LLMProviderError, LLMResponseError
 from common.schema.settings import IngestionSettings
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.worker import IngestionWorker
@@ -54,6 +55,14 @@ class _Processor:
 class _InvalidProcessor(_Processor):
     async def process(self, batch):
         batch.fail(ValueError("invalid extraction"))
+
+
+class _FailureProcessor(_Processor):
+    def __init__(self, failure):
+        self.failure = failure
+
+    async def process(self, batch):
+        batch.fail(self.failure)
 
 
 async def _context(*_args):
@@ -115,3 +124,24 @@ async def test_durable_worker_preserves_pipeline_failure_classification():
     assert store.failed[0]["retryable"] is False
     assert store.failed[0]["failure_stage"] == "pipeline"
     assert store.failed[0]["failure_code"] == "ValueError"
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("failure", "retryable", "stage"),
+    [
+        (LLMProviderError("provider unavailable"), True, "runtime"),
+        (LLMResponseError("invalid structured response"), False, "pipeline"),
+        (ConfigurationError("missing model configuration"), False, "pipeline"),
+    ],
+)
+async def test_durable_worker_classifies_model_failures(failure, retryable, stage):
+    store = _Store()
+    worker = _worker(store, _FailureProcessor(failure), lambda _batch: None)
+
+    await worker._drain_durable_queue()
+
+    assert store.failed[0]["retryable"] is retryable
+    assert store.failed[0]["failure_stage"] == stage
+    assert store.failed[0]["failure_code"] == failure.code
