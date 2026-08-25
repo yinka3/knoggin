@@ -41,30 +41,6 @@ class FakePostgres:
         return {"ok": 1}
 
 
-class FakeRedis:
-    def __init__(self, *, fail: bool = False) -> None:
-        self.fail = fail
-        self.ping_calls = 0
-        self.strings = {}
-        self.lists = {}
-
-    async def ping(self):
-        self.ping_calls += 1
-        if self.fail:
-            raise RuntimeError("redis://:secret@example.invalid")
-        return True
-
-    async def llen(self, key):
-        return len(self.lists.get(key, []))
-
-    async def lrange(self, key, start, end):
-        items = self.lists.get(key, [])
-        return items[start : (len(items) if end == -1 else end + 1)]
-
-    async def get(self, key):
-        return self.strings.get(key)
-
-
 class FakeCoordinator:
     def __init__(self, snapshot: dict):
         self.snapshot = snapshot
@@ -75,11 +51,9 @@ class FakeCoordinator:
         return dict(self.snapshot)
 
 
-def resources(*, postgres=None, redis=None):
+def resources(*, postgres=None):
     return SimpleNamespace(
         postgres=postgres or FakePostgres(),
-        redis=redis or FakeRedis(),
-        redis_manager=None,
         model_work=FakeCoordinator(
             {
                 "foreground_concurrency": 1,
@@ -140,7 +114,7 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
     assert payload["details"]["queue"]["pending_count"] == 2
     assert payload["details"]["queue"]["claimed_count"] == 1
     assert payload["details"]["queue"]["available"] is True
-    assert "redis_available" not in payload["details"]
+    assert "redis" not in payload["details"]
 
 
 class FakeWorker:
@@ -185,9 +159,8 @@ class FakeDocumentService:
 @pytest.mark.no_network
 async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
     postgres = FakePostgres()
-    redis = FakeRedis()
     service = RuntimeHealthService(
-        resources=resources(postgres=postgres, redis=redis),
+        resources=resources(postgres=postgres),
         projects=SimpleNamespace(
             active_projects={"project-a": object(), "project-b": object()}
         ),
@@ -203,7 +176,6 @@ async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
     assert payload["details"]["loaded_project_count"] == 2
     assert payload["details"]["active_runtime_session_count"] == 1
     assert postgres.fetch_calls == 1
-    assert redis.ping_calls == 1
     assert "secret" not in json.dumps(payload)
 
 
@@ -211,9 +183,7 @@ async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
 @pytest.mark.no_network
 async def test_failed_dependency_probes_are_bounded_and_redacted():
     service = RuntimeHealthService(
-        resources=resources(
-            postgres=FakePostgres(fail=True), redis=FakeRedis(fail=True)
-        ),
+        resources=resources(postgres=FakePostgres(fail=True)),
         projects=SimpleNamespace(active_projects={}),
         sessions=SessionRuntimeReader({}),
     )
@@ -223,9 +193,7 @@ async def test_failed_dependency_probes_are_bounded_and_redacted():
     assert payload["status"] == "failed"
     assert payload["activity"] == "idle"
     assert payload["details"]["postgres"]["reason"] == "unavailable"
-    assert payload["details"]["redis"]["reason"] == "probe_failed"
     assert "postgresql://" not in json.dumps(payload)
-    assert "redis://" not in json.dumps(payload)
 
 
 @pytest.mark.unit
@@ -255,7 +223,7 @@ async def test_resource_health_projects_current_queue_without_other_project_ids(
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_ingestion_health_reports_durable_queue_delay_without_redis_reads():
+async def test_ingestion_health_reports_durable_queue_delay():
     class Store:
         async def get_ingestion_queue_health(self, **_kwargs):
             return {
@@ -266,8 +234,7 @@ async def test_ingestion_health_reports_durable_queue_delay_without_redis_reads(
                 "last_processed_ms": None,
             }
 
-    redis = FakeRedis()
-    resource_set = resources(redis=redis)
+    resource_set = resources()
     resource_set.knowledge_store = Store()
     service = RuntimeHealthService(
         resources=resource_set,
@@ -292,8 +259,7 @@ async def test_ingestion_health_reports_durable_queue_delay_without_redis_reads(
     assert payload["details"]["queue"]["pending_count"] == 1
     assert payload["details"]["queue"]["delay_state"] == "delayed"
     assert payload["details"]["progress"]["message_state"] == "pending"
-    assert redis.ping_calls == 0
-    assert "redis_available" not in payload["details"]
+    assert "redis" not in payload["details"]
 
 
 @pytest.mark.unit
@@ -303,8 +269,7 @@ async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
         async def get_ingestion_queue_health(self, **_kwargs):
             raise RuntimeError("postgresql://secret")
 
-    redis = FakeRedis()
-    resource_set = resources(redis=redis)
+    resource_set = resources()
     resource_set.knowledge_store = FailingStore()
     service = RuntimeHealthService(
         resources=resource_set,
@@ -327,7 +292,6 @@ async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
     assert payload["status"] == "degraded"
     assert payload["details"]["queue"]["available"] is False
     assert payload["details"]["queue"]["pending_count"] == 0
-    assert redis.ping_calls == 0
     assert "postgresql://" not in json.dumps(payload)
 
 

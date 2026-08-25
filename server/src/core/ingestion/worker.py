@@ -1,4 +1,4 @@
-"""PostgreSQL queue worker; Redis only wakes an active consumer."""
+"""PostgreSQL queue worker with application-local consumer signaling."""
 
 import asyncio
 from typing import Awaitable, Callable, Dict, List, Optional

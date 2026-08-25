@@ -49,20 +49,16 @@ class RuntimeHealthService:
     async def get_engine_health(self) -> HealthSnapshot:
         """Return dependency and lifecycle health for the running engine."""
 
-        postgres, redis = await asyncio.gather(
-            self._probe_postgres(),
-            self._probe_redis(),
-        )
+        postgres = await self._probe_postgres()
         active_project_count = self._active_project_count()
         active_session_count = self._active_session_count()
         failures = [
             name
-            for name, result in (("PostgreSQL", postgres), ("Redis", redis))
+            for name, result in (("PostgreSQL", postgres),)
             if not result["available"]
         ]
         subsystems = {
             "postgres": bool(postgres["available"]),
-            "redis": bool(redis["available"]),
             "model_work": getattr(self.resources, "model_work", None) is not None,
             "background_work": (
                 getattr(self.resources, "background_work", None) is not None
@@ -81,7 +77,7 @@ class RuntimeHealthService:
         warnings.extend(
             f"{name.replace('_', ' ')} is unavailable"
             for name in unavailable_subsystems
-            if name not in {"postgres", "redis"}
+            if name != "postgres"
         )
         if self._closing:
             warnings.append("runtime is closing")
@@ -102,9 +98,7 @@ class RuntimeHealthService:
             summary = "Runtime is healthy"
 
         activity = HealthActivity.IDLE
-        if self._closing or any(
-            result.get("reason") == "timeout" for result in (postgres, redis)
-        ):
+        if self._closing or postgres.get("reason") == "timeout":
             activity = HealthActivity.DELAYED
         elif active_session_count:
             activity = HealthActivity.BUSY
@@ -120,7 +114,6 @@ class RuntimeHealthService:
                     "uptime_seconds": self._uptime_seconds(),
                 },
                 "postgres": postgres,
-                "redis": redis,
                 "loaded_project_count": active_project_count,
                 "active_runtime_session_count": active_session_count,
                 "subsystems": subsystems,
@@ -611,28 +604,6 @@ class RuntimeHealthService:
         return await self._run_probe(
             lambda: fetch_one("SELECT 1 AS ok"),
         )
-
-    async def _probe_redis(self) -> _ProbeResult:
-        redis = getattr(self.resources, "redis", None)
-        if redis is None:
-            manager = getattr(self.resources, "redis_manager", None)
-            try:
-                client = getattr(manager, "client", None)
-            except Exception:
-                client = None
-            if client is not None:
-                redis = client
-        ping = getattr(redis, "ping", None) if redis is not None else None
-        if not callable(ping) and redis is not None:
-            try:
-                client = getattr(redis, "client", None)
-            except Exception:
-                client = None
-            redis = client if client is not None else redis
-            ping = getattr(redis, "ping", None)
-        if not callable(ping):
-            return self._unavailable_probe("unavailable")
-        return await self._run_probe(ping)
 
     async def _run_probe(
         self,

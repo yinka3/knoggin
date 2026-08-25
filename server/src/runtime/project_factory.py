@@ -68,7 +68,6 @@ class ProjectRuntimeFactory:
             self.resources.knowledge_store is None
             or self.resources.embedding is None
             or self.resources.executor is None
-            or self.resources.redis is None
             or self.resources.postgres is None
             or self.resources.llm_service is None
         ):

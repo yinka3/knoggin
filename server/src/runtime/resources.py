@@ -9,7 +9,6 @@ from dataclasses import dataclass, replace
 from inspect import isawaitable
 from typing import Any, Callable, Optional
 
-import redis.asyncio as aioredis
 import spacy
 import torch
 from dotenv import load_dotenv
@@ -18,7 +17,6 @@ from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
-from common.schema.settings import RedisConnectionSettings
 from common.utils.coordination_log import configure_coordination_log
 from core.knowledge.services.embedding_service import EmbeddingService
 from core.knowledge.store import KnowledgeStore
@@ -26,7 +24,6 @@ from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.llm_client import LLMService
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.postgres_client import PostgresClient
-from infrastructure.redis_client import AsyncRedisClient
 from infrastructure.resource_profile import ResourceProfile
 from log.llm_trace import get_trace_logger
 
@@ -55,8 +52,6 @@ class RuntimeResources:
         self.knowledge_store: Optional[KnowledgeStore] = None
         self.postgres: Optional[PostgresClient] = None
         self.embedding: Optional[EmbeddingService] = None
-        self.redis_manager: Optional[AsyncRedisClient] = None
-        self.redis: Optional[aioredis.Redis] = None
         self.llm_service: Optional[LLMService] = None
         self.executor: Optional[ThreadPoolExecutor] = None
         self.background_work: Optional[BackgroundWorkCoordinator] = None
@@ -156,8 +151,6 @@ class RuntimeResources:
         self.postgres = PostgresClient(dsn=dsn)
         await self.postgres.connect()
 
-        self.redis_manager = AsyncRedisClient(RedisConnectionSettings.from_env())
-        self.redis = await self.redis_manager.connect()
 
     def _construct_shared_services(self, *, device: torch.device) -> None:
         if self.postgres is None or self.model_work is None or self.resource_profile is None:
@@ -283,11 +276,6 @@ class RuntimeResources:
         executor, self.executor = self.executor, None
         if executor is not None:
             await attempt("executor", lambda: executor.shutdown(wait=wait))
-
-        redis_manager, self.redis_manager = self.redis_manager, None
-        self.redis = None
-        if redis_manager is not None:
-            await attempt("Redis", redis_manager.close)
 
         postgres, self.postgres = self.postgres, None
         if postgres is not None:

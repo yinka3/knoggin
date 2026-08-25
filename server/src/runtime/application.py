@@ -165,7 +165,7 @@ class ApplicationRuntime:
             aac_runtime = None
             if all(
                 getattr(resources, dependency, None) is not None
-                for dependency in ("postgres", "embedding", "redis", "knowledge_store")
+                for dependency in ("postgres", "embedding", "knowledge_store")
             ):
                 aac_runtime = await AACRuntime.create(
                     user_name=user_name,

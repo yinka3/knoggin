@@ -30,7 +30,8 @@ class MessageAcceptance:
 class MessageLifecycleWriter:
     """Keep message editing and ingestion eligibility in Postgres.
 
-    Redis may wake a worker, but never decides which message version is ingested.
+    Local worker signaling may wake a consumer, but never decides which message
+    version is ingested.
     """
 
     def __init__(self, client: PostgresClient, message_writer: MessageWriter):

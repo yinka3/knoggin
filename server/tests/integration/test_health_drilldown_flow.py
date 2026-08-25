@@ -31,28 +31,6 @@ class HealthPostgres:
         self.write_calls += 1
 
 
-class HealthRedis:
-    def __init__(self):
-        self.ping_calls = 0
-        self.write_calls = 0
-
-    async def ping(self):
-        self.ping_calls += 1
-        return True
-
-    async def llen(self, _key):
-        return 0
-
-    async def lrange(self, _key, _start, _end):
-        return []
-
-    async def get(self, _key):
-        return None
-
-    async def set(self, *_args, **_kwargs):
-        self.write_calls += 1
-
-
 class HealthCoordinator:
     def __init__(self, snapshot):
         self.snapshot = snapshot
@@ -75,11 +53,8 @@ class HealthToolHarness(HealthTools):
 @pytest.mark.no_network
 async def test_health_drilldown_is_bounded_scoped_and_read_only():
     postgres = HealthPostgres()
-    redis = HealthRedis()
     resources = SimpleNamespace(
         postgres=postgres,
-        redis=redis,
-        redis_manager=None,
         model_work=HealthCoordinator(
             {
                 "foreground_concurrency": 1,
@@ -144,6 +119,4 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
     serialized = json.dumps(resources_health)
     assert "project-a" not in serialized
     assert postgres.fetch_one_calls == 1
-    assert redis.ping_calls == 1
     assert postgres.write_calls == 0
-    assert redis.write_calls == 0

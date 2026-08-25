@@ -3,7 +3,7 @@
 This module intentionally does not know how the server's runtime is assembled.
 ``create_app`` receives an application port and delegates to it, which keeps
 the HTTP import path safe for tooling, tests, and worker processes that do not
-need to start PostgreSQL, Redis, or an embedding model.
+need to start PostgreSQL or an embedding model.
 """
 
 from __future__ import annotations
