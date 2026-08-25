@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Union
 
-from common.utils.time_utils import parse_iso_time_or_now
+from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.agent.formatters import (
     format_entity_results,
     format_episode_results,
@@ -19,6 +20,10 @@ def build_user_message(
     ctx: AgentRun, last_result: Optional[Union[Dict, List[Dict]]] = None
 ) -> str:
     msg = ""
+
+    last_turn_context = _format_last_turn_context(ctx.last_turn_at)
+    if last_turn_context:
+        msg += f"**Last successful turn:** {last_turn_context}\n\n"
 
     if ctx.history:
         recent = ctx.history[-ctx.limits.max_history_turns :]
@@ -109,6 +114,34 @@ def build_user_message(
         msg += _format_evidence(ctx, last_result)
 
     return msg
+
+
+def _format_last_turn_context(last_turn_at: object) -> str:
+    """Give an agent an absolute, human-readable temporal anchor for its run."""
+
+    if not isinstance(last_turn_at, datetime):
+        return ""
+    if last_turn_at.tzinfo is None:
+        last_turn_at = last_turn_at.replace(tzinfo=timezone.utc)
+    else:
+        last_turn_at = last_turn_at.astimezone(timezone.utc)
+    current_time = get_now()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    else:
+        current_time = current_time.astimezone(timezone.utc)
+    elapsed_seconds = max(0, int((current_time - last_turn_at).total_seconds()))
+    hours, remainder = divmod(elapsed_seconds, 3600)
+    days, hours = divmod(hours, 24)
+    minutes = remainder // 60
+    elapsed = (
+        f"{days}d {hours}h {minutes}m"
+        if days
+        else f"{hours}h {minutes}m"
+        if hours
+        else f"{minutes}m"
+    )
+    return f"{last_turn_at.isoformat()} ({elapsed} ago)"
 
 
 def _format_evidence(

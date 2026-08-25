@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 from uuid import uuid4
 
@@ -118,6 +119,7 @@ class AgentRun:
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
+    last_turn_at: Optional[datetime] = None
     initial_source_candidates: List[SourceReferenceCandidate] = field(
         default_factory=list
     )
@@ -178,6 +180,11 @@ class AgentRun:
             if audit_project_id is _UNSET_AUDIT_PROJECT_ID
             else cast(str | None, audit_project_id)
         )
+        effective_state = dict(state)
+        effective_state.setdefault(
+            "last_turn_at",
+            getattr(agent.config, "last_turn_at", None),
+        )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,
             additional_schemas=effective_additional_schemas,
@@ -203,7 +210,7 @@ class AgentRun:
             additional_tool_schemas=effective_additional_schemas,
             tool_runtime=tool_runtime,
             limits=limits,
-            **state,
+            **effective_state,
         )
 
     @classmethod

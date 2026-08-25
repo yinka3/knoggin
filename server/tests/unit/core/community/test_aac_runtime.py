@@ -24,7 +24,6 @@ def _provider():
                             enabled=False,
                             interval_minutes=30,
                             token_budget=100,
-                            agent_pool_ids=[],
                         ),
                     ),
                 )
@@ -79,7 +78,7 @@ async def test_aac_runtime_owns_local_discussion_admission_and_stop():
     assert admission.outcome is AACAdmissionOutcome.STARTED
     assert admission.discussion_id == runtime.active_discussion_id
     assert seeder.budgets[0].token_budget == 100
-    await runtime.request_stop()
+    assert await runtime.request_stop() is True
     await runtime.shutdown()
 
 
@@ -110,3 +109,74 @@ async def test_aac_runtime_skips_without_enabled_participants():
     assert admission.outcome is AACAdmissionOutcome.SKIPPED
     assert admission.reason == "no_enabled_agents"
 
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_aac_runtime_reconciles_durable_participation_and_records_events():
+    resources = FakeResources()
+    manager = AgentManager(resources, user_name="ada")
+    first = await manager.create_agent("Researcher", "Careful")
+    second = await manager.create_agent("Critic", "Skeptical")
+    await manager.set_aac_enabled(first.id, True)
+    context = await AACReadContext.create(
+        user_name="ada",
+        postgres=resources.postgres,
+        knowledge_store=resources.knowledge_store,
+        embedding_service=resources.embedding,
+        redis=resources.redis,
+    )
+    runtime = AACRuntime(
+        user_name="ada",
+        resources=resources,
+        agent_manager=manager,
+        read_context=context,
+        store=AACStore(resources.postgres),
+        config_provider=_provider(),
+        seeder=FakeSeeder(SeedDecision("SKIP")),
+    )
+    runtime._discussion_id = "discussion-1"
+    runtime._participants = [first.id]
+
+    promoted = await runtime.set_participation(second.id, True)
+    assert promoted is not None
+    assert runtime._participants == sorted([first.id, second.id])
+
+    removed = await runtime.set_participation(first.id, False)
+    assert removed is not None
+    assert runtime._participants == [second.id]
+
+    timeline_writes = [
+        params
+        for kind, query, params in resources.postgres.calls
+        if kind == "execute" and "INSERT INTO public.aac_timeline" in query
+    ]
+    assert [write["content"] for write in timeline_writes] == [
+        f"Agent {second.id} joined the discussion.",
+        f"Agent {first.id} left the discussion.",
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_aac_runtime_ignores_stop_when_no_discussion_is_active():
+    resources = FakeResources()
+    manager = AgentManager(resources, user_name="ada")
+    context = await AACReadContext.create(
+        user_name="ada",
+        postgres=resources.postgres,
+        knowledge_store=resources.knowledge_store,
+        embedding_service=resources.embedding,
+        redis=resources.redis,
+    )
+    runtime = AACRuntime(
+        user_name="ada",
+        resources=resources,
+        agent_manager=manager,
+        read_context=context,
+        store=AACStore(resources.postgres),
+        config_provider=_provider(),
+        seeder=FakeSeeder(SeedDecision("SKIP")),
+    )
+
+    assert await runtime.request_stop() is False
+    assert runtime._discussion_stop_event.is_set() is False

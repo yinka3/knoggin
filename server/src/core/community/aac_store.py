@@ -192,6 +192,59 @@ class AACStore:
             {"user_name": self._text(user_name, "user_name")},
         )
 
+    async def list_discussions(
+        self,
+        *,
+        user_name: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return a user's durable AAC discussion history."""
+
+        return await self._read(
+            "list_aac_discussions",
+            """
+            SELECT discussion_id, topic, status, token_budget, tokens_used,
+                   started_at, ended_at
+            FROM public.aac_discussions
+            WHERE user_name = %(user_name)s
+            ORDER BY started_at DESC, discussion_id DESC
+            LIMIT %(limit)s
+            """,
+            {
+                "user_name": self._text(user_name, "user_name"),
+                "limit": self._limit(limit),
+            },
+        )
+
+    async def list_timeline(
+        self,
+        *,
+        discussion_id: str,
+        user_name: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return one user's AAC transcript and lightweight system events."""
+
+        return await self._read(
+            "list_aac_timeline",
+            """
+            SELECT timeline.timeline_id, timeline.kind, timeline.agent_id,
+                   timeline.content, timeline.created_at
+            FROM public.aac_timeline AS timeline
+            JOIN public.aac_discussions AS discussion
+              ON discussion.discussion_id = timeline.discussion_id
+            WHERE timeline.discussion_id = %(discussion_id)s
+              AND discussion.user_name = %(user_name)s
+            ORDER BY timeline.created_at, timeline.timeline_id
+            LIMIT %(limit)s
+            """,
+            {
+                "discussion_id": self._text(discussion_id, "discussion_id"),
+                "user_name": self._text(user_name, "user_name"),
+                "limit": self._limit(limit),
+            },
+        )
+
     async def create_insight(
         self,
         *,
@@ -264,6 +317,34 @@ class AACStore:
             {
                 "user_name": self._text(user_name, "user_name"),
                 "viewer_agent_id": self._text(viewer_agent_id, "viewer_agent_id"),
+                "query": query,
+                "limit": self._limit(limit),
+            },
+        )
+
+    async def list_user_insights(
+        self,
+        *,
+        user_name: str,
+        query: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return both shared and private Insights for their owning user."""
+
+        query = query.strip() if isinstance(query, str) else ""
+        return await self._read(
+            "list_user_aac_insights",
+            """
+            SELECT insight_id, discussion_id, author_agent_id, visibility, content,
+                   created_at
+            FROM public.aac_insights
+            WHERE user_name = %(user_name)s
+              AND (%(query)s = '' OR content ILIKE '%%' || %(query)s || '%%')
+            ORDER BY created_at DESC, insight_id DESC
+            LIMIT %(limit)s
+            """,
+            {
+                "user_name": self._text(user_name, "user_name"),
                 "query": query,
                 "limit": self._limit(limit),
             },

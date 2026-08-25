@@ -117,6 +117,49 @@ async def test_aac_store_keeps_insights_independent_and_scopes_agent_reads():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_aac_store_exposes_history_and_all_insights_to_the_owning_user():
+    postgres = RecordingPostgres(
+        rows=[
+            [{"discussion_id": "discussion-1", "status": "completed"}],
+            [{"timeline_id": "timeline-1", "kind": "agent_message"}],
+            [{"insight_id": "private-1", "visibility": "private"}],
+            [{"voter_agent_id": "agent-2", "vote": "up"}],
+        ]
+    )
+    store = AACStore(postgres)
+
+    discussions = await store.list_discussions(user_name="ada")
+    timeline = await store.list_timeline(
+        discussion_id="discussion-1",
+        user_name="ada",
+    )
+    insights = await store.list_user_insights(user_name="ada", query="evidence")
+    votes = await store.list_insight_votes(
+        insight_id="private-1",
+        user_name="ada",
+    )
+
+    discussion_query, discussion_params = postgres.read_calls[0]
+    assert "FROM public.aac_discussions" in discussion_query
+    assert discussion_params == {"user_name": "ada", "limit": 20}
+    timeline_query, timeline_params = postgres.read_calls[1]
+    assert "JOIN public.aac_discussions AS discussion" in timeline_query
+    assert timeline_params == {
+        "discussion_id": "discussion-1",
+        "user_name": "ada",
+        "limit": 100,
+    }
+    insight_query, insight_params = postgres.read_calls[2]
+    assert "visibility = 'shared'" not in insight_query
+    assert insight_params == {"user_name": "ada", "query": "evidence", "limit": 20}
+    assert discussions[0]["discussion_id"] == "discussion-1"
+    assert timeline[0]["timeline_id"] == "timeline-1"
+    assert insights[0]["visibility"] == "private"
+    assert votes[0]["voter_agent_id"] == "agent-2"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_aac_store_allows_only_other_agents_to_vote_on_shared_insights():
     postgres = RecordingPostgres()
     store = AACStore(postgres)

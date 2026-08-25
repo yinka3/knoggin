@@ -212,36 +212,83 @@ class AACRuntime:
                 discussion_id,
             )
 
-    async def request_stop(self) -> None:
-        """Stop after the current AgentRun, without cancelling that run."""
+    async def request_stop(self) -> bool:
+        """Stop an active discussion after its current AgentRun finishes."""
 
-        self._discussion_stop_event.set()
         discussion_id = self._discussion_id
-        if discussion_id:
-            await self.store.append_timeline(
-                discussion_id=discussion_id,
-                user_name=self.user_name,
-                kind="system_event",
-                content="AAC discussion stop requested by user.",
-            )
-
-    async def add_participant(self, agent_id: str) -> bool:
-        agent = await self.agent_manager.get_agent(agent_id)
-        if agent is None or not agent.aac_enabled:
+        discussion = self._discussion_task
+        if discussion_id is None or discussion is None or discussion.done():
             return False
-        async with self._participants_lock:
-            if agent_id not in self._participants:
-                self._participants.append(agent_id)
-                await self._append_event(f"Agent {agent_id} joined the discussion.")
+        self._discussion_stop_event.set()
+        await self.store.append_timeline(
+            discussion_id=discussion_id,
+            user_name=self.user_name,
+            kind="system_event",
+            content="AAC discussion stop requested by user.",
+        )
         return True
 
-    async def remove_participant(self, agent_id: str) -> bool:
-        async with self._participants_lock:
-            if agent_id not in self._participants:
-                return False
-            self._participants.remove(agent_id)
-            await self._append_event(f"Agent {agent_id} left the discussion.")
-        return True
+    async def list_discussions(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Expose the current user's durable AAC discussion history."""
+
+        return await self.store.list_discussions(user_name=self.user_name, limit=limit)
+
+    async def list_timeline(
+        self,
+        discussion_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Expose one user-owned AAC transcript and its system events."""
+
+        return await self.store.list_timeline(
+            discussion_id=discussion_id,
+            user_name=self.user_name,
+            limit=limit,
+        )
+
+    async def list_insights(
+        self,
+        *,
+        query: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Expose shared and private Insights to their owning user."""
+
+        return await self.store.list_user_insights(
+            user_name=self.user_name,
+            query=query,
+            limit=limit,
+        )
+
+    async def list_insight_votes(
+        self,
+        insight_id: str,
+    ) -> list[dict[str, Any]]:
+        """Expose advisory AAC Insight votes to their owning user."""
+
+        return await self.store.list_insight_votes(
+            insight_id=insight_id,
+            user_name=self.user_name,
+        )
+
+    async def set_participation(
+        self,
+        agent_id: str,
+        enabled: bool,
+    ) -> Optional[AgentConfig]:
+        """Persist an AAC participation choice and apply it to active work.
+
+        The durable flag remains the source of truth.  Reconciling immediately
+        gives a caller deterministic join/leave events; the discussion loop
+        also reconciles before every participant run for callers that update
+        ``AgentManager`` directly.
+        """
+
+        agent = await self.agent_manager.set_aac_enabled(agent_id, enabled)
+        if agent is not None and self._discussion_id is not None:
+            await self._reconcile_participants()
+        return agent
 
     async def _opportunity_loop(self) -> None:
         while not self._stopping:
@@ -276,8 +323,7 @@ class AACRuntime:
         turn = 0
         try:
             while budget.allow_call() and not self._discussion_stop_event.is_set():
-                async with self._participants_lock:
-                    current = list(self._participants)
+                current = await self._reconcile_participants()
                 if not current:
                     break
                 agent_id = current[turn % len(current)]
@@ -422,12 +468,25 @@ class AACRuntime:
         return run_specialist
 
     async def _enabled_participants(self) -> list[str]:
-        settings = self._community_settings()
         agents = [agent for agent in await self.agent_manager.list_agents() if agent.aac_enabled]
-        if settings.agent_pool_ids:
-            allowed = set(settings.agent_pool_ids)
-            agents = [agent for agent in agents if agent.id in allowed]
         return sorted(agent.id for agent in agents)
+
+    async def _reconcile_participants(self) -> list[str]:
+        """Reflect durable AAC choices in an active discussion's next turn."""
+
+        enabled = await self._enabled_participants()
+        async with self._participants_lock:
+            previous = set(self._participants)
+            current = set(enabled)
+            joined = sorted(current - previous)
+            left = sorted(previous - current)
+            self._participants = enabled
+
+        for agent_id in joined:
+            await self._append_event(f"Agent {agent_id} joined the discussion.")
+        for agent_id in left:
+            await self._append_event(f"Agent {agent_id} left the discussion.")
+        return list(enabled)
 
     def _community_settings(self):
         return self.config_provider.get().config.developer_settings.community

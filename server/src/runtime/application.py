@@ -108,7 +108,7 @@ class ApplicationRuntime:
     sessions: SessionManager
     agent_manager: AgentManager
     agent_orchestrator: AgentOrchestrator
-    aac_runtime: ShutdownOwner | None = None
+    aac_runtime: AACRuntime | None = None
     shutdown_coordinator: ApplicationShutdownCoordinator = field(init=False)
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
