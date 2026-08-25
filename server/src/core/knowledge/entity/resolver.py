@@ -199,6 +199,7 @@ class EntityResolver:
                     precomputed_embedding=embedding_map.get(name),
                     candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
                     candidate_vector_threshold=policy.candidate_vector_threshold,
+                    strict=True,
                 )
                 seen_by_dedupe_key[dedupe_key] = (
                     ("candidates", candidates) if candidates else ("new", None)
@@ -305,39 +306,18 @@ class EntityResolver:
                     if dedupe_key in created_in_batch:
                         entity_id = created_in_batch[dedupe_key]
                     else:
-                        try:
-                            entity_id = await allocate_entity_id()
-                            pending_entity_writes[
-                                entity_id
-                            ] = await self.prepare_pending_entity(
-                                entity_id,
-                                name.strip(),
-                                [name.strip()],
-                                mention_type,
-                                topic,
-                            )
-                            new_ids.add(entity_id)
-                            created_in_batch[dedupe_key] = entity_id
-                        except Exception as exc:
-                            if issues is not None:
-                                issues.append(
-                                    ValidationIssue(
-                                        stage="resolution",
-                                        code="entity_registration_failed",
-                                        message=(
-                                            f"Failed to register entity '{name}': "
-                                            f"{exc}"
-                                        ),
-                                        severity="error",
-                                        item_ref=name,
-                                        metadata={
-                                            "msg_id": msg_id,
-                                            "type": mention_type,
-                                            "topic": topic,
-                                        },
-                                    )
-                                )
-                            entity_id = None
+                        entity_id = await allocate_entity_id()
+                        pending_entity_writes[
+                            entity_id
+                        ] = await self.prepare_pending_entity(
+                            entity_id,
+                            name.strip(),
+                            [name.strip()],
+                            mention_type,
+                            topic,
+                        )
+                        new_ids.add(entity_id)
+                        created_in_batch[dedupe_key] = entity_id
 
                 if entity_id is not None:
                     if entity_id not in entity_msg_map:
@@ -783,6 +763,7 @@ class EntityResolver:
         *,
         candidate_fuzzy_threshold: int | None = None,
         candidate_vector_threshold: float | None = None,
+        strict: bool = False,
     ) -> List[EntityCandidate]:
 
         if not mention:
@@ -843,6 +824,8 @@ class EntityResolver:
             try:
                 vector = await self.embedding_service.encode_single(mention)
             except Exception as e:
+                if strict:
+                    raise
                 logger.warning(f"Encoding failed: {e}")
                 vector = None
 
@@ -858,6 +841,8 @@ class EntityResolver:
                     )
                 )
             except Exception as e:
+                if strict:
+                    raise
                 logger.warning(f"Vector search failed, using fuzzy only: {e}")
                 vector_results = []
         for eid, vec_score in vector_results:
