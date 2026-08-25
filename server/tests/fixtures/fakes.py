@@ -7,10 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from common.schema.settings import RedisConnectionSettings
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.message_lifecycle_writer import MessageAcceptance
-from infrastructure.redis_client import AsyncRedisClient
 
 
 class FakePipeline:
@@ -21,9 +19,9 @@ class FakePipeline:
         self.refresh_count += 1
 
 
-class FakePipelineWriter:
-    def __init__(self, redis):
-        self.redis = redis
+class FakeEphemeralPipelineWriter:
+    def __init__(self, store):
+        self.store = store
         self.commands = []
 
     def hset(self, key, field, value):
@@ -60,29 +58,29 @@ class FakePipelineWriter:
             name = command[0]
             if name == "hset":
                 _, key, field, value = command
-                results.append(await self.redis.hset(key, field, value))
+                results.append(await self.store.hset(key, field, value))
             elif name == "zadd":
                 _, key, mapping = command
-                results.append(await self.redis.zadd(key, mapping))
+                results.append(await self.store.zadd(key, mapping))
             elif name == "zremrangebyrank":
                 _, key, start, end = command
-                results.append(await self.redis.zremrangebyrank(key, start, end))
+                results.append(await self.store.zremrangebyrank(key, start, end))
             elif name == "zrem":
                 _, key, members = command
-                results.append(await self.redis.zrem(key, *members))
+                results.append(await self.store.zrem(key, *members))
             elif name == "expire":
                 _, key, ttl = command
-                results.append(await self.redis.expire(key, ttl))
+                results.append(await self.store.expire(key, ttl))
             elif name == "hdel":
                 _, key, fields = command
-                results.append(await self.redis.hdel(key, *fields))
+                results.append(await self.store.hdel(key, *fields))
             elif name == "hget":
                 _, key, field = command
-                results.append(await self.redis.hget(key, field))
+                results.append(await self.store.hget(key, field))
         return results
 
 
-class FakeRedis:
+class FakeEphemeralStore:
     def __init__(self):
         self.strings: dict[str, str] = {}
         self.hashes: dict[str, dict[str, str]] = defaultdict(dict)
@@ -109,7 +107,7 @@ class FakeRedis:
 
     def pipeline(self):
         self.pipeline_calls += 1
-        return FakePipelineWriter(self)
+        return FakeEphemeralPipelineWriter(self)
 
     async def hset(self, key, field, value):
         self._purge_expired(key)
@@ -521,15 +519,6 @@ class FakeEmbeddingService:
 class FakeLLMService:
     async def close(self):
         pass
-
-
-class FakeRedisManager(AsyncRedisClient):
-    def __init__(self, client: FakeRedis):
-        super().__init__(RedisConnectionSettings())
-        self._client = client
-
-    async def connect(self):
-        return self.client
 
 
 class FakePostgresClient:
@@ -1009,8 +998,6 @@ class _FakePostgresCursor:
 
 @dataclass
 class FakeResources:
-    redis: FakeRedis = field(default_factory=FakeRedis)
-    redis_manager: Any = None
     knowledge_store: FakeKnowledgeStore = field(default_factory=FakeKnowledgeStore)
     postgres: FakePostgresClient = field(default_factory=FakePostgresClient)
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
@@ -1018,11 +1005,6 @@ class FakeResources:
     executor: Any = None
     gliner: Any = None
     spacy: Any = None
-
-    def __post_init__(self):
-        if self.redis_manager is None:
-            self.redis_manager = FakeRedisManager(self.redis)
-
 
 class FakeScheduler:
     def __init__(self):

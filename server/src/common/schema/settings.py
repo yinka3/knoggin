@@ -1,56 +1,9 @@
-import os
 from typing import Dict, List, Optional
 
-from pydantic import ConfigDict, Field, ValidationError, model_validator
+from pydantic import Field, model_validator
 
-from common.exceptions import ConfigurationError
 from common.schema.agent.settings import AgentLimitSettings
 from common.schema.config import ConfigModel
-
-
-class RedisConnectionSettings(ConfigModel):
-    """Startup-only Redis connection and pool settings."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    url: str = "redis://localhost:6379/0"
-    max_connections: int = Field(10, ge=1)
-    health_check_interval: int = Field(30, ge=0)
-    connect_timeout: float = Field(2.0, gt=0)
-    startup_attempts: int = Field(3, ge=1)
-    startup_backoff_seconds: float = Field(0.25, ge=0)
-
-    @classmethod
-    def from_env(cls) -> "RedisConnectionSettings":
-        values = {
-            "url": os.getenv("REDIS_URL", "redis://localhost:6379/0"),
-            "max_connections": os.getenv("REDIS_MAX_CONNECTIONS", "10"),
-            "health_check_interval": os.getenv(
-                "REDIS_HEALTH_CHECK_INTERVAL",
-                "30",
-            ),
-            "connect_timeout": os.getenv("REDIS_CONNECT_TIMEOUT", "2.0"),
-            "startup_attempts": os.getenv("REDIS_STARTUP_ATTEMPTS", "3"),
-            "startup_backoff_seconds": os.getenv(
-                "REDIS_STARTUP_BACKOFF_SECONDS",
-                "0.25",
-            ),
-        }
-        try:
-            return cls.model_validate(values)
-        except ValidationError as exc:
-            errors = [
-                {
-                    "field": ".".join(str(part) for part in error["loc"]),
-                    "message": error["msg"],
-                }
-                for error in exc.errors(include_url=False)
-            ]
-            raise ConfigurationError(
-                "Invalid Redis connection settings",
-                details={"errors": errors},
-            ) from exc
-
 
 DEFAULT_SPARSE_CONTEXT_VERBS = [
     "accepted",

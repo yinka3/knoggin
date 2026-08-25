@@ -117,7 +117,7 @@ def test_public_errors_use_safe_stable_projection_and_drop_internal_details():
     )
     assert "secret-host" not in error.model_dump_json()
     assert to_public_error(ValueError("bad input")).code == "invalid_request"
-    assert to_public_error(DependencyError("redis password" )).retryable is True
+    assert to_public_error(DependencyError("service password")).retryable is True
 
 
 @pytest.mark.unit

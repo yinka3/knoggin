@@ -7,7 +7,7 @@ if [ "$1" = "--prefetch-models" ]; then
         exit 1
     fi
     # Optional: downloads/exports the embedder, reranker, NLI, spaCy, and GLiNER
-    # without starting Postgres, Redis, or the application server.
+    # without starting Postgres or the application server.
     uv run --project server python server/scripts/prefetch_models.py
     exit $?
 fi
@@ -22,13 +22,9 @@ if [ -f .env ]; then
     exit 0
 fi
 
-REDIS_PW=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
 PG_PW=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
 
 cat > .env << EOF
-REDIS_PASSWORD=${REDIS_PW}
-REDIS_HOST=redis
-REDIS_PORT=6379
 POSTGRES_USER=knoggin
 POSTGRES_PASSWORD=${PG_PW}
 POSTGRES_DB=knoggin_db

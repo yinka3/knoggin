@@ -74,7 +74,7 @@ def _worker(store, processor, write):
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_durable_worker_claims_and_completes_without_redis_recovery():
+async def test_durable_worker_claims_and_completes_without_runtime_recovery():
     store = _Store()
 
     async def write(batch):

@@ -120,7 +120,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
     config_manager = RecordingConfigManager()
     resources = SimpleNamespace(
         postgres=object(),
-        redis=object(),
         llm_service=object(),
         knowledge_store=object(),
         executor=object(),
@@ -185,7 +184,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     config_manager = RecordingConfigManager()
     resources = SimpleNamespace(
         postgres=object(),
-        redis=object(),
         llm_service=object(),
         knowledge_store=object(),
         executor=object(),

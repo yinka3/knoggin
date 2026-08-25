@@ -114,7 +114,7 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
     assert payload["details"]["queue"]["pending_count"] == 2
     assert payload["details"]["queue"]["claimed_count"] == 1
     assert payload["details"]["queue"]["available"] is True
-    assert "redis" not in payload["details"]
+    assert "postgres" in payload["details"]
 
 
 class FakeWorker:
@@ -259,7 +259,7 @@ async def test_ingestion_health_reports_durable_queue_delay():
     assert payload["details"]["queue"]["pending_count"] == 1
     assert payload["details"]["queue"]["delay_state"] == "delayed"
     assert payload["details"]["progress"]["message_state"] == "pending"
-    assert "redis" not in payload["details"]
+    assert "postgres" in payload["details"]
 
 
 @pytest.mark.unit

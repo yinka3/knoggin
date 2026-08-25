@@ -1,4 +1,4 @@
-"""Real PostgreSQL/Redis contracts for composed server workflows."""
+"""Real PostgreSQL contracts for composed server workflows."""
 
 import asyncio
 import json
@@ -21,7 +21,6 @@ from common.schema.primitives import Message
 from common.schema.settings import (
     EpisodeSettings,
     IngestionSettings,
-    RedisConnectionSettings,
 )
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.executor import AgentExecutor
@@ -38,7 +37,6 @@ from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
 from infrastructure.postgres_client import PostgresClient
-from infrastructure.redis_client import AsyncRedisClient, RedisKeys
 from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
 from tests.fixtures.ingestion import ingestion_policy
@@ -167,6 +165,9 @@ class _StaticAgentManager:
     async def get_agent(self, agent_id: str) -> AgentConfig | None:
         return self._config if agent_id == self._config.id else None
 
+    async def mark_turn_completed(self, agent_id: str) -> bool:
+        return agent_id == self._config.id
+
 
 class _NoEntityProcessor:
     """Complete the pipeline boundary without requiring an external LLM."""
@@ -220,8 +221,6 @@ async def real_server_scope():
     )
     postgres = PostgresClient(dsn=dsn, min_size=1, max_size=2)
     await postgres.connect()
-    redis_manager = AsyncRedisClient(RedisConnectionSettings.from_env())
-    redis = await redis_manager.connect()
     suffix = uuid.uuid4().hex[:12]
     user_name = "server_flow_test_user"
     project_id = f"server-flow-project-{suffix}"
@@ -245,8 +244,6 @@ async def real_server_scope():
     try:
         yield {
             "postgres": postgres,
-            "redis": redis,
-            "redis_manager": redis_manager,
             "user_name": user_name,
             "project_id": project_id,
             "session_id": session_id,
@@ -256,15 +253,6 @@ async def real_server_scope():
             user_name=user_name,
             project_id=project_id,
         )
-        keys = set(RedisKeys.project_cleanup_keys(user_name, project_id))
-        keys.update(RedisKeys.session_keys(user_name, session_id))
-        async for key in redis.scan_iter(
-            match=RedisKeys.message_dedup_pattern(user_name, session_id)
-        ):
-            keys.add(key)
-        if keys:
-            await redis.delete(*keys)
-        await redis_manager.close()
         await postgres.close()
 
 
@@ -296,7 +284,6 @@ def _prepared_graph_callback(store):
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_server_flow_reaches_episode_and_grounded_answer(
     real_server_scope,
@@ -306,11 +293,9 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
 
     scope = real_server_scope
     postgres = scope["postgres"]
-    redis = scope["redis"]
     store = KnowledgeStore(postgres, _DeterministicEmbeddingService())
     resources = SimpleNamespace(
         postgres=postgres,
-        redis=redis,
         knowledge_store=store,
         embedding=_DeterministicEmbeddingService(),
     )
@@ -500,7 +485,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_document_request_persists_document_source_provenance(
     real_server_scope,
@@ -510,13 +494,11 @@ async def test_real_document_request_persists_document_source_provenance(
 
     scope = real_server_scope
     postgres = scope["postgres"]
-    redis = scope["redis"]
     embedding = _DeterministicEmbeddingService()
     llm = _DeterministicDocumentAgentLLM()
     store = KnowledgeStore(postgres, embedding)
     resources = SimpleNamespace(
         postgres=postgres,
-        redis=redis,
         knowledge_store=store,
         embedding=embedding,
         llm_service=llm,
@@ -651,7 +633,6 @@ async def test_real_document_request_persists_document_source_provenance(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_concurrent_sessions_accept_one_message_once(
     real_server_scope,
@@ -663,7 +644,6 @@ async def test_real_concurrent_sessions_accept_one_message_once(
     store = KnowledgeStore(scope["postgres"], _DeterministicEmbeddingService())
     resources = SimpleNamespace(
         postgres=scope["postgres"],
-        redis=scope["redis"],
         knowledge_store=store,
         embedding=_DeterministicEmbeddingService(),
     )
@@ -711,7 +691,6 @@ async def test_real_concurrent_sessions_accept_one_message_once(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_worker_processes_message_persisted_during_acceptance(
     real_server_scope,
@@ -723,7 +702,6 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
     real_store = KnowledgeStore(scope["postgres"], _DeterministicEmbeddingService())
     resources = SimpleNamespace(
         postgres=scope["postgres"],
-        redis=scope["redis"],
         knowledge_store=real_store,
         embedding=_DeterministicEmbeddingService(),
     )

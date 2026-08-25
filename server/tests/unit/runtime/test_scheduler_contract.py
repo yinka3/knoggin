@@ -271,7 +271,7 @@ async def test_stop_uses_one_deadline_then_cancels_all_jobs(monkeypatch):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_scheduler_health_snapshot_has_no_redis_lease_state(monkeypatch):
+async def test_scheduler_health_snapshot_has_no_lease_state(monkeypatch):
     scheduler = Scheduler("ada", "project-1")
     scheduler._is_running = True
     job = ControlledJob(blocker=asyncio.Event())

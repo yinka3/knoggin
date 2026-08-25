@@ -21,7 +21,7 @@ class ConfigurationError(KnogginError):
 
 
 class DependencyError(KnogginError):
-    """Raised when a required service or dependency (Redis, LLM, etc.) is unavailable."""
+    """Raised when a required service or dependency (LLM, etc.) is unavailable."""
 
     def __init__(self, message: str, details: Optional[Dict] = None):
         super().__init__(message, code="dependency_error", details=details)

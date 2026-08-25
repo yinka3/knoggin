@@ -69,7 +69,7 @@ def context(monkeypatch):
     ctx = SessionRuntime("ada", resources)
     ctx.session_id = "session-1"
     ctx.project_id = "project-1"
-    ctx.project = make_project_state("project-1", redis=resources.redis)
+    ctx.project = make_project_state("project-1")
     ctx.consumer = FakeConsumer()
     monkeypatch.setattr(
         SessionRuntime,
@@ -144,9 +144,8 @@ async def test_context_add_persists_editable_turn_and_signals_consumer(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_does_not_require_redis(context):
+async def test_context_add_uses_durable_message_acceptance(context):
     ctx, resources = context
-    resources.redis = None
 
     accepted = await ctx.add(Message(content="durable only"))
 
@@ -181,12 +180,12 @@ async def test_context_add_retries_after_durable_acceptance_write_failure(contex
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise ConnectionError("temporary Redis failure")
+            raise ConnectionError("temporary Postgres failure")
         return await original_persist(msg, acceptance_key=acceptance_key)
 
     monkeypatch.setattr(ctx, "_persist_user_turn", fail_once)
 
-    with pytest.raises(ConnectionError, match="temporary Redis failure"):
+    with pytest.raises(ConnectionError, match="temporary Postgres failure"):
         await ctx.add(Message(content="hello", timestamp=timestamp))
 
     retried = await ctx.add(Message(content="hello", timestamp=timestamp))
@@ -210,8 +209,6 @@ async def test_context_add_persists_a_durable_acceptance_key(context):
 async def test_context_assistant_turn_uses_canonical_message_sequence(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
-    resources.redis = None
-
     await ctx.add_assistant_turn("hello from assistant", timestamp)
 
     assert resources.knowledge_store.saved_message_logs == [
@@ -635,7 +632,7 @@ async def test_cancelling_one_session_run_does_not_cancel_another(context):
     other = SessionRuntime("ada", other_resources)
     other.session_id = "session-2"
     other.project_id = "project-2"
-    other.project = make_project_state("project-2", redis=other_resources.redis)
+    other.project = make_project_state("project-2")
     other.consumer = FakeConsumer()
 
     first_started = asyncio.Event()

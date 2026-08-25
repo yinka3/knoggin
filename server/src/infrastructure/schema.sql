@@ -648,8 +648,8 @@ CREATE INDEX IF NOT EXISTS conflict_evidence_refs_observation_idx
 ON public.conflict_evidence_refs(observation_id)
 WHERE observation_id IS NOT NULL;
 
--- The cursor is durable; Redis may schedule the job, but it must not determine
--- which relationship observations have already been examined.
+-- The cursor is durable and determines which relationship observations have
+-- already been examined.
 CREATE TABLE IF NOT EXISTS public.conflict_discovery_checkpoints (
     user_name TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id)

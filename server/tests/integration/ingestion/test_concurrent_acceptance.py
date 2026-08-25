@@ -43,11 +43,10 @@ def _configure_context(monkeypatch) -> None:
     )
 
 
-def _context(scope, *, postgres, redis):
+def _context(scope, *, postgres):
     store = KnowledgeStore(postgres, _DeterministicEmbeddingService())
     resources = SimpleNamespace(
         postgres=postgres,
-        redis=redis,
         knowledge_store=store,
         embedding=_DeterministicEmbeddingService(),
     )
@@ -72,7 +71,6 @@ async def _message_rows(scope):
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_concurrent_identical_submissions_are_accepted_once(
     real_server_scope, monkeypatch
@@ -82,7 +80,7 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
     _configure_context(monkeypatch)
     scope = real_server_scope
     contexts = [
-        _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+        _context(scope, postgres=scope["postgres"])
         for _ in range(8)
     ]
     timestamp = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
@@ -105,7 +103,6 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
     real_server_scope, monkeypatch
@@ -114,7 +111,7 @@ async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    context = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 1, tzinfo=timezone.utc)
     original_signal = context.consumer.signal
     calls = 0
@@ -144,7 +141,6 @@ async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_lost_acceptance_response_is_safe_to_retry(
     real_server_scope, monkeypatch
@@ -153,8 +149,8 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    first_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
-    second_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    first_runtime = _context(scope, postgres=scope["postgres"])
+    second_runtime = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 2, tzinfo=timezone.utc)
 
     first = await first_runtime.add(
@@ -173,7 +169,6 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_restart_reuses_durable_acceptance(
     real_server_scope, monkeypatch
@@ -182,13 +177,13 @@ async def test_real_restart_reuses_durable_acceptance(
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    first_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    first_runtime = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 3, tzinfo=timezone.utc)
     first = await first_runtime.add(
         Message(content="restart durable acceptance", timestamp=timestamp)
     )
 
-    restarted = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    restarted = _context(scope, postgres=scope["postgres"])
     retried = await restarted.add(
         Message(content="restart durable acceptance", timestamp=timestamp)
     )
@@ -203,7 +198,6 @@ async def test_real_restart_reuses_durable_acceptance(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_durable_acceptance_does_not_expire(
     real_server_scope, monkeypatch
@@ -212,7 +206,7 @@ async def test_real_durable_acceptance_does_not_expire(
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    context = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 4, tzinfo=timezone.utc)
     first = await context.add(Message(content="durable acceptance", timestamp=timestamp))
     retried = await context.add(
@@ -228,7 +222,6 @@ async def test_real_durable_acceptance_does_not_expire(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_same_timestamp_scopes_and_content_remain_distinct(
     real_server_scope, monkeypatch
@@ -237,7 +230,7 @@ async def test_real_same_timestamp_scopes_and_content_remain_distinct(
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    first = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    first = _context(scope, postgres=scope["postgres"])
 
     other_session = f"session-{scope['project_id']}"
     await scope["postgres"].execute(
@@ -245,7 +238,7 @@ async def test_real_same_timestamp_scopes_and_content_remain_distinct(
         (other_session, scope["user_name"], scope["project_id"]),
     )
     other_scope = {**scope, "session_id": other_session}
-    second = _context(other_scope, postgres=scope["postgres"], redis=scope["redis"])
+    second = _context(other_scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 5, tzinfo=timezone.utc)
 
     first_message, second_message, changed_message = await asyncio.gather(
