@@ -549,10 +549,11 @@ async def test_agent_turn_wires_community_context_tools_memory_and_reasoning(
         )
 
     class FakeExecutor:
-        def __init__(self, ctx, llm, tools):
+        def __init__(self, ctx, llm, tools, *, on_successful_completion=None):
             captured["ctx"] = ctx
             captured["llm"] = llm
             captured["tools"] = tools
+            captured["on_successful_completion"] = on_successful_completion
 
         async def execute(self, **kwargs):
             captured["execute_kwargs"] = kwargs

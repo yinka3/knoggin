@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import AsyncGenerator, Dict, List, Optional
@@ -100,10 +101,13 @@ class AgentExecutor:
         ctx: AgentRun,
         llm: LLMService,
         tools: Tools,
+        *,
+        on_successful_completion: Callable[[str], Awaitable[object]] | None = None,
     ):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
+        self._on_successful_completion = on_successful_completion
         install_tool_runtime(
             tools,
             ctx.tool_runtime,
@@ -274,7 +278,7 @@ class AgentExecutor:
                             needs_final_synthesis = True
                             break
 
-                        self.ctx.finalize(content)
+                        await self._finalize_successfully(content)
                         yield response
                         return
 
@@ -691,6 +695,22 @@ class AgentExecutor:
             ]
         return event
 
+    async def _finalize_successfully(self, content: str) -> None:
+        """Seal a successful run, then persist its agent's completion clock."""
+
+        self.ctx.finalize(content)
+        if self._on_successful_completion is None:
+            return
+        try:
+            await self._on_successful_completion(self.ctx.agent.config.id)
+        except Exception:
+            # The completed response remains valid even if a secondary
+            # last-turn statistic cannot be persisted right now.
+            logger.exception(
+                "AgentExecutor: failed to record successful turn for {}",
+                self.ctx.agent.config.id,
+            )
+
     async def _fallback(self) -> Dict:
         """Unified fallback when agent exhausts attempts."""
         logger.warning(
@@ -702,7 +722,7 @@ class AgentExecutor:
         if self.ctx.has_any():
             summary = await self._generate_fallback_summary()
             content = summary or "I found information but couldn't summarize it."
-            self.ctx.finalize(content)
+            await self._finalize_successfully(content)
             event = {
                 "event": "response",
                 "data": {

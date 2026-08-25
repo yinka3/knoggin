@@ -71,10 +71,11 @@ class FakeTools:
 class FakeExecutor:
     instances = []
 
-    def __init__(self, ctx, llm, tools):
+    def __init__(self, ctx, llm, tools, *, on_successful_completion=None):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
+        self.on_successful_completion = on_successful_completion
         self.execute_kwargs = None
         self.__class__.instances.append(self)
 

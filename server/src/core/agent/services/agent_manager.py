@@ -392,6 +392,19 @@ class AgentManager:
         )
         return await self.get_agent(agent_id)
 
+    async def mark_turn_completed(self, agent_id: str) -> bool:
+        """Persist one agent's most recent successful execution timestamp."""
+
+        updated = await self.pg.execute(
+            """
+            UPDATE public.agents
+            SET last_turn_at = NOW(), updated_at = NOW()
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {"user_name": self.user_name, "agent_id": agent_id},
+        )
+        return bool(updated)
+
     async def delete_agent(self, agent_id: str) -> bool:
         """Delete an agent. Returns False if not found or is default."""
         config = await self.get_agent(agent_id)

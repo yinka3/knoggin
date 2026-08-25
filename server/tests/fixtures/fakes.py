@@ -973,6 +973,8 @@ class FakePostgresClient:
                 row["brain_revision"] += 1
             if "set is_default = true" in normalized:
                 row["is_default"] = True
+            if "last_turn_at = now()" in normalized:
+                row["last_turn_at"] = self._now()
             return
 
         if "delete from public.agents" in normalized:

@@ -172,7 +172,12 @@ class AgentOrchestrator:
             )
 
             # Execution via AgentExecutor
-            executor = AgentExecutor(run, context.llm, tools)
+            executor = AgentExecutor(
+                run,
+                context.llm,
+                tools,
+                on_successful_completion=self._agent_manager.mark_turn_completed,
+            )
 
             async for event in executor.execute(
                 user_timezone=user_timezone,

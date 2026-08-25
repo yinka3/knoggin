@@ -83,6 +83,16 @@ async def test_agent_manager_keeps_aac_participation_user_owned_and_opt_in(manag
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_agent_manager_records_completed_turn_timestamp(manager):
+    agent_manager, resources = manager
+    created = await agent_manager.create_agent("Researcher", "Careful")
+
+    assert await agent_manager.mark_turn_completed(created.id) is True
+    assert resources.postgres.agents[created.id]["last_turn_at"] is not None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 def test_agent_config_derives_specialist_status_from_parent():
     specialist = AgentConfig(
         id="specialist-1",

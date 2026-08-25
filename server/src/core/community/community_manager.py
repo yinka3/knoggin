@@ -530,6 +530,7 @@ class CommunityManager:
             ctx=run,
             llm=self.resources.llm_service,
             tools=comm_tools,
+            on_successful_completion=self._mark_turn_completed,
         )
 
         full_response: str = ""
@@ -564,6 +565,10 @@ class CommunityManager:
             await comm_tools.close()
 
         return full_response.strip() if full_response else None
+
+    async def _mark_turn_completed(self, agent_id: str) -> bool:
+        manager = AgentManager(self.resources, self.user_name)
+        return await manager.mark_turn_completed(agent_id)
 
     def _resolve_agent_tools(self, agent: AgentConfig) -> tuple[List[str], List[Dict]]:
         if agent.enabled_tools is None:

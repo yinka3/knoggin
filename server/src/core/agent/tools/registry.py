@@ -249,6 +249,7 @@ class ToolPermissions:
     user_name: str
     agent_id: str
     project_id: str
+    audit_project_id: str | None
     session_id: str
     run_id: str
     allowed_tools: frozenset[str]
@@ -278,6 +279,7 @@ def build_tool_runtime(
     user_name: str,
     agent_id: str,
     project_id: str,
+    audit_project_id: str | None,
     session_id: str,
     run_id: str,
 ) -> ToolRuntime:
@@ -292,6 +294,7 @@ def build_tool_runtime(
         user_name=user_name,
         agent_id=agent_id,
         project_id=project_id,
+        audit_project_id=audit_project_id,
         session_id=session_id,
         run_id=run_id,
         allowed_tools=frozenset(schema_map),

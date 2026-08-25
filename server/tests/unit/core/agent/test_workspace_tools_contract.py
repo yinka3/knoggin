@@ -140,6 +140,7 @@ async def test_workspace_writes_require_authorization_and_are_audited():
         user_name="user",
         agent_id="agent",
         project_id="project",
+        audit_project_id="project",
         session_id="session",
         run_id="run",
         allowed_tools=frozenset({"create_workspace_file"}),

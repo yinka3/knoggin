@@ -1242,7 +1242,7 @@ CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     audit_id UUID PRIMARY KEY,
     user_name TEXT NOT NULL,
     agent_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
+    project_id TEXT,
     session_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     tool_name TEXT NOT NULL,
@@ -1277,6 +1277,17 @@ ON public.agent_tool_audits(
 
 CREATE INDEX IF NOT EXISTS agent_tool_audits_run_idx
 ON public.agent_tool_audits(run_id, created_at);
+
+-- AAC has user-level execution ownership. Its audited local writes must not
+-- pretend to belong to a project or disappear when any project is deleted.
+ALTER TABLE public.agent_tool_audits
+    DROP CONSTRAINT IF EXISTS agent_tool_audits_project_fk;
+ALTER TABLE public.agent_tool_audits
+    ALTER COLUMN project_id DROP NOT NULL;
+ALTER TABLE public.agent_tool_audits
+    ADD CONSTRAINT agent_tool_audits_project_fk
+    FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+    ON DELETE CASCADE;
 
 ALTER TABLE public.agent_tool_audits
     DROP CONSTRAINT IF EXISTS agent_tool_audits_capability_check;
