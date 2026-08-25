@@ -9,12 +9,20 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 from loguru import logger
 
 from common.schema.document import (
+    DocumentSelection,
     FolderPreview,
     FolderScanSettings,
     FolderUploadEntry,
     WorkspaceSyncChanges,
 )
 from common.schema.health import sanitize_health_details
+from common.schema.source.locators import (
+    CodeLineLocator,
+    CsvRowLocator,
+    DocxParagraphLocator,
+    PdfPageLocator,
+    TextLineLocator,
+)
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
@@ -29,6 +37,7 @@ from .constants import (
     HYBRID_SEARCH_CANDIDATE_MULTIPLIER,
     HYBRID_SEARCH_MAX_CANDIDATES,
     HYBRID_SEARCH_MIN_CANDIDATES,
+    IMAGE_EXTENSIONS,
     INLINE_INDEX_MAX_BYTES,
     MAX_DOCUMENT_SIZE,
     MAX_READ_CHARACTERS,
@@ -46,6 +55,7 @@ from .storage import (
     extract_docx_paragraphs,
     extract_pdf_pages,
     extract_text,
+    is_code_extension,
 )
 
 BlockingRunner = Callable[..., Awaitable[Any]]
@@ -202,6 +212,27 @@ class DocumentService:
                 metadata[key] = value.isoformat()
         metadata.setdefault("chunk_count", 0)
         return metadata
+
+    async def _get_visible_document(
+        self,
+        *,
+        session_id: Optional[str],
+        document_id: Optional[str],
+        relative_path: Optional[str],
+    ) -> Dict:
+        """Resolve exactly one non-deleted document visible to this session."""
+        rows = await self._reader.fetch_documents_by_reference(
+            document_id=document_id,
+            relative_path=relative_path,
+            session_id=session_id,
+        )
+        if not rows:
+            raise FileNotFoundError("Document not found")
+        if relative_path is not None and len(rows) > 1:
+            raise ValueError(
+                "Multiple visible uploads use this relative_path; use document_id"
+            )
+        return rows[0]
 
     @staticmethod
     def _public_folder_metadata(row: Dict) -> Dict:
@@ -539,19 +570,12 @@ class DocumentService:
         relative_path: Optional[str] = None,
     ) -> Dict:
         """Return metadata for one visible document."""
-        rows = await self._reader.fetch_documents_by_reference(
+        document = await self._get_visible_document(
             document_id=document_id,
             relative_path=relative_path,
             session_id=session_id,
         )
-        if not rows:
-            raise FileNotFoundError("Document not found")
-        if relative_path is not None and len(rows) > 1:
-            raise ValueError(
-                "Multiple visible uploads use this relative_path; "
-                "use document_id"
-            )
-        return self._public_metadata(rows[0])
+        return self._public_metadata(document)
 
     async def read_document(
         self,
@@ -587,20 +611,11 @@ class DocumentService:
         ):
             raise ValueError("page_number must be a positive integer")
 
-        rows = await self._reader.fetch_documents_by_reference(
+        document_metadata = await self._get_visible_document(
             document_id=document_id,
             relative_path=relative_path,
             session_id=session_id,
         )
-        if not rows:
-            raise FileNotFoundError("Document not found")
-        if relative_path is not None and len(rows) > 1:
-            raise ValueError(
-                "Multiple visible uploads use this relative_path; "
-                "use document_id"
-            )
-
-        document_metadata = rows[0]
         extension = document_metadata["extension"].lower()
         selected_page = None
         docx_paragraphs = None
@@ -727,6 +742,124 @@ class DocumentService:
         if selected_page is not None:
             result["page_number"] = selected_page
         return result
+
+    async def resolve_document_selection(
+        self,
+        *,
+        document_id: str,
+        selection: DocumentSelection,
+        session_id: Optional[str] = None,
+    ) -> Dict:
+        """Resolve a current, bounded passage selected from one document.
+
+        The browser provides only a version hash and coordinate. This boundary
+        checks both against the visible durable document and returns server-read
+        content plus a canonical locator, never client-supplied display metadata.
+        """
+        document = await self._get_visible_document(
+            document_id=document_id,
+            relative_path=None,
+            session_id=session_id,
+        )
+        if selection.content_hash != document["content_hash"]:
+            raise ValueError(
+                "Document selection is stale; refresh the document and select again"
+            )
+
+        extension = str(document["extension"]).lower()
+        locator = selection.locator
+        if isinstance(locator, PdfPageLocator):
+            if extension != ".pdf":
+                raise ValueError("PDF page selections require a PDF document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                session_id=session_id,
+                page_number=locator.page,
+            )
+            if result["end_line"] != result["total_lines"]:
+                raise ValueError("Selected PDF page exceeds the readable passage limit")
+            canonical_locator = {"kind": "pdf_page", "page": locator.page}
+        elif isinstance(locator, DocxParagraphLocator):
+            if extension != ".docx":
+                raise ValueError("DOCX paragraph selections require a DOCX document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                session_id=session_id,
+                start_line=locator.start_paragraph,
+                end_line=locator.end_paragraph,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_paragraph,
+                end=locator.end_paragraph,
+            )
+            canonical_locator = dict(result["locator"])
+        elif isinstance(locator, CsvRowLocator):
+            if extension != ".csv":
+                raise ValueError("CSV row selections require a CSV document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                session_id=session_id,
+                start_line=locator.start_row,
+                end_line=locator.end_row,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_row,
+                end=locator.end_row,
+            )
+            canonical_locator = dict(result["locator"])
+        elif isinstance(locator, CodeLineLocator):
+            if not is_code_extension(extension):
+                raise ValueError("Code line selections require a source-code document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                session_id=session_id,
+                start_line=locator.start_line,
+                end_line=locator.end_line,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_line,
+                end=locator.end_line,
+            )
+            canonical_locator = {
+                "kind": "code_lines",
+                "start_line": result["start_line"],
+                "end_line": result["end_line"],
+            }
+        elif isinstance(locator, TextLineLocator):
+            if extension in {".pdf", ".docx", ".csv", ".ipynb", *IMAGE_EXTENSIONS}:
+                raise ValueError(
+                    "Text line selections are unsupported for this document format"
+                )
+            if is_code_extension(extension):
+                raise ValueError("Source-code documents require a code line selection")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                session_id=session_id,
+                start_line=locator.start_line,
+                end_line=locator.end_line,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_line,
+                end=locator.end_line,
+            )
+            canonical_locator = dict(result["locator"])
+        else:  # pragma: no cover - DocumentSelection validates the union.
+            raise ValueError("Unsupported document selection locator")
+
+        if len(result["content"]) >= MAX_READ_CHARACTERS:
+            raise ValueError("Selected passage exceeds the readable character limit")
+        result["locator"] = canonical_locator
+        return result
+
+    @staticmethod
+    def _require_exact_selection_range(result: Dict, *, start: int, end: int) -> None:
+        """Reject a requested range that had to be shortened during reading."""
+        if result["start_line"] != start or result["end_line"] != end:
+            raise ValueError("Selected passage is outside the current document range")
 
     async def delete_document(
         self,
@@ -1098,8 +1231,6 @@ class DocumentService:
                 "target_type": "document",
                 "document_id": document["document_id"],
                 "relative_path": document["relative_path"],
-                "folder_root_id": document.get("folder_root_id"),
-                "path_prefix": None,
             }
 
         if folder_root_id is None:
@@ -1127,17 +1258,12 @@ class DocumentService:
                 raise FileNotFoundError("Document focus target not found")
             return {
                 "target_type": "subtree",
-                "document_id": None,
-                "relative_path": None,
                 "folder_root_id": folder_root_id,
                 "path_prefix": normalized_prefix,
             }
         return {
             "target_type": "folder_upload",
-            "document_id": None,
-            "relative_path": None,
             "folder_root_id": folder_root_id,
-            "path_prefix": None,
         }
 
     @staticmethod

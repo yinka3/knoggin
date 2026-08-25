@@ -230,6 +230,11 @@ def is_accepted_extension(extension: str) -> bool:
     return extension.lower() in ACCEPTED_EXTENSIONS
 
 
+def is_code_extension(extension: str) -> bool:
+    """Return whether the extension is rendered as source code."""
+    return extension.lower() in _CODE_LANGUAGES
+
+
 def extract_text(content: bytes, extension: str) -> str:
     ext = extension.lower()
 

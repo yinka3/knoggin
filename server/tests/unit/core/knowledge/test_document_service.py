@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 
 from common.schema.document import (
+    DocumentSelection,
     FolderScanSettings,
     FolderUploadEntry,
     WorkspaceSyncChanges,
@@ -2168,6 +2169,75 @@ async def test_read_document_returns_bounded_numbered_lines(document_harness):
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_document_selection_resolves_current_server_canonical_code_passage(
+    document_harness,
+):
+    service, _ = document_harness
+    uploaded = await service.add_document(
+        content=b"one\ndef useful():\n    return 42\n",
+        original_name="notes.py",
+    )
+
+    selection = await service.resolve_document_selection(
+        document_id=uploaded["document_id"],
+        selection=DocumentSelection(
+            content_hash=uploaded["content_hash"],
+            locator={
+                "kind": "code_lines",
+                "start_line": 2,
+                "end_line": 3,
+                "symbol_name": "client-must-not-control-this",
+            },
+        ),
+    )
+
+    assert selection["content"] == "2: def useful():\n3:     return 42"
+    assert selection["locator"] == {
+        "kind": "code_lines",
+        "start_line": 2,
+        "end_line": 3,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_selection_rejects_stale_or_incompatible_coordinates(
+    document_harness,
+):
+    service, _ = document_harness
+    uploaded = await service.add_document(
+        content=b"first\nsecond\nthird",
+        original_name="notes.txt",
+    )
+
+    with pytest.raises(ValueError, match="stale"):
+        await service.resolve_document_selection(
+            document_id=uploaded["document_id"],
+            selection=DocumentSelection(
+                content_hash="a" * 64,
+                locator={"kind": "text_lines", "start_line": 1, "end_line": 1},
+            ),
+        )
+    with pytest.raises(ValueError, match="Code line selections"):
+        await service.resolve_document_selection(
+            document_id=uploaded["document_id"],
+            selection=DocumentSelection(
+                content_hash=uploaded["content_hash"],
+                locator={"kind": "code_lines", "start_line": 1, "end_line": 1},
+            ),
+        )
+    with pytest.raises(ValueError, match="outside the current document range"):
+        await service.resolve_document_selection(
+            document_id=uploaded["document_id"],
+            selection=DocumentSelection(
+                content_hash=uploaded["content_hash"],
+                locator={"kind": "text_lines", "start_line": 2, "end_line": 4},
+            ),
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_read_document_uses_persisted_extracted_text_after_index(
     monkeypatch,
     document_harness,
@@ -2874,6 +2944,57 @@ async def test_read_document_keeps_pdf_line_ranges_page_local(
     assert result["locator"] == {"kind": "pdf_page", "page": 2}
     assert result["start_line"] == result["end_line"] == 2
     assert result["content"] == "2: Second page last"
+    selection = await service.resolve_document_selection(
+        document_id=uploaded["document_id"],
+        selection=DocumentSelection(
+            content_hash=uploaded["content_hash"],
+            locator={"kind": "pdf_page", "page": 2},
+        ),
+    )
+    assert selection["locator"] == {"kind": "pdf_page", "page": 2}
+    assert selection["content"] == "1: Second page first\n2: Second page last"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_selection_derives_docx_heading_path(
+    monkeypatch,
+    document_harness,
+):
+    from types import SimpleNamespace
+
+    paragraphs = [
+        SimpleNamespace(text="Overview", style=SimpleNamespace(name="Heading 1")),
+        SimpleNamespace(text="Current selection", style=SimpleNamespace(name="Normal")),
+    ]
+    monkeypatch.setattr(
+        storage_module,
+        "DocxDocument",
+        lambda _: SimpleNamespace(paragraphs=paragraphs),
+    )
+    service, _ = document_harness
+    uploaded = await service.add_document(content=b"docx", original_name="notes.docx")
+
+    selection = await service.resolve_document_selection(
+        document_id=uploaded["document_id"],
+        selection=DocumentSelection(
+            content_hash=uploaded["content_hash"],
+            locator={
+                "kind": "docx_paragraphs",
+                "start_paragraph": 2,
+                "end_paragraph": 2,
+                "heading_path": ["client-must-not-control-this"],
+            },
+        ),
+    )
+
+    assert selection["content"] == "2: Current selection"
+    assert selection["locator"] == {
+        "kind": "docx_paragraphs",
+        "start_paragraph": 2,
+        "end_paragraph": 2,
+        "heading_path": ["Overview"],
+    }
 
 
 @pytest.mark.storage
@@ -2900,6 +3021,19 @@ async def test_read_document_reports_csv_data_rows_not_physical_file_lines(
     }
     assert result["chunk_index"] == "rows:2-2"
     assert result["content"] == "2: beta,2"
+    selection = await service.resolve_document_selection(
+        document_id=uploaded["document_id"],
+        selection=DocumentSelection(
+            content_hash=uploaded["content_hash"],
+            locator={"kind": "csv_rows", "start_row": 1, "end_row": 2},
+        ),
+    )
+    assert selection["locator"] == {
+        "kind": "csv_rows",
+        "start_row": 1,
+        "end_row": 2,
+    }
+    assert selection["content"] == "1: alpha,1\n2: beta,2"
 
 
 @pytest.mark.storage
@@ -3473,12 +3607,13 @@ async def test_folder_reads_enforce_visibility_and_build_tree(
     )
     assert subtree_focus == {
         "target_type": "subtree",
-        "document_id": None,
-        "relative_path": None,
         "folder_root_id": folder_root_id,
         "path_prefix": "src",
     }
-    assert batch_focus["target_type"] == "folder_upload"
+    assert batch_focus == {
+        "target_type": "folder_upload",
+        "folder_root_id": folder_root_id,
+    }
     with pytest.raises(FileNotFoundError):
         await project_one.resolve_focus_target(
             folder_root_id=folder_root_id,
@@ -3494,6 +3629,15 @@ async def test_folder_reads_enforce_visibility_and_build_tree(
     assert {item["relative_path"] for item in documents} == {
         "src/app.py",
         "src/lib/util.py",
+    }
+    exact_focus = await project_one.resolve_focus_target(
+        document_id=documents[0]["document_id"],
+        session_id="session-1",
+    )
+    assert exact_focus == {
+        "target_type": "document",
+        "document_id": documents[0]["document_id"],
+        "relative_path": documents[0]["relative_path"],
     }
 
 
