@@ -164,7 +164,14 @@ class RelationshipExtractor:
         )
         user_03 = format_vp02_input(
             candidates,
-            [{"id": m["id"], "text": m["message"]} for m in messages],
+            [
+                {
+                    "id": m["id"],
+                    "text": m["message"],
+                    "role": m.get("role"),
+                }
+                for m in messages
+            ],
             session_text,
             user_name=self.user_name,
             message_local_ids=message_local_ids,

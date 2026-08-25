@@ -263,6 +263,29 @@ async def test_extract_connections_resolves_local_msg_id_to_real_message_id():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_extract_connections_preserves_message_roles_in_prompt():
+    processor, entities = make_processor()
+    await seed_connection_entities(entities)
+    messages = [
+        {"id": 41, "message": "Ada met Alice.", "role": "user"},
+        {"id": 99, "message": "Alice joined the project.", "role": "assistant"},
+    ]
+
+    await extract(
+        processor,
+        entity_msg_map={101: [41], 102: [41], 103: [41]},
+        messages=messages,
+        trace=ExtractionTrace(),
+        issues=[],
+    )
+
+    prompt = processor.llm.calls[0]["user"]
+    assert '[MSG m1] [USER]: "Ada met Alice."' in prompt
+    assert '[MSG m2] [AGENT]: "Alice joined the project."' in prompt
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_extract_connections_accepts_known_alias_names_from_llm():
     response = RelationshipExtraction(
         connections=[relationship(entity_b=" Bob ")],
