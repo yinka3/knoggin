@@ -110,6 +110,10 @@ class AgentOrchestrator:
                 context,
                 request_document_focus or context.document_focus,
             )
+            document_selection_context = await self._resolve_document_selection_context(
+                context,
+                effective_document_focus,
+            )
             tools = await self._bootstrap_services(
                 context,
                 agent_cfg.id if agent_cfg else None,
@@ -163,6 +167,7 @@ class AgentOrchestrator:
                 hot_topic_context=hot_topic_context,
                 history=conversation_history or [],
                 document_focus=effective_document_focus,
+                document_selection_context=document_selection_context,
                 initial_source_candidates=(
                     build_pasted_text_candidates(
                         project_id=context.project_id or "",
@@ -304,3 +309,34 @@ class AgentOrchestrator:
                 f"{context.session_id}: {exc}"
             )
             return None
+
+    async def _resolve_document_selection_context(
+        self,
+        context: SessionRuntime,
+        focus: Optional[DocumentFocus],
+    ) -> Optional[Dict]:
+        """Read the request-selected passage for prompt context.
+
+        The focus model carries only versioned identity and coordinates. The
+        excerpt is loaded from the document service for this run and is never
+        accepted from the public request.
+        """
+        if (
+            focus is None
+            or focus.target_type != "document"
+            or focus.selection is None
+            or context.document_service is None
+        ):
+            return None
+        result = await context.document_service.resolve_document_selection(
+            document_id=focus.document_id,
+            selection=focus.selection,
+            session_id=context.session_id,
+        )
+        return {
+            "document_id": result["document_id"],
+            "relative_path": result["relative_path"],
+            "content_hash": result["content_hash"],
+            "locator": result["locator"],
+            "excerpt": result["content"],
+        }

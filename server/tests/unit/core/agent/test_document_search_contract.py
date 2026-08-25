@@ -710,6 +710,43 @@ async def test_read_document_adds_source_context_from_the_returned_read_range():
 
 
 @pytest.mark.no_network
+async def test_request_document_selection_defaults_reads_to_the_selected_range():
+    tools = SearchTools()
+    tools.document_service = ReadOnlyDocumentService()
+    tools.session_id = "session-1"
+    tools.document_focus = {
+        "mode": "request",
+        "target_type": "document",
+        "document_id": "file-1",
+        "relative_path": "docs/notes.md",
+        "selection": {
+            "content_hash": "a" * 64,
+            "locator": {
+                "kind": "text_lines",
+                "start_line": 3,
+                "end_line": 4,
+            },
+        },
+    }
+
+    await tools.read_document()
+
+    assert tools.document_service.calls == [
+        ("read_document", "session-1", "file-1", None, 3, 4)
+    ]
+
+    await tools.read_document(start_line=8, end_line=9)
+    assert tools.document_service.calls[-1] == (
+        "read_document",
+        "session-1",
+        "file-1",
+        None,
+        8,
+        9,
+    )
+
+
+@pytest.mark.no_network
 async def test_search_documents_adds_docx_paragraph_source_context():
     content_hash = "d" * 64
     stored_chunk = {

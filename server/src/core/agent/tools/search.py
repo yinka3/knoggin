@@ -418,6 +418,46 @@ class SearchTools:
             return self.document_focus["document_id"]
         return None
 
+    def _request_selection_defaults(
+        self,
+        *,
+        page_number: int | None,
+        start_line: int,
+        end_line: int | None,
+    ) -> tuple[int | None, int, int | None]:
+        """Use a request selection only when the tool supplied no range."""
+        selection = (
+            self.document_focus.get("selection")
+            if self.document_focus
+            and self.document_focus.get("mode") == "request"
+            and self.document_focus.get("target_type") == "document"
+            else None
+        )
+        if (
+            not isinstance(selection, dict)
+            or page_number is not None
+            or start_line != 1
+            or end_line is not None
+        ):
+            return page_number, start_line, end_line
+        locator = selection.get("locator")
+        if not isinstance(locator, dict):
+            return page_number, start_line, end_line
+        kind = locator.get("kind")
+        if kind == "pdf_page":
+            return locator.get("page"), start_line, end_line
+        if kind in {"text_lines", "code_lines"}:
+            return page_number, locator.get("start_line", 1), locator.get("end_line")
+        if kind == "csv_rows":
+            return page_number, locator.get("start_row", 1), locator.get("end_row")
+        if kind == "docx_paragraphs":
+            return (
+                page_number,
+                locator.get("start_paragraph", 1),
+                locator.get("end_paragraph"),
+            )
+        return page_number, start_line, end_line
+
     @classmethod
     def _with_search_source_contexts(
         cls,
@@ -795,6 +835,11 @@ class SearchTools:
             and self.document_focus["target_type"] == "document"
         ):
             document_id = self.document_focus["document_id"]
+        page_number, start_line, end_line = self._request_selection_defaults(
+            page_number=page_number,
+            start_line=start_line,
+            end_line=end_line,
+        )
         read_kwargs = {
             "session_id": self.session_id,
             "document_id": document_id,

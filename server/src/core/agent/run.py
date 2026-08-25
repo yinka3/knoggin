@@ -137,6 +137,7 @@ class AgentRun:
     )
     history: List[Dict] = field(default_factory=list)
     document_focus: Optional[DocumentFocus] = None
+    document_selection_context: Optional[Dict[str, Any]] = None
     hot_topics: List[str] = field(default_factory=list)
     active_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)

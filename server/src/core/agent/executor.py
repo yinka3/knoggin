@@ -163,7 +163,8 @@ class AgentExecutor:
             if manifest:
                 documents_context = format_documents_context(manifest)
         document_focus_context = format_document_focus_context(
-            getattr(self.tools, "document_focus", None)
+            getattr(self.tools, "document_focus", None),
+            getattr(self.ctx, "document_selection_context", None),
         )
         project_context = await self._load_project_context()
 

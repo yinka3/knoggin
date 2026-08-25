@@ -562,6 +562,19 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
                 "relative_path": "docs/notes.py",
             }
 
+        async def resolve_document_selection(self, **kwargs):
+            return {
+                "document_id": "document-1",
+                "relative_path": "docs/notes.py",
+                "content_hash": "a" * 64,
+                "locator": {
+                    "kind": "code_lines",
+                    "start_line": 2,
+                    "end_line": 3,
+                },
+                "content": "2: def useful():\n3:     return 42",
+            }
+
     context.document_service = FocusDocumentService()
     focus = {
         "mode": "request",
@@ -581,6 +594,17 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
     assert loaded.mode == "request"
     assert loaded.selection is not None
     assert loaded.selection.locator.kind == "code_lines"
+    selection_context = await make_orchestrator(context)._resolve_document_selection_context(
+        context,
+        loaded,
+    )
+    assert selection_context == {
+        "document_id": "document-1",
+        "relative_path": "docs/notes.py",
+        "content_hash": "a" * 64,
+        "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
+        "excerpt": "2: def useful():\n3:     return 42",
+    }
 
 
 @pytest.mark.runtime
