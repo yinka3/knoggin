@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
+from common.schema.agent.research import ResearchMode, resolve_research_profile
 from common.schema.agent.stream import (
     AgentExecutionEvent,
     validate_agent_execution_event,
@@ -60,6 +61,7 @@ class AgentOrchestrator:
         user_message_id: Optional[int] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
         request_document_focus: Optional[DocumentFocus] = None,
+        research_mode: ResearchMode = "normal",
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """
         Main entry point for agent execution. Uses modular helpers for initialization.
@@ -74,7 +76,10 @@ class AgentOrchestrator:
             # Configuration
             config = self._config_provider.get().config
             limits = config.developer_settings.limits
-            run_limits = AgentRunLimits.from_settings(limits)
+            research_profile = resolve_research_profile(research_mode)
+            run_limits = AgentRunLimits.from_settings(limits).for_research_profile(
+                research_profile
+            )
 
             # Identity & Persona
             identity = await self._resolve_agent_identity(
@@ -146,6 +151,7 @@ class AgentOrchestrator:
                 run_id=run_id,
                 agent=identity,
                 limits=run_limits,
+                research_profile=research_profile,
                 model=effective_model,
                 temperature=effective_temperature,
                 brain=effective_brain,

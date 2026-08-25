@@ -18,6 +18,7 @@ _TOOL_SOURCE_ENCOUNTERS = {
     "read_document": "document_read",
     "web_search": "web_search",
     "news_search": "news_search",
+    "read_web_page": "web_read",
 }
 
 

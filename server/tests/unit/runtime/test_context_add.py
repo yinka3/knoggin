@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import fetch_conversation_turns
@@ -27,7 +28,7 @@ def _pasted_source_candidate():
     )
 
 
-def _response_event(content, *, sources_consulted=None):
+def _response_event(content, *, sources_consulted=None, artifact=None):
     data = {
         "content": content,
         "usage": {
@@ -39,6 +40,8 @@ def _response_event(content, *, sources_consulted=None):
     }
     if sources_consulted:
         data["sources_consulted"] = sources_consulted
+    if artifact is not None:
+        data["artifact"] = artifact
     return {"event": "response", "data": data}
 
 
@@ -164,6 +167,24 @@ async def test_context_add_deduplicates_same_message_timestamp_and_session(conte
 
     assert first.id == 1
     assert second.id == 1
+    assert ctx.consumer.signaled == 2
+    assert len(resources.knowledge_store.saved_message_logs) == 1
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_accept_message_reports_durable_idempotency_without_running_agent(context):
+    ctx, resources = context
+
+    first, first_created = await ctx.accept_message(
+        Message(content="hello", metadata={"idempotency_key": "request-1"})
+    )
+    duplicate, duplicate_created = await ctx.accept_message(
+        Message(content="hello", metadata={"idempotency_key": "request-1"})
+    )
+
+    assert (first.id, first_created) == (duplicate.id, True)
+    assert duplicate_created is False
     assert ctx.consumer.signaled == 2
     assert len(resources.knowledge_store.saved_message_logs) == 1
 
@@ -448,6 +469,68 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         "queued_message_ids": [],
         "queue_paused": False,
     }
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_agent_stream_persists_artifact_with_assistant_completion(context):
+    ctx, resources = context
+    artifact = ArtifactDraft(
+        kind="general",
+        title="Reusable note",
+        blocks=(MarkdownArtifactBlock(content="Keep this."),),
+    )
+    handoffs = []
+
+    async def persist_assistant(
+        message, candidates, *, readable_project_ids, artifact=None
+    ):
+        handoffs.append(
+            (message, candidates, readable_project_ids, artifact)
+        )
+        resources.knowledge_store.saved_message_logs.append([message])
+        return []
+
+    async def handler(_kwargs):
+        yield _response_event(
+            "Answer",
+            artifact=artifact.model_dump(mode="json"),
+        )
+
+    resources.knowledge_store.save_assistant_message_with_source_refs = (
+        persist_assistant
+    )
+    events = await _collect_turn(
+        ctx,
+        Message(content="Save this"),
+        _FakeTurnOrchestrator(handler),
+    )
+
+    assert [event["event"] for event in events] == ["response"]
+    assert handoffs[0][1:] == ([], ["project-1"], artifact)
+    assert events[0]["data"]["artifact"]["title"] == "Reusable note"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_agent_stream_forwards_selected_research_mode(context):
+    ctx, _ = context
+
+    async def handler(_kwargs):
+        yield _response_event("Answer")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    events = [
+        event
+        async for event in ctx.run_agent_stream(
+            Message(content="Investigate this"),
+            orchestrator=orchestrator,
+            research_mode="deep_research",
+        )
+    ]
+
+    assert [event["event"] for event in events] == ["response"]
+    assert orchestrator.calls[0]["research_mode"] == "deep_research"
 
 
 @pytest.mark.runtime

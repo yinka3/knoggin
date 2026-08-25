@@ -18,6 +18,7 @@ from common.schema.episode.generation import (
 )
 from common.schema.ingestion.contracts import IngestionCommit
 from common.schema.primitives import Message
+from common.schema.public import StartRunRequest, validate_public_stream
 from common.schema.settings import (
     EpisodeSettings,
     IngestionSettings,
@@ -37,6 +38,7 @@ from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
 from infrastructure.postgres_client import PostgresClient
+from runtime.api_port import ApplicationRuntimePort
 from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
 from tests.fixtures.ingestion import ingestion_policy
@@ -167,6 +169,19 @@ class _StaticAgentManager:
 
     async def mark_turn_completed(self, agent_id: str) -> bool:
         return agent_id == self._config.id
+
+
+class _StaticSessionManager:
+    """Expose one real session through the public runtime-port boundary."""
+
+    def __init__(self, session: Session):
+        self.user_name = session.user_name
+        self._session = session
+
+    async def get_or_resume_session(self, session_id: str) -> Session | None:
+        if session_id == self._session.session_id:
+            return self._session
+        return None
 
 
 class _NoEntityProcessor:
@@ -579,26 +594,48 @@ async def test_real_document_request_persists_document_source_provenance(
         _StaticAgentManager(agent),
         config_provider=ConfigManager,
     )
+    context.agent_orchestrator = orchestrator
+    application = ApplicationRuntimePort(
+        SimpleNamespace(
+            sessions=_StaticSessionManager(context),
+            resources=resources,
+        )
+    )
 
     events = [
         event
-        async for event in context.run_agent_stream(
-            Message(
-                content="What is the violet launch phrase?",
-                timestamp=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
+        async for event in application.run_stream(
+            user_name=scope["user_name"],
+            request=StartRunRequest(
+                session_id=scope["session_id"],
+                query="What is the violet launch phrase?",
+                enabled_tools=["search_documents"],
             ),
-            orchestrator=orchestrator,
-            enabled_tools=["search_documents"],
         )
     ]
 
-    assert not [event for event in events if event["event"] == "error"]
-    response = next(event for event in events if event["event"] == "response")
-    assert any(event["event"] == "tool_end" for event in events)
-    assert len(response["data"]["source_ref_ids"]) == 1
+    public_events = validate_public_stream(events, require_terminal=True)
+    assert public_events[-1].type == "run.completed"
+    assert not [event for event in public_events if event.type == "run.failed"]
+    assert any(
+        event.type == "tool.completed"
+        and event.tool_name == "search_documents"
+        and event.succeeded
+        for event in public_events
+    )
+    source_events = [
+        event for event in public_events if event.type == "source.added"
+    ]
+    assert len(source_events) == 1
+    assert source_events[0].source.document_id == document["document_id"]
+
+    response = public_events[-1]
+    assert response.type == "run.completed"
+    assert len(response.result.source_ref_ids) == 1
+    assert response.result.sources == (source_events[0].source,)
 
     answer = await store.get_assistant_message_with_sources(
-        response["data"]["assistant_message_id"],
+        response.result.assistant_message_id,
         user_name=scope["user_name"],
         project_id=scope["project_id"],
         session_id=scope["session_id"],
@@ -609,7 +646,15 @@ async def test_real_document_request_persists_document_source_provenance(
     assert source.source_kind == "text_document"
     assert source.document_id == document["document_id"]
     assert source.source_project_id == scope["project_id"]
-    assert source.contributing_message_id == response["data"]["assistant_message_id"]
+    assert source.excerpt == "The violet launch phrase is durable and documented."
+    assert source.locator.model_dump() == {
+        "kind": "text_lines",
+        "start_line": 1,
+        "end_line": 1,
+        "section_path": None,
+    }
+    assert source.source_status == "available"
+    assert source.contributing_message_id == response.result.assistant_message_id
 
     source_row = await postgres.fetch_one(
         """
@@ -618,7 +663,7 @@ async def test_real_document_request_persists_document_source_provenance(
         FROM message_source_refs
         WHERE source_ref_id = %s
         """,
-        (response["data"]["source_ref_ids"][0],),
+        (response.result.source_ref_ids[0],),
     )
     assert source_row == {
         "project_id": scope["project_id"],

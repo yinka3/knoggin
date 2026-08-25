@@ -5,6 +5,12 @@ import pytest
 
 from api.app import create_app
 from common.exceptions import StorageReadError
+from common.schema.artifacts import (
+    ArtifactDraft,
+    MarkdownArtifactBlock,
+    artifact_content_hash,
+    render_artifact_markdown,
+)
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
@@ -17,10 +23,45 @@ from common.schema.public import (
 )
 
 
+def _artifact_payloads():
+    draft = ArtifactDraft(
+        kind="research_brief",
+        title="Research brief",
+        blocks=(MarkdownArtifactBlock(content="Finding"),),
+    )
+    markdown = render_artifact_markdown(draft)
+    reference = {
+        "artifact_id": "11111111-1111-1111-1111-111111111111",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "originating_message_id": 42,
+        "kind": "research_brief",
+        "title": "Research brief",
+        "status": "complete",
+        "current_revision": 1,
+        "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+    }
+    revision = {
+        "artifact_id": reference["artifact_id"],
+        "revision": 1,
+        "schema_version": 1,
+        "kind": "research_brief",
+        "title": "Research brief",
+        "blocks": draft.model_dump(mode="json")["blocks"],
+        "status": "complete",
+        "markdown": markdown,
+        "content_hash": artifact_content_hash(draft, markdown),
+        "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+    }
+    return reference, revision
+
+
 class FakeApplication:
     def __init__(self):
         self.calls = []
         self.fail_projects = False
+        self.artifact, self.artifact_revision = _artifact_payloads()
 
     async def create_project(self, *, user_name, request: CreateProjectRequest):
         self.calls.append(("project", user_name, request))
@@ -82,6 +123,28 @@ class FakeApplication:
             ),
         }
 
+    async def list_artifacts(self, *, user_name, project_id, session_id=None, limit=50):
+        self.calls.append(("artifacts", user_name, project_id, session_id, limit))
+        return [self.artifact]
+
+    async def get_artifact(
+        self, *, user_name, project_id, artifact_id, session_id=None
+    ):
+        self.calls.append(("artifact", user_name, project_id, artifact_id, session_id))
+        return self.artifact if artifact_id == self.artifact["artifact_id"] else None
+
+    async def get_artifact_revision(
+        self, *, user_name, project_id, artifact_id, revision, session_id=None
+    ):
+        self.calls.append(
+            ("artifact_revision", user_name, project_id, artifact_id, revision, session_id)
+        )
+        return (
+            self.artifact_revision
+            if artifact_id == self.artifact["artifact_id"] and revision == 1
+            else None
+        )
+
 
 class BrokenStreamApplication(FakeApplication):
     async def run_stream(self, *, user_name, request: StartRunRequest):
@@ -121,7 +184,11 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
         result = await client.post(
             "/v1/runs",
             headers={"X-User-Name": "ada"},
-            json={"session_id": "session-1", "query": "What happened?"},
+            json={
+                "session_id": "session-1",
+                "query": "What happened?",
+                "research_mode": "research",
+            },
         )
 
     assert project.status_code == 201
@@ -139,6 +206,10 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
         "content": "Done",
         "sources": [],
         "usage": None,
+        "research_mode": "normal",
+        "assistant_message_id": None,
+        "source_ref_ids": [],
+        "artifact": None,
     }
     assert [call[0] for call in port.calls] == [
         "project",
@@ -146,6 +217,49 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
         "message",
         "run",
     ]
+    assert port.calls[-1][2].research_mode == "research"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_artifact_routes_expose_scoped_reference_and_revision_contracts():
+    port = FakeApplication()
+    app = create_app(port)
+    artifact_id = port.artifact["artifact_id"]
+
+    async with await _client(app) as client:
+        listed = await client.get(
+            "/v1/projects/project-1/artifacts?session_id=session-1&limit=10",
+            headers={"X-User-Name": "ada"},
+        )
+        reference = await client.get(
+            f"/v1/projects/project-1/artifacts/{artifact_id}",
+            headers={"X-User-Name": "ada"},
+        )
+        revision = await client.get(
+            f"/v1/projects/project-1/artifacts/{artifact_id}/revisions/1",
+            headers={"X-User-Name": "ada"},
+        )
+        missing = await client.get(
+            "/v1/projects/project-1/artifacts/22222222-2222-2222-2222-222222222222",
+            headers={"X-User-Name": "ada"},
+        )
+        invalid_limit = await client.get(
+            "/v1/projects/project-1/artifacts?limit=0",
+            headers={"X-User-Name": "ada"},
+        )
+
+    assert listed.status_code == 200
+    assert listed.json()["artifacts"][0]["artifact_id"] == artifact_id
+    assert reference.status_code == 200
+    assert reference.json()["current_revision"] == 1
+    assert revision.status_code == 200
+    assert revision.json()["blocks"] == [{"kind": "markdown", "content": "Finding"}]
+    assert revision.json()["markdown"] == "# Research brief\n\nFinding\n"
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "not_found"
+    assert invalid_limit.status_code == 422
+    assert invalid_limit.json()["error"]["code"] == "invalid_request"
 
 
 @pytest.mark.unit

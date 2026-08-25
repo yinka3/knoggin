@@ -51,6 +51,11 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
     assert CreateSessionRequest(project_id="project-1").enabled_tools is None
     assert CreateSessionRequest(project_id="project-1", enabled_tools=[]).enabled_tools == []
     assert StartRunRequest(session_id="session-1", query="hello", enabled_tools=[])
+    assert StartRunRequest(
+        session_id="session-1", query="hello", research_mode="deep_research"
+    ).research_mode == "deep_research"
+    with pytest.raises(ValidationError):
+        StartRunRequest(session_id="session-1", query="hello", research_mode="turbo")
 
     accepted = MessageAcceptance(message_id=12, idempotent=True)
     result = RunResult(

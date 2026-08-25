@@ -1946,7 +1946,9 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             'text_document',
             'user_pasted_text',
             'web_search_result',
-            'news_search_result'
+            'news_search_result',
+            'web_page',
+            'web_pdf'
         )),
     CONSTRAINT message_source_refs_encounter_check
         CHECK (encounter_kind IN (
@@ -1954,7 +1956,8 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
             'document_read',
             'user_pasted_text',
             'web_search',
-            'news_search'
+            'news_search',
+            'web_read'
         )),
     CONSTRAINT message_source_refs_position_check
         CHECK (result_position >= 0),
@@ -2050,6 +2053,43 @@ CREATE TABLE IF NOT EXISTS public.message_source_refs (
                     OR (source_kind = 'news_search_result' AND encounter_kind = 'news_search')
                 )
             )
+            OR (
+                source_kind = 'web_page'
+                AND document_id IS NULL
+                AND source_project_id IS NULL
+                AND source_message_id IS NULL
+                AND canonical_url ~ '^https?://[^[:space:]#]+$'
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind = 'web_read'
+                AND locator ->> 'kind' = 'text_lines'
+                AND jsonb_typeof(locator -> 'start_line') = 'number'
+                AND jsonb_typeof(locator -> 'end_line') = 'number'
+                AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
+                AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
+                AND (locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint
+                AND (
+                    NOT (metadata ? 'title')
+                    OR COALESCE(metadata ->> 'title', '') <> ''
+                )
+                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
+            )
+            OR (
+                source_kind = 'web_pdf'
+                AND document_id IS NULL
+                AND source_project_id IS NULL
+                AND source_message_id IS NULL
+                AND canonical_url ~ '^https?://[^[:space:]#]+$'
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind = 'web_read'
+                AND locator ->> 'kind' = 'pdf_page'
+                AND jsonb_typeof(locator -> 'page') = 'number'
+                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
+                AND (
+                    NOT (metadata ? 'title')
+                    OR COALESCE(metadata ->> 'title', '') <> ''
+                )
+                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
+            )
         )
 );
 
@@ -2087,11 +2127,239 @@ BEGIN
     END IF;
 END $$;
 
+-- Knoggin is unreleased: replace the closed source-reference constraints with
+-- the current target shape instead of carrying a compatibility variant.
+ALTER TABLE public.message_source_refs
+    DROP CONSTRAINT IF EXISTS message_source_refs_kind_check,
+    DROP CONSTRAINT IF EXISTS message_source_refs_encounter_check,
+    DROP CONSTRAINT IF EXISTS message_source_refs_source_project_shape_check,
+    DROP CONSTRAINT IF EXISTS message_source_refs_source_shape_check;
+
+ALTER TABLE public.message_source_refs
+    ADD CONSTRAINT message_source_refs_kind_check
+        CHECK (source_kind IN (
+            'pdf_document',
+            'text_document',
+            'user_pasted_text',
+            'web_search_result',
+            'news_search_result',
+            'web_page',
+            'web_pdf'
+        )),
+    ADD CONSTRAINT message_source_refs_encounter_check
+        CHECK (encounter_kind IN (
+            'document_search',
+            'document_read',
+            'user_pasted_text',
+            'web_search',
+            'news_search',
+            'web_read'
+        )),
+    ADD CONSTRAINT message_source_refs_source_project_shape_check
+        CHECK (
+            (source_kind IN ('pdf_document', 'text_document')
+                AND source_project_id IS NOT NULL)
+            OR (source_kind NOT IN ('pdf_document', 'text_document')
+                AND source_project_id IS NULL)
+        ),
+    ADD CONSTRAINT message_source_refs_source_shape_check
+        CHECK (
+            (
+                source_kind = 'pdf_document'
+                AND document_id IS NOT NULL
+                AND source_project_id IS NOT NULL
+                AND canonical_url IS NULL
+                AND source_message_id IS NULL
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind IN ('document_search', 'document_read')
+                AND locator ->> 'kind' = 'pdf_page'
+                AND jsonb_typeof(locator -> 'page') = 'number'
+                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
+                AND COALESCE(metadata ->> 'document_name', '') <> ''
+            )
+            OR (
+                source_kind = 'text_document'
+                AND document_id IS NOT NULL
+                AND source_project_id IS NOT NULL
+                AND canonical_url IS NULL
+                AND source_message_id IS NULL
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind IN ('document_search', 'document_read')
+                AND (
+                    (
+                        locator ->> 'kind' IN ('text_lines', 'code_lines')
+                        AND jsonb_typeof(locator -> 'start_line') = 'number'
+                        AND jsonb_typeof(locator -> 'end_line') = 'number'
+                        AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
+                        AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
+                        AND (locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint
+                    )
+                    OR (
+                        locator ->> 'kind' = 'csv_rows'
+                        AND jsonb_typeof(locator -> 'start_row') = 'number'
+                        AND jsonb_typeof(locator -> 'end_row') = 'number'
+                        AND locator ->> 'start_row' ~ '^[1-9][0-9]*$'
+                        AND locator ->> 'end_row' ~ '^[1-9][0-9]*$'
+                        AND (locator ->> 'end_row')::bigint >= (locator ->> 'start_row')::bigint
+                    )
+                    OR (
+                        locator ->> 'kind' = 'docx_paragraphs'
+                        AND jsonb_typeof(locator -> 'start_paragraph') = 'number'
+                        AND jsonb_typeof(locator -> 'end_paragraph') = 'number'
+                        AND locator ->> 'start_paragraph' ~ '^[1-9][0-9]*$'
+                        AND locator ->> 'end_paragraph' ~ '^[1-9][0-9]*$'
+                        AND (locator ->> 'end_paragraph')::bigint >= (locator ->> 'start_paragraph')::bigint
+                    )
+                )
+                AND COALESCE(metadata ->> 'document_name', '') <> ''
+            )
+            OR (
+                source_kind = 'user_pasted_text'
+                AND document_id IS NULL
+                AND source_project_id IS NULL
+                AND canonical_url IS NULL
+                AND source_message_id IS NOT NULL
+                AND tool_call_id IS NULL
+                AND encounter_kind = 'user_pasted_text'
+                AND locator ->> 'kind' = 'character_span'
+                AND jsonb_typeof(locator -> 'start_char') = 'number'
+                AND jsonb_typeof(locator -> 'end_char') = 'number'
+                AND locator ->> 'start_char' ~ '^[0-9]+$'
+                AND locator ->> 'end_char' ~ '^[1-9][0-9]*$'
+                AND (locator ->> 'end_char')::bigint > (locator ->> 'start_char')::bigint
+            )
+            OR (
+                source_kind IN ('web_search_result', 'news_search_result')
+                AND document_id IS NULL
+                AND source_project_id IS NULL
+                AND source_message_id IS NULL
+                AND canonical_url ~ '^https?://[^[:space:]#]+$'
+                AND tool_call_id IS NOT NULL
+                AND locator ->> 'kind' = 'search_result'
+                AND COALESCE(locator ->> 'provider', '') <> ''
+                AND COALESCE(locator ->> 'query', '') <> ''
+                AND jsonb_typeof(locator -> 'rank') = 'number'
+                AND locator ->> 'rank' ~ '^[1-9][0-9]*$'
+                AND COALESCE(metadata ->> 'title', '') <> ''
+                AND metadata -> 'discovery_snippet' = 'true'::jsonb
+                AND (
+                    (source_kind = 'web_search_result' AND encounter_kind = 'web_search')
+                    OR (source_kind = 'news_search_result' AND encounter_kind = 'news_search')
+                )
+            )
+            OR (
+                source_kind = 'web_page'
+                AND document_id IS NULL
+                AND source_project_id IS NULL
+                AND source_message_id IS NULL
+                AND canonical_url ~ '^https?://[^[:space:]#]+$'
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind = 'web_read'
+                AND locator ->> 'kind' = 'text_lines'
+                AND jsonb_typeof(locator -> 'start_line') = 'number'
+                AND jsonb_typeof(locator -> 'end_line') = 'number'
+                AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
+                AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
+                AND (locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint
+                AND (
+                    NOT (metadata ? 'title')
+                    OR COALESCE(metadata ->> 'title', '') <> ''
+                )
+                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
+            )
+            OR (
+                source_kind = 'web_pdf'
+                AND document_id IS NULL
+                AND source_project_id IS NULL
+                AND source_message_id IS NULL
+                AND canonical_url ~ '^https?://[^[:space:]#]+$'
+                AND tool_call_id IS NOT NULL
+                AND encounter_kind = 'web_read'
+                AND locator ->> 'kind' = 'pdf_page'
+                AND jsonb_typeof(locator -> 'page') = 'number'
+                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
+                AND (
+                    NOT (metadata ? 'title')
+                    OR COALESCE(metadata ->> 'title', '') <> ''
+                )
+                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
+            )
+        );
+
 CREATE INDEX IF NOT EXISTS message_source_refs_message_scope_idx
 ON public.message_source_refs(message_id, project_id, session_id);
 
 CREATE INDEX IF NOT EXISTS message_source_refs_episode_lookup_idx
 ON public.message_source_refs(project_id, session_id, message_id, created_at);
+
+-- Structured artifacts are durable project history, separate from editable
+-- workspace documents.  One assistant completion owns at most one artifact;
+-- revisions remain immutable so later edits can be added without rewriting
+-- the originating message.
+CREATE TABLE IF NOT EXISTS public.project_artifacts (
+    artifact_id UUID PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    originating_message_id BIGINT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'complete',
+    current_revision INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT project_artifacts_origin_message_unique
+        UNIQUE (originating_message_id),
+    CONSTRAINT project_artifacts_message_scope_fk
+        FOREIGN KEY (originating_message_id, project_id, session_id)
+        REFERENCES public.messages(message_id, project_id, session_id)
+        ON DELETE CASCADE,
+    CONSTRAINT project_artifacts_session_scope_fk
+        FOREIGN KEY (session_id, project_id)
+        REFERENCES public.sessions(session_id, project_id)
+        ON DELETE CASCADE,
+    CONSTRAINT project_artifacts_kind_check
+        CHECK (kind IN ('general', 'research_brief', 'research_report')),
+    CONSTRAINT project_artifacts_status_check
+        CHECK (status IN ('complete', 'incomplete')),
+    CONSTRAINT project_artifacts_title_check
+        CHECK (length(btrim(title)) > 0 AND length(title) <= 200),
+    CONSTRAINT project_artifacts_revision_check
+        CHECK (current_revision >= 1)
+);
+
+CREATE TABLE IF NOT EXISTS public.project_artifact_revisions (
+    artifact_id UUID NOT NULL REFERENCES public.project_artifacts(artifact_id)
+        ON DELETE CASCADE,
+    revision INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    blocks JSONB NOT NULL,
+    markdown TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (artifact_id, revision),
+    CONSTRAINT project_artifact_revisions_revision_check
+        CHECK (revision >= 1 AND schema_version >= 1),
+    CONSTRAINT project_artifact_revisions_kind_check
+        CHECK (kind IN ('general', 'research_brief', 'research_report')),
+    CONSTRAINT project_artifact_revisions_status_check
+        CHECK (status IN ('complete', 'incomplete')),
+    CONSTRAINT project_artifact_revisions_blocks_check
+        CHECK (jsonb_typeof(blocks) = 'array' AND jsonb_array_length(blocks) > 0),
+    CONSTRAINT project_artifact_revisions_markdown_check
+        CHECK (length(btrim(markdown)) > 0 AND length(markdown) <= 100000),
+    CONSTRAINT project_artifact_revisions_hash_check
+        CHECK (content_hash ~ '^[0-9a-f]{64}$')
+);
+
+CREATE INDEX IF NOT EXISTS project_artifacts_project_updated_idx
+ON public.project_artifacts(project_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS project_artifacts_session_updated_idx
+ON public.project_artifacts(session_id, updated_at DESC);
 
 -- ============================================================================
 -- ADDITIVE INTEGRITY CONSTRAINTS

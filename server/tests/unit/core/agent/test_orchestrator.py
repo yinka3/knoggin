@@ -177,6 +177,44 @@ async def test_orchestrator_identity_overrides_take_precedence():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_orchestrator_compiles_selected_research_mode_into_same_agent_run(
+    monkeypatch,
+):
+    context = FakeSession()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(
+            id="agent-1",
+            name="Researcher",
+            persona="Careful",
+            is_default=True,
+        )
+    )
+    tools = FakeTools()
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
+
+    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
+        return tools
+
+    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
+
+    events = [
+        event
+        async for event in make_orchestrator(context).run_stream(
+            user_query="Investigate this",
+            context=context,
+            research_mode="research",
+        )
+    ]
+
+    assert events == [FAKE_RESPONSE_EVENT]
+    run = FakeExecutor.instances[0].ctx
+    assert run.research_profile.mode == "research"
+    assert run.limits.max_calls == FakeLimits.max_tool_calls * 2
+    assert run.limits.max_attempts == FakeLimits.max_attempts * 2
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_config(
     monkeypatch,
 ):

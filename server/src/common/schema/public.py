@@ -20,9 +20,12 @@ from common.exceptions import (
     DependencyError,
     LLMProviderError,
     LLMResponseError,
+    NotFoundError,
     StorageError,
     ToolExecutionError,
 )
+from common.schema.agent.research import ResearchMode
+from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
 from common.schema.source.references import SourceConsulted
 
 PUBLIC_CONTRACT_VERSION = "1"
@@ -152,6 +155,7 @@ class StartRunRequest(PublicModel):
     model: str | None = Field(default=None, min_length=1)
     agent_id: str | None = Field(default=None, min_length=1)
     enabled_tools: list[str] | None = None
+    research_mode: ResearchMode = "normal"
 
     _normalise_tools = field_validator("enabled_tools")(_normalise_enabled_tools)
 
@@ -171,11 +175,59 @@ class Usage(PublicModel):
     approximate: bool = False
 
 
+class ArtifactResponse(PublicModel):
+    """Public identity/current-revision projection for one artifact."""
+
+    artifact_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    originating_message_id: int = Field(gt=0)
+    kind: ArtifactKind
+    title: str = Field(min_length=1, max_length=200)
+    status: ArtifactStatus
+    current_revision: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ArtifactRevisionResponse(PublicModel):
+    """Public structured artifact revision with Markdown fallback."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        str_strip_whitespace=False,
+    )
+
+    artifact_id: str = Field(min_length=1)
+    revision: int = Field(ge=1)
+    schema_version: int = Field(ge=1)
+    kind: ArtifactKind
+    title: str = Field(min_length=1, max_length=200)
+    blocks: tuple[ArtifactBlock, ...] = Field(min_length=1, max_length=50)
+    status: ArtifactStatus
+    markdown: str = Field(min_length=1, max_length=100_000)
+    content_hash: str = Field(
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    created_at: datetime
+
+
+class ArtifactListResponse(PublicModel):
+    artifacts: tuple[ArtifactResponse, ...]
+
+
 class RunResult(PublicModel):
     run_id: str = Field(min_length=1)
     content: str
     sources: tuple[SourceConsulted, ...] = ()
     usage: Usage | None = None
+    research_mode: ResearchMode = "normal"
+    assistant_message_id: int | None = Field(default=None, gt=0)
+    source_ref_ids: tuple[str, ...] = ()
+    artifact: ArtifactResponse | None = None
 
 
 class PublicError(PublicModel):
@@ -199,6 +251,11 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "dependency_unavailable",
         "A required service is temporarily unavailable.",
         True,
+    ),
+    NotFoundError: (
+        "not_found",
+        "The requested resource was not found.",
+        False,
     ),
     StorageError: (
         "storage_unavailable",

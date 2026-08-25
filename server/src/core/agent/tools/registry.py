@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
@@ -15,7 +16,7 @@ from core.agent.tools.graph import GraphTools
 from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
-from core.agent.tools.search import SearchTools
+from core.agent.tools.search import SearchTools, create_web_page_http_client
 from core.agent.tools.workspace import WorkspaceTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
@@ -125,6 +126,7 @@ TOOL_DEFINITIONS = {
     "search_documents": _definition("search_documents", default_limit=8),
     "web_search": _definition("web_search", default_limit=8),
     "news_search": _definition("news_search", default_limit=8),
+    "read_web_page": _definition("read_web_page", default_limit=6),
     "submit_answer": _definition("submit_answer", executor_protocol=True),
     "check_graph_health": _definition("check_graph_health"),
     "propose_entity_merge": _definition("propose_entity_merge"),
@@ -428,6 +430,9 @@ class Tools(
         self.health_service = health_service
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
+        self._web_page_client = create_web_page_http_client()
+        self._web_page_snapshots = OrderedDict()
+        self._web_page_snapshot_aliases: Dict[str, str] = {}
 
     # Internal-memory tools are formatting/argument adapters only. Retrieval
     # policy, ranking, and evidence expansion live in the
@@ -491,7 +496,12 @@ class Tools(
         ]
 
     async def close(self):
-        await self._http_client.aclose()
+        try:
+            await self._http_client.aclose()
+        finally:
+            await self._web_page_client.aclose()
+            self._web_page_snapshots.clear()
+            self._web_page_snapshot_aliases.clear()
 
 
 validate_registry_contract()

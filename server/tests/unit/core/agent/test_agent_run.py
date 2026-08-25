@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.agent.identity import AgentConfig
+from common.schema.agent.research import resolve_research_profile
 from core.agent.executor import AgentExecutor
 from core.agent.run import (
     AAC_DIAGNOSTIC_PROJECT_ID,
@@ -92,6 +93,28 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
     }
     with pytest.raises(AttributeError):
         run.limits.max_calls = 4
+
+
+@pytest.mark.no_network
+def test_research_profile_scales_existing_run_budget_without_new_executor():
+    profile = resolve_research_profile("deep_research")
+    limits = AgentRunLimits(
+        max_calls=4,
+        max_attempts=5,
+        max_accumulated_sources=6,
+        tool_limits=(("search_messages", 2),),
+    )
+    scaled = limits.for_research_profile(profile)
+    run = make_run(
+        limits=scaled,
+        research_profile=profile,
+    )
+
+    assert run.research_profile.mode == "deep_research"
+    assert run.limits.max_calls == 12
+    assert run.limits.max_attempts == 15
+    assert run.limits.max_accumulated_sources == 18
+    assert run.limits.get_tool_limit("search_messages") == 6
 
 
 @pytest.mark.no_network
@@ -210,6 +233,38 @@ class CompletingLLM:
         }
 
 
+class ArtifactCompletingLLM(CompletingLLM):
+    async def stream_with_tools(self, **_kwargs):
+        yield {
+            "event": "tool_calls",
+            "data": {
+                "content": "I have the answer.",
+                "calls": [
+                    {
+                        "name": "submit_answer",
+                        "arguments": (
+                            '{"content": "Done", "artifact": '
+                            '{"kind": "general", "title": "Saved", '
+                            '"blocks": [{"kind": "markdown", "content": "Saved"}]}}'
+                        ),
+                        "id": "submit-1",
+                    }
+                ],
+            },
+        }
+        yield {
+            "event": "step_completed",
+            "data": {
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                    "approximate": False,
+                }
+            },
+        }
+
+
 @pytest.mark.no_network
 async def test_executor_finalizes_an_agent_run():
     run = make_run()
@@ -229,6 +284,42 @@ async def test_executor_finalizes_an_agent_run():
     # The executor performs a dedicated final synthesis after the first
     # structured answer, so both model turns contribute usage.
     assert run.usage["total_tokens"] == 10
+
+
+@pytest.mark.no_network
+async def test_research_profile_supplies_default_report_artifact_at_synthesis():
+    profile = resolve_research_profile("deep_research")
+    run = make_run(
+        limits=AgentRunLimits(max_calls=6, max_attempts=6),
+        research_profile=profile,
+    )
+    executor = AgentExecutor(
+        run,
+        CompletingLLM(),
+        SimpleNamespace(document_service=None),
+    )
+
+    events = [event async for event in executor.execute()]
+
+    response = next(event for event in events if event["event"] == "response")
+    assert response["data"]["research_mode"] == "deep_research"
+    assert response["data"]["artifact"]["kind"] == "research_report"
+    assert response["data"]["artifact"]["title"] == "Research report"
+
+
+@pytest.mark.no_network
+async def test_model_supplied_artifact_is_preserved_through_final_synthesis():
+    run = make_run()
+    executor = AgentExecutor(
+        run,
+        ArtifactCompletingLLM(),
+        SimpleNamespace(document_service=None),
+    )
+
+    events = [event async for event in executor.execute()]
+
+    response = next(event for event in events if event["event"] == "response")
+    assert response["data"]["artifact"]["title"] == "Saved"
 
 
 @pytest.mark.no_network

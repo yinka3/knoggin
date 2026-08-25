@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import LLMProviderError
+from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
@@ -299,3 +300,28 @@ async def test_step_forwards_llm_error_chunk_and_exceptions():
             },
         }
     ]
+
+
+@pytest.mark.no_network
+async def test_final_response_carries_validated_structured_artifact():
+    executor = make_executor(StreamingLLM())
+    artifact = ArtifactDraft(
+        kind="research_brief",
+        title="Brief",
+        blocks=(MarkdownArtifactBlock(content="Finding"),),
+    )
+
+    event = executor._wrap_final_response(
+        content="Answer",
+        usage={
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "approximate": False,
+        },
+        sources_consulted=[],
+        artifact=artifact.model_dump(mode="json"),
+    )
+
+    assert event["data"]["artifact"]["kind"] == "research_brief"
+    assert event["data"]["artifact"]["blocks"][0]["content"] == "Finding"
