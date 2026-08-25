@@ -61,7 +61,6 @@ CREATE TABLE IF NOT EXISTS public.project_read_scopes (
 CREATE TABLE IF NOT EXISTS public.agents (
     agent_id TEXT PRIMARY KEY,
     user_name TEXT NOT NULL,
-    project_id TEXT REFERENCES public.projects(project_id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     persona TEXT,
     brain TEXT,
@@ -69,16 +68,104 @@ CREATE TABLE IF NOT EXISTS public.agents (
     temperature DOUBLE PRECISION,
     enabled_tools JSONB,
     is_default BOOLEAN NOT NULL DEFAULT false,
-    is_spawned BOOLEAN NOT NULL DEFAULT false,
+    aac_enabled BOOLEAN NOT NULL DEFAULT false,
     spawned_by TEXT,
     brain_revision INTEGER NOT NULL DEFAULT 1 CHECK (brain_revision >= 1),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_turn_at TIMESTAMPTZ
 );
+
+-- AAC agents are application-owned. This unreleased schema may drop the
+-- former project coupling and redundant spawned flag outright.
+ALTER TABLE public.agents
+    DROP COLUMN IF EXISTS project_id,
+    DROP COLUMN IF EXISTS is_spawned,
+    ADD COLUMN IF NOT EXISTS aac_enabled BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS last_turn_at TIMESTAMPTZ;
 
 CREATE UNIQUE INDEX IF NOT EXISTS agents_one_default_per_user_idx
 ON public.agents(user_name)
 WHERE is_default;
+
+-- AAC is durable user-level discussion state, intentionally separate from the
+-- canonical knowledge graph and from any individual project lifecycle.
+CREATE TABLE IF NOT EXISTS public.aac_discussions (
+    discussion_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    end_reason TEXT,
+    token_budget BIGINT NOT NULL CHECK (token_budget >= 0),
+    tokens_used BIGINT NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at TIMESTAMPTZ,
+    CONSTRAINT aac_discussions_status_check
+        CHECK (status IN ('active', 'completed', 'stopped', 'interrupted', 'failed')),
+    CONSTRAINT aac_discussions_end_reason_check
+        CHECK (end_reason IS NULL OR end_reason IN (
+            'completed', 'token_budget', 'user_stopped', 'no_participants',
+            'shutdown', 'failed', 'startup_recovery', 'interrupted'
+        ))
+);
+
+ALTER TABLE public.aac_discussions
+    ADD COLUMN IF NOT EXISTS end_reason TEXT;
+
+ALTER TABLE public.aac_discussions
+    DROP CONSTRAINT IF EXISTS aac_discussions_end_reason_check,
+    ADD CONSTRAINT aac_discussions_end_reason_check
+        CHECK (end_reason IS NULL OR end_reason IN (
+            'completed', 'token_budget', 'user_stopped', 'no_participants',
+            'shutdown', 'failed', 'startup_recovery', 'interrupted'
+        ));
+
+CREATE INDEX IF NOT EXISTS aac_discussions_user_started_idx
+ON public.aac_discussions(user_name, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.aac_timeline (
+    timeline_id TEXT PRIMARY KEY,
+    discussion_id TEXT NOT NULL REFERENCES public.aac_discussions(discussion_id)
+        ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    agent_id TEXT,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT aac_timeline_kind_check
+        CHECK (kind IN ('agent_message', 'system_event'))
+);
+
+CREATE INDEX IF NOT EXISTS aac_timeline_discussion_created_idx
+ON public.aac_timeline(discussion_id, created_at, timeline_id);
+
+CREATE TABLE IF NOT EXISTS public.aac_insights (
+    insight_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    discussion_id TEXT REFERENCES public.aac_discussions(discussion_id)
+        ON DELETE SET NULL,
+    author_agent_id TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'shared',
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT aac_insights_visibility_check
+        CHECK (visibility IN ('shared', 'private'))
+);
+
+CREATE INDEX IF NOT EXISTS aac_insights_user_visibility_created_idx
+ON public.aac_insights(user_name, visibility, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.aac_insight_votes (
+    insight_id TEXT NOT NULL REFERENCES public.aac_insights(insight_id)
+        ON DELETE CASCADE,
+    voter_agent_id TEXT NOT NULL,
+    vote TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (insight_id, voter_agent_id),
+    CONSTRAINT aac_insight_votes_vote_check CHECK (vote IN ('up', 'down')),
+    CONSTRAINT aac_insight_votes_reason_check CHECK (length(trim(reason)) > 0)
+);
 
 DROP TABLE IF EXISTS public.agent_brain_revisions;
 
@@ -181,6 +268,7 @@ CREATE TABLE IF NOT EXISTS public.messages (
     ) STORED,
     user_msg_id BIGINT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    acceptance_key TEXT,
     timestamp_ms BIGINT,
     lifecycle_state TEXT NOT NULL DEFAULT 'sealed'
         CHECK (lifecycle_state IN ('editable', 'sealed', 'superseded')),
@@ -219,6 +307,9 @@ ALTER TABLE public.messages
     ) STORED;
 
 ALTER TABLE public.messages
+    ADD COLUMN IF NOT EXISTS acceptance_key TEXT;
+
+ALTER TABLE public.messages
     ADD COLUMN IF NOT EXISTS ingestion_attempt_count INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS ingestion_last_failure_stage TEXT,
     ADD COLUMN IF NOT EXISTS ingestion_last_failure_code TEXT,
@@ -234,6 +325,10 @@ ON public.messages USING gin (search_tsvector);
 CREATE INDEX IF NOT EXISTS messages_ingestion_queue_idx
 ON public.messages(user_name, session_id, message_id)
 WHERE role = 'user' AND ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'blocked');
+
+CREATE UNIQUE INDEX IF NOT EXISTS messages_acceptance_key_idx
+ON public.messages(user_name, session_id, acceptance_key)
+WHERE acceptance_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.message_revisions (
     user_name TEXT NOT NULL,
@@ -570,8 +665,8 @@ CREATE INDEX IF NOT EXISTS conflict_evidence_refs_observation_idx
 ON public.conflict_evidence_refs(observation_id)
 WHERE observation_id IS NOT NULL;
 
--- The cursor is durable; Redis may schedule the job, but it must not determine
--- which relationship observations have already been examined.
+-- The cursor is durable and determines which relationship observations have
+-- already been examined.
 CREATE TABLE IF NOT EXISTS public.conflict_discovery_checkpoints (
     user_name TEXT NOT NULL,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id)
@@ -1234,7 +1329,7 @@ CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
     audit_id UUID PRIMARY KEY,
     user_name TEXT NOT NULL,
     agent_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
+    project_id TEXT,
     session_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     tool_name TEXT NOT NULL,
@@ -1269,6 +1364,17 @@ ON public.agent_tool_audits(
 
 CREATE INDEX IF NOT EXISTS agent_tool_audits_run_idx
 ON public.agent_tool_audits(run_id, created_at);
+
+-- AAC has user-level execution ownership. Its audited local writes must not
+-- pretend to belong to a project or disappear when any project is deleted.
+ALTER TABLE public.agent_tool_audits
+    DROP CONSTRAINT IF EXISTS agent_tool_audits_project_fk;
+ALTER TABLE public.agent_tool_audits
+    ALTER COLUMN project_id DROP NOT NULL;
+ALTER TABLE public.agent_tool_audits
+    ADD CONSTRAINT agent_tool_audits_project_fk
+    FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
+    ON DELETE CASCADE;
 
 ALTER TABLE public.agent_tool_audits
     DROP CONSTRAINT IF EXISTS agent_tool_audits_capability_check;

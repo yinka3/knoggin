@@ -72,7 +72,7 @@ def test_health_sanitization_redacts_secret_strings_in_values_and_warnings() -> 
             "connection": "postgresql://user:password@db.internal/knoggin",
             "note": "worker is delayed",
         },
-        warnings=["redis://:secret@example.invalid", "worker is delayed"],
+        warnings=["postgresql://user:password@example.invalid/db", "worker is delayed"],
     )
 
     payload = snapshot.model_dump(mode="json")

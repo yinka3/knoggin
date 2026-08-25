@@ -71,10 +71,11 @@ class FakeTools:
 class FakeExecutor:
     instances = []
 
-    def __init__(self, ctx, llm, tools):
+    def __init__(self, ctx, llm, tools, *, on_successful_completion=None):
         self.ctx = ctx
         self.llm = llm
         self.tools = tools
+        self.on_successful_completion = on_successful_completion
         self.execute_kwargs = None
         self.__class__.instances.append(self)
 
@@ -86,7 +87,6 @@ class FakeExecutor:
 class FakeSession:
     def __init__(self):
         self.resources = FakeResources()
-        self.redis_client = self.resources.redis
         self.knowledge_store = self.resources.knowledge_store
         self.llm = self.resources.llm_service
         self.user_name = "ada"
@@ -128,7 +128,7 @@ def reset_fake_executor():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_orchestrator_resolves_agent_identity_from_redis():
+async def test_orchestrator_resolves_durable_agent_identity():
     context = FakeSession()
     agent = AgentConfig(
         id="agent-1",

@@ -12,7 +12,6 @@ from common.scoping import (
     require_scope_value,
     require_visible_project_ids,
 )
-from core.community.community_job import AACJob
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.db.readers.document_reader import DocumentReader
@@ -69,7 +68,6 @@ class ProjectRuntimeFactory:
             self.resources.knowledge_store is None
             or self.resources.embedding is None
             or self.resources.executor is None
-            or self.resources.redis is None
             or self.resources.postgres is None
             or self.resources.llm_service is None
         ):
@@ -101,7 +99,6 @@ class ProjectRuntimeFactory:
             embedding_service=self.resources.embedding,
             knowledge_store=self.resources.knowledge_store,
             postgres=self.resources.postgres,
-            redis=self.resources.redis,
             search_config={
                 **runtime_config.developer_settings.search.model_dump(),
                 **runtime_config.search.model_dump(),
@@ -322,4 +319,3 @@ class ProjectRuntimeFactory:
                 "developer_settings.jobs.conflict_discovery",
             )
         )
-        scheduler.register(AACJob(runtime, self.resources))

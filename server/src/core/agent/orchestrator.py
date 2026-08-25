@@ -172,7 +172,12 @@ class AgentOrchestrator:
             )
 
             # Execution via AgentExecutor
-            executor = AgentExecutor(run, context.llm, tools)
+            executor = AgentExecutor(
+                run,
+                context.llm,
+                tools,
+                on_successful_completion=self._agent_manager.mark_turn_completed,
+            )
 
             async for event in executor.execute(
                 user_timezone=user_timezone,
@@ -246,7 +251,6 @@ class AgentOrchestrator:
             knowledge_retrieval=context.project.knowledge_retrieval,
             knowledge_store=context.knowledge_store,
             postgres=context.resources.postgres,
-            redis=context.redis_client,
             agent_id=agent_id,
             health_service=getattr(context, "health_service", None),
         )

@@ -145,6 +145,10 @@ TOOL_DEFINITIONS = {
     ),
     "save_insight": _definition("save_insight", default_limit=4),
     "spawn_specialist": _definition("spawn_specialist", default_limit=2),
+    "search_insights": _definition("search_insights", default_limit=4),
+    "vote_insight": _definition("vote_insight", default_limit=4),
+    "remove_insight_vote": _definition("remove_insight_vote", default_limit=4),
+    "consult_specialist": _definition("consult_specialist", default_limit=2),
 }
 
 
@@ -249,6 +253,7 @@ class ToolPermissions:
     user_name: str
     agent_id: str
     project_id: str
+    audit_project_id: str | None
     session_id: str
     run_id: str
     allowed_tools: frozenset[str]
@@ -278,6 +283,7 @@ def build_tool_runtime(
     user_name: str,
     agent_id: str,
     project_id: str,
+    audit_project_id: str | None,
     session_id: str,
     run_id: str,
 ) -> ToolRuntime:
@@ -292,6 +298,7 @@ def build_tool_runtime(
         user_name=user_name,
         agent_id=agent_id,
         project_id=project_id,
+        audit_project_id=audit_project_id,
         session_id=session_id,
         run_id=run_id,
         allowed_tools=frozenset(schema_map),
@@ -388,15 +395,12 @@ class Tools(
         knowledge_retrieval: Optional[KnowledgeRetrieval] = None,
         knowledge_store=None,
         postgres=None,
-        redis=None,
         agent_id: Optional[str] = None,
         health_service=None,
         workspace_service=None,
     ):
-        if knowledge_store is None or postgres is None or redis is None:
-            raise ValueError(
-                "Tools requires explicit knowledge_store, postgres, and redis"
-            )
+        if knowledge_store is None or postgres is None:
+            raise ValueError("Tools requires explicit knowledge_store and postgres")
         if knowledge_retrieval is None:
             raise ValueError("Tools requires a project-scoped KnowledgeRetrieval")
 
@@ -406,7 +410,6 @@ class Tools(
         self.postgres = postgres
         self.entities = entities
         self.user_name = user_name
-        self.redis = redis
         self.embedding_service = entities.embedding_service
         self.project_id = entities.project_id
         self.readable_project_ids = entities.readable_project_ids
@@ -427,7 +430,7 @@ class Tools(
         self._http_client = httpx.AsyncClient(timeout=10.0)
 
     # Internal-memory tools are formatting/argument adapters only. Retrieval
-    # policy, cache fallbacks, ranking, and evidence expansion live in the
+    # policy, ranking, and evidence expansion live in the
     # project-scoped KnowledgeRetrieval service.
     async def search_messages(self, query: str, limit: int = None):
         return await self.knowledge_retrieval.search_messages(

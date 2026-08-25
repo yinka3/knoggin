@@ -289,7 +289,7 @@ async def _start_tool_audit(
             "audit_id": audit_id,
             "user_name": authorization.user_name,
             "agent_id": authorization.agent_id,
-            "project_id": authorization.project_id,
+            "project_id": authorization.audit_project_id,
             "session_id": authorization.session_id,
             "run_id": authorization.run_id,
             "tool_name": tool_name,

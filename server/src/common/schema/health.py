@@ -95,8 +95,6 @@ _MAX_DETAIL_STRING_LENGTH = 500
 _SENSITIVE_STRING_MARKERS = (
     "postgres://",
     "postgresql://",
-    "redis://",
-    "rediss://",
     "amqp://",
     "mongodb://",
     "bearer ",

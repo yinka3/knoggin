@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
+from common.utils.time_utils import frozen_time
 from core.agent.prompt_context import build_user_message, update_accumulators
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.tool_runtime import summarize_result
@@ -105,6 +107,21 @@ def test_build_user_message_omits_participants_outside_community():
     message = build_user_message(ctx)
 
     assert "Participants" not in message
+
+
+@pytest.mark.no_network
+def test_build_user_message_includes_absolute_and_elapsed_last_turn_time():
+    ctx = make_ctx(
+        last_turn_at=datetime(2026, 8, 24, 15, 30, tzinfo=timezone.utc),
+    )
+
+    with frozen_time(datetime(2026, 8, 24, 18, 5, tzinfo=timezone.utc)):
+        message = build_user_message(ctx)
+
+    assert (
+        "**Last successful turn:** "
+        "2026-08-24T15:30:00+00:00 (2h 35m ago)"
+    ) in message
 
 
 @pytest.mark.no_network

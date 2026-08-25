@@ -8,7 +8,6 @@ __pycache__
 .venv
 venv
 *.log
-redis_data/
 config/
 .vscode/
 *.md

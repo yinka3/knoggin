@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from core.knowledge.db.writers.message_lifecycle_writer import (
@@ -182,3 +184,59 @@ async def test_real_postgres_ingestion_failure_metadata_blocks_and_retries(
         "ingestion_attempt_count": 3,
         "ingestion_last_failure_code": "llm_provider_error",
     }
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_accepts_concurrent_user_message_request_once(
+    real_postgres_client,
+):
+    await _seed_session(real_postgres_client, "session-acceptance")
+    lifecycle = MessageLifecycleWriter(
+        real_postgres_client,
+        MessageWriter(real_postgres_client),
+    )
+
+    def message(message_id: int) -> dict:
+        return {
+            "id": message_id,
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-acceptance",
+            "role": "user",
+            "content": "accept exactly once",
+            "timestamp": 1_754_064_000_000,
+            "metadata": {"idempotency_key": "request-1"},
+            "acceptance_key": "request:request-1",
+        }
+
+    accepted = await asyncio.gather(
+        *(
+            lifecycle.create_editable_user_message(
+                message(message_id), edit_window_seconds=600
+            )
+            for message_id in range(1001, 1009)
+        )
+    )
+
+    accepted_ids = {result.message_id for result in accepted}
+    assert len(accepted_ids) == 1
+    assert sum(result.created for result in accepted) == 1
+    rows = await real_postgres_client.fetch_all(
+        """
+        SELECT message_id, acceptance_key
+        FROM public.messages
+        WHERE user_name = 'ada' AND session_id = 'session-acceptance'
+        """
+    )
+    assert rows == [
+        {"message_id": next(iter(accepted_ids)), "acceptance_key": "request:request-1"}
+    ]
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT message_id, revision
+        FROM public.message_revisions
+        WHERE user_name = 'ada' AND session_id = 'session-acceptance'
+        """
+    ) == [{"message_id": next(iter(accepted_ids)), "revision": 1}]

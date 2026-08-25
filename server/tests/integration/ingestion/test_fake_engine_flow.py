@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 
 import pytest
@@ -7,7 +6,6 @@ from common.schema.primitives import Message
 from common.utils.events import EventEmitter
 from core.project.project_manager import ProjectManager
 from core.session.session_manager import SessionManager
-from infrastructure.redis_client import RedisKeys
 from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config, make_project_state
 from tests.fixtures.fakes import (
@@ -37,7 +35,7 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         "current_config",
         property(lambda self: FakeConfigValue(conversation_context_turns=100)),
     )
-    project_state = make_project_state(project["id"], redis=resources.redis)
+    project_state = make_project_state(project["id"])
 
     async def create_project_runtime(*_args, **_kwargs):
         return project_state
@@ -135,28 +133,11 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
         user_name="ada",
         project_manager=project_manager,
     )
-    await resources.redis.hset(
-        RedisKeys.conversation("ada", session_id),
-        "1",
-        json.dumps(
-            {
-                "role": "user",
-                "content": "delete me",
-                "timestamp": "2026-01-02T03:04:00+00:00",
-            }
-        ),
-    )
-
     deleted_project = await project_manager.delete_project(project["id"])
     assert await project_manager.get_session_ids(project["id"]) == []
-
-    assert (
-        await resources.redis.hget(RedisKeys.conversation("ada", session_id), "1")
-        is None
-    )
 
     deleted_count = await manager.delete_session_data(session_id)
 
     assert deleted_project["status"] == "deleted"
     assert await project_manager.get_project(project["id"]) is None
-    assert deleted_count == 0
+    assert deleted_count is None

@@ -831,19 +831,6 @@ wheels = [
 ]
 
 [[package]]
-name = "environs"
-version = "14.6.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "marshmallow" },
-    { name = "python-dotenv" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/fb/c7/94f97e6e74482a50b5fc798856b6cc06e8d072ab05a0b74cb5d87bd0d065/environs-14.6.0.tar.gz", hash = "sha256:ed2767588deb503209ffe4dd9bb2b39311c2e4e7e27ce2c64bf62ca83328d068", size = 35563, upload-time = "2026-02-20T04:02:08.869Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/a8/c070e1340636acb38d4e6a7e45c46d168a462b48b9b3257e14ca0e5af79b/environs-14.6.0-py3-none-any.whl", hash = "sha256:f8fb3d6c6a55872b0c6db077a28f5a8c7b8984b7c32029613d44cef95cfc0812", size = 17205, upload-time = "2026-02-20T04:02:07.299Z" },
-]
-
-[[package]]
 name = "fastapi"
 version = "0.135.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3362,28 +3349,6 @@ wheels = [
 ]
 
 [[package]]
-name = "redis"
-version = "7.3.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/da/82/4d1a5279f6c1251d3d2a603a798a1137c657de9b12cfc1fba4858232c4d2/redis-7.3.0.tar.gz", hash = "sha256:4d1b768aafcf41b01022410b3cc4f15a07d9b3d6fe0c66fc967da2c88e551034", size = 4928081, upload-time = "2026-03-06T18:18:16.287Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/28/84e57fce7819e81ec5aa1bd31c42b89607241f4fb1a3ea5b0d2dbeaea26c/redis-7.3.0-py3-none-any.whl", hash = "sha256:9d4fcb002a12a5e3c3fbe005d59c48a2cc231f87fbb2f6b70c2d89bb64fec364", size = 404379, upload-time = "2026-03-06T18:18:14.583Z" },
-]
-
-[[package]]
-name = "redis-tools"
-version = "0.0.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "environs" },
-    { name = "redis" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2d/79/6fd70f1455bfa525ed7c69cf87a995313a2436571d746f82a62b44cfe931/redis-tools-0.0.2.tar.gz", hash = "sha256:a2e00c840c776c93a91d2b6733c00e9c742a25ea8675b40000ea1b9bbcf0c142", size = 7094, upload-time = "2021-02-25T22:50:54.89Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/8a/a4c8238b08f43b83126dff28d6e9ac85d6201ae0b34fd74946dbdd2fa492/redis_tools-0.0.2-py2.py3-none-any.whl", hash = "sha256:8cb83af83ae6b608049b9c78d9bce62c44638fb6bd28ae873de61d5330897821", size = 4700, upload-time = "2021-02-25T22:50:53.675Z" },
-]
-
-[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3942,8 +3907,6 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "rapidfuzz" },
-    { name = "redis" },
-    { name = "redis-tools" },
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "sentence-transformers", extra = ["onnx"] },
@@ -4005,8 +3968,6 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rapidfuzz", specifier = ">=3.14.3" },
-    { name = "redis", specifier = ">=7.1.0" },
-    { name = "redis-tools", specifier = ">=0.0.2" },
     { name = "ruff", specifier = ">=0.15.12" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.0" },
     { name = "scikit-learn", specifier = ">=1.8.0" },

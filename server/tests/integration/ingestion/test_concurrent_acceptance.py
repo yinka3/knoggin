@@ -1,4 +1,4 @@
-"""Real PostgreSQL/Redis acceptance and idempotency contracts."""
+"""Real durable acceptance and idempotency contracts."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -9,7 +9,6 @@ import pytest
 from common.schema.primitives import Message
 from core.knowledge.store import KnowledgeStore
 from runtime.session_runtime import SessionRuntime as Session
-from infrastructure.redis_client import RedisKeys
 from tests.integration.ingestion.test_server_flow import (
     _DeterministicEmbeddingService,
     _session,
@@ -44,11 +43,10 @@ def _configure_context(monkeypatch) -> None:
     )
 
 
-def _context(scope, *, postgres, redis):
+def _context(scope, *, postgres):
     store = KnowledgeStore(postgres, _DeterministicEmbeddingService())
     resources = SimpleNamespace(
         postgres=postgres,
-        redis=redis,
         knowledge_store=store,
         embedding=_DeterministicEmbeddingService(),
     )
@@ -73,7 +71,6 @@ async def _message_rows(scope):
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_concurrent_identical_submissions_are_accepted_once(
     real_server_scope, monkeypatch
@@ -83,7 +80,7 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
     _configure_context(monkeypatch)
     scope = real_server_scope
     contexts = [
-        _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+        _context(scope, postgres=scope["postgres"])
         for _ in range(8)
     ]
     timestamp = datetime(2026, 8, 1, 16, 0, tzinfo=timezone.utc)
@@ -101,64 +98,49 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
     assert await _message_rows(scope) == [
         {"message_id": results[0].id, "content": "same concurrent submission"}
     ]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
 
 
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_enqueue_failure_keeps_durable_pending_claim_for_retry(
+async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
     real_server_scope, monkeypatch
 ):
-    """A durable PostgreSQL write survives a Redis signal outage."""
+    """A durable PostgreSQL write survives a local worker wake failure."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    context = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 1, tzinfo=timezone.utc)
-    original_incr = scope["redis"].incr
+    original_signal = context.consumer.signal
     calls = 0
 
-    async def fail_once(*args, **kwargs):
+    def fail_once():
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise ConnectionError("simulated signal outage")
-        return await original_incr(*args, **kwargs)
+            raise RuntimeError("simulated local wake outage")
+        original_signal()
 
-    monkeypatch.setattr(scope["redis"], "incr", fail_once)
+    monkeypatch.setattr(context.consumer, "signal", fail_once)
     message = Message(content="signal retry", timestamp=timestamp)
 
-    with pytest.raises(ConnectionError, match="signal outage"):
+    with pytest.raises(RuntimeError, match="local wake outage"):
         await context.add(message)
 
-    dedup_keys = []
-    async for key in scope["redis"].scan_iter(
-        match=RedisKeys.message_dedup_pattern(scope["user_name"], scope["session_id"])
-    ):
-        dedup_keys.append(key)
-    assert len(dedup_keys) == 1
-    assert await scope["redis"].get(dedup_keys[0]) == f"pending:{message.id}"
     assert await _message_rows(scope) == [
         {"message_id": message.id, "content": "signal retry"}
     ]
 
     retried = await context.add(Message(content="signal retry", timestamp=timestamp))
     assert retried.id == message.id
-    assert await scope["redis"].get(dedup_keys[0]) == f"accepted:{message.id}"
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
+    assert context.consumer.calls == 1
 
 
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_lost_acceptance_response_is_safe_to_retry(
     real_server_scope, monkeypatch
@@ -167,8 +149,8 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    first_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
-    second_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    first_runtime = _context(scope, postgres=scope["postgres"])
+    second_runtime = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 2, tzinfo=timezone.utc)
 
     first = await first_runtime.add(
@@ -182,100 +164,64 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
     assert await _message_rows(scope) == [
         {"message_id": first.id, "content": "response was lost"}
     ]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
 
 
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_restart_reuses_a_pending_acceptance_claim(
+async def test_real_restart_reuses_durable_acceptance(
     real_server_scope, monkeypatch
 ):
-    """A new runtime can finish a durable acceptance left pending by a crash."""
+    """A new runtime receives the original durable acceptance ID."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    first_runtime = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    first_runtime = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 3, tzinfo=timezone.utc)
-    original_incr = scope["redis"].incr
-
-    async def fail_signal(*_args, **_kwargs):
-        raise ConnectionError("runtime stopped before signal")
-
-    monkeypatch.setattr(scope["redis"], "incr", fail_signal)
-    with pytest.raises(ConnectionError, match="runtime stopped"):
-        await first_runtime.add(
-            Message(content="restart pending claim", timestamp=timestamp)
-        )
-    monkeypatch.setattr(scope["redis"], "incr", original_incr)
-
-    restarted = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
-    retried = await restarted.add(
-        Message(content="restart pending claim", timestamp=timestamp)
+    first = await first_runtime.add(
+        Message(content="restart durable acceptance", timestamp=timestamp)
     )
 
+    restarted = _context(scope, postgres=scope["postgres"])
+    retried = await restarted.add(
+        Message(content="restart durable acceptance", timestamp=timestamp)
+    )
+
+    assert retried.id == first.id
     assert await _message_rows(scope) == [
-        {"message_id": retried.id, "content": "restart pending claim"}
+        {"message_id": retried.id, "content": "restart durable acceptance"}
     ]
-    assert await scope["redis"].get(
-        RedisKeys.heartbeat_counter(scope["user_name"], scope["session_id"])
-    ) == "1"
+    assert restarted.consumer.calls == 1
 
 
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
-async def test_real_acceptance_claim_expiry_is_reclaimable(
+async def test_real_durable_acceptance_does_not_expire(
     real_server_scope, monkeypatch
 ):
-    """An expired pending claim can be reclaimed by a later runtime."""
+    """A retry remains bound to its durable acceptance indefinitely."""
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    context = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    context = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 4, tzinfo=timezone.utc)
-    original_incr = scope["redis"].incr
+    first = await context.add(Message(content="durable acceptance", timestamp=timestamp))
+    retried = await context.add(
+        Message(content="durable acceptance", timestamp=timestamp)
+    )
 
-    async def fail_signal(*_args, **_kwargs):
-        raise ConnectionError("claim owner stopped")
-
-    monkeypatch.setattr(scope["redis"], "incr", fail_signal)
-    with pytest.raises(ConnectionError, match="claim owner stopped"):
-        await context.add(Message(content="expired claim", timestamp=timestamp))
-    monkeypatch.setattr(scope["redis"], "incr", original_incr)
-
-    dedup_keys = [
-        key
-        async for key in scope["redis"].scan_iter(
-            match=RedisKeys.message_dedup_pattern(
-                scope["user_name"], scope["session_id"]
-            )
-        )
+    assert retried.id == first.id
+    assert await _message_rows(scope) == [
+        {"message_id": first.id, "content": "durable acceptance"}
     ]
-    assert len(dedup_keys) == 1
-    digest = dedup_keys[0]
-    await scope["redis"].expire(digest, 1)
-    await asyncio.sleep(1.2)
-    assert await scope["redis"].get(digest) is None
-
-    # The five-minute acceptance claim is an intentionally bounded Redis
-    # idempotency window. Once it expires, the deterministic key is reclaimable
-    # and the caller receives a new durable acceptance identity.
-    retried = await context.add(Message(content="expired claim", timestamp=timestamp))
-    assert retried.id > 0
-    assert len(await _message_rows(scope)) == 2
 
 
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_same_timestamp_scopes_and_content_remain_distinct(
     real_server_scope, monkeypatch
@@ -284,7 +230,7 @@ async def test_real_same_timestamp_scopes_and_content_remain_distinct(
 
     _configure_context(monkeypatch)
     scope = real_server_scope
-    first = _context(scope, postgres=scope["postgres"], redis=scope["redis"])
+    first = _context(scope, postgres=scope["postgres"])
 
     other_session = f"session-{scope['project_id']}"
     await scope["postgres"].execute(
@@ -292,7 +238,7 @@ async def test_real_same_timestamp_scopes_and_content_remain_distinct(
         (other_session, scope["user_name"], scope["project_id"]),
     )
     other_scope = {**scope, "session_id": other_session}
-    second = _context(other_scope, postgres=scope["postgres"], redis=scope["redis"])
+    second = _context(other_scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 5, tzinfo=timezone.utc)
 
     first_message, second_message, changed_message = await asyncio.gather(

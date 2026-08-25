@@ -7,9 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from common.schema.settings import RedisConnectionSettings
 from common.utils.time_utils import get_now_iso
-from infrastructure.redis_client import AsyncRedisClient
+from core.knowledge.db.writers.message_lifecycle_writer import MessageAcceptance
 
 
 class FakePipeline:
@@ -20,9 +19,9 @@ class FakePipeline:
         self.refresh_count += 1
 
 
-class FakePipelineWriter:
-    def __init__(self, redis):
-        self.redis = redis
+class FakeEphemeralPipelineWriter:
+    def __init__(self, store):
+        self.store = store
         self.commands = []
 
     def hset(self, key, field, value):
@@ -59,29 +58,29 @@ class FakePipelineWriter:
             name = command[0]
             if name == "hset":
                 _, key, field, value = command
-                results.append(await self.redis.hset(key, field, value))
+                results.append(await self.store.hset(key, field, value))
             elif name == "zadd":
                 _, key, mapping = command
-                results.append(await self.redis.zadd(key, mapping))
+                results.append(await self.store.zadd(key, mapping))
             elif name == "zremrangebyrank":
                 _, key, start, end = command
-                results.append(await self.redis.zremrangebyrank(key, start, end))
+                results.append(await self.store.zremrangebyrank(key, start, end))
             elif name == "zrem":
                 _, key, members = command
-                results.append(await self.redis.zrem(key, *members))
+                results.append(await self.store.zrem(key, *members))
             elif name == "expire":
                 _, key, ttl = command
-                results.append(await self.redis.expire(key, ttl))
+                results.append(await self.store.expire(key, ttl))
             elif name == "hdel":
                 _, key, fields = command
-                results.append(await self.redis.hdel(key, *fields))
+                results.append(await self.store.hdel(key, *fields))
             elif name == "hget":
                 _, key, field = command
-                results.append(await self.redis.hget(key, field))
+                results.append(await self.store.hget(key, field))
         return results
 
 
-class FakeRedis:
+class FakeEphemeralStore:
     def __init__(self):
         self.strings: dict[str, str] = {}
         self.hashes: dict[str, dict[str, str]] = defaultdict(dict)
@@ -108,7 +107,7 @@ class FakeRedis:
 
     def pipeline(self):
         self.pipeline_calls += 1
-        return FakePipelineWriter(self)
+        return FakeEphemeralPipelineWriter(self)
 
     async def hset(self, key, field, value):
         self._purge_expired(key)
@@ -427,6 +426,7 @@ class FakeKnowledgeStore:
         self.next_message_id = 1
         self.embedding_rebuild_calls = []
         self.reset_claimed_ingestion_calls = []
+        self.accepted_message_ids = {}
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -461,6 +461,10 @@ class FakeKnowledgeStore:
         return True
 
     async def create_editable_user_message(self, message, *, edit_window_seconds):
+        acceptance_key = message["acceptance_key"]
+        existing_id = self.accepted_message_ids.get(acceptance_key)
+        if existing_id is not None:
+            return MessageAcceptance(message_id=existing_id, created=False)
         row = {
             **message,
             "lifecycle_state": "editable",
@@ -469,6 +473,8 @@ class FakeKnowledgeStore:
             "edit_window_seconds": edit_window_seconds,
         }
         self.saved_message_logs.append([row])
+        self.accepted_message_ids[acceptance_key] = message["id"]
+        return MessageAcceptance(message_id=message["id"], created=True)
 
     async def reset_claimed_ingestion(self, *, user_name, project_id, session_id):
         self.reset_claimed_ingestion_calls.append(
@@ -513,15 +519,6 @@ class FakeEmbeddingService:
 class FakeLLMService:
     async def close(self):
         pass
-
-
-class FakeRedisManager(AsyncRedisClient):
-    def __init__(self, client: FakeRedis):
-        super().__init__(RedisConnectionSettings())
-        self._client = client
-
-    async def connect(self):
-        return self.client
 
 
 class FakePostgresClient:
@@ -586,10 +583,11 @@ class FakePostgresClient:
             "temperature": data.get("temperature", 0.7),
             "enabled_tools": data.get("enabled_tools"),
             "is_default": data.get("is_default", False),
-            "is_spawned": data.get("is_spawned", False),
+            "aac_enabled": data.get("aac_enabled", False),
             "spawned_by": data.get("spawned_by"),
             "brain_revision": data.get("brain_revision", 1),
             "created_at": data.get("created_at", get_now_iso()),
+            "last_turn_at": data.get("last_turn_at"),
         }
 
     def upsert_project(self, project_id, status="active", user_name="ada"):
@@ -754,7 +752,7 @@ class FakePostgresClient:
             ids = set(params.get("agent_ids") or [])
             rows = [row for row in rows if row["agent_id"] in ids]
             if "count(*)" in normalized:
-                return [{"count": sum(1 for row in rows if row.get("is_spawned"))}]
+                return [{"count": sum(1 for row in rows if row.get("spawned_by"))}]
         return rows[:1] if "limit 1" in normalized else rows
 
     def _execute_against_stores(self, query, params):
@@ -920,7 +918,6 @@ class FakePostgresClient:
             self.agents[agent_id] = {
                 "agent_id": agent_id,
                 "user_name": params.get("user_name"),
-                "project_id": params.get("project_id"),
                 "name": params.get("name"),
                 "persona": params.get("persona"),
                 "brain": params.get("brain"),
@@ -930,10 +927,11 @@ class FakePostgresClient:
                 if isinstance(params.get("enabled_tools"), str)
                 else params.get("enabled_tools"),
                 "is_default": "%(enabled_tools)s, true" in normalized,
-                "is_spawned": "true, %(spawned_by)s" in normalized,
+                "aac_enabled": "true, %(spawned_by)s" in normalized,
                 "spawned_by": params.get("spawned_by"),
                 "brain_revision": 1,
                 "created_at": get_now_iso(),
+                "last_turn_at": None,
             }
             return
 
@@ -954,7 +952,15 @@ class FakePostgresClient:
             row = self.agents.get(agent_id)
             if not row:
                 return
-            for field in ("name", "brain", "model", "temperature", "enabled_tools"):
+            for field in (
+                "name",
+                "brain",
+                "model",
+                "temperature",
+                "enabled_tools",
+                "aac_enabled",
+                "last_turn_at",
+            ):
                 if field in params:
                     value = params[field]
                     if field == "enabled_tools" and isinstance(value, str):
@@ -964,6 +970,8 @@ class FakePostgresClient:
                 row["brain_revision"] += 1
             if "set is_default = true" in normalized:
                 row["is_default"] = True
+            if "last_turn_at = now()" in normalized:
+                row["last_turn_at"] = self._now()
             return
 
         if "delete from public.agents" in normalized:
@@ -990,8 +998,6 @@ class _FakePostgresCursor:
 
 @dataclass
 class FakeResources:
-    redis: FakeRedis = field(default_factory=FakeRedis)
-    redis_manager: Any = None
     knowledge_store: FakeKnowledgeStore = field(default_factory=FakeKnowledgeStore)
     postgres: FakePostgresClient = field(default_factory=FakePostgresClient)
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
@@ -999,11 +1005,6 @@ class FakeResources:
     executor: Any = None
     gliner: Any = None
     spacy: Any = None
-
-    def __post_init__(self):
-        if self.redis_manager is None:
-            self.redis_manager = FakeRedisManager(self.redis)
-
 
 class FakeScheduler:
     def __init__(self):

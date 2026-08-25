@@ -37,7 +37,6 @@ from core.project.domain_config_store import (
 )
 from core.project.entity_cleanup import EntityCleanupWorkflow
 from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
-from infrastructure.redis_client import RedisKeys
 from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -706,7 +705,7 @@ class ProjectManager:
         return await self.get_project(project_id)
 
     async def delete_project(self, project_id: str) -> Optional[dict]:
-        """Hard delete every PostgreSQL, AGE, and Redis record owned by a project."""
+        """Hard delete every durable PostgreSQL and AGE record owned by a project."""
         async with self._maintenance_lock:
             meta = await self.get_project(project_id)
             if not meta:
@@ -722,19 +721,6 @@ class ProjectManager:
                 await active_state.shutdown()
                 del self.active_projects[project_id]
 
-            session_ids: List[str] = []
-            agent_ids: List[str] = []
-            if getattr(self.resources, "redis", None) is not None:
-                try:
-                    session_ids, agent_ids = await self._project_runtime_member_ids(
-                        project_id
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Could not snapshot Redis cleanup members for project {}: {}",
-                        project_id,
-                        exc,
-                    )
             deleted = await self._project_deletion_writer.delete_project(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -744,97 +730,11 @@ class ProjectManager:
                     f"Project '{project_id}' disappeared during deletion"
                 )
 
-            try:
-                await self._delete_project_redis_state(
-                    project_id,
-                    session_ids=session_ids,
-                    agent_ids=agent_ids,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Durable deletion completed but Redis cleanup failed for project {}: {}",
-                    project_id,
-                    exc,
-                )
-
             logger.info(
                 f"Hard deleted project {project_id} and all owned state: {deleted}"
             )
             meta["status"] = ProjectStatus.DELETED.value
             return meta
-
-    async def _project_runtime_member_ids(
-        self,
-        project_id: str,
-    ) -> tuple[List[str], List[str]]:
-        if getattr(self.resources, "redis", None) is None:
-            return [], []
-        session_rows = await self.pg.fetch_all(
-            """
-            SELECT session_id
-            FROM public.sessions
-            WHERE user_name = %(user_name)s AND project_id = %(project_id)s
-            """,
-            {"user_name": self.user_name, "project_id": project_id},
-        )
-        agent_rows = await self.pg.fetch_all(
-            """
-            SELECT agent_id
-            FROM public.agents
-            WHERE user_name = %(user_name)s AND project_id = %(project_id)s
-            """,
-            {"user_name": self.user_name, "project_id": project_id},
-        )
-        return (
-            [str(row["session_id"]) for row in session_rows],
-            [str(row["agent_id"]) for row in agent_rows],
-        )
-
-    async def _delete_project_redis_state(
-        self,
-        project_id: str,
-        *,
-        session_ids: List[str],
-        agent_ids: List[str],
-    ) -> int:
-        redis = getattr(self.resources, "redis", None)
-        if redis is None:
-            return 0
-
-        keys = set(RedisKeys.project_cleanup_keys(self.user_name, project_id))
-        patterns = list(RedisKeys.project_cleanup_patterns(self.user_name, project_id))
-        for session_id in session_ids:
-            keys.update(RedisKeys.session_keys(self.user_name, session_id))
-            patterns.extend(
-                (
-                    RedisKeys.message_dedup_pattern(self.user_name, session_id),
-                    RedisKeys.session_memory_pattern(self.user_name, session_id),
-                )
-            )
-        for agent_id in agent_ids:
-            keys.add(RedisKeys.agent_directives(self.user_name, agent_id))
-            keys.add(RedisKeys.community_agent_memory(self.user_name, agent_id))
-
-        for pattern in patterns:
-            cursor = 0
-            while True:
-                cursor, matched = await redis.scan(
-                    cursor,
-                    match=pattern,
-                    count=100,
-                )
-                keys.update(matched)
-                if cursor == 0:
-                    break
-
-        deleted = int(await redis.delete(*sorted(keys))) if keys else 0
-        await redis.hdel(RedisKeys.projects(self.user_name), project_id)
-        if agent_ids:
-            await redis.hdel(RedisKeys.agents(self.user_name), *agent_ids)
-            default_key = RedisKeys.agents_default(self.user_name)
-            if await redis.get(default_key) in set(agent_ids):
-                deleted += int(await redis.delete(default_key))
-        return deleted
 
     async def acquire_project_for_session(
         self, project_id: str, session_id: str

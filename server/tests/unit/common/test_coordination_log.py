@@ -166,14 +166,14 @@ def test_policy_normalizes_scheduler_failure_name_to_job_field():
 def test_logfmt_quotes_values_without_breaking_searchable_keys():
     line = format_logfmt(
         {
-            "event": "job.merge_queue_marked",
+            "event": "job.episode_processed",
             "label": "RECOVERY",
             "reason": "profile refined",
             "path": 'value "quoted"',
         }
     )
 
-    assert "event=job.merge_queue_marked" in line
+    assert "event=job.episode_processed" in line
     assert "label=RECOVERY" in line
     assert 'reason="profile refined"' in line
     assert 'path="value \\"quoted\\""' in line
@@ -191,8 +191,8 @@ def test_coordination_log_writes_when_enabled_and_skips_when_disabled(tmp_path):
         )
     )
 
-    log.write({"event": "job.merge_queue_marked", "label": "RECOVERY"})
-    assert "event=job.merge_queue_marked label=RECOVERY" in path.read_text()
+    log.write({"event": "job.episode_processed", "label": "RECOVERY"})
+    assert "event=job.episode_processed label=RECOVERY" in path.read_text()
 
     disabled_path = tmp_path / "disabled.log"
     log.configure(
@@ -203,7 +203,7 @@ def test_coordination_log_writes_when_enabled_and_skips_when_disabled(tmp_path):
             rotation_mb=10,
         )
     )
-    log.write({"event": "job.merge_queue_marked", "label": "RECOVERY"})
+    log.write({"event": "job.episode_processed", "label": "RECOVERY"})
     assert not disabled_path.exists()
 
 
@@ -220,7 +220,7 @@ def test_coordination_log_write_failure_does_not_raise(monkeypatch):
         lambda **_kwargs: BrokenLogger(),
     )
 
-    log.write({"event": "job.merge_queue_marked", "label": "RECOVERY"})
+    log.write({"event": "job.episode_processed", "label": "RECOVERY"})
 
 
 @pytest.mark.no_network
@@ -238,13 +238,12 @@ async def test_engine_emitter_persists_approved_events(
     await emitter.emit(
         "project-1",
         "job",
-        "merge_queue_marked",
+        "episode_processed",
         {
             "user_name": "ada",
             "project_id": "project-1",
-            "merge_key": "merge_queue:ada:project-1",
-            "entity_ids": [2, 4],
-            "reason": "profile_refined",
+            "source_message_count": 2,
+            "episode_count": 1,
         },
     )
 
@@ -254,11 +253,10 @@ async def test_engine_emitter_persists_approved_events(
             "label": "RECOVERY",
             "retention": "recovery",
             "component": "job",
-            "event": "job.merge_queue_marked",
+            "event": "job.episode_processed",
             "user": "ada",
             "project_id": "project-1",
-            "merge_key": "merge_queue:ada:project-1",
-            "entity_ids": "2,4",
-            "reason": "profile_refined",
+            "source_message_count": 2,
+            "episode_count": 1,
         }
     ]

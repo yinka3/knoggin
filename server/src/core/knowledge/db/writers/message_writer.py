@@ -133,3 +133,62 @@ class MessageWriter:
                         f"{message['user_name']}/{message['session_id']}/{message['id']}"
                     )
         return True
+
+    @_storage_write("accept_editable_user_message")
+    async def accept_editable_user_message(self, message: Dict, *, cur) -> int | None:
+        """Insert one user turn unless its durable acceptance already exists.
+
+        The partial unique index makes this safe across independent runtime
+        instances.  A ``None`` result means another transaction accepted the
+        same key first.
+        """
+
+        missing = [
+            key
+            for key in ("user_name", "session_id", "project_id", "acceptance_key")
+            if not message.get(key)
+        ]
+        if missing:
+            raise ValueError(
+                "Editable user message missing required fields: " + ", ".join(missing)
+            )
+        timestamp = self._timestamp_ms(message.get("timestamp"))
+        await cur.execute(
+            """
+            INSERT INTO public.messages (
+                user_name, session_id, message_id, project_id, role, content,
+                user_msg_id, metadata, acceptance_key, timestamp_ms, lifecycle_state,
+                editable_until_ms, sealed_at_ms, selected_revision,
+                replaces_message_id, superseded_at_ms, ingestion_state,
+                ingestion_not_before_ms, ingestion_claim_id,
+                ingestion_claimed_at_ms, episode_eligible, episode_type
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (user_name, session_id, acceptance_key)
+            WHERE acceptance_key IS NOT NULL
+            DO NOTHING
+            RETURNING message_id
+            """,
+            (
+                message["user_name"], message["session_id"], message["id"],
+                message["project_id"], message["role"], message["content"],
+                message.get("user_msg_id") or message["id"],
+                json.dumps(message.get("metadata") or {}), message["acceptance_key"],
+                timestamp, message.get("lifecycle_state", "sealed"),
+                message.get("editable_until_ms"), message.get("sealed_at_ms"),
+                int(message.get("selected_revision", 1)),
+                message.get("replaces_message_id"), message.get("superseded_at_ms"),
+                message.get("ingestion_state", "excluded"),
+                message.get("ingestion_not_before_ms"),
+                message.get("ingestion_claim_id"),
+                message.get("ingestion_claimed_at_ms"),
+                bool(message.get("episode_eligible", False)),
+                message.get("episode_type"),
+            ),
+        )
+        inserted = await cur.fetchone()
+        if inserted is None:
+            return None
+        return int(inserted["message_id"])

@@ -4,12 +4,14 @@ from typing import List, Mapping, Optional, Union
 
 from loguru import logger
 
+from common.schema.agent.community_tools import AAC_DEFAULT_ENABLED_TOOLS
 from common.schema.agent.identity import AgentConfig, PersonaProfile
 from common.utils.agent_identity import (
     build_brain_snapshot_summary,
     normalize_agent_brain,
     should_snapshot_brain_revision,
 )
+from common.utils.time_utils import parse_iso_time
 from core.agent.tools.registry import get_registered_tool_names
 
 _UNSET = object()
@@ -32,10 +34,15 @@ def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
         temperature=row["temperature"] if row["temperature"] is not None else 0.7,
         enabled_tools=row["enabled_tools"],
         is_default=bool(row["is_default"]),
-        is_spawned=bool(row["is_spawned"]),
+        aac_enabled=bool(row.get("aac_enabled", False)),
         spawned_by=row["spawned_by"],
         brain_revision=int(row.get("brain_revision", 1)),
         created_at=row["created_at"],
+        last_turn_at=(
+            parse_iso_time(row["last_turn_at"])
+            if isinstance(row.get("last_turn_at"), str)
+            else row.get("last_turn_at")
+        ),
     )
 
 
@@ -59,8 +66,8 @@ class AgentManager:
         """List all agents for the user."""
         query = '''
             SELECT agent_id, name, persona, brain, model, temperature,
-                   enabled_tools, is_default, is_spawned, spawned_by,
-                   brain_revision, created_at
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
             FROM public.agents
             WHERE user_name = %(user_name)s
         '''
@@ -72,8 +79,8 @@ class AgentManager:
         """Get agent by ID."""
         query = '''
             SELECT agent_id, name, persona, brain, model, temperature,
-                   enabled_tools, is_default, is_spawned, spawned_by,
-                   brain_revision, created_at
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
             FROM public.agents
             WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
         '''
@@ -90,8 +97,8 @@ class AgentManager:
         """Get agent by name (case-insensitive)."""
         query = '''
             SELECT agent_id, name, persona, brain, model, temperature,
-                   enabled_tools, is_default, is_spawned, spawned_by,
-                   brain_revision, created_at
+                   enabled_tools, is_default, aac_enabled, spawned_by,
+                   brain_revision, created_at, last_turn_at
             FROM public.agents
             WHERE user_name = %(user_name)s AND LOWER(name) = LOWER(%(name)s)
             LIMIT 1
@@ -186,7 +193,7 @@ class AgentManager:
             WITH inserted AS (
                 INSERT INTO public.agents (
                 agent_id, user_name, name, persona, brain,
-                model, temperature, enabled_tools, is_default, is_spawned
+                model, temperature, enabled_tools, is_default, aac_enabled
                 ) VALUES (
                     %(agent_id)s, %(user_name)s, %(name)s, %(persona)s, %(brain)s,
                     %(model)s, %(temperature)s, %(enabled_tools)s, false, false
@@ -221,6 +228,93 @@ class AgentManager:
         logger.info(f"Created agent: {name} ({agent_id})")
         return await self.get_agent(agent_id)
 
+    async def create_specialist(
+        self,
+        *,
+        parent_id: str,
+        name: str,
+        persona: Union[PersonaProfile, Mapping[str, str]],
+        brain: Optional[str] = None,
+        model: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+    ) -> AgentConfig:
+        """Create a user-owned specialist while preserving parent ancestry."""
+
+        parent_id = self._require_agent_id(parent_id, "parent_id")
+        parent = await self.get_agent(parent_id)
+        if parent is None:
+            raise ValueError("Parent agent does not exist for this user")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Specialist name must not be blank")
+        if len(name.strip()) > 100:
+            raise ValueError("Specialist name must be 100 characters or fewer")
+
+        persona_profile = PersonaProfile.from_value(persona)
+        specialist_id = f"spawned_{uuid.uuid4().hex}"
+        candidate = AgentConfig(
+            id=specialist_id,
+            name=name.strip(),
+            persona=persona_profile,
+            brain=normalize_agent_brain(brain or "", persona_profile.to_markdown()),
+            model=model,
+            temperature=0.7,
+            enabled_tools=(
+                list(AAC_DEFAULT_ENABLED_TOOLS)
+                if enabled_tools is None
+                else enabled_tools
+            ),
+            aac_enabled=False,
+            spawned_by=parent_id,
+        )
+        self._validate_enabled_tools(candidate.enabled_tools)
+        await self.pg.execute(
+            """
+            WITH inserted AS (
+                INSERT INTO public.agents (
+                    agent_id, user_name, name, persona, brain,
+                    model, temperature, enabled_tools, is_default,
+                    aac_enabled, spawned_by
+                ) VALUES (
+                    %(agent_id)s, %(user_name)s, %(name)s, %(persona)s,
+                    %(brain)s, %(model)s, %(temperature)s, %(enabled_tools)s,
+                    false, false, %(spawned_by)s
+                )
+                RETURNING agent_id, user_name, brain_revision, brain
+            )
+            INSERT INTO public.agent_brain_snapshots (
+                agent_id, revision, user_name, content, edited_by,
+                change_type, change_summary
+            )
+            SELECT agent_id, brain_revision, user_name, COALESCE(brain, ''),
+                   'aac_spawn', 'specialist_spawn', %(change_summary)s
+            FROM inserted
+            """,
+            {
+                "agent_id": specialist_id,
+                "user_name": self.user_name,
+                "name": candidate.name,
+                "persona": candidate.persona_markdown,
+                "brain": candidate.brain,
+                "model": candidate.model,
+                "temperature": candidate.temperature,
+                "enabled_tools": json.dumps(candidate.enabled_tools),
+                "spawned_by": parent_id,
+                "change_summary": build_brain_snapshot_summary(
+                    "specialist_spawn"
+                ),
+            },
+        )
+        created = await self.get_agent(specialist_id)
+        if created is None:
+            raise RuntimeError("Specialist was not returned after creation")
+        return created
+
+    @staticmethod
+    def _require_agent_id(value: object, field: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field} must not be blank")
+        return value.strip()
+
     async def update_agent(
         self,
         agent_id: str,
@@ -253,10 +347,11 @@ class AgentManager:
                 enabled_tools if enabled_tools is not _UNSET else config.enabled_tools
             ),
             is_default=config.is_default,
-            is_spawned=config.is_spawned,
+            aac_enabled=config.aac_enabled,
             spawned_by=config.spawned_by,
             brain_revision=config.brain_revision,
             created_at=config.created_at,
+            last_turn_at=config.last_turn_at,
         )
         self._validate_enabled_tools(candidate.enabled_tools)
 
@@ -358,6 +453,45 @@ class AgentManager:
         )
         logger.info(f"Updated agent persona from settings: {config.name} ({agent_id})")
         return await self.get_agent(agent_id)
+
+    async def set_aac_enabled(
+        self,
+        agent_id: str,
+        enabled: bool,
+    ) -> Optional[AgentConfig]:
+        """Set whether this durable agent may be selected for AAC discussion."""
+
+        if not isinstance(enabled, bool):
+            raise ValueError("AAC participation must be a boolean")
+        config = await self.get_agent(agent_id)
+        if not config:
+            return None
+        await self.pg.execute(
+            """
+            UPDATE public.agents
+            SET aac_enabled = %(aac_enabled)s, updated_at = now()
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {
+                "user_name": self.user_name,
+                "agent_id": agent_id,
+                "aac_enabled": enabled,
+            },
+        )
+        return await self.get_agent(agent_id)
+
+    async def mark_turn_completed(self, agent_id: str) -> bool:
+        """Persist one agent's most recent successful execution timestamp."""
+
+        updated = await self.pg.execute(
+            """
+            UPDATE public.agents
+            SET last_turn_at = NOW(), updated_at = NOW()
+            WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+            """,
+            {"user_name": self.user_name, "agent_id": agent_id},
+        )
+        return bool(updated)
 
     async def delete_agent(self, agent_id: str) -> bool:
         """Delete an agent. Returns False if not found or is default."""

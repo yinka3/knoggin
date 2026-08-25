@@ -89,7 +89,6 @@ cython_debug/
 
 # Knoggin specific
 config/
-redis_data/
 *.log
 tmp/
 data/

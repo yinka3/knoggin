@@ -1,16 +1,10 @@
-import asyncio
-import json
-
 import pytest
 
 from core.agent.tools.search import SearchTools
-from infrastructure.redis_client import RedisKeys
-from tests.fixtures.fakes import FakeRedis
 
 
-def make_search_tool(redis=None, knowledge_store=None):
+def make_search_tool(knowledge_store=None):
     tool = SearchTools()
-    tool.redis = redis or FakeRedis()
     tool.knowledge_store = knowledge_store or object()
     tool.user_name = "ada"
     tool.session_id = "session-1"
@@ -19,86 +13,7 @@ def make_search_tool(redis=None, knowledge_store=None):
 
 
 @pytest.mark.no_network
-async def test_surrounding_context_uses_message_ids_and_skips_malformed_entries():
-    redis = FakeRedis()
-    tool = make_search_tool(redis=redis)
-
-    recent_key = RedisKeys.recent_conversation("ada", "session-1")
-    conv_key = RedisKeys.conversation("ada", "session-1")
-
-    await redis.zadd(
-        recent_key,
-        {
-            "6": 1,
-            "7": 2,
-            "8": 3,
-            "9": 4,
-        },
-    )
-    await redis.hset(
-        conv_key,
-        "6",
-        json.dumps(
-            {
-                "role": "assistant",
-                "content": "before",
-                "timestamp": "2026-01-01T10:00:00+00:00",
-            }
-        ),
-    )
-    await redis.hset(
-        conv_key,
-        "7",
-        json.dumps(
-            {
-                "role": "user",
-                "content": "hit",
-                "timestamp": "2026-01-01T10:01:00+00:00",
-            }
-        ),
-    )
-    await redis.hset(conv_key, "8", "{not-json")
-    await redis.hset(
-        conv_key,
-        "9",
-        json.dumps(
-            {
-                "role": "assistant",
-                "content": "after",
-                "timestamp": "2026-01-01T10:02:00+00:00",
-            }
-        ),
-    )
-
-    context = await tool._get_surrounding_context(
-        "msg_7", forward=2, target_total=4
-    )
-
-    assert context == [
-        {
-            "role": "assistant",
-            "timestamp": "2026-01-01T10:00:00+00:00",
-            "content": "before",
-            "id": "msg_6",
-        },
-        {
-            "role": "user",
-            "timestamp": "2026-01-01T10:01:00+00:00",
-            "content": "hit",
-            "id": "msg_7",
-            "is_hit": True,
-        },
-        {
-            "role": "assistant",
-            "timestamp": "2026-01-01T10:02:00+00:00",
-            "content": "after",
-            "id": "msg_9",
-        },
-    ]
-
-
-@pytest.mark.no_network
-async def test_surrounding_context_falls_back_to_graph_when_redis_rank_is_missing():
+async def test_surrounding_context_uses_durable_scoped_messages():
     class FakeKnowledgeStore:
         def __init__(self):
             self.calls = []
@@ -139,7 +54,7 @@ async def test_surrounding_context_falls_back_to_graph_when_redis_rank_is_missin
             ]
 
     knowledge_store = FakeKnowledgeStore()
-    tool = make_search_tool(redis=FakeRedis(), knowledge_store=knowledge_store)
+    tool = make_search_tool(knowledge_store=knowledge_store)
 
     context = await tool._get_surrounding_context(
         "msg_5", forward=1, target_total=3, session_id="session-2"
@@ -154,7 +69,7 @@ async def test_surrounding_context_falls_back_to_graph_when_redis_rank_is_missin
 
 @pytest.mark.no_network
 async def test_search_messages_drops_results_without_hit_context():
-    tool = make_search_tool(redis=FakeRedis())
+    tool = make_search_tool()
     tool.search_cfg = {"default_message_limit": 8}
 
     async def search(query, limit):
@@ -171,28 +86,38 @@ async def test_search_messages_drops_results_without_hit_context():
 
 @pytest.mark.no_network
 async def test_hydrate_evidence_uses_explicit_and_default_scope():
-    redis = FakeRedis()
-    await redis.hset(
-        RedisKeys.message_content("grace", "session-9"),
-        "msg_7",
-        json.dumps(
-            {
-                "message": "explicit scoped message",
-                "timestamp": "2026-01-01T10:00:00+00:00",
-            }
-        ),
-    )
-    await redis.hset(
-        RedisKeys.message_content("ada", "session-1"),
-        "msg_8",
-        json.dumps(
-            {
-                "content": "legacy default message",
-                "timestamp": "2026-01-01T10:01:00+00:00",
-            }
-        ),
-    )
-    tool = make_search_tool(redis=redis)
+    class FakeKnowledgeStore:
+        def __init__(self):
+            self.calls = []
+
+        async def get_messages_by_ids(
+            self,
+            message_ids,
+            *,
+            user_name,
+            session_ids,
+            visible_project_ids,
+        ):
+            self.calls.append(
+                (message_ids, user_name, session_ids, visible_project_ids)
+            )
+            message_id = message_ids[0]
+            return [
+                {
+                    "id": message_id,
+                    "user_name": user_name,
+                    "session_id": session_ids[0],
+                    "content": (
+                        "explicit scoped message"
+                        if user_name == "grace"
+                        else "default scoped message"
+                    ),
+                    "timestamp": 1767261600000 + message_id,
+                }
+            ]
+
+    knowledge_store = FakeKnowledgeStore()
+    tool = make_search_tool(knowledge_store=knowledge_store)
 
     evidence = await tool._hydrate_evidence(
         [
@@ -209,79 +134,17 @@ async def test_hydrate_evidence_uses_explicit_and_default_scope():
             "user_name": "grace",
             "session_id": "session-9",
             "message": "explicit scoped message",
-            "timestamp": "2026-01-01T10:00:00+00:00",
+            "timestamp": "2026-01-01T10:00:00.007000+00:00",
         },
         {
             "id": "msg_8",
             "user_name": "ada",
             "session_id": "session-1",
-            "message": "legacy default message",
-            "timestamp": "2026-01-01T10:01:00+00:00",
+            "message": "default scoped message",
+            "timestamp": "2026-01-01T10:00:00.008000+00:00",
         },
     ]
-
-
-@pytest.mark.no_network
-async def test_hydrate_evidence_falls_back_to_scoped_graph_lookup_on_redis_miss():
-    class FakeKnowledgeStore:
-        def __init__(self):
-            self.calls = []
-
-        async def get_messages_by_ids(
-            self,
-            message_ids,
-            *,
-            user_name,
-            session_ids,
-            visible_project_ids,
-        ):
-            self.calls.append(
-                (message_ids, user_name, session_ids, visible_project_ids)
-            )
-            return [
-                {
-                    "id": 11,
-                    "user_name": user_name,
-                    "session_id": session_ids[0],
-                    "content": "from graph",
-                    "timestamp": 1767261600000,
-                }
-            ]
-
-    knowledge_store = FakeKnowledgeStore()
-    tool = make_search_tool(redis=FakeRedis(), knowledge_store=knowledge_store)
-
-    evidence = await tool._hydrate_evidence(
-        [{"user_name": "ada", "session_id": "session-2", "message_id": 11}]
-    )
-
     assert knowledge_store.calls == [
-        ([11], "ada", ["session-2"], ["project-1"])
+        ([7], "grace", ["session-9"], ["project-1"]),
+        ([8], "ada", ["session-1"], ["project-1"]),
     ]
-    assert evidence == [
-        {
-            "id": "msg_11",
-            "user_name": "ada",
-            "session_id": "session-2",
-            "message": "from graph",
-            "timestamp": "2026-01-01T10:00:00+00:00",
-        }
-    ]
-
-
-@pytest.mark.no_network
-async def test_hydrate_evidence_returns_empty_on_redis_timeout():
-    class TimeoutPipeline:
-        def hget(self, key, field):
-            return self
-
-        async def execute(self):
-            raise asyncio.TimeoutError
-
-    class TimeoutRedis:
-        def pipeline(self):
-            return TimeoutPipeline()
-
-    tool = make_search_tool(redis=TimeoutRedis())
-
-    assert await tool._hydrate_evidence([7]) == []

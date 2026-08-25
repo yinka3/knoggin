@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
-from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -25,16 +23,8 @@ from core.ingestion.graph_commit import write_ingestion_batch_to_graph
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.documents import DocumentService
-from infrastructure.redis_client import (
-    SESSION_RUNTIME_TTL_SECONDS,
-    SHORT_LIVED_DEDUP_TTL_SECONDS,
-    RedisKeys,
-)
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
-
-SESSION_KEY_TTL = SESSION_RUNTIME_TTL_SECONDS
-MAX_LOCAL_DURABLE_MESSAGE_CLAIMS = 1024
 
 
 class SessionRuntime:
@@ -84,17 +74,12 @@ class SessionRuntime:
         self._agent_run_state = "idle"
         self._agent_queue_paused = False
         self._agent_runs_closed = False
-        self._durable_message_claims: OrderedDict[str, int] = OrderedDict()
         self._shutdown_lock = asyncio.Lock()
         self._closed = False
 
     @property
     def current_config(self) -> RootConfig:
         return ConfigManager.get().config
-
-    @property
-    def redis_client(self):
-        return self.resources.redis
 
     @property
     def knowledge_store(self):
@@ -337,178 +322,32 @@ class SessionRuntime:
         msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
         idempotency_key = str(msg.metadata.get("idempotency_key", "")).strip()
-        # Prefer the application request key for retries. Keep the existing
-        # content/timestamp fallback for internal callers that do not provide
-        # an application idempotency key.
+        # PostgreSQL owns this stable acceptance identity.  An application
+        # request key wins; internal callers retain deterministic content/time
+        # acceptance without a separate cache protocol.
         timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
-        content_hash = hashlib.sha256(
+        fallback_key = hashlib.sha256(
             (
-                f"{self.session_id}:request:{idempotency_key}"
-                if idempotency_key
-                else f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}"
+                f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}"
             ).encode()
-        ).hexdigest()[:12]
-
-        dedup_key = RedisKeys.message_dedup(
-            self.user_name,
-            self.session_id,
-            content_hash,
+        ).hexdigest()
+        acceptance_key = (
+            f"request:{idempotency_key}" if idempotency_key else f"content:{fallback_key}"
         )
+        msg.id = await self.knowledge_store.allocate_message_id()
 
-        durable = False
-        while True:
-            existing_id = await self.redis_client.get(dedup_key)
-            if existing_id:
-                status, message_id = self._parse_message_dedup(existing_id)
-                msg.id = message_id
-                if status == "accepted":
-                    return msg
-
-                resolution = await self._wait_for_pending_message_claim(
-                    dedup_key,
-                    msg,
-                )
-                if resolution == "accepted":
-                    return msg
-                if resolution == "durable":
-                    durable = True
-                    break
-                continue
-
-            new_id = await self.knowledge_store.allocate_message_id()
-            if await self.redis_client.set(
-                dedup_key,
-                f"pending:{new_id}",
-                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
-                nx=True,
-            ):
-                msg.id = new_id
-                break
-
-        try:
-            if not durable:
-                await self._persist_user_turn(msg)
-                self._remember_durable_message(dedup_key, msg.id)
-                durable = True
-            await self._record_conversation_message(
-                message_id=msg.id,
-                role="user",
-                content=msg.content.strip(),
-                timestamp=msg.timestamp,
-                user_msg_id=msg.id,
-                metadata=msg.metadata,
-            )
-            await self._signal_user_message()
-            await self.redis_client.set(
-                dedup_key,
-                f"accepted:{msg.id}",
-                ex=SHORT_LIVED_DEDUP_TTL_SECONDS,
-            )
-        except Exception:
-            if not durable:
-                try:
-                    await self.redis_client.delete(dedup_key)
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Failed to release message dedup claim after add failure: "
-                        f"{cleanup_exc}"
-                    )
-            raise
+        acceptance = await self._persist_user_turn(msg, acceptance_key=acceptance_key)
+        msg.id = acceptance.message_id
+        if not acceptance.created:
+            # The original writer may have committed just before its local
+            # worker wake failed.  A duplicate request is always safe to use
+            # as another wake-up edge because the durable queue is canonical.
+            self.consumer.signal()
+            return msg
 
         self.consumer.signal()
-        await self.refresh_session_ttls()
 
         return msg
-
-    async def _wait_for_pending_message_claim(
-        self,
-        dedup_key: str,
-        msg: Message,
-    ) -> str:
-        """Wait for another runtime to finish a shared acceptance claim.
-
-        A pending claim can mean either an active writer or a crashed writer
-        that already committed PostgreSQL.  Let the active writer publish its
-        accepted state first; after a bounded wait, a durable row can safely be
-        completed by this runtime without allocating or inserting a second ID.
-        """
-
-        durable_id: Optional[int] = None
-        for attempt in range(50):
-            local_durable_id = self._durable_message_claims.get(dedup_key)
-            if local_durable_id is not None:
-                msg.id = local_durable_id
-                return "durable"
-
-            current = await self.redis_client.get(dedup_key)
-            if current is None:
-                return "retry"
-
-            status, message_id = self._parse_message_dedup(current)
-            msg.id = message_id
-            if status == "accepted":
-                return "accepted"
-
-            if attempt % 5 == 0:
-                durable_id = await self._find_durable_user_message(msg)
-                if durable_id is not None and attempt >= 20:
-                    msg.id = durable_id
-                    return "durable"
-            await asyncio.sleep(0.01)
-
-        if durable_id is not None:
-            msg.id = durable_id
-            return "durable"
-        raise RuntimeError("Message dedup claim remained pending")
-
-    async def _find_durable_user_message(self, msg: Message) -> Optional[int]:
-        """Find a committed row matching the deterministic acceptance identity."""
-
-        if not self.session_id or not self.project_id:
-            return None
-        row = await self.resources.postgres.fetch_one(
-            """
-            SELECT message_id
-            FROM public.messages
-            WHERE user_name = %s
-              AND session_id = %s
-              AND project_id = %s
-              AND role = 'user'
-              AND content = %s
-              AND timestamp_ms = %s
-            ORDER BY message_id
-            LIMIT 1
-            """,
-            (
-                self.user_name,
-                self.session_id,
-                self.project_id,
-                msg.content.strip(),
-                int(msg.timestamp.timestamp() * 1000),
-            ),
-        )
-        if not row or row.get("message_id") is None:
-            return None
-        return int(row["message_id"])
-
-    def _remember_durable_message(self, dedup_key: str, message_id: int) -> None:
-        """Keep only a bounded local retry hint; PostgreSQL remains canonical."""
-
-        self._durable_message_claims[dedup_key] = message_id
-        self._durable_message_claims.move_to_end(dedup_key)
-        while len(self._durable_message_claims) > MAX_LOCAL_DURABLE_MESSAGE_CLAIMS:
-            self._durable_message_claims.popitem(last=False)
-
-    @staticmethod
-    def _parse_message_dedup(value: str) -> tuple[str, int]:
-        """Parse current status values and legacy numeric dedup claims."""
-        text = str(value)
-        if ":" not in text:
-            return "accepted", int(text)
-        status, raw_message_id = text.split(":", 1)
-        if status not in {"pending", "accepted"}:
-            raise ValueError(f"Unknown message dedup status: {status}")
-        return status, int(raw_message_id)
 
     @staticmethod
     def _normalize_timestamp(timestamp: datetime) -> datetime:
@@ -516,66 +355,9 @@ class SessionRuntime:
             return timestamp.replace(tzinfo=timezone.utc)
         return timestamp.astimezone(timezone.utc)
 
-    async def _record_conversation_message(
-        self,
-        message_id: int,
-        role: str,
-        content: str,
-        timestamp: datetime,
-        user_msg_id: Optional[int] = None,
-        metadata: Optional[dict] = None,
-    ) -> None:
-        """Atomically cache one canonical message and its conversation position."""
-        normalized_timestamp = self._normalize_timestamp(timestamp)
-        timestamp_iso = normalized_timestamp.isoformat()
-        message_key = str(message_id)
-
-        payload = {
-            "message_id": message_id,
-            "role": role,
-            "role_label": "Assistant" if role == "assistant" else "User",
-            "content": content,
-            "timestamp": timestamp_iso,
-            "metadata": metadata,
-            "user_msg_id": user_msg_id,
-        }
-        content_payload = {
-            "id": message_id,
-            "message": content,
-            "content": content,
-            "timestamp": timestamp_iso,
-            "role": role,
-        }
-        max_history = (
-            self.current_config.developer_settings.limits.conversation_context_turns
-            or 100
-        )
-
-        pipe = self.redis_client.pipeline()
-        pipe.hset(
-            RedisKeys.conversation(self.user_name, self.session_id),
-            message_key,
-            json.dumps(payload),
-        )
-        pipe.zadd(
-            RedisKeys.recent_conversation(self.user_name, self.session_id),
-            {message_key: normalized_timestamp.timestamp()},
-        )
-        pipe.hset(
-            RedisKeys.message_content(self.user_name, self.session_id),
-            f"msg_{message_id}",
-            json.dumps(content_payload),
-        )
-        pipe.zremrangebyrank(
-            RedisKeys.recent_conversation(self.user_name, self.session_id),
-            0,
-            -(max_history + 1),
-        )
-        await pipe.execute()
-
-    async def _persist_user_turn(self, msg: Message):
+    async def _persist_user_turn(self, msg: Message, *, acceptance_key: str):
         """Durably create an editable canonical user message and revision one."""
-        await self.knowledge_store.create_editable_user_message(
+        return await self.knowledge_store.create_editable_user_message(
             {
                 "id": msg.id,
                 "content": msg.content.strip(),
@@ -586,21 +368,11 @@ class SessionRuntime:
                 "timestamp": msg.timestamp.timestamp() * 1000,
                 "metadata": msg.metadata,
                 "user_msg_id": msg.id,
+                "acceptance_key": acceptance_key,
             },
             edit_window_seconds=(
                 self.current_config.developer_settings.ingestion.message_edit_window_seconds
             ),
-        )
-
-    async def _signal_user_message(self):
-        """Refresh operational counters; Postgres owns the ingestion queue."""
-        await self.redis_client.incr(
-            RedisKeys.heartbeat_counter(self.user_name, self.session_id)
-        )
-        if not self.project_id:
-            raise RuntimeError("Session cannot enqueue messages without project_id")
-        await self.redis_client.incr(
-            RedisKeys.project_heartbeat_counter(self.user_name, self.project_id)
         )
 
     async def add_assistant_turn(
@@ -617,15 +389,6 @@ class SessionRuntime:
 
         timestamp = self._normalize_timestamp(timestamp)
         message_id = await self.knowledge_store.allocate_message_id()
-        await self._record_conversation_message(
-            message_id=message_id,
-            role="assistant",
-            content=content,
-            timestamp=timestamp,
-            metadata=metadata,
-            user_msg_id=user_msg_id,
-        )
-
         try:
             source_references = await self._persist_assistant_message_log(
                 message_id,
@@ -644,7 +407,6 @@ class SessionRuntime:
                     f"failure for message {message_id}: {cleanup_exc}"
                 )
             raise
-        await self.refresh_session_ttls()
         return {
             "message_id": message_id,
             "source_ref_ids": [
@@ -655,8 +417,7 @@ class SessionRuntime:
         }
 
     async def _delete_conversation_message(self, message_id: int) -> None:
-        """Remove all staged Postgres and Redis state for one canonical message."""
-        # Delete from Postgres
+        """Remove one staged canonical message after persistence failure."""
         query = (
             "DELETE FROM public.messages WHERE user_name = %(user_name)s "
             "AND session_id = %(session_id)s AND message_id = %(message_id)s"
@@ -669,22 +430,6 @@ class SessionRuntime:
                 "message_id": message_id,
             },
         )
-
-        message_key = str(message_id)
-        pipe = self.redis_client.pipeline()
-        pipe.hdel(
-            RedisKeys.conversation(self.user_name, self.session_id),
-            message_key,
-        )
-        pipe.zrem(
-            RedisKeys.recent_conversation(self.user_name, self.session_id),
-            message_key,
-        )
-        pipe.hdel(
-            RedisKeys.message_content(self.user_name, self.session_id),
-            f"msg_{message_id}",
-        )
-        await pipe.execute()
 
     async def _persist_assistant_message_log(
         self,
@@ -782,13 +527,6 @@ class SessionRuntime:
             entities=self.project.entities,
         )
 
-    async def refresh_session_ttls(self):
-        """Refresh TTLs on all fixed session-scoped Redis keys."""
-        pipe = self.redis_client.pipeline()
-        for key in RedisKeys.session_keys(self.user_name, self.session_id):
-            pipe.expire(key, SESSION_KEY_TTL)
-        await pipe.execute()
-
     async def shutdown(self) -> None:
         """Stop all session-owned work without skipping later cleanup phases."""
 
@@ -826,7 +564,6 @@ class SessionRuntime:
                     )
                     failures.append(exc)
 
-            self._durable_message_claims.clear()
             self._closed = True
             try:
                 await emit(self.session_id, "system", "session_shutdown", {})

@@ -15,7 +15,6 @@ from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
-from infrastructure.redis_client import RedisKeys
 from runtime.session_runtime import SessionRuntime
 from runtime.session_runtime_factory import SessionRuntimeFactory
 
@@ -374,18 +373,16 @@ class SessionManager:
 
         return turns
 
-    async def delete_session_data(self, session_id: str) -> int:
+    async def delete_session_data(self, session_id: str) -> None:
         """
-        Tombstone a session, purge its session-owned documents, and clear cache.
+        Tombstone a session and purge its session-owned documents.
 
         Canonical messages and their graph projections remain as read-only
         evidence for existing project memories. The durable tombstone excludes
         them from future runtime, ingestion, and episode work.
 
-        Returns count of Redis keys deleted.
         """
         user = self.user_name
-        redis = self.resources.redis
         async with self._lock:
             if self._closed:
                 raise RuntimeError("SessionManager is shutting down")
@@ -410,40 +407,7 @@ class SessionManager:
                     self._deleting_session_ids.discard(session_id)
                     self._session_locks.pop(session_id, None)
 
-            # Redis is a recoverable cache and follows the durable tombstone.
-            # A transient cache failure must not report the committed deletion
-            # as failed.
-            direct_keys = RedisKeys.session_keys(user, session_id)
-            deleted = 0
-            try:
-                for pattern in (
-                    RedisKeys.session_memory_pattern(user, session_id),
-                    RedisKeys.message_dedup_pattern(user, session_id),
-                ):
-                    cursor = 0
-                    while True:
-                        cursor, keys = await redis.scan(
-                            cursor,
-                            match=pattern,
-                            count=100,
-                        )
-                        if keys:
-                            deleted += int(await redis.delete(*keys))
-                        if cursor == 0:
-                            break
-
-                if direct_keys:
-                    deleted += await redis.delete(*direct_keys)
-            except Exception as exc:
-                logger.error(
-                    "Durable session deletion committed, but Redis cleanup failed "
-                    f"for {session_id}: {exc}"
-                )
-
-            logger.info(
-                f"Cleaned up {deleted} Redis keys after deleting session {session_id}"
-            )
-            return deleted
+            logger.info("Deleted durable session state for {}", session_id)
 
     async def update_session_metadata(self, session_id: str, new_data: dict) -> dict:
         """Update explicitly allowed session configuration fields."""

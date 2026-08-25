@@ -15,7 +15,6 @@ from runtime import resources as resources_module
     [
         "background_start",
         "model_start",
-        "redis_connect",
         "tokenizer",
         "embedding",
         "spacy",
@@ -30,7 +29,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
         executors=[],
         background=[],
         model_work=[],
-        redis=[],
         llm=[],
         embedding=[],
         postgres=[],
@@ -70,19 +68,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
 
         async def shutdown(self):
             self.shutdown_calls += 1
-
-    class FakeRedisManager:
-        def __init__(self, _settings):
-            self.closed = False
-            created.redis.append(self)
-
-        async def connect(self):
-            if failure == "redis_connect":
-                raise RuntimeError("redis_connect failed")
-            return object()
-
-        async def close(self):
-            self.closed = True
 
     class FakeLLM:
         def __init__(self, **_kwargs):
@@ -166,7 +151,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
         subscribe=lambda *_args, **_kwargs: lambda: None,
     )
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setattr(
         resources_module.ConfigManager,
@@ -176,7 +160,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     monkeypatch.setattr(resources_module, "ThreadPoolExecutor", FakeExecutor)
     monkeypatch.setattr(resources_module, "BackgroundWorkCoordinator", FakeBackground)
     monkeypatch.setattr(resources_module, "ModelWorkCoordinator", FakeModelWork)
-    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeRedisManager)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLM)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbedding)
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
@@ -188,7 +171,6 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
 
     assert all(resource.shutdown_calls for resource in created.background)
     assert all(resource.shutdown_calls for resource in created.model_work)
-    assert all(resource.closed for resource in created.redis)
     assert all(resource.closed for resource in created.llm)
     assert all(resource.cleaned for resource in created.embedding)
     assert all(resource.closed for resource in created.postgres)

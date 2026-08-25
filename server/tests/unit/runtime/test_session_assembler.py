@@ -141,13 +141,10 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.enabled_tools == []
     assert ctx.agent_orchestrator is harness.agent_orchestrator
 
-    assert harness.resources.redis.evals == []
-
     assert RecordingIngestionPipeline.instances == [harness.batch_processor]
     processor = harness.batch_processor
     assert ctx.batch_processor is processor
     assert processor.kwargs["project_id"] == "project-1"
-    assert "redis_client" not in processor.kwargs
     assert processor.kwargs["llm"] is harness.resources.llm_service
     assert processor.kwargs["entities"] is harness.project_state.entities
     assert processor.kwargs["processor"] is harness.project_state.pipeline
@@ -157,7 +154,6 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     consumer = RecordingIngestionWorker.instances[0]
     assert ctx.consumer is consumer
     assert consumer.kwargs["knowledge_store"] is harness.resources.knowledge_store
-    assert "redis" not in consumer.kwargs
     assert consumer.kwargs["processor"] is processor
     assert consumer.get_session_context == ctx.get_conversation_context
     assert consumer.write_to_graph == ctx._write_to_graph_callback

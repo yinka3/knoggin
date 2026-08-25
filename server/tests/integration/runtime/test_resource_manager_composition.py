@@ -1,4 +1,4 @@
-"""Real model, PostgreSQL, and Redis runtime lifecycle contracts."""
+"""Real model and PostgreSQL runtime lifecycle contracts."""
 
 import asyncio
 import os
@@ -69,7 +69,6 @@ async def real_resource_manager(monkeypatch):
             "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
         ),
     )
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", embedding_model)
     monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", reranker_model)
     monkeypatch.setenv("KNOGGIN_GLINER_MODEL", gliner_model)
@@ -95,17 +94,12 @@ async def real_resource_manager(monkeypatch):
 @pytest.mark.model
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.no_network
 async def test_real_runtime_startup_and_shutdown_drains_active_work(
     real_resource_manager,
 ):
     manager = real_resource_manager
     postgres = manager.postgres
-    redis_manager = manager.redis_manager
-
-    assert manager.redis is not None
-    assert await manager.redis.ping() is True
     assert manager.embedding is not None
     assert manager.embedding.embedding_dim > 0
     assert manager.spacy is not None
@@ -156,7 +150,6 @@ async def test_real_runtime_startup_and_shutdown_drains_active_work(
     assert ingestion_task.result() == "ingestion-complete"
     assert agent_tool_task.result() == "agent-tool-complete"
     assert manager.postgres is None
-    assert manager.redis_manager is None
     assert manager.embedding is None
     assert manager.llm_service is None
     assert manager.work_snapshot() == {
@@ -165,7 +158,6 @@ async def test_real_runtime_startup_and_shutdown_drains_active_work(
         "model_work": None,
     }
     assert postgres._pool is None
-    assert redis_manager._client is None
 
     # A second close is a supported no-op after both complete and partial boots.
     await manager.shutdown()

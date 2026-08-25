@@ -3,7 +3,6 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from core.knowledge.entity.merge_service import EntityMergeService
-from infrastructure.redis_client import RedisKeys
 
 
 class MaintenanceTools:
@@ -15,15 +14,7 @@ class MaintenanceTools:
         Returns a list of potential duplicates for the agent to review.
         """
         try:
-            dirty_ids = None
-            if self.redis:
-                merge_key = RedisKeys.merge_queue(self.user_name, self.project_id)
-                dirty_raw = await self.redis.srandmember(merge_key, 50)
-                dirty_ids = {int(eid) for eid in dirty_raw} if dirty_raw else None
-
-            candidates = await self.entities.detect_merge_entity_candidates(
-                dirty_ids=dirty_ids
-            )
+            candidates = await self.entities.detect_merge_entity_candidates()
 
             if not candidates:
                 return {
@@ -113,7 +104,6 @@ class MaintenanceTools:
             service = EntityMergeService(
                 self.postgres,
                 self.knowledge_store,
-                redis=self.redis,
             )
             return await service.propose(
                 user_name=self.user_name,

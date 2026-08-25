@@ -2,10 +2,12 @@
 
 AAC_READ_TOOL_NAMES = [
     "search_entity",
+    "find_path",
     "episode_check",
     "read_episode",
     "read_recent_episodes",
     "get_connections",
+    "get_recent_activity",
     "search_messages",
     "search_documents",
     "read_document",
@@ -34,6 +36,15 @@ AAC_SPECIFIC_SCHEMAS = [
                     "content": {
                         "type": "string",
                         "description": "The insight to persist.",
+                    },
+                    "visibility": {
+                        "type": "string",
+                        "enum": ["shared", "private"],
+                        "default": "shared",
+                        "description": (
+                            "Use private for a note visible only to you; shared is "
+                            "visible to other AAC participants."
+                        ),
                     }
                 },
                 "required": ["content"],
@@ -86,10 +97,11 @@ AAC_SPECIFIC_SCHEMAS = [
         "function": {
             "name": "spawn_specialist",
             "description": (
-                "Spawn a new specialist sub-agent to join this discussion if "
-                "the topic requires expertise clearly outside your own scope "
-                "or persona. You may choose the new specialist's persona at "
-                "creation time, but cannot edit any existing agent's persona."
+                "Create a persistent private specialist when the topic requires "
+                "expertise outside your own scope or persona. It does not join "
+                "the main discussion unless the user later promotes it. You may "
+                "choose its persona at creation time, but cannot edit any existing "
+                "agent's persona."
             ),
             "parameters": {
                 "type": "object",
@@ -138,6 +150,72 @@ AAC_SPECIFIC_SCHEMAS = [
             },
             "tags": ["community"],
             "capability": "configuration_write",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_insights",
+            "description": "Search shared AAC Insights and your own private Insights.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+                "required": [],
+            },
+            "tags": ["community", "read"],
+            "capability": "read",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "vote_insight",
+            "description": "Upvote or downvote another agent's shared Insight with a reason.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "insight_id": {"type": "string"},
+                    "vote": {"type": "string", "enum": ["up", "down"]},
+                    "reason": {"type": "string", "maxLength": 500},
+                },
+                "required": ["insight_id", "vote", "reason"],
+            },
+            "tags": ["community"],
+            "capability": "reversible_write",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_insight_vote",
+            "description": "Remove your vote from a shared AAC Insight.",
+            "parameters": {
+                "type": "object",
+                "properties": {"insight_id": {"type": "string"}},
+                "required": ["insight_id"],
+            },
+            "tags": ["community"],
+            "capability": "reversible_write",
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consult_specialist",
+            "description": "Privately ask one of your own spawned specialists for help.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "specialist_id": {"type": "string"},
+                    "question": {"type": "string"},
+                },
+                "required": ["specialist_id", "question"],
+            },
+            "tags": ["community"],
+            "capability": "reversible_write",
         },
     },
 ]

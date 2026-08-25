@@ -120,7 +120,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
     config_manager = RecordingConfigManager()
     resources = SimpleNamespace(
         postgres=object(),
-        redis=object(),
         llm_service=object(),
         knowledge_store=object(),
         executor=object(),
@@ -152,14 +151,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "runtime.project_factory.ConflictDiscoveryJob",
         lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
     )
-    monkeypatch.setattr(
-        "runtime.project_factory.AACJob",
-        lambda state, deps: RecordingJob(
-            "aac_discussion",
-            state=state,
-            resources=deps,
-        ),
-    )
 
     factory._register_background_jobs(
         project_state,
@@ -173,7 +164,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "merge_rollback_cleanup",
         "audit_retention_cleanup",
         "conflict_discovery",
-        "aac_discussion",
     ]
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
@@ -194,7 +184,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     config_manager = RecordingConfigManager()
     resources = SimpleNamespace(
         postgres=object(),
-        redis=object(),
         llm_service=object(),
         knowledge_store=object(),
         executor=object(),
@@ -225,10 +214,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     monkeypatch.setattr(
         "runtime.project_factory.ConflictDiscoveryJob",
         lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
-    )
-    monkeypatch.setattr(
-        "runtime.project_factory.AACJob",
-        lambda *_: RecordingJob("aac_discussion"),
     )
     factory._register_background_jobs(
         state,

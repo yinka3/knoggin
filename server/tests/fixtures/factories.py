@@ -11,7 +11,6 @@ from tests.fixtures.fakes import (
     FakeEmbeddingService,
     FakePipeline,
     FakePostgresClient,
-    FakeRedis,
     FakeScheduler,
 )
 
@@ -40,7 +39,6 @@ def make_domain_config(version=1):
 
 def make_project_state(
     project_id="project-1",
-    redis=None,
     scheduler=None,
     postgres=None,
     embedding=None,
@@ -50,7 +48,6 @@ def make_project_state(
     entities=None,
     pipeline=None,
 ):
-    redis = redis or FakeRedis()
     scheduler = scheduler or FakeScheduler()
     postgres = postgres or FakePostgresClient()
     embedding = embedding or FakeEmbeddingService()

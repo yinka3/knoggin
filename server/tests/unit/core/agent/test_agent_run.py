@@ -4,7 +4,12 @@ import pytest
 
 from common.schema.agent.identity import AgentConfig
 from core.agent.executor import AgentExecutor
-from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
+from core.agent.run import (
+    AAC_DIAGNOSTIC_PROJECT_ID,
+    AgentIdentity,
+    AgentRun,
+    AgentRunLimits,
+)
 
 
 def make_agent_config() -> AgentConfig:
@@ -124,6 +129,25 @@ def test_agent_run_snapshots_tool_runtime_once_at_construction():
 
 
 @pytest.mark.no_network
+def test_agent_run_opens_aac_scope_without_a_durable_project_audit_owner():
+    run = AgentRun.open_aac(
+        user_name="ada",
+        session_id="aac:discussion-1",
+        user_query="Explore a disagreement.",
+        agent=AgentIdentity(
+            config=make_agent_config(),
+            name="Researcher",
+            persona="Careful and evidence-led",
+        ),
+        limits=AgentRunLimits(),
+    )
+
+    assert run.project_id == AAC_DIAGNOSTIC_PROJECT_ID
+    assert run.tool_runtime.permissions.project_id == AAC_DIAGNOSTIC_PROJECT_ID
+    assert run.tool_runtime.permissions.audit_project_id is None
+
+
+@pytest.mark.no_network
 def test_agent_run_records_runtime_diagnostics_and_releases_handles():
     run = make_run()
 
@@ -205,6 +229,26 @@ async def test_executor_finalizes_an_agent_run():
     # The executor performs a dedicated final synthesis after the first
     # structured answer, so both model turns contribute usage.
     assert run.usage["total_tokens"] == 10
+
+
+@pytest.mark.no_network
+async def test_executor_records_only_successful_turn_completion():
+    run = make_run()
+    completed_agents = []
+
+    async def record_completion(agent_id):
+        completed_agents.append(agent_id)
+
+    executor = AgentExecutor(
+        run,
+        CompletingLLM(),
+        SimpleNamespace(document_service=None),
+        on_successful_completion=record_completion,
+    )
+
+    _ = [event async for event in executor.execute()]
+
+    assert completed_agents == ["agent-1"]
 
 
 @pytest.mark.no_network

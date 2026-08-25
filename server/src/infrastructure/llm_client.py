@@ -531,14 +531,21 @@ class LLMService:
         provider_usage: Any = None,
         failed: bool,
         additional_prompt_tokens: int = 0,
+        aac_budget: Any = None,
     ) -> None:
+        declared_approximate = None
         if isinstance(provider_usage, dict):
             prompt_tokens = provider_usage.get("prompt_tokens")
             completion_tokens = provider_usage.get("completion_tokens")
+            declared_approximate = provider_usage.get("approximate")
         else:
             prompt_tokens = getattr(provider_usage, "prompt_tokens", None)
             completion_tokens = getattr(provider_usage, "completion_tokens", None)
-        approximate = prompt_tokens is None or completion_tokens is None
+        approximate = (
+            bool(declared_approximate)
+            if declared_approximate is not None
+            else prompt_tokens is None or completion_tokens is None
+        )
         if approximate:
             prompt_tokens = (
                 self.count_tokens(f"{system}\n{user}")
@@ -553,6 +560,24 @@ class LLMService:
             approximate_usage=approximate,
             failed=failed,
         )
+        if aac_budget is not None:
+            aac_budget.record(
+                {
+                    "prompt_tokens": int(prompt_tokens or 0),
+                    "completion_tokens": int(completion_tokens or 0),
+                    "total_tokens": int(prompt_tokens or 0)
+                    + int(completion_tokens or 0),
+                    "approximate": approximate,
+                }
+            )
+
+    @staticmethod
+    def _check_aac_budget(aac_budget: Any) -> None:
+        if aac_budget is not None and not aac_budget.allow_call():
+            raise LLMBudgetExceededError(
+                "The AAC discussion token budget has been reached.",
+                details={"scope": "aac"},
+            )
 
     def _trace_exchange(self, model: str, user: str, response: Any) -> None:
         if not self._trace:
@@ -576,6 +601,7 @@ class LLMService:
         model: Optional[str] = None,
         temperature: float = 1.0,
         reasoning: Optional[str] = None,
+        aac_budget: Any = None,
     ) -> str:
         """Generate an unstructured text completion."""
         model = model or self._extraction_model
@@ -583,6 +609,7 @@ class LLMService:
 
         async with self._client_snapshot() as (raw_client, _):
             for attempt in range(TRANSPORT_RETRIES):
+                self._check_aac_budget(aac_budget)
                 reservation = await self._reserve_external_attempt(
                     model=model,
                     system=system,
@@ -628,6 +655,7 @@ class LLMService:
                         content=content,
                         provider_usage=getattr(response, "usage", None),
                         failed=False,
+                        aac_budget=aac_budget,
                     )
                     recorded = True
                     self._trace_exchange(model, user, content)
@@ -644,6 +672,7 @@ class LLMService:
                             content=content or "",
                             provider_usage=getattr(response, "usage", None),
                             failed=True,
+                            aac_budget=aac_budget,
                         )
                         recorded = True
                     raise
@@ -657,6 +686,7 @@ class LLMService:
                             content=content or "",
                             provider_usage=getattr(response, "usage", None),
                             failed=True,
+                            aac_budget=aac_budget,
                         )
                         recorded = True
                     if attempt < TRANSPORT_RETRIES - 1:
@@ -680,6 +710,7 @@ class LLMService:
                             content=content or "",
                             provider_usage=getattr(response, "usage", None),
                             failed=True,
+                            aac_budget=aac_budget,
                         )
 
         raise AssertionError("unreachable")
@@ -694,6 +725,7 @@ class LLMService:
         temperature: float = 1.0,
         reasoning: Optional[str] = None,
         mode: Optional[instructor.Mode] = None,
+        aac_budget: Any = None,
     ) -> ResponseT:
         """Generate and validate a structured completion with Instructor."""
         model = model or self._extraction_model
@@ -717,6 +749,7 @@ class LLMService:
         async with self._client_snapshot() as (_, instructor_client):
             response = None
             for attempt in range(VALIDATION_RETRIES + 1):
+                self._check_aac_budget(aac_budget)
                 reservation = await self._reserve_external_attempt(
                     model=model,
                     system=system,
@@ -739,6 +772,7 @@ class LLMService:
                         content=str(response),
                         provider_usage=getattr(completion, "usage", None),
                         failed=False,
+                        aac_budget=aac_budget,
                     )
                     recorded = True
                     break
@@ -752,6 +786,7 @@ class LLMService:
                             user=user,
                             provider_usage=getattr(completion, "usage", None),
                             failed=True,
+                            aac_budget=aac_budget,
                         )
                         recorded = True
                     if attempt < VALIDATION_RETRIES:
@@ -780,6 +815,7 @@ class LLMService:
                             user=user,
                             provider_usage=getattr(completion, "usage", None),
                             failed=True,
+                            aac_budget=aac_budget,
                         )
                         recorded = True
                     raise LLMProviderError(
@@ -795,6 +831,7 @@ class LLMService:
                             user=user,
                             provider_usage=getattr(completion, "usage", None),
                             failed=True,
+                            aac_budget=aac_budget,
                         )
                         recorded = True
                     raise LLMResponseError(
@@ -810,6 +847,7 @@ class LLMService:
                             user=user,
                             provider_usage=getattr(completion, "usage", None),
                             failed=True,
+                            aac_budget=aac_budget,
                         )
 
         if response is None:
@@ -839,6 +877,7 @@ class LLMService:
         model: Optional[str] = None,
         temperature: float = 0.0,
         reasoning: Optional[str] = "low",
+        aac_budget: Any = None,
     ) -> AsyncIterator[InternalAgentStreamEvent]:
         """Streaming completion with tools. Defaults to agent model."""
         model = model or self._agent_model
@@ -853,6 +892,7 @@ class LLMService:
                 temperature=temperature,
                 reasoning=reasoning,
                 is_openrouter=is_openrouter,
+                aac_budget=aac_budget,
             ):
                 yield event
 
@@ -867,6 +907,7 @@ class LLMService:
         temperature: float,
         reasoning: Optional[str],
         is_openrouter: bool,
+        aac_budget: Any = None,
     ) -> AsyncIterator[InternalAgentStreamEvent]:
         tool_schema_tokens = self.count_tokens(
             json.dumps(tools, sort_keys=True, default=str, separators=(",", ":"))
@@ -878,6 +919,7 @@ class LLMService:
             emitted_output = False
             usage: Optional[StreamUsage] = None
             try:
+                self._check_aac_budget(aac_budget)
                 reservation = await self._reserve_external_attempt(
                     model=model,
                     system=system,
@@ -987,6 +1029,7 @@ class LLMService:
                     provider_usage=usage,
                     failed=False,
                     additional_prompt_tokens=tool_schema_tokens,
+                    aac_budget=aac_budget,
                 )
                 recorded = True
 
@@ -1044,6 +1087,7 @@ class LLMService:
                         provider_usage=usage,
                         failed=True,
                         additional_prompt_tokens=tool_schema_tokens,
+                        aac_budget=aac_budget,
                     )
                     recorded = True
                 if attempt < TRANSPORT_RETRIES - 1:
@@ -1087,6 +1131,7 @@ class LLMService:
                         provider_usage=usage,
                         failed=True,
                         additional_prompt_tokens=tool_schema_tokens,
+                        aac_budget=aac_budget,
                     )
 
     async def close(self):

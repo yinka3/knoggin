@@ -14,15 +14,12 @@ from common.utils.agent_identity import (
 )
 
 if TYPE_CHECKING:
-    import redis.asyncio as aioredis
-
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
 
 
 class MemoryTools:
-    redis: aioredis.Redis
     knowledge_store: KnowledgeStore
     postgres: PostgresClient
     entities: EntityResolver
@@ -401,3 +398,24 @@ class MemoryTools:
         initial_directives: List[Dict] = None,
     ) -> Dict:
         return {"error": "spawn_specialist is only available in community discussions."}
+
+    async def search_insights(self, query: str = "", limit: int = 20) -> Dict:
+        return {"error": "search_insights is only available in AAC discussions."}
+
+    async def vote_insight(
+        self,
+        insight_id: str,
+        vote: str,
+        reason: str,
+    ) -> Dict:
+        return {"error": "vote_insight is only available in AAC discussions."}
+
+    async def remove_insight_vote(self, insight_id: str) -> Dict:
+        return {"error": "remove_insight_vote is only available in AAC discussions."}
+
+    async def consult_specialist(
+        self,
+        specialist_id: str,
+        question: str,
+    ) -> Dict:
+        return {"error": "consult_specialist is only available in AAC discussions."}

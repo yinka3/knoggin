@@ -18,7 +18,6 @@ from common.schema.episode.generation import (
 from common.schema.primitives import Message
 from common.schema.settings import (
     EpisodeSettings,
-    RedisConnectionSettings,
 )
 from common.schema.source.locators import PastedTextLocator
 from common.schema.source.references import SourceReferenceCandidate
@@ -27,9 +26,8 @@ from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWri
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.store import KnowledgeStore
-from runtime.session_runtime import SessionRuntime as Session
 from infrastructure.postgres_client import PostgresClient
-from infrastructure.redis_client import AsyncRedisClient, RedisKeys
+from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
 from tests.fixtures.fakes import FakeConfigValue, FakeConsumer
 
@@ -245,10 +243,9 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
 
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-@pytest.mark.requires_redis
 @pytest.mark.integration
 @pytest.mark.no_network
-async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_redis(
+async def test_session_add_and_assistant_sources_are_durable_in_postgres(
     isolated_e2e_scope,
     monkeypatch,
 ):
@@ -260,14 +257,7 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_red
     session_id = isolated_e2e_scope["session_id"]
     embedding_service = DeterministicEmbeddingService()
     knowledge_store = KnowledgeStore(real_postgres_client, embedding_service)
-    redis_manager = AsyncRedisClient(RedisConnectionSettings.from_env())
-    redis = await redis_manager.connect()
     session_deleted = False
-
-    activity_calls = []
-
-    async def record_session_activity():
-        activity_calls.append(session_id)
 
     monkeypatch.setattr(
         Session,
@@ -276,10 +266,8 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_red
     )
     context = Session(
         user_name,
-        [],
         SimpleNamespace(
             postgres=real_postgres_client,
-            redis=redis,
             knowledge_store=knowledge_store,
             embedding=embedding_service,
         ),
@@ -288,7 +276,7 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_red
     context.project_id = project_id
     context.project = SimpleNamespace(
         scheduler=object(),
-        record_session_activity=record_session_activity,
+        readable_project_ids=[project_id],
     )
     context.consumer = FakeConsumer()
 
@@ -314,13 +302,6 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_red
             "project_id": project_id,
             "session_id": session_id,
         }
-        assert await redis.get(
-            RedisKeys.heartbeat_counter(user_name, session_id)
-        ) == "1"
-        assert await redis.get(
-            RedisKeys.project_heartbeat_counter(user_name, project_id)
-        ) == "1"
-        assert activity_calls == [session_id]
         assert context.consumer.signaled == 1
 
         excerpt = "durable memory must stay grounded"
@@ -374,17 +355,5 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres_and_red
             session_id=session_id,
         )
         session_deleted = True
-        redis_keys = RedisKeys.session_keys(user_name, session_id)
-        redis_keys.extend(
-            [
-                key
-                async for key in redis.scan_iter(
-                    match=RedisKeys.message_dedup_pattern(user_name, session_id)
-                )
-            ]
-        )
-        if redis_keys:
-            await redis.delete(*redis_keys)
-        await redis_manager.close()
 
     assert session_deleted is True

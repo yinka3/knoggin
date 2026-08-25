@@ -75,7 +75,9 @@ def get_now_unix() -> float:
 
 def set_test_clock(clock_or_time: Union[Clock, str, float, int, datetime]) -> Clock:
     global _active_clock
-    if hasattr(clock_or_time, "now") and callable(clock_or_time.now):
+    if not isinstance(clock_or_time, (str, float, int, datetime)) and hasattr(
+        clock_or_time, "now"
+    ) and callable(clock_or_time.now):
         _active_clock = clock_or_time
     else:
         _active_clock = TestClock(clock_or_time)

@@ -21,7 +21,6 @@ from common.schema.source.references import (
     SourceReference,
     SourceReferenceCandidate,
 )
-from core.community.community_store import CommunityStore
 from core.knowledge.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflict_service import ConflictService
 from core.knowledge.conflicts import (
@@ -60,6 +59,7 @@ from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
+    MessageAcceptance,
     MessageLifecycleWriter,
 )
 from core.knowledge.db.writers.message_writer import MessageWriter
@@ -86,8 +86,8 @@ class KnowledgeStore:
     """
     Core-facing facade over durable knowledge persistence.
 
-    Composes focused readers, writers, rebuilders, tool queries, and the
-    community store over the runtime-owned PostgresClient. Callers use this
+    Composes focused readers, writers, rebuilders, and tool queries over the
+    runtime-owned PostgresClient. Callers use this
     boundary without depending on the underlying SQL, AGE, or index layout.
     """
 
@@ -141,20 +141,15 @@ class KnowledgeStore:
             self._postgres_client,
             embedding_service,
         )
-        self._community = CommunityStore(self._postgres_client)
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
-
-    @property
-    def community(self) -> CommunityStore:
-        return self._community
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._message_writer.save_message_logs(messages)
 
     async def create_editable_user_message(
         self, message: Dict, *, edit_window_seconds: int
-    ) -> None:
-        await self._message_lifecycle_writer.create_editable_user_message(
+    ) -> MessageAcceptance:
+        return await self._message_lifecycle_writer.create_editable_user_message(
             message, edit_window_seconds=edit_window_seconds
         )
 

@@ -29,7 +29,6 @@ flowchart LR
         Jobs["Background jobs"]
     end
 
-    Redis["Redis\nqueues and runtime state"]
     Store["Postgres + Apache AGE\nevidence and graph"]
 
     Client --> Session
@@ -37,9 +36,7 @@ flowchart LR
     Session --> Ingest
     Agent --> Store
     Ingest --> Store
-    Ingest --> Redis
     Jobs <--> Store
-    Jobs <--> Redis
 ```
 
 The engine lives in `server/` and intentionally does not prescribe an HTTP transport. An embedding application owns its own integration surface while Knoggin owns the durable memory, retrieval, and background processing runtime.
@@ -78,7 +75,7 @@ This preserves the named Postgres volume. Use `docker compose down -v` only when
 
 ## Configuration
 
-`.env.example` documents local runtime settings, including the database URL, model choices, resource profile, and document storage directory. Docker Compose starts Redis and a Postgres image configured with Apache AGE, pgvector, and the project schema.
+`.env.example` documents local runtime settings, including the database URL, model choices, resource profile, and document storage directory. Docker Compose starts Postgres configured with Apache AGE, pgvector, and the project schema.
 
 Knoggin writes application-level settings to `config/knoggin.yml`. This file is managed by the app; manual changes can be overwritten. The topic seed lives at `server/src/common/templates/topics.yaml`.
 
@@ -107,7 +104,7 @@ server/src/core/project/  Project state, domain config, and workspace services
 server/src/core/session/  Session lifecycle and runtime context
 server/src/core/ingestion/  Extraction, batching, episodes, and dead-letter work
 server/src/core/knowledge/  Entity resolution, documents, graph, and retrieval
-server/src/infrastructure/  Postgres, Redis, models, queues, and scheduling
+server/src/infrastructure/  Postgres, models, queues, and scheduling
 server/tests/            Unit, runtime, ingestion, storage, and integration tests
 docker/                 Local Postgres image and initialization
 ```

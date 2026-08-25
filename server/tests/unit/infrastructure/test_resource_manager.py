@@ -30,9 +30,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     captured_llm_kwargs = {}
     unsubscribe_calls = []
     subscribe_calls = []
-    redis_client = object()
-    redis_instances = []
-    redis_calls = []
     configure_coordination_log = MagicMock()
 
     class FakeConfigManager:
@@ -65,19 +62,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
         def __init__(self, postgres_client, embedding_service):
             self.postgres_client = postgres_client
             self.embedding_service = embedding_service
-
-    class FakeAsyncRedisClient:
-        def __init__(self, settings):
-            self.settings = settings
-            self.closed = False
-            redis_instances.append(self)
-
-        async def connect(self):
-            return redis_client
-
-        async def close(self):
-            self.closed = True
-            redis_calls.append(("close", redis_client))
 
     class FakeLLMService:
         def __init__(self, **kwargs):
@@ -133,7 +117,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", "custom/embedder")
     monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", "custom/reranker")
@@ -146,7 +129,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     monkeypatch.setattr(resources_module, "load_dotenv", load_dotenv)
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
-    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(
         resources_module,
         "configure_coordination_log",
@@ -159,10 +141,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     manager = await resources_module.RuntimeResources.create()
 
     load_dotenv.assert_called_once_with()
-    assert manager.redis is redis_client
-    assert manager.redis_manager is redis_instances[0]
-    assert redis_instances[0].settings.url == "redis://localhost:6379/0"
-    assert redis_calls == []
     assert captured_llm_kwargs["base_url"] == "https://llm.example/v1"
     assert captured_llm_kwargs["trace_logger"] is None
     assert manager.embedding.embedding_model == "custom/embedder"
@@ -182,8 +160,6 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     await manager.shutdown()
 
     assert unsubscribe_calls == ["developer_settings.coordination_log", "llm"]
-    assert redis_instances[0].closed is True
-    assert redis_calls == [("close", redis_client)]
 
 
 @pytest.mark.no_network
@@ -197,9 +173,7 @@ async def test_resource_manager_raises_if_database_url_missing(monkeypatch):
 
 @pytest.mark.no_network
 async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatch):
-    redis_client = object()
     knowledge_store_instances = []
-    redis_instances = []
     embedding_instances = []
     llm_instances = []
     executor_instances = []
@@ -232,17 +206,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
         async def connect(self):
             raise ConnectionError("Postgres unavailable")
-
-    class FakeAsyncRedisClient:
-        def __init__(self, settings):
-            self.closed = False
-            redis_instances.append(self)
-
-        async def connect(self):
-            return redis_client
-
-        async def close(self):
-            self.closed = True
 
     class FakeLLMService:
         def __init__(self, **kwargs):
@@ -305,7 +268,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
     fake_config = FakeConfigManager()
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setattr(
         resources_module.ConfigManager,
@@ -318,7 +280,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
         "PostgresClient",
         FailingPostgresClient,
     )
-    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -329,7 +290,6 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
     assert knowledge_store_instances == []
     assert FailingPostgresClient.instances[0].closed is True
-    assert redis_instances == []
     assert embedding_instances == []
     assert llm_instances == []
     assert executor_instances[0].shutdown_calls == [False]
@@ -340,16 +300,6 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     class FakeKnowledgeStore:
         def __init__(self, postgres_client, embedding_service):
             self.postgres_client = postgres_client
-
-    class FakeAsyncRedisClient:
-        def __init__(self, settings):
-            self.raw = object()
-
-        async def connect(self):
-            return self.raw
-
-        async def close(self):
-            pass
 
     class FakeLLMService:
         def __init__(self, **kwargs):
@@ -392,14 +342,12 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
             return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
     monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
-    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -417,16 +365,6 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
         def __init__(self, postgres_client, embedding_service):
             self.postgres_client = postgres_client
 
-    class FakeAsyncRedisClient:
-        def __init__(self, settings):
-            self.raw = object()
-
-        async def connect(self):
-            return self.raw
-
-        async def close(self):
-            pass
-
     class FakeLLMService:
         def __init__(self, **kwargs):
             pass
@@ -468,7 +406,6 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
             return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
 
@@ -493,7 +430,6 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
     monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
-    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -509,16 +445,6 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
     class FakeKnowledgeStore:
         def __init__(self, postgres_client, embedding_service):
             self.postgres_client = postgres_client
-
-    class FakeAsyncRedisClient:
-        def __init__(self, settings):
-            self.raw = object()
-
-        async def connect(self):
-            return self.raw
-
-        async def close(self):
-            pass
 
     class FakeLLMService:
         def __init__(self, **kwargs):
@@ -561,14 +487,12 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
             return MagicMock()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
-    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
     monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
-    monkeypatch.setattr(resources_module, "AsyncRedisClient", FakeAsyncRedisClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(resources_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
@@ -621,7 +545,6 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
     resources = resources_module.RuntimeResources()
     background = AsyncResource("background", fail=True)
     model_work = AsyncResource("model_work")
-    redis = AsyncResource("redis")
     postgres = AsyncResource("postgres")
     llm = AsyncResource("llm")
     executor = Executor()
@@ -630,7 +553,6 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
     resources.background_work = background
     resources.model_work = model_work
     resources.executor = executor
-    resources.redis_manager = redis
     resources.postgres = postgres
     resources.embedding = embedding
     resources.llm_service = llm
@@ -654,11 +576,10 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
         "background",
         "model_work",
         "executor",
-        "redis",
         "postgres",
         "embedding",
         "llm",
     ]
     assert background.close_calls == model_work.close_calls == 1
-    assert redis.close_calls == postgres.close_calls == llm.close_calls == 1
+    assert postgres.close_calls == llm.close_calls == 1
     assert executor.shutdown_calls == embedding.cleanup_calls == 1

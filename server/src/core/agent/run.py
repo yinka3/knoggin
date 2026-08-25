@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 from uuid import uuid4
 
 from common.schema.agent.identity import AgentConfig
@@ -31,6 +32,10 @@ def _empty_usage() -> StreamUsage:
         "total_tokens": 0,
         "approximate": False,
     }
+
+
+AAC_DIAGNOSTIC_PROJECT_ID = "__aac__"
+_UNSET_AUDIT_PROJECT_ID = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +119,7 @@ class AgentRun:
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
+    last_turn_at: Optional[datetime] = None
     initial_source_candidates: List[SourceReferenceCandidate] = field(
         default_factory=list
     )
@@ -157,6 +163,7 @@ class AgentRun:
         enabled_tools: Optional[List[str]] = None,
         additional_tool_schemas: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
+        audit_project_id: str | None | object = _UNSET_AUDIT_PROJECT_ID,
         **state: Any,
     ) -> "AgentRun":
         """Open an agent run with a fixed scope and policy snapshot."""
@@ -168,12 +175,23 @@ class AgentRun:
             tuple(enabled_tools) if enabled_tools is not None else None
         )
         effective_additional_schemas = tuple(additional_tool_schemas or ())
+        effective_audit_project_id = (
+            project_id
+            if audit_project_id is _UNSET_AUDIT_PROJECT_ID
+            else cast(str | None, audit_project_id)
+        )
+        effective_state = dict(state)
+        effective_state.setdefault(
+            "last_turn_at",
+            getattr(agent.config, "last_turn_at", None),
+        )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,
             additional_schemas=effective_additional_schemas,
             user_name=user_name,
             agent_id=str(getattr(agent.config, "id", "") or ""),
             project_id=project_id,
+            audit_project_id=effective_audit_project_id,
             session_id=session_id,
             run_id=effective_run_id,
         )
@@ -192,6 +210,44 @@ class AgentRun:
             additional_tool_schemas=effective_additional_schemas,
             tool_runtime=tool_runtime,
             limits=limits,
+            **effective_state,
+        )
+
+    @classmethod
+    def open_aac(
+        cls,
+        *,
+        user_name: str,
+        session_id: str,
+        user_query: str,
+        agent: AgentIdentity,
+        limits: AgentRunLimits,
+        model: Optional[str] = None,
+        temperature: float = 0.7,
+        brain: Optional[str] = None,
+        directives: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+        additional_tool_schemas: Optional[List[Dict[str, Any]]] = None,
+        run_id: Optional[str] = None,
+        **state: Any,
+    ) -> "AgentRun":
+        """Open a user-level AAC run with no durable project audit owner."""
+
+        return cls.open(
+            user_name=user_name,
+            project_id=AAC_DIAGNOSTIC_PROJECT_ID,
+            session_id=session_id,
+            user_query=user_query,
+            agent=agent,
+            limits=limits,
+            model=model,
+            temperature=temperature,
+            brain=brain,
+            directives=directives,
+            enabled_tools=enabled_tools,
+            additional_tool_schemas=additional_tool_schemas,
+            run_id=run_id,
+            audit_project_id=None,
             **state,
         )
 
