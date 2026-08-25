@@ -1,8 +1,6 @@
 import pytest
 
 from core.agent.tools.search import SearchTools
-from infrastructure.redis_client import RedisKeys
-from tests.fixtures.fakes import FakeRedis
 
 
 @pytest.mark.no_network
@@ -197,13 +195,16 @@ async def test_search_messages_uses_readable_project_scope_directly():
             return []
 
     knowledge_store = FakeKnowledgeStore()
-    redis = FakeRedis()
-    await redis.sadd(RedisKeys.project_sessions("ada", "project-1"), "session-2")
-    await redis.sadd(RedisKeys.project_sessions("ada", "project-1"), "session-3")
-    await redis.sadd(RedisKeys.project_sessions("ada", "project-2"), "session-4")
+    class FakePostgres:
+        async def fetch_all(self, _query, _params):
+            return [
+                {"session_id": "session-2"},
+                {"session_id": "session-3"},
+                {"session_id": "session-4"},
+            ]
 
     tool = SearchTools()
-    tool.redis = redis
+    tool.postgres = FakePostgres()
     tool.knowledge_store = knowledge_store
     tool.embedding_service = object()
     tool.search_cfg = {"fts_limit": 10}
@@ -227,7 +228,6 @@ async def test_search_messages_uses_readable_project_scope_directly():
 @pytest.mark.no_network
 async def test_search_messages_public_result_preserves_hit_session_id():
     tool = SearchTools()
-    tool.redis = FakeRedis()
     tool.search_cfg = {"default_message_limit": 8}
     tool.user_name = "ada"
     tool.session_id = "session-1"

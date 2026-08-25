@@ -35,7 +35,6 @@ def _base_tools(resources):
         knowledge_retrieval=object(),
         knowledge_store=resources.knowledge_store,
         postgres=resources.postgres,
-        redis=resources.redis,
     )
 
 
@@ -100,4 +99,3 @@ async def test_aac_tools_persist_local_insights_and_only_consult_owned_specialis
     with pytest.raises(ValueError, match="own specialists"):
         await tools.consult_specialist(outsider.id, "No")
     await tools.close()
-

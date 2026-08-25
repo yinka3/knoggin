@@ -16,8 +16,6 @@ from loguru import logger
 
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
-from common.utils.json_utils import safe_json_loads
-from infrastructure.redis_client import RedisKeys
 
 DEFAULT_EPISODE_RETRIEVAL_LIMIT = 5
 
@@ -41,7 +39,6 @@ class KnowledgeRetrieval:
         embedding_service,
         knowledge_store,
         postgres,
-        redis,
         search_config: Optional[Dict] = None,
         active_topics: Optional[List[str]] = None,
     ) -> None:
@@ -58,7 +55,6 @@ class KnowledgeRetrieval:
         self.embedding_service = embedding_service
         self.knowledge_store = knowledge_store
         self.postgres = postgres
-        self.redis = redis
         self.search_cfg = search_config or {}
         self.active_topics = list(active_topics) if active_topics else None
 
@@ -108,32 +104,6 @@ class KnowledgeRetrieval:
             hit = next((message for message in context if message.get("is_hit")), None)
             if not hit:
                 continue
-
-            # Redis is only an accelerator.  Context has already fallen back
-            # to PostgreSQL, so a cache failure must not discard the hit.
-            if msg_key.startswith("msg_"):
-                try:
-                    content_key = RedisKeys.message_content(
-                        self.user_name, result_session_id
-                    )
-                    raw = await self.redis.hget(content_key, msg_key)
-                    data = safe_json_loads(raw) if raw else None
-                    if isinstance(data, dict):
-                        hit = {
-                            **hit,
-                            "role": data.get("role", "user"),
-                            "content": data.get(
-                                "message", data.get("content", "")
-                            ),
-                            "timestamp": data.get(
-                                "timestamp", hit.get("timestamp", "")
-                            ),
-                        }
-                except Exception as exc:
-                    logger.warning(
-                        "Message cache read failed; using durable context: {}",
-                        type(exc).__name__,
-                    )
 
             turn_marker = f"{result_session_id}:{hit['id']}"
             if turn_marker in seen_turns:
@@ -629,7 +599,7 @@ class KnowledgeRetrieval:
         ]
 
     async def _hydrate_evidence(
-        self, evidence_refs: List, *, session_id: str, timeout: float = 5.0
+        self, evidence_refs: List, *, session_id: str
     ) -> List[Dict]:
         if not evidence_refs:
             return []
@@ -642,48 +612,14 @@ class KnowledgeRetrieval:
         if not normalized:
             return []
 
-        raw_by_idx: Dict[int, Any] = {}
         grouped: Dict[tuple[str, str], List[Dict]] = {}
         for item in normalized:
             grouped.setdefault((item["user_name"], item["session_id"]), []).append(item)
-        try:
-            for (user_name, reference_session_id), items in grouped.items():
-                pipe = self.redis.pipeline()
-                key = RedisKeys.message_content(user_name, reference_session_id)
-                for item in items:
-                    pipe.hget(key, item["key"])
-                for item, raw in zip(
-                    items, await asyncio.wait_for(pipe.execute(), timeout=timeout)
-                ):
-                    raw_by_idx[item["idx"]] = raw
-        except Exception as exc:
-            logger.warning(
-                "Evidence cache unavailable; using durable messages: {}",
-                type(exc).__name__,
-            )
-            raw_by_idx.clear()
 
         results_by_idx: Dict[int, Dict] = {}
-        missing: Dict[tuple[str, str], List[int]] = {}
-        for item in normalized:
-            raw = raw_by_idx.get(item["idx"])
-            data = safe_json_loads(raw) if raw else None
-            if isinstance(data, dict):
-                results_by_idx[item["idx"]] = {
-                    "id": item["key"],
-                    "user_name": item["user_name"],
-                    "session_id": item["session_id"],
-                    "message": data.get("message", data.get("content", "")),
-                    "timestamp": data.get("timestamp", ""),
-                }
-            else:
-                missing.setdefault((item["user_name"], item["session_id"]), []).append(
-                    item["message_id"]
-                )
-
-        for (user_name, reference_session_id), message_ids in missing.items():
+        for (user_name, reference_session_id), items in grouped.items():
             durable = await self.knowledge_store.get_messages_by_ids(
-                message_ids,
+                [item["message_id"] for item in items],
                 user_name=user_name,
                 session_ids=[reference_session_id],
                 visible_project_ids=self.readable_project_ids,
@@ -695,7 +631,7 @@ class KnowledgeRetrieval:
                     if isinstance(timestamp, (int, float))
                     else ""
                 )
-                for item in normalized:
+                for item in items:
                     if (
                         item["idx"] not in results_by_idx
                         and item["user_name"] == user_name
@@ -739,21 +675,6 @@ class KnowledgeRetrieval:
             message_id = self._parse_message_ref_id(message_key)
         except (TypeError, ValueError, IndexError):
             return []
-        try:
-            cached = await self._get_cached_surrounding_context(
-                message_id,
-                session_id,
-                forward=forward,
-                target_total=target_total,
-            )
-            if cached:
-                return cached
-        except Exception as exc:
-            logger.warning(
-                "Conversation cache unavailable; using durable context: {}",
-                type(exc).__name__,
-            )
-
         messages = await self.knowledge_store.get_surrounding_messages(
             message_id,
             user_name=self.user_name,
@@ -776,44 +697,6 @@ class KnowledgeRetrieval:
             }
             for message in messages
         ]
-
-    async def _get_cached_surrounding_context(
-        self,
-        message_id: int,
-        session_id: str,
-        *,
-        forward: int,
-        target_total: int,
-    ) -> List[Dict]:
-        target_member = str(message_id)
-        recent_key = RedisKeys.recent_conversation(self.user_name, session_id)
-        rank = await self.redis.zrank(recent_key, target_member)
-        if rank is None:
-            return []
-        backward = max(target_total - forward - 1, 0)
-        message_ids = await self.redis.zrange(
-            recent_key, max(rank - backward, 0), rank + forward
-        )
-        if not message_ids:
-            return []
-        key = RedisKeys.conversation(self.user_name, session_id)
-        context = []
-        for raw_id in message_ids:
-            item_id = str(raw_id)
-            raw = await self.redis.hget(key, item_id)
-            data = safe_json_loads(raw) if raw else None
-            if not isinstance(data, dict):
-                continue
-            entry = {
-                "role": data.get("role", "user"),
-                "timestamp": data.get("timestamp", ""),
-                "content": data.get("message", data.get("content", "")),
-                "id": f"msg_{item_id}",
-            }
-            if item_id == target_member:
-                entry["is_hit"] = True
-            context.append(entry)
-        return context
 
     def _normalize_evidence_ref(self, ref: Any, *, session_id: str) -> Optional[Dict]:
         if isinstance(ref, dict):

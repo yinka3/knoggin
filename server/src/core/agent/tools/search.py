@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:
-    import redis.asyncio as aioredis
-
     from core.knowledge.documents import DocumentService
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.services.embedding_service import EmbeddingService
@@ -20,9 +18,6 @@ if TYPE_CHECKING:
 
 import httpx
 from loguru import logger
-
-from common.utils.json_utils import safe_json_loads
-from infrastructure.redis_client import RedisKeys
 
 try:
     from duckduckgo_search import DDGS
@@ -205,7 +200,6 @@ def _canonical_search_url(value) -> Optional[str]:
 
 
 class SearchTools:
-    redis: aioredis.Redis
     knowledge_store: KnowledgeStore
     postgres: PostgresClient
     embedding_service: EmbeddingService
@@ -273,7 +267,14 @@ class SearchTools:
         )
         if source_context is None:
             return normalized
-        return {**normalized, "source_context": source_context}
+        return {
+            **normalized,
+            "source_kind": source_kind,
+            "provider": provider,
+            "query": query,
+            "rank": rank,
+            "source_context": source_context,
+        }
 
     @classmethod
     def _with_document_source_context(cls, result: Dict) -> Dict:
@@ -662,18 +663,6 @@ class SearchTools:
             hit = next((m for m in context if m.get("is_hit")), None)
             if not hit:
                 continue
-
-            if msg_key.startswith("msg_"):
-                content_key = RedisKeys.message_content(self.user_name, session_id)
-                raw = await self.redis.hget(content_key, msg_key)
-                data = safe_json_loads(raw) if raw else None
-                if data and isinstance(data, dict):
-                    hit = {
-                        **hit,
-                        "role": data.get("role", "user"),
-                        "content": data.get("message", data.get("content", "")),
-                        "timestamp": data.get("timestamp", hit.get("timestamp", "")),
-                    }
 
             turn_marker = f"{session_id}:{hit['id']}"
             if turn_marker in seen_turns:
@@ -1071,13 +1060,8 @@ class SearchTools:
                 raise ValueError("Conversation turn IDs are not canonical message IDs")
         return int(raw_id)
 
-    async def _hydrate_evidence(
-        self, evidence_refs: List, timeout: float = 5.0
-    ) -> List[Dict]:
-        """
-        Fetch full message payloads from Redis for scoped evidence refs.
-        Falls back to PostgreSQL lookup if Redis cache misses.
-        """
+    async def _hydrate_evidence(self, evidence_refs: List) -> List[Dict]:
+        """Fetch scoped evidence payloads from durable message storage."""
         if not evidence_refs:
             return []
 
@@ -1091,58 +1075,21 @@ class SearchTools:
         if not normalized:
             return []
 
-        raw_by_idx = {}
         grouped = {}
         for item in normalized:
             group_key = (item["user_name"], item["session_id"])
             grouped.setdefault(group_key, []).append(item)
 
-        try:
-            for (user_name, session_id), items in grouped.items():
-                redis_key = RedisKeys.message_content(user_name, session_id)
-                pipe = self.redis.pipeline()
-                for item in items:
-                    pipe.hget(redis_key, item["key"])
-                raw_results = await asyncio.wait_for(pipe.execute(), timeout=timeout)
-                for item, raw in zip(items, raw_results):
-                    raw_by_idx[item["idx"]] = raw
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"Redis hydrate timed out for {len(evidence_refs)} evidence refs"
-            )
-            return []
-
         results_by_idx = {}
-        missing_by_session = {}
         normalized_by_idx = {item["idx"]: item for item in normalized}
-
-        for item in normalized:
-            raw = raw_by_idx.get(item["idx"])
-            if raw:
-                data = safe_json_loads(raw)
-                if data and isinstance(data, dict):
-                    results_by_idx[item["idx"]] = {
-                        "id": item["key"],
-                        "user_name": item["user_name"],
-                        "session_id": item["session_id"],
-                        "message": data.get("message", data.get("content", "")),
-                        "timestamp": data.get("timestamp", ""),
-                    }
-                else:
-                    logger.warning(f"Malformed evidence data for {item['key']}")
-            else:
-                missing_by_session.setdefault(
-                    (item["user_name"], item["session_id"]), []
-                ).append(item["message_id"])
-
-        for (user_name, session_id), message_ids in missing_by_session.items():
-            fallback_msgs = await self.knowledge_store.get_messages_by_ids(
-                message_ids,
+        for (user_name, session_id), items in grouped.items():
+            messages = await self.knowledge_store.get_messages_by_ids(
+                [item["message_id"] for item in items],
                 user_name=user_name,
                 session_ids=[session_id],
                 visible_project_ids=self.readable_project_ids,
             )
-            for message in fallback_msgs:
+            for message in messages:
                 ts_iso = ""
                 if "timestamp" in message and isinstance(
                     message["timestamp"], (int, float)
@@ -1175,29 +1122,16 @@ class SearchTools:
             return [self.session_id]
 
         visible = {self.session_id}
-        postgres = getattr(self, "postgres", None)
-        if postgres is not None:
-            rows = await postgres.fetch_all(
-                """
-                SELECT session_id
-                FROM public.sessions
-                WHERE user_name = %s
-                  AND project_id = ANY(%s)
-                """,
-                (self.user_name, self.readable_project_ids),
-            )
-            visible.update(str(row["session_id"]) for row in rows)
-            return sorted(visible)
-
-        redis = getattr(self, "redis", None)
-        if redis is not None:
-            for project_id in self.readable_project_ids:
-                session_ids = await redis.smembers(
-                    RedisKeys.project_sessions(self.user_name, project_id)
-                )
-                visible.update(str(session_id) for session_id in session_ids)
-            return sorted(visible)
-
+        rows = await self.postgres.fetch_all(
+            """
+            SELECT session_id
+            FROM public.sessions
+            WHERE user_name = %s
+              AND project_id = ANY(%s)
+            """,
+            (self.user_name, self.readable_project_ids),
+        )
+        visible.update(str(row["session_id"]) for row in rows)
         return sorted(visible)
 
 
@@ -1219,16 +1153,7 @@ class SearchTools:
         if is_prefixed_msg_id:
             try:
                 numerical_msg_id = int(msg_id.split("_")[1])
-                cached_context = await self._get_cached_surrounding_context(
-                    numerical_msg_id,
-                    target_session_id,
-                    forward=forward,
-                    target_total=target_total,
-                )
-                if cached_context:
-                    return cached_context
-
-                fallback_msgs = await self.knowledge_store.get_surrounding_messages(
+                messages = await self.knowledge_store.get_surrounding_messages(
                     numerical_msg_id,
                     user_name=self.user_name,
                     session_id=target_session_id,
@@ -1238,7 +1163,7 @@ class SearchTools:
                 )
 
                 formatted_fallback = []
-                for m in fallback_msgs:
+                for m in messages:
                     ts_iso = ""
                     if "timestamp" in m and isinstance(
                         m["timestamp"], (int, float)
@@ -1260,51 +1185,6 @@ class SearchTools:
             except (ValueError, IndexError):
                 pass
         return []
-
-    async def _get_cached_surrounding_context(
-        self,
-        numerical_msg_id: int,
-        session_id: str,
-        *,
-        forward: int,
-        target_total: int,
-    ) -> List[Dict]:
-        redis = getattr(self, "redis", None)
-        if redis is None:
-            return []
-
-        target_member = str(numerical_msg_id)
-        recent_key = RedisKeys.recent_conversation(self.user_name, session_id)
-        rank = await redis.zrank(recent_key, target_member)
-        if rank is None:
-            return []
-
-        backward = max(target_total - forward - 1, 0)
-        start = max(rank - backward, 0)
-        end = rank + forward
-        message_ids = await redis.zrange(recent_key, start, end)
-        if not message_ids:
-            return []
-
-        conv_key = RedisKeys.conversation(self.user_name, session_id)
-        context = []
-        for raw_id in message_ids:
-            item_id = str(raw_id)
-            raw = await redis.hget(conv_key, item_id)
-            data = safe_json_loads(raw) if raw else None
-            if not isinstance(data, dict):
-                continue
-            entry = {
-                "role": data.get("role", "user"),
-                "timestamp": data.get("timestamp", ""),
-                "content": data.get("message", data.get("content", "")),
-                "id": f"msg_{item_id}",
-            }
-            if item_id == target_member:
-                entry["is_hit"] = True
-            context.append(entry)
-
-        return context
 
     async def _search_duckduckgo(
         self, query: str, limit: int, freshness: str = None

@@ -251,7 +251,6 @@ class AgentOrchestrator:
             knowledge_retrieval=context.project.knowledge_retrieval,
             knowledge_store=context.knowledge_store,
             postgres=context.resources.postgres,
-            redis=context.redis_client,
             agent_id=agent_id,
             health_service=getattr(context, "health_service", None),
         )

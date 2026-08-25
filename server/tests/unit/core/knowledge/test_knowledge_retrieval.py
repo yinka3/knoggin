@@ -4,15 +4,6 @@ import pytest
 
 from core.agent.tools.registry import Tools
 from core.knowledge.retrieval import KnowledgeRetrieval
-from tests.fixtures.fakes import FakeRedis
-
-
-class _UnavailableRedis:
-    def pipeline(self):
-        raise RuntimeError("redis unavailable")
-
-    async def zrank(self, *_args):
-        raise RuntimeError("redis unavailable")
 
 
 class _Postgres:
@@ -21,7 +12,7 @@ class _Postgres:
 
 
 @pytest.mark.no_network
-async def test_message_context_uses_durable_fallback_when_redis_is_unavailable():
+async def test_message_context_uses_durable_storage():
     class Store:
         async def search_messages_fts(self, *_args, **_kwargs):
             return [(7, 1.0, "session-2")]
@@ -46,7 +37,6 @@ async def test_message_context_uses_durable_fallback_when_redis_is_unavailable()
         embedding_service=SimpleNamespace(),
         knowledge_store=Store(),
         postgres=_Postgres(),
-        redis=_UnavailableRedis(),
         search_config={"fts_limit": 10},
     )
 
@@ -87,7 +77,6 @@ async def test_entity_search_hydrates_visible_relationship_evidence():
         embedding_service=SimpleNamespace(),
         knowledge_store=Store(),
         postgres=_Postgres(),
-        redis=_UnavailableRedis(),
     )
 
     results = await retrieval.search_entities("Ada", session_id="session-1")
@@ -126,7 +115,6 @@ async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
         knowledge_retrieval=retrieval,
         knowledge_store=SimpleNamespace(),
         postgres=SimpleNamespace(),
-        redis=FakeRedis(),
     )
     try:
         assert await tools.search_messages("project memory", limit=3) == [
@@ -157,7 +145,6 @@ async def test_episode_reads_receive_the_directional_readable_project_scope():
         embedding_service=SimpleNamespace(),
         knowledge_store=store,
         postgres=_Postgres(),
-        redis=_UnavailableRedis(),
     )
 
     result = await retrieval.read_recent_episodes(session_id="session-1")

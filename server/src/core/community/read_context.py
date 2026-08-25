@@ -31,7 +31,6 @@ class AACReadContext:
         postgres: Any,
         knowledge_store: Any,
         embedding_service: Any,
-        redis: Any,
         search_config: Dict | None = None,
     ) -> "AACReadContext":
         """Build independent user-wide retrieval services for AAC.
@@ -73,7 +72,6 @@ class AACReadContext:
             embedding_service=embedding_service,
             knowledge_store=knowledge_store,
             postgres=postgres,
-            redis=redis,
             search_config=search_config,
             active_topics=None,
         )
@@ -96,4 +94,3 @@ class AACReadContext:
             knowledge_retrieval=retrieval,
             documents=DocumentReadService(service),
         )
-

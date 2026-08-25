@@ -49,7 +49,6 @@ async def test_seeder_uses_normal_agent_run_and_skips_unusable_output(monkeypatc
         postgres=resources.postgres,
         knowledge_store=resources.knowledge_store,
         embedding_service=resources.embedding,
-        redis=resources.redis,
     )
 
     class FakeExecutor:

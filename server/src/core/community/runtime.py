@@ -88,7 +88,6 @@ class AACRuntime:
             postgres=resources.postgres,
             knowledge_store=resources.knowledge_store,
             embedding_service=resources.embedding,
-            redis=resources.redis,
             search_config={
                 **config.developer_settings.search.model_dump(),
                 **config.search.model_dump(),
@@ -391,7 +390,6 @@ class AACRuntime:
             knowledge_retrieval=self.read_context.knowledge_retrieval,
             knowledge_store=self.resources.knowledge_store,
             postgres=self.resources.postgres,
-            redis=self.resources.redis,
             agent_id=agent.id,
             workspace_service=None,
         )

@@ -107,7 +107,6 @@ class AACSeeder:
             knowledge_retrieval=self.read_context.knowledge_retrieval,
             knowledge_store=self.resources.knowledge_store,
             postgres=self.resources.postgres,
-            redis=self.resources.redis,
             agent_id=agent.id,
             workspace_service=None,
         )

@@ -419,7 +419,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             embedding_service=resolver.embedding_service,
             knowledge_store=store,
             postgres=postgres,
-            redis=redis,
         )
         tools = Tools(
             scope["user_name"],
@@ -428,7 +427,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             knowledge_retrieval=retrieval,
             knowledge_store=store,
             postgres=postgres,
-            redis=redis,
         )
         run = AgentRun.open(
             user_name=scope["user_name"],
@@ -564,7 +562,6 @@ async def test_real_document_request_persists_document_source_provenance(
         embedding_service=embedding,
         knowledge_store=store,
         postgres=postgres,
-        redis=redis,
     )
     context = _session(
         resources,

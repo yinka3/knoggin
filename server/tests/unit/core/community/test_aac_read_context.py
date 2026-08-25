@@ -4,7 +4,7 @@ import pytest
 
 from common.scoping import IDENTITY_SCOPE
 from core.community.read_context import AACReadContext
-from tests.fixtures.fakes import FakeEmbeddingService, FakePostgresClient, FakeRedis
+from tests.fixtures.fakes import FakeEmbeddingService, FakePostgresClient
 
 
 @pytest.mark.no_network
@@ -20,7 +20,6 @@ async def test_aac_read_context_discovers_user_projects_and_uses_identity_scope(
         postgres=postgres,
         knowledge_store=object(),
         embedding_service=FakeEmbeddingService(),
-        redis=FakeRedis(),
     )
 
     assert context.readable_project_ids == (
@@ -45,7 +44,6 @@ async def test_aac_document_reader_never_grants_session_private_visibility():
         postgres=postgres,
         knowledge_store=object(),
         embedding_service=FakeEmbeddingService(),
-        redis=FakeRedis(),
     )
 
     await context.documents.list_documents(session_id=None, limit=10)

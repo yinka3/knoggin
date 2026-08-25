@@ -100,7 +100,6 @@ class ProjectRuntimeFactory:
             embedding_service=self.resources.embedding,
             knowledge_store=self.resources.knowledge_store,
             postgres=self.resources.postgres,
-            redis=self.resources.redis,
             search_config={
                 **runtime_config.developer_settings.search.model_dump(),
                 **runtime_config.search.model_dump(),

@@ -43,7 +43,6 @@ class AACTools(Tools):
             knowledge_retrieval=base_tools.knowledge_retrieval,
             knowledge_store=base_tools.knowledge_store,
             postgres=base_tools.postgres,
-            redis=base_tools.redis,
             agent_id=agent_id,
             health_service=None,
             workspace_service=None,

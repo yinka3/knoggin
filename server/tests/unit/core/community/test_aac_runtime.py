@@ -54,7 +54,6 @@ async def test_aac_runtime_owns_local_discussion_admission_and_stop():
         postgres=resources.postgres,
         knowledge_store=resources.knowledge_store,
         embedding_service=resources.embedding,
-        redis=resources.redis,
     )
     seeder = FakeSeeder(SeedDecision("START", "Compare evidence"))
     runtime = AACRuntime(
@@ -92,7 +91,6 @@ async def test_aac_runtime_skips_without_enabled_participants():
         postgres=resources.postgres,
         knowledge_store=resources.knowledge_store,
         embedding_service=resources.embedding,
-        redis=resources.redis,
     )
     runtime = AACRuntime(
         user_name="ada",
@@ -123,7 +121,6 @@ async def test_aac_runtime_reconciles_durable_participation_and_records_events()
         postgres=resources.postgres,
         knowledge_store=resources.knowledge_store,
         embedding_service=resources.embedding,
-        redis=resources.redis,
     )
     runtime = AACRuntime(
         user_name="ada",
@@ -166,7 +163,6 @@ async def test_aac_runtime_ignores_stop_when_no_discussion_is_active():
         postgres=resources.postgres,
         knowledge_store=resources.knowledge_store,
         embedding_service=resources.embedding,
-        redis=resources.redis,
     )
     runtime = AACRuntime(
         user_name="ada",

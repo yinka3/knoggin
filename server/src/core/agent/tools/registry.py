@@ -395,15 +395,12 @@ class Tools(
         knowledge_retrieval: Optional[KnowledgeRetrieval] = None,
         knowledge_store=None,
         postgres=None,
-        redis=None,
         agent_id: Optional[str] = None,
         health_service=None,
         workspace_service=None,
     ):
-        if knowledge_store is None or postgres is None or redis is None:
-            raise ValueError(
-                "Tools requires explicit knowledge_store, postgres, and redis"
-            )
+        if knowledge_store is None or postgres is None:
+            raise ValueError("Tools requires explicit knowledge_store and postgres")
         if knowledge_retrieval is None:
             raise ValueError("Tools requires a project-scoped KnowledgeRetrieval")
 
@@ -413,7 +410,6 @@ class Tools(
         self.postgres = postgres
         self.entities = entities
         self.user_name = user_name
-        self.redis = redis
         self.embedding_service = entities.embedding_service
         self.project_id = entities.project_id
         self.readable_project_ids = entities.readable_project_ids
@@ -434,7 +430,7 @@ class Tools(
         self._http_client = httpx.AsyncClient(timeout=10.0)
 
     # Internal-memory tools are formatting/argument adapters only. Retrieval
-    # policy, cache fallbacks, ranking, and evidence expansion live in the
+    # policy, ranking, and evidence expansion live in the
     # project-scoped KnowledgeRetrieval service.
     async def search_messages(self, query: str, limit: int = None):
         return await self.knowledge_retrieval.search_messages(
