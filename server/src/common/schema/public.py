@@ -26,6 +26,7 @@ from common.exceptions import (
 )
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
+from common.schema.document import DocumentSelection
 from common.schema.source.references import SourceConsulted
 
 PUBLIC_CONTRACT_VERSION = "1"
@@ -149,6 +150,83 @@ class MessageAcceptance(PublicModel):
     idempotent: bool = False
 
 
+class RunDocumentFocusDocument(PublicModel):
+    """One document optionally anchored at a request-scoped selection."""
+
+    target_type: Literal["document"]
+    document_id: str = Field(min_length=1)
+    selection: DocumentSelection | None = None
+
+
+class RunDocumentFocusSubtree(PublicModel):
+    """One request-scoped subtree in a folder upload."""
+
+    target_type: Literal["subtree"]
+    folder_root_id: str = Field(min_length=1)
+    path_prefix: str = Field(min_length=1)
+
+
+class RunDocumentFocusFolderUpload(PublicModel):
+    """One request-scoped uploaded folder."""
+
+    target_type: Literal["folder_upload"]
+    folder_root_id: str = Field(min_length=1)
+
+
+RunDocumentFocus = Annotated[
+    Union[
+        RunDocumentFocusDocument,
+        RunDocumentFocusSubtree,
+        RunDocumentFocusFolderUpload,
+    ],
+    Field(discriminator="target_type"),
+]
+
+
+class SetDocumentFocusDocument(PublicModel):
+    """Persisted focus for one document, deliberately without a selection."""
+
+    target_type: Literal["document"]
+    document_id: str = Field(min_length=1)
+
+
+class SetDocumentFocusSubtree(PublicModel):
+    """Persisted focus for one folder subtree."""
+
+    target_type: Literal["subtree"]
+    folder_root_id: str = Field(min_length=1)
+    path_prefix: str = Field(min_length=1)
+
+
+class SetDocumentFocusFolderUpload(PublicModel):
+    """Persisted focus for one complete uploaded folder."""
+
+    target_type: Literal["folder_upload"]
+    folder_root_id: str = Field(min_length=1)
+
+
+SetDocumentFocusRequest = Annotated[
+    Union[
+        SetDocumentFocusDocument,
+        SetDocumentFocusSubtree,
+        SetDocumentFocusFolderUpload,
+    ],
+    Field(discriminator="target_type"),
+]
+
+
+class DocumentFocusResponse(PublicModel):
+    """Stable public projection of the currently pinned session focus."""
+
+    mode: Literal["pinned"]
+    created_at: datetime
+    target_type: Literal["document", "subtree", "folder_upload"]
+    document_id: str | None = None
+    relative_path: str | None = None
+    folder_root_id: str | None = None
+    path_prefix: str | None = None
+
+
 class StartRunRequest(PublicModel):
     session_id: str = Field(min_length=1)
     query: str = Field(min_length=1, max_length=100_000)
@@ -156,6 +234,7 @@ class StartRunRequest(PublicModel):
     agent_id: str | None = Field(default=None, min_length=1)
     enabled_tools: list[str] | None = None
     research_mode: ResearchMode = "normal"
+    document_focus: RunDocumentFocus | None = None
 
     _normalise_tools = field_validator("enabled_tools")(_normalise_enabled_tools)
 

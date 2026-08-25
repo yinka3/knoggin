@@ -1,3 +1,4 @@
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -11,6 +12,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from common.schema.source.locators import DocumentLocator
 
 
 class FolderUploadEntry(BaseModel):
@@ -172,12 +175,31 @@ class _DocumentFocusBase(BaseModel):
         return value.astimezone(timezone.utc)
 
 
+class DocumentSelection(BaseModel):
+    """One version-bound passage selected from a durable document."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content_hash: str = Field(min_length=64, max_length=64)
+    locator: DocumentLocator
+
+    @field_validator("content_hash")
+    @classmethod
+    def _require_sha256_content_hash(cls, value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(
+                "document selection content_hash must be a SHA-256 hex digest"
+            )
+        return value
+
+
 class DocumentFocusDocument(_DocumentFocusBase):
     """A focus targeting one exact document."""
 
     target_type: Literal["document"]
     document_id: str = Field(min_length=1)
     relative_path: str = Field(min_length=1)
+    selection: DocumentSelection | None = None
 
     @field_validator("document_id", "relative_path")
     @classmethod
@@ -185,6 +207,12 @@ class DocumentFocusDocument(_DocumentFocusBase):
         if not (normalized := value.strip()):
             raise ValueError("document focus selectors must not be blank")
         return normalized
+
+    @model_validator(mode="after")
+    def _selection_is_request_scoped(self):
+        if self.selection is not None and self.mode != "request":
+            raise ValueError("document selections are only valid for request focus")
+        return self
 
 
 class DocumentFocusSubtree(_DocumentFocusBase):
@@ -267,7 +295,7 @@ def dump_document_focus(value: DocumentFocus) -> dict:
     """Serialize a validated focus using only its variant's selector fields."""
 
     focus = parse_document_focus(value)
-    payload = focus.model_dump(mode="json")
+    payload = focus.model_dump(mode="json", exclude_none=True)
     # Keep the application's stable ISO-8601 UTC form (+00:00) rather than
     # inheriting Pydantic's version-dependent `Z` JSON rendering.
     payload["created_at"] = focus.created_at.isoformat()
