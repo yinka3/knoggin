@@ -603,6 +603,34 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
+async def test_extract_mentions_rejects_overlapping_llm_mentions():
+    processor, _ = make_processor(
+        llm_response=EntityExtraction(
+            mentions=[
+                make_entity("OpenAI", msg_id="m1"),
+                make_entity("OpenAI, Inc.", msg_id="m1"),
+            ]
+        ),
+        llm_ner=True,
+    )
+
+    async def run_model_work(operation, **_kwargs):
+        return operation()
+
+    processor._run_model_work = run_model_work
+    trace = ExtractionTrace()
+    issues = []
+
+    result = await extract(processor, trace=trace, issues=issues)
+
+    assert result == [(1, "OpenAI", "Tools", "Tools")]
+    assert trace.llm_mentions_accepted == 1
+    assert trace.llm_mentions_rejected == 1
+    assert [issue.code for issue in issues] == ["duplicate_mention"]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
 async def test_extract_mentions_does_not_expose_known_entity_ids_to_llm():
     processor, llm = make_processor(
         known_aliases={"alice": 101},

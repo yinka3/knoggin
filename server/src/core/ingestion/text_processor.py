@@ -560,6 +560,7 @@ class TextProcessor:
                             metadata={"msg_id": actual_msg_id},
                         )
                         continue
+                    covered_texts[actual_msg_id].add(entity.name.casefold())
                     output.append(
                         (actual_msg_id, entity.name, canonical_type, derived_topic)
                     )
