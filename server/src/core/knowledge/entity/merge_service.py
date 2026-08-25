@@ -10,13 +10,11 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from common.scoping import IDENTITY_ENTITY_ID
-from common.utils.events import emit
 from common.utils.time_utils import get_now, parse_iso_time
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from infrastructure.postgres_client import PostgresClient
-from infrastructure.redis_client import RedisKeys
 
 MERGE_ROLLBACK_RETENTION_HOURS = 5
 
@@ -30,10 +28,9 @@ class EntityMergeService:
         r"[\s.-]\d{3}[\s.-]\d{4}(?!\d)"
     )
 
-    def __init__(self, postgres: PostgresClient, knowledge_store, redis=None):
+    def __init__(self, postgres: PostgresClient, knowledge_store):
         self.postgres = postgres
         self.knowledge_store = knowledge_store
-        self.redis = redis
         self.merge_audit_reader = MergeAuditReader(postgres)
         self.merge_audit_writer = MergeAuditWriter(postgres)
         self.projection_rebuilder = GraphBuilder(postgres)
@@ -286,25 +283,6 @@ class EntityMergeService:
                 "reason": "The canonical merge transaction failed without committing.",
             }
 
-        if self.redis:
-            merge_key = RedisKeys.merge_queue(proposal["user_name"], project_id)
-            await self.redis.srem(merge_key, str(primary_id), str(duplicate_id))
-            await emit(
-                project_id,
-                "job",
-                "merge_queue_removed",
-                {
-                    "user_name": proposal["user_name"],
-                    "project_id": project_id,
-                    "merge_key": merge_key,
-                    "entity_ids": [primary_id, duplicate_id],
-                    "cleared_count": 2,
-                    "reason": "merge_executed",
-                    "proposal_id": proposal_id,
-                    "primary_id": primary_id,
-                    "duplicate_id": duplicate_id,
-                },
-            )
         return {
             "policy_result": "executed",
             "proposal_id": proposal_id,

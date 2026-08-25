@@ -14,15 +14,12 @@ from common.utils.agent_identity import (
 )
 
 if TYPE_CHECKING:
-    import redis.asyncio as aioredis
-
     from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
 
 
 class MemoryTools:
-    redis: aioredis.Redis
     knowledge_store: KnowledgeStore
     postgres: PostgresClient
     entities: EntityResolver
