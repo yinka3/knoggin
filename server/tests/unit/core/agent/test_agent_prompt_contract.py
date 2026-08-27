@@ -179,15 +179,6 @@ def test_agent_prompt_renders_server_resolved_document_selection_context():
 def test_agent_prompt_renders_agent_and_community_contexts():
     prompt = get_agent_prompt(
         user_name="Ada",
-        agent_directives=(
-            "Required:\n"
-            "- Stay grounded.\n"
-            "- Cite evidence.\n\n"
-            "Preferred:\n"
-            "- Prefer concise answers.\n\n"
-            "Avoid:\n"
-            "- Do not overstate weak evidence."
-        ),
         agent_brain="Use the available evidence before answering.",
         is_community=True,
         participants=["planner", "critic"],
@@ -195,10 +186,7 @@ def test_agent_prompt_renders_agent_and_community_contexts():
     )
 
     assert "<agent_brain>" in prompt
-    assert "<run_directives>" in prompt
-    assert "Required:\n- Stay grounded.\n- Cite evidence." in prompt
-    assert "Preferred:\n- Prefer concise answers." in prompt
-    assert "Avoid:\n- Do not overstate weak evidence." in prompt
+    assert "<run_directives>" not in prompt
     assert "<community_context>" in prompt
     assert "Current participants: planner, critic" in prompt
     assert "Use the available evidence before answering." in prompt

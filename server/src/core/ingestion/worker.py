@@ -1,4 +1,4 @@
-"""PostgreSQL queue worker with application-local consumer signaling."""
+"""PostgreSQL queue worker with application-local worker signaling."""
 
 import asyncio
 from typing import Awaitable, Callable, Dict, List, Optional

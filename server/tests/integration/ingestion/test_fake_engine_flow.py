@@ -10,14 +10,14 @@ from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config, make_project_state
 from tests.fixtures.fakes import (
     FakeConfigValue,
-    FakeConsumer,
+    FakeIngestionWorker,
     FakeResources,
 )
 
 
 @pytest.mark.integration
 @pytest.mark.no_network
-async def test_session_create_add_history_and_close_flow(monkeypatch):
+async def test_session_create_run_admission_history_and_delete_flow(monkeypatch):
     resources = FakeResources()
     project_manager = ProjectManager(resources, user_name="ada")
     project = await project_manager.create_project(
@@ -41,15 +41,19 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         return project_state
 
     class RuntimeFactory:
-        async def bootstrap(self, state, **kwargs):
-            ctx = Session(resources=resources, user_name="ada")
-            ctx.session_id = kwargs["session_id"]
-            ctx.project_id = state.project_id
-            ctx.project = state
-            ctx.model = kwargs["model"]
-            ctx.agent_id = kwargs["agent_id"]
-            ctx.enabled_tools = kwargs["enabled_tools"]
-            ctx.consumer = FakeConsumer()
+        async def create(self, state, **kwargs):
+            ctx = Session(
+                resources=resources,
+                user_name="ada",
+                session_id=kwargs["session_id"],
+                project_id=state.project_id,
+                project=state,
+                model=kwargs["model"],
+                agent_id=kwargs["agent_id"],
+                enabled_tools=kwargs["enabled_tools"],
+                document_focus=kwargs.get("document_focus"),
+            )
+            ctx.ingestion_worker = FakeIngestionWorker()
             return ctx
 
     class FakeEmitter:
@@ -81,14 +85,13 @@ async def test_session_create_add_history_and_close_flow(monkeypatch):
         project_id=project["id"],
     )
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
-    msg = await ctx.add(
+    await ctx.open_agent_run_stream(
         Message(content="  hello from integration  ", timestamp=timestamp)
     )
-    assert msg.id == 1
     assert await project_manager.get_session_ids(project["id"]) == [ctx.session_id]
-    assert ctx.consumer.signaled == 1
+    assert ctx.ingestion_worker.signaled == 1
 
-    assert await manager.close_session(ctx.session_id) is True
+    assert await manager.delete_session(ctx.session_id) is None
     assert active_sessions == {}
     assert project["id"] not in project_manager.active_projects
 
@@ -136,7 +139,7 @@ async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
     deleted_project = await project_manager.delete_project(project["id"])
     assert await project_manager.get_session_ids(project["id"]) == []
 
-    deleted_count = await manager.delete_session_data(session_id)
+    deleted_count = await manager.delete_session(session_id)
 
     assert deleted_project["status"] == "deleted"
     assert await project_manager.get_project(project["id"]) is None

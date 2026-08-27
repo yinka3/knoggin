@@ -201,6 +201,7 @@ def get_tool_schemas(
         )
 
     additional = tuple(additional_schemas)
+    _validate_additional_schemas(additional)
     overrides = {
         schema["function"]["name"]: schema
         for schema in additional
@@ -237,6 +238,53 @@ def get_tool_schemas(
             filtered.append(schema)
             selected_names.add(name)
     return filtered
+
+
+def _validate_additional_schemas(schemas: Iterable[dict]) -> None:
+    """Ensure every extra model-visible schema has an engine implementation."""
+
+    seen: set[str] = set()
+    for schema in schemas:
+        if not isinstance(schema, dict):
+            raise ValueError("Additional tool schemas must be objects")
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            raise ValueError("Additional tool schemas require a function object")
+        name = function.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Additional tool schemas require a tool name")
+        if name in seen:
+            raise ValueError(f"Duplicate additional tool schema: {name}")
+        seen.add(name)
+
+        definition = TOOL_DEFINITIONS.get(name)
+        if definition is None:
+            raise ValueError(
+                f"Additional tool schema '{name}' has no registered implementation"
+            )
+        if get_schema_capability(schema) != definition.capability:
+            raise ValueError(
+                f"Tool schema override for '{name}' changes its capability"
+            )
+
+        if definition.dispatch is None:
+            continue
+        parameters = function.get("parameters")
+        properties = (
+            parameters.get("properties", {})
+            if isinstance(parameters, dict)
+            else None
+        )
+        if not isinstance(properties, dict):
+            raise ValueError(
+                f"Additional tool schema '{name}' has invalid parameters"
+            )
+        expected = set(definition.dispatch[1])
+        if set(properties) != expected:
+            raise ValueError(
+                f"Additional tool schema '{name}' does not match its registered "
+                "dispatch parameters"
+            )
 
 
 def get_runtime_instructions(schemas: Iterable[dict]) -> str:

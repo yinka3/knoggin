@@ -475,7 +475,7 @@ class RuntimeHealthService:
             return None
         if context is None or getattr(context, "project_id", None) != project_id:
             return None
-        return getattr(context, "consumer", None)
+        return getattr(context, "ingestion_worker", None)
 
     def _project_state(self, project_id: str) -> Any:
         projects = getattr(self.projects, "active_projects", None)

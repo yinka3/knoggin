@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from common.conf.manager import ConfigManager
 from common.scoping import (
@@ -33,7 +33,7 @@ from core.project.domain_config_store import DomainConfigStore
 from core.project.workspace_service import ProjectWorkspaceService
 from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
-from runtime.resources import RuntimeResources
+from runtime.resources import ReadyRuntimeResources, RuntimeResources
 
 
 class ProjectRuntimeFactory:
@@ -64,24 +64,17 @@ class ProjectRuntimeFactory:
 
         require_scope_value(project_id, "project_id", "ProjectRuntimeFactory")
         require_visible_project_ids(readable_project_ids, "ProjectRuntimeFactory")
-        if (
-            self.resources.knowledge_store is None
-            or self.resources.embedding is None
-            or self.resources.executor is None
-            or self.resources.postgres is None
-            or self.resources.llm_service is None
-        ):
-            raise RuntimeError("Runtime resources are not ready for project startup")
+        resources = self.resources.require_ready()
 
-        domain_store = DomainConfigStore(self.resources.postgres)
+        domain_store = DomainConfigStore(resources.postgres)
         domain_config = await domain_store.load(self.user_name, project_id)
         compiled_domain = domain_config.compile()
         entity_settings = self.dev_settings.entity_resolution
         entities = EntityResolver(
             project_id=project_id,
             readable_project_ids=readable_project_ids,
-            knowledge_store=self.resources.knowledge_store,
-            embedding_service=self.resources.embedding,
+            knowledge_store=resources.knowledge_store,
+            embedding_service=resources.embedding,
             fuzzy_substring_threshold=entity_settings.fuzzy_substring_threshold,
             fuzzy_non_substring_threshold=entity_settings.fuzzy_non_substring_threshold,
             generic_token_freq=entity_settings.generic_token_freq,
@@ -96,9 +89,9 @@ class ProjectRuntimeFactory:
             readable_project_ids=readable_project_ids,
             user_name=self.user_name,
             entities=entities,
-            embedding_service=self.resources.embedding,
-            knowledge_store=self.resources.knowledge_store,
-            postgres=self.resources.postgres,
+            embedding_service=resources.embedding,
+            knowledge_store=resources.knowledge_store,
+            postgres=resources.postgres,
             search_config={
                 **runtime_config.developer_settings.search.model_dump(),
                 **runtime_config.search.model_dump(),
@@ -106,30 +99,30 @@ class ProjectRuntimeFactory:
             active_topics=list(compiled_domain.active_topics),
         )
 
-        pipeline = await asyncio.get_running_loop().run_in_executor(
-            self.resources.executor,
+        text_processor = await asyncio.get_running_loop().run_in_executor(
+            resources.executor,
             partial(
                 TextProcessor,
-                llm=self.resources.llm_service,
+                llm=resources.llm_service,
                 get_known_aliases=entities.get_known_aliases,
                 get_alias_version=entities.get_alias_version,
                 get_profile=entities.get_profile,
-                gliner=self.resources.gliner,
-                spacy=self.resources.spacy,
+                gliner=resources.gliner,
+                spacy=resources.spacy,
                 settings=self.dev_settings.nlp_pipeline,
-                model_work=self.resources.model_work,
+                model_work=resources.model_work,
             ),
         )
-        project_processor = IngestionPipeline(
+        ingestion_pipeline = IngestionPipeline(
             project_id=project_id,
-            llm=self.resources.llm_service,
+            llm=resources.llm_service,
             entities=entities,
-            processor=pipeline,
-            knowledge_store=self.resources.knowledge_store,
-            cpu_executor=self.resources.executor,
+            processor=text_processor,
+            knowledge_store=resources.knowledge_store,
+            cpu_executor=resources.executor,
             user_name=self.user_name,
             compiled_domain=compiled_domain,
-            get_next_ent_id=self.resources.knowledge_store.allocate_entity_id,
+            get_next_ent_id=resources.knowledge_store.allocate_entity_id,
             resolution_threshold=entity_settings.resolution_threshold,
             common_word_frequency_threshold=(
                 entity_settings.common_word_frequency_threshold
@@ -139,17 +132,18 @@ class ProjectRuntimeFactory:
         scheduler = Scheduler(
             self.user_name,
             project_id,
-            background_work=self.resources.background_work,
+            background_work=resources.background_work,
         )
         document_service, workspace_service = self._create_document_services(
             project_id,
             readable_project_ids=readable_project_ids,
+            resources=resources,
         )
         runtime = ProjectRuntime(
             project_id=project_id,
             entities=entities,
             knowledge_retrieval=retrieval,
-            pipeline=pipeline,
+            text_processor=text_processor,
             scheduler=scheduler,
             user_name=self.user_name,
             readable_project_ids=readable_project_ids,
@@ -157,10 +151,10 @@ class ProjectRuntimeFactory:
             document_service=document_service,
             workspace_service=workspace_service,
             domain_config_store=domain_store,
-            batch_processor=project_processor,
-            background_work=self.resources.background_work,
+            ingestion_pipeline=ingestion_pipeline,
+            background_work=resources.background_work,
         )
-        episode_job = self._create_episode_job(project_id)
+        episode_job = self._create_episode_job(project_id, resources=resources)
         runtime.episode_job = episode_job
 
         try:
@@ -168,8 +162,9 @@ class ProjectRuntimeFactory:
             self._register_background_jobs(
                 runtime,
                 entities=entities,
-                processor=project_processor,
+                processor=ingestion_pipeline,
                 episode_job=episode_job,
+                resources=resources,
             )
             await scheduler.start()
         except Exception:
@@ -182,36 +177,36 @@ class ProjectRuntimeFactory:
         project_id: str,
         *,
         readable_project_ids: list[str],
+        resources: ReadyRuntimeResources | None = None,
     ) -> tuple[DocumentService, ProjectWorkspaceService]:
-        resource_profile = self.resources.resource_profile
-        if resource_profile is None:
-            raise RuntimeError("Runtime resource profile is unavailable")
+        resources = resources or cast(ReadyRuntimeResources, self.resources)
+        resource_profile = resources.resource_profile
         runtime_config = ConfigManager.get().config
         document_settings = runtime_config.developer_settings.documents
         reader = DocumentReader(
-            self.resources.postgres,
+            resources.postgres,
             project_id,
             readable_project_ids=readable_project_ids,
         )
-        writer = DocumentWriter(self.resources.postgres, project_id)
+        writer = DocumentWriter(resources.postgres, project_id)
         indexer = DocumentIndexer(
             project_id=project_id,
             reader=reader,
             writer=writer,
-            embedding_service=self.resources.embedding,
+            embedding_service=resources.embedding,
             policy=DocumentIndexPolicy.capture(
                 workspace_prepare_concurrency=(
                     resource_profile.workspace_prepare_concurrency
                 )
             ),
             blocking_runner=asyncio.to_thread,
-            background_work=self.resources.background_work,
+            background_work=resources.background_work,
         )
         document_service = DocumentService(
             project_id=project_id,
-            postgres_client=self.resources.postgres,
-            embedding_service=self.resources.embedding,
-            background_work=self.resources.background_work,
+            postgres_client=resources.postgres,
+            embedding_service=resources.embedding,
+            background_work=resources.background_work,
             readable_project_ids=readable_project_ids,
             reader=reader,
             writer=writer,
@@ -236,12 +231,18 @@ class ProjectRuntimeFactory:
                 f"entity ID {IDENTITY_ENTITY_ID}"
             )
 
-    def _create_episode_job(self, project_id: str) -> EpisodeJob:
+    def _create_episode_job(
+        self,
+        project_id: str,
+        *,
+        resources: ReadyRuntimeResources | None = None,
+    ) -> EpisodeJob:
+        resources = resources or cast(ReadyRuntimeResources, self.resources)
         return EpisodeJob(
-            knowledge_store=self.resources.knowledge_store,
+            knowledge_store=resources.knowledge_store,
             settings=self.dev_settings.jobs.episode,
-            llm=self.resources.llm_service,
-            embedding_service=self.resources.embedding,
+            llm=resources.llm_service,
+            embedding_service=resources.embedding,
             episode_window_size_provider=lambda: self._episode_window_size_provider(
                 project_id
             ),
@@ -254,7 +255,9 @@ class ProjectRuntimeFactory:
         entities: EntityResolver,
         processor: IngestionPipeline,
         episode_job: EpisodeJob,
+        resources: ReadyRuntimeResources | None = None,
     ) -> None:
+        resources = resources or cast(ReadyRuntimeResources, self.resources)
         scheduler = runtime.scheduler
         jobs = self.dev_settings.jobs
         config_manager = ConfigManager.get()
@@ -284,7 +287,7 @@ class ProjectRuntimeFactory:
         )
 
         merge_cleanup_job = MergeCleanupJob(
-            knowledge_store=self.resources.knowledge_store,
+            knowledge_store=resources.knowledge_store,
             settings=jobs.merge_rollback,
         )
         scheduler.register(merge_cleanup_job)
@@ -296,7 +299,7 @@ class ProjectRuntimeFactory:
         )
 
         audit_retention_job = AuditRetentionCleanupJob(
-            knowledge_store=self.resources.knowledge_store,
+            knowledge_store=resources.knowledge_store,
             settings=jobs.audit_retention,
         )
         scheduler.register(audit_retention_job)
@@ -308,9 +311,9 @@ class ProjectRuntimeFactory:
         )
 
         conflict_discovery_job = ConflictDiscoveryJob(
-            knowledge_store=self.resources.knowledge_store,
+            knowledge_store=resources.knowledge_store,
             settings=jobs.conflict_discovery,
-            llm=self.resources.llm_service,
+            llm=resources.llm_service,
         )
         scheduler.register(conflict_discovery_job)
         runtime.add_config_unsubscriber(

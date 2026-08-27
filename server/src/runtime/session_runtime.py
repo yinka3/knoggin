@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.exceptions import SessionBusyError
 from common.schema.agent.research import ResearchMode
 from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
@@ -46,6 +47,14 @@ class SessionRuntime:
         self,
         user_name: str,
         resources: RuntimeResources,
+        *,
+        session_id: str,
+        project_id: str,
+        project: ProjectRuntime,
+        model: Optional[str],
+        agent_id: Optional[str],
+        enabled_tools: Optional[List[str]],
+        document_focus: Optional[DocumentFocus] = None,
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
     ):
@@ -53,30 +62,24 @@ class SessionRuntime:
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
         self.user_name: str = user_name
-        self.model: Optional[str] = None
-        self.agent_id: Optional[str] = None
-        self.enabled_tools: Optional[List[str]] = None
-        self.document_focus: Optional[DocumentFocus] = None
+        self.model = model
+        self.agent_id = agent_id
+        self.enabled_tools = list(enabled_tools) if enabled_tools is not None else None
+        self.document_focus = document_focus
         self.document_service: Optional[DocumentService] = None
 
-        self.session_id: Optional[str] = None
-        self.project_id: Optional[str] = None
-        self.project: Optional[ProjectRuntime] = None
+        self.session_id = session_id
+        self.project_id = project_id
+        self.project = project
 
-        self.batch_processor: Optional[IngestionPipeline] = None
-        self.consumer: Optional[IngestionWorker] = None
+        self.ingestion_pipeline: Optional[IngestionPipeline] = None
+        self.ingestion_worker: Optional[IngestionWorker] = None
         self.config_unsubscribers: List = []
-        self._message_add_lock = asyncio.Lock()
-        # Conversation turns are accepted independently, but only the oldest
-        # accepted turn may advance the session's agent state at a time.
-        self._agent_submission_lock = asyncio.Lock()
-        self._agent_queue_condition = asyncio.Condition()
-        self._agent_run_queue: list[tuple[object, int]] = []
-        self._active_agent_task: Optional[asyncio.Task] = None
-        self._agent_run_state = "idle"
-        self._agent_queue_paused = False
-        self._agent_runs_closed = False
+        self._agent_run_lock = asyncio.Lock()
         self._shutdown_lock = asyncio.Lock()
+        self._agent_run_reserved = False
+        self._active_agent_task: Optional[asyncio.Task] = None
+        self._agent_runs_closed = False
         self._closed = False
 
     @property
@@ -91,70 +94,10 @@ class SessionRuntime:
     def llm(self):
         return self.resources.llm_service
 
-    async def add(self, msg: Message) -> Message:
-        if self._closed or self._agent_runs_closed:
-            raise RuntimeError("Session is shutting down")
-        if not self.project or not self.project.scheduler or not self.consumer:
-            raise RuntimeError("Session is not fully initialized for message ingestion")
-
-        async with self._message_add_lock:
-            return await self._add_user_message(msg)
-
-    async def accept_message(self, msg: Message) -> tuple[Message, bool]:
-        """Durably accept one user message without starting an agent run.
-
-        The public application port exposes message acceptance separately from
-        execution.  Keep that operation on the session runtime so it uses the
-        same idempotency key, lifecycle writer, and worker wake-up path as
-        ``run_agent_stream``.
-        """
-
-        if self._closed or self._agent_runs_closed:
-            raise RuntimeError("Session is shutting down")
-        if not self.project or not self.project.scheduler or not self.consumer:
-            raise RuntimeError("Session is not fully initialized for message ingestion")
-
-        async with self._message_add_lock:
-            return await self._accept_user_message(msg)
-
-    def agent_run_snapshot(self) -> dict[str, object]:
-        """Return the bounded, session-owned state of agent execution."""
-
-        return {
-            "state": self._agent_run_state,
-            "active": self._active_agent_task is not None
-            and not self._active_agent_task.done(),
-            "queued_message_ids": [
-                message_id for _, message_id in self._agent_run_queue
-            ],
-            "queue_paused": self._agent_queue_paused,
-        }
-
-    async def resume_agent_queue(self) -> bool:
-        """Permit the next already-accepted turn after an interrupted run.
-
-        The caller represents the user or a higher-level interaction policy.
-        The session itself never advances queued work automatically after a
-        failed, cancelled, or clarification-only run.
-        """
-
-        async with self._agent_queue_condition:
-            if (
-                self._agent_runs_closed
-                or self._active_agent_task is not None
-                or not self._agent_queue_paused
-                or not self._agent_run_queue
-            ):
-                return False
-            self._agent_queue_paused = False
-            self._agent_run_state = "idle"
-            self._agent_queue_condition.notify_all()
-            return True
-
     async def cancel_active_agent_run(self) -> bool:
         """Cancel only this session's active agent execution, if any."""
 
-        async with self._agent_queue_condition:
+        async with self._agent_run_lock:
             task = self._active_agent_task
         if task is None or task.done() or task is asyncio.current_task():
             return False
@@ -180,56 +123,104 @@ class SessionRuntime:
         idempotency_key: Optional[str] = None,
         research_mode: ResearchMode = "normal",
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
-        """Run the canonical server-owned message-to-answer workflow.
+        """Run one admitted canonical user-message-to-answer workflow."""
 
-        The user message becomes durable before it can wait behind an active
-        run. Streamed tokens remain transient; a final ``response`` is exposed
-        only after the assistant message and its consulted sources commit.
+        stream = await self.open_agent_run_stream(
+            message,
+            orchestrator=orchestrator,
+            user_timezone=user_timezone,
+            model=model,
+            agent_id=agent_id,
+            enabled_tools=enabled_tools,
+            document_focus=document_focus,
+            pasted_text_spans=pasted_text_spans,
+            idempotency_key=idempotency_key,
+            research_mode=research_mode,
+        )
+        async for event in stream:
+            yield event
+
+    async def open_agent_run_stream(
+        self,
+        message: Message,
+        *,
+        orchestrator: Any = None,
+        user_timezone: Optional[str] = None,
+        model: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None,
+        document_focus: Optional[DocumentFocus] = None,
+        pasted_text_spans: Optional[List[Dict]] = None,
+        idempotency_key: Optional[str] = None,
+        research_mode: ResearchMode = "normal",
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
+        """Admit and persist a run before returning its event stream.
+
+        Adapters can await this preflight operation and report a conflict
+        before starting an HTTP/SSE response. A rejected overlapping run does
+        not allocate or persist a user message.
         """
 
-        ticket = object()
-        queued = False
-        running = False
-        outcome = "failed"
-        task: Optional[asyncio.Task] = None
+        self._require_message_ingestion_ready()
+        async with self._agent_run_lock:
+            if self._closed or self._agent_runs_closed:
+                raise RuntimeError("Session is shutting down")
+            if self._agent_run_reserved:
+                raise SessionBusyError()
+            self._agent_run_reserved = True
 
         try:
-            # Serialize acceptance enough to preserve FIFO queue order without
-            # blocking an unrelated session or a currently running agent.
-            async with self._agent_submission_lock:
-                if self._agent_runs_closed:
-                    raise RuntimeError("Session is shutting down")
-                if idempotency_key:
-                    message.metadata["idempotency_key"] = idempotency_key
-                accepted = await self.add(message)
-                async with self._agent_queue_condition:
-                    self._agent_run_queue.append((ticket, accepted.id))
-                    queued = True
-                    self._agent_queue_condition.notify_all()
+            if idempotency_key:
+                message.metadata["idempotency_key"] = idempotency_key
+            accepted, _created = await self._accept_user_message(message)
+        except Exception:
+            await self._release_agent_run(None)
+            raise
 
-            task = asyncio.current_task()
-            if task is None:
-                raise RuntimeError("Agent stream must run in an asyncio task")
+        return self._run_admitted_agent_stream(
+            accepted,
+            orchestrator=orchestrator,
+            user_timezone=user_timezone,
+            model=model,
+            agent_id=agent_id,
+            enabled_tools=enabled_tools,
+            document_focus=document_focus,
+            pasted_text_spans=pasted_text_spans,
+            research_mode=research_mode,
+        )
 
-            async with self._agent_queue_condition:
-                while True:
-                    if self._agent_runs_closed:
-                        raise RuntimeError("Session is shutting down")
-                    is_head = (
-                        bool(self._agent_run_queue)
-                        and self._agent_run_queue[0][0] is ticket
-                    )
-                    if (
-                        is_head
-                        and self._active_agent_task is None
-                        and not self._agent_queue_paused
-                    ):
-                        self._active_agent_task = task
-                        self._agent_run_state = "running"
-                        running = True
-                        break
-                    await self._agent_queue_condition.wait()
+    def _require_message_ingestion_ready(self) -> None:
+        if not self.project.scheduler or not self.ingestion_worker:
+            raise RuntimeError("Session is not fully initialized for message ingestion")
 
+    async def _run_admitted_agent_stream(
+        self,
+        accepted: Message,
+        *,
+        orchestrator: Any,
+        user_timezone: Optional[str],
+        model: Optional[str],
+        agent_id: Optional[str],
+        enabled_tools: Optional[List[str]],
+        document_focus: Optional[DocumentFocus],
+        pasted_text_spans: Optional[List[Dict]],
+        research_mode: ResearchMode,
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
+        """Execute one already-persisted, exclusively admitted run."""
+
+        outcome = "failed"
+        task = asyncio.current_task()
+        if task is None:
+            await self._release_agent_run(None)
+            raise RuntimeError("Agent stream must run in an asyncio task")
+
+        async with self._agent_run_lock:
+            if self._agent_runs_closed:
+                self._agent_run_reserved = False
+                raise RuntimeError("Session is shutting down")
+            self._active_agent_task = task
+
+        try:
             history = await self.get_conversation_context(
                 self.current_config.developer_settings.limits.conversation_context_turns,
                 up_to_msg_id=accepted.id - 1,
@@ -298,20 +289,13 @@ class SessionRuntime:
                 },
             }
         finally:
-            async with self._agent_queue_condition:
-                if queued:
-                    self._agent_run_queue = [
-                        entry
-                        for entry in self._agent_run_queue
-                        if entry[0] is not ticket
-                    ]
-                if running and self._active_agent_task is task:
-                    self._active_agent_task = None
-                if running:
-                    self._agent_run_state = outcome
-                    if outcome != "completed":
-                        self._agent_queue_paused = True
-                self._agent_queue_condition.notify_all()
+            await self._release_agent_run(task)
+
+    async def _release_agent_run(self, task: Optional[asyncio.Task]) -> None:
+        async with self._agent_run_lock:
+            if task is None or self._active_agent_task is task:
+                self._active_agent_task = None
+            self._agent_run_reserved = False
 
     @staticmethod
     def _assistant_response_metadata(response: Dict[str, Any]) -> dict:
@@ -347,12 +331,6 @@ class SessionRuntime:
             return None
         return ArtifactDraft.model_validate(raw_artifact)
 
-    async def _add_user_message(self, msg: Message) -> Message:
-        """Durably accept and idempotently enqueue one user message."""
-
-        accepted, _created = await self._accept_user_message(msg)
-        return accepted
-
     async def _accept_user_message(self, msg: Message) -> tuple[Message, bool]:
         """Persist one user message and report whether it was newly created."""
 
@@ -379,10 +357,10 @@ class SessionRuntime:
             # The original writer may have committed just before its local
             # worker wake failed.  A duplicate request is always safe to use
             # as another wake-up edge because the durable queue is canonical.
-            self.consumer.signal()
+            self.ingestion_worker.signal()
             return msg, False
 
-        self.consumer.signal()
+        self.ingestion_worker.signal()
 
         return msg, True
 
@@ -583,11 +561,8 @@ class SessionRuntime:
                 return
 
             failures: list[Exception] = []
-            async with self._agent_queue_condition:
+            async with self._agent_run_lock:
                 self._agent_runs_closed = True
-                self._agent_queue_paused = True
-                self._agent_run_queue.clear()
-                self._agent_queue_condition.notify_all()
 
             try:
                 await self.cancel_active_agent_run()
@@ -595,9 +570,9 @@ class SessionRuntime:
                 logger.exception("Failed to cancel agent run for session {}", self.session_id)
                 failures.append(exc)
 
-            if self.consumer is not None:
+            if self.ingestion_worker is not None:
                 try:
-                    await self.consumer.stop()
+                    await self.ingestion_worker.stop()
                 except Exception as exc:
                     logger.exception("Failed to stop worker for session {}", self.session_id)
                     failures.append(exc)
@@ -616,7 +591,9 @@ class SessionRuntime:
             try:
                 await emit(self.session_id, "system", "session_shutdown", {})
             except Exception as exc:
-                logger.exception("Failed to emit shutdown event for session {}", self.session_id)
+                logger.exception(
+                    "Failed to emit shutdown event for session {}", self.session_id
+                )
                 failures.append(exc)
 
             if failures:

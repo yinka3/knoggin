@@ -35,7 +35,6 @@ class RecordingPostgres:
                 "user_name": "ada",
                 "name": "Research",
                 "description": "A project description",
-                "access_mode": "open",
                 "status": "active",
                 "domain_config": {},
                 "allowed_projects": [],

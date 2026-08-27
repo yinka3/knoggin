@@ -38,7 +38,7 @@ class SessionRuntimeFactory:
     def dev_settings(self):
         return self.config.developer_settings
 
-    async def bootstrap(
+    async def create(
         self,
         project_state: ProjectRuntime,
         *,
@@ -48,8 +48,8 @@ class SessionRuntimeFactory:
         enabled_tools: Optional[list[str]],
         document_focus: Optional[DocumentFocus] = None,
     ) -> SessionRuntime:
-        """Perform the multi-phase boot sequence: assemble + launch."""
-        ctx = await self.assemble(
+        """Create and launch one fully wired session runtime."""
+        ctx = await self._assemble(
             project_state,
             session_id=session_id,
             model=model,
@@ -58,13 +58,13 @@ class SessionRuntimeFactory:
             document_focus=document_focus,
         )
         try:
-            await self.launch(ctx)
+            await self._launch(ctx)
         except Exception:
             await ctx.shutdown()
             raise
         return ctx
 
-    async def assemble(
+    async def _assemble(
         self,
         project_state: ProjectRuntime,
         *,
@@ -82,38 +82,36 @@ class SessionRuntimeFactory:
         ctx = SessionRuntime(
             self.user_name,
             self.resources,
+            session_id=session_id,
+            project_id=project_state.project_id,
+            project=project_state,
+            model=model,
+            agent_id=agent_id,
+            enabled_tools=enabled_tools,
+            document_focus=document_focus,
             health_service=self.health_service,
             agent_orchestrator=self.agent_orchestrator,
         )
-        ctx.session_id = session_id
-        ctx.project_id = project_state.project_id
-        ctx.project = project_state
-        ctx.model = model
-        ctx.agent_id = agent_id
-        ctx.enabled_tools = (
-            list(enabled_tools) if enabled_tools is not None else None
-        )
-        ctx.document_focus = document_focus
 
         # Use the project-owned processor so config updates and background jobs
-        # share the same ingestion runtime as session consumers.
-        processor = project_state.batch_processor
-        if processor is None:
-            raise RuntimeError("project_state.batch_processor not wired")
-        ctx.batch_processor = processor
+        # share the same ingestion runtime as session workers.
+        ingestion_pipeline = project_state.ingestion_pipeline
+        if ingestion_pipeline is None:
+            raise RuntimeError("project_state.ingestion_pipeline not wired")
+        ctx.ingestion_pipeline = ingestion_pipeline
 
-        # Initialize Batch Consumer with direct callbacks
-        consumer = self._init_batch_consumer(
+        # Initialize the session-owned ingestion worker with direct callbacks.
+        ingestion_worker = self._init_ingestion_worker(
             session_id,
-            processor,
+            ingestion_pipeline,
             get_session_context=ctx.get_conversation_context,
             write_to_graph=ctx._write_to_graph_callback,
         )
-        ctx.consumer = consumer
+        ctx.ingestion_worker = ingestion_worker
 
         ctx.config_unsubscribers.append(
             ConfigManager.get().subscribe(
-                consumer.update_settings, "developer_settings.ingestion"
+                ingestion_worker.update_settings, "developer_settings.ingestion"
             )
         )
 
@@ -122,19 +120,21 @@ class SessionRuntimeFactory:
 
         return ctx
 
-    async def launch(self, ctx: SessionRuntime):
+    async def _launch(self, ctx: SessionRuntime):
         """Starts background tasks and jobs for the context."""
-        if ctx.consumer:
-            if ctx.consumer.get_session_context is None:
-                raise RuntimeError("consumer.get_session_context callback not wired")
-            if ctx.consumer.write_to_graph is None:
-                raise RuntimeError("consumer.write_to_graph callback not wired")
+        if ctx.ingestion_worker:
+            if ctx.ingestion_worker.get_session_context is None:
+                raise RuntimeError("ingestion_worker.get_session_context callback not wired")
+            if ctx.ingestion_worker.write_to_graph is None:
+                raise RuntimeError("ingestion_worker.write_to_graph callback not wired")
 
-        if ctx.batch_processor:
-            if ctx.batch_processor._get_next_ent_id is None:
-                raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
+        if ctx.ingestion_pipeline:
+            if ctx.ingestion_pipeline._get_next_ent_id is None:
+                raise RuntimeError(
+                    "ingestion_pipeline.get_next_ent_id callback not wired"
+                )
 
-        if ctx.consumer:
+        if ctx.ingestion_worker:
             reset_message_ids = await self.resources.knowledge_store.reset_claimed_ingestion(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
@@ -146,11 +146,11 @@ class SessionRuntimeFactory:
                     len(reset_message_ids),
                     ctx.session_id,
                 )
-            ctx.consumer.start()
+            ctx.ingestion_worker.start()
 
         logger.info(f"System launched successfully for session {ctx.session_id}")
 
-    def _init_batch_consumer(
+    def _init_ingestion_worker(
         self,
         session_id: str,
         processor: IngestionPipeline,

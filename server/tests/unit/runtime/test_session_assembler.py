@@ -88,9 +88,9 @@ def assembler_harness(monkeypatch):
         postgres=resources.postgres,
         embedding=resources.embedding,
         domain_config=make_domain_config(),
-        batch_processor=shared_processor,
+        ingestion_pipeline=shared_processor,
         entities=entities,
-        pipeline=pipeline,
+        text_processor=pipeline,
     )
 
     monkeypatch.setattr(
@@ -111,7 +111,7 @@ def assembler_harness(monkeypatch):
         config_manager=config_manager,
         project_state=project_state,
         resources=resources,
-        batch_processor=shared_processor,
+        ingestion_pipeline=shared_processor,
         get_next_ent_id=get_next_ent_id,
         agent_orchestrator=agent_orchestrator,
     )
@@ -119,12 +119,12 @@ def assembler_harness(monkeypatch):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_assembler_assemble_wires_runtime_without_launch(
+async def test_session_factory_assemble_wires_runtime_without_launch(
     assembler_harness,
 ):
     harness = assembler_harness
 
-    ctx = await harness.assembler.assemble(
+    ctx = await harness.assembler._assemble(
         harness.project_state,
         session_id="session-1",
         model="model-a",
@@ -141,24 +141,24 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
     assert ctx.enabled_tools == []
     assert ctx.agent_orchestrator is harness.agent_orchestrator
 
-    assert RecordingIngestionPipeline.instances == [harness.batch_processor]
-    processor = harness.batch_processor
-    assert ctx.batch_processor is processor
+    assert RecordingIngestionPipeline.instances == [harness.ingestion_pipeline]
+    processor = harness.ingestion_pipeline
+    assert ctx.ingestion_pipeline is processor
     assert processor.kwargs["project_id"] == "project-1"
     assert processor.kwargs["llm"] is harness.resources.llm_service
     assert processor.kwargs["entities"] is harness.project_state.entities
-    assert processor.kwargs["processor"] is harness.project_state.pipeline
+    assert processor.kwargs["processor"] is harness.project_state.text_processor
     assert processor.kwargs["compiled_domain"] == harness.project_state.compiled_domain
     assert processor.get_next_ent_id is harness.get_next_ent_id
 
-    consumer = RecordingIngestionWorker.instances[0]
-    assert ctx.consumer is consumer
-    assert consumer.kwargs["knowledge_store"] is harness.resources.knowledge_store
-    assert consumer.kwargs["processor"] is processor
-    assert consumer.get_session_context == ctx.get_conversation_context
-    assert consumer.write_to_graph == ctx._write_to_graph_callback
-    assert consumer.kwargs["settings"].batch_size == 8
-    assert consumer.kwargs["settings"].session_window == 24
+    worker = RecordingIngestionWorker.instances[0]
+    assert ctx.ingestion_worker is worker
+    assert worker.kwargs["knowledge_store"] is harness.resources.knowledge_store
+    assert worker.kwargs["processor"] is processor
+    assert worker.get_session_context == ctx.get_conversation_context
+    assert worker.write_to_graph == ctx._write_to_graph_callback
+    assert worker.kwargs["settings"].batch_size == 8
+    assert worker.kwargs["settings"].session_window == 24
 
     assert ctx.document_service is harness.project_state.document_service
     assert ctx.document_service.project_id == "project-1"
@@ -166,7 +166,7 @@ async def test_session_assembler_assemble_wires_runtime_without_launch(
 
     assert len(ctx.config_unsubscribers) == 1
     assert harness.config_manager.subscriptions == [
-        (consumer.update_settings, "developer_settings.ingestion")
+        (worker.update_settings, "developer_settings.ingestion")
     ]
 
 
@@ -177,14 +177,14 @@ async def test_sessions_in_same_project_share_document_service(
 ):
     harness = assembler_harness
 
-    first = await harness.assembler.assemble(
+    first = await harness.assembler._assemble(
         harness.project_state,
         session_id="session-1",
         model=None,
         agent_id=None,
         enabled_tools=None,
     )
-    second = await harness.assembler.assemble(
+    second = await harness.assembler._assemble(
         harness.project_state,
         session_id="session-2",
         model=None,
@@ -198,11 +198,11 @@ async def test_sessions_in_same_project_share_document_service(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_assembler_launch_starts_consumer_only(
+async def test_session_factory_create_starts_ingestion_worker_only(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(
+    ctx = await harness.assembler.create(
         harness.project_state,
         session_id="session-1",
         model=None,
@@ -210,11 +210,9 @@ async def test_session_assembler_launch_starts_consumer_only(
         enabled_tools=None,
     )
 
-    await harness.assembler.launch(ctx)
-
     assert harness.project_state.scheduler.running is False
     assert harness.project_state.scheduler.started == 0
-    assert ctx.consumer.started == 1
+    assert ctx.ingestion_worker.started == 1
     assert harness.resources.knowledge_store.reset_claimed_ingestion_calls == [
         {
             "user_name": "ada",
@@ -226,11 +224,11 @@ async def test_session_assembler_launch_starts_consumer_only(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_assembler_launch_leaves_project_scheduler_untouched(
+async def test_session_factory_launch_leaves_project_scheduler_untouched(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(
+    ctx = await harness.assembler._assemble(
         harness.project_state,
         session_id="session-1",
         model=None,
@@ -239,35 +237,35 @@ async def test_session_assembler_launch_leaves_project_scheduler_untouched(
     )
     harness.project_state.scheduler.running = True
 
-    await harness.assembler.launch(ctx)
+    await harness.assembler._launch(ctx)
 
     assert harness.project_state.scheduler.started == 0
-    assert ctx.consumer.started == 1
+    assert ctx.ingestion_worker.started == 1
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_assembler_launch_rejects_missing_consumer_callbacks(
+async def test_session_factory_launch_rejects_missing_worker_callbacks(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(
+    ctx = await harness.assembler._assemble(
         harness.project_state,
         session_id="session-1",
         model=None,
         agent_id=None,
         enabled_tools=None,
     )
-    ctx.consumer.get_session_context = None
+    ctx.ingestion_worker.get_session_context = None
 
-    with pytest.raises(RuntimeError, match="consumer.get_session_context callback"):
-        await harness.assembler.launch(ctx)
+    with pytest.raises(RuntimeError, match="ingestion_worker.get_session_context callback"):
+        await harness.assembler._launch(ctx)
 
-    ctx.consumer.get_session_context = ctx.get_conversation_context
-    ctx.consumer.write_to_graph = None
+    ctx.ingestion_worker.get_session_context = ctx.get_conversation_context
+    ctx.ingestion_worker.write_to_graph = None
 
-    with pytest.raises(RuntimeError, match="consumer.write_to_graph callback"):
-        await harness.assembler.launch(ctx)
+    with pytest.raises(RuntimeError, match="ingestion_worker.write_to_graph callback"):
+        await harness.assembler._launch(ctx)
 
 
 @pytest.mark.runtime
@@ -276,14 +274,16 @@ async def test_session_assembler_launch_rejects_missing_entity_id_callback(
     assembler_harness,
 ):
     harness = assembler_harness
-    ctx = await harness.assembler.assemble(
+    ctx = await harness.assembler._assemble(
         harness.project_state,
         session_id="session-1",
         model=None,
         agent_id=None,
         enabled_tools=None,
     )
-    ctx.batch_processor.get_next_ent_id = None
+    ctx.ingestion_pipeline.get_next_ent_id = None
 
-    with pytest.raises(RuntimeError, match="batch_processor.get_next_ent_id callback"):
-        await harness.assembler.launch(ctx)
+    with pytest.raises(
+        RuntimeError, match="ingestion_pipeline.get_next_ent_id callback"
+    ):
+        await harness.assembler._launch(ctx)

@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -12,7 +13,7 @@ class RecordingSessionRuntimeFactory:
         self.calls: list[dict] = []
         self.failure = failure
 
-    async def bootstrap(self, project_state, **kwargs):
+    async def create(self, project_state, **kwargs):
         self.calls.append({"project_state": project_state, **kwargs})
         if self.failure is not None:
             raise self.failure
@@ -154,7 +155,7 @@ async def test_resume_reconstructs_all_durable_session_configuration(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_document_focus_read_is_durable_and_excludes_closed_sessions(
+async def test_document_focus_read_is_durable_and_excludes_deleted_sessions(
     session_manager,
 ):
     manager, resources, _, _ = session_manager
@@ -176,7 +177,7 @@ async def test_document_focus_read_is_durable_and_excludes_closed_sessions(
     assert await manager.get_document_focus("session-1") == focus
     assert manager._active_sessions == {}
 
-    resources.postgres.sessions["session-1"]["status"] = "closed"
+    resources.postgres.sessions["session-1"]["status"] = "deleted"
     with pytest.raises(FileNotFoundError, match="Session not found"):
         await manager.get_document_focus("session-1")
 
@@ -224,6 +225,45 @@ async def test_deleted_or_missing_durable_sessions_do_not_resume(session_manager
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_shutdown_cannot_publish_a_runtime_after_a_delayed_resume(
+    monkeypatch,
+    session_manager,
+):
+    manager, resources, _, _ = session_manager
+    resources.postgres.sessions["session-1"] = {
+        "session_id": "session-1",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "status": "open",
+    }
+    bootstrapping = asyncio.Event()
+    release_bootstrap = asyncio.Event()
+
+    class DelayedFactory(RecordingSessionRuntimeFactory):
+        async def create(self, project_state, **kwargs):
+            bootstrapping.set()
+            await release_bootstrap.wait()
+            return await super().create(project_state, **kwargs)
+
+    factory = DelayedFactory()
+    monkeypatch.setattr(manager, "_session_runtime_factory", lambda: factory)
+
+    resume = asyncio.create_task(manager.get_or_resume_session("session-1"))
+    await bootstrapping.wait()
+    shutdown = asyncio.create_task(manager.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    release_bootstrap.set()
+    context = await resume
+    await shutdown
+
+    assert context.shutdown_count == 1
+    assert manager._active_sessions == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_deactivate_releases_exact_session_lease(session_manager):
     manager, _, project_manager, _ = session_manager
     context = FakeSession(session_id="session-1", project_id="project-1")
@@ -249,15 +289,14 @@ async def test_delete_returns_after_durable_delete(
         calls.append(kwargs)
 
     monkeypatch.setattr(manager._session_deletion_writer, "delete_session", delete_session)
-    assert await manager.delete_session_data("session-1") is None
+    assert await manager.delete_session("session-1") is None
 
     assert calls == [{"user_name": "ada", "session_id": "session-1"}]
-    assert "session-1" not in manager._deleting_session_ids
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_failed_durable_delete_clears_deleting_marker(
+async def test_failed_durable_delete_leaves_no_runtime_published(
     monkeypatch,
     session_manager,
 ):
@@ -269,9 +308,9 @@ async def test_failed_durable_delete_clears_deleting_marker(
     monkeypatch.setattr(manager._session_deletion_writer, "delete_session", unavailable)
 
     with pytest.raises(RuntimeError, match="database unavailable"):
-        await manager.delete_session_data("session-1")
+        await manager.delete_session("session-1")
 
-    assert "session-1" not in manager._deleting_session_ids
+    assert manager._active_sessions == {}
 
 
 @pytest.mark.runtime

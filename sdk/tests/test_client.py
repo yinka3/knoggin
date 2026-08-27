@@ -13,8 +13,11 @@ class _FakeSession:
         self.calls = []
         self.session_id = "session-1"
 
-    async def run_agent_stream(self, message, **kwargs):
+    async def open_agent_run_stream(self, message, **kwargs):
         self.calls.append((message, kwargs))
+        return self._events()
+
+    async def _events(self):
         yield {"event": "thinking", "data": {"content": "local reasoning summary"}}
         yield {"event": "token", "data": {"content": "Hello"}}
         yield {

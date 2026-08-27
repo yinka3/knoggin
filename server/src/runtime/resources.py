@@ -7,7 +7,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from inspect import isawaitable
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol, cast
 
 import spacy
 import torch
@@ -45,6 +45,21 @@ class RuntimeResourcesShutdownError(RuntimeError):
         super().__init__(f"Runtime resource shutdown failed in phase(s): {phases}")
 
 
+class ReadyRuntimeResources(Protocol):
+    """Non-optional view available after ``RuntimeResources.create()`` succeeds."""
+
+    knowledge_store: KnowledgeStore
+    postgres: PostgresClient
+    embedding: EmbeddingService
+    llm_service: LLMService
+    executor: ThreadPoolExecutor
+    background_work: BackgroundWorkCoordinator
+    model_work: ModelWorkCoordinator
+    resource_profile: ResourceProfile
+    gliner: GLiNER
+    spacy: Any
+
+
 class RuntimeResources:
     """The explicit container of dependencies owned by an application runtime."""
 
@@ -60,9 +75,9 @@ class RuntimeResources:
         self.gliner: Optional[GLiNER] = None
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
-        self._shutdown_lock = asyncio.Lock()
-        self._shutdown_task: asyncio.Task[None] | None = None
         self._started = False
+        self._shutdown_complete = False
+        self._shutdown_error: RuntimeResourcesShutdownError | None = None
 
     @classmethod
     async def create(cls, num_workers: int | None = None) -> "RuntimeResources":
@@ -96,6 +111,13 @@ class RuntimeResources:
         await self._connect_datastores()
         self._construct_shared_services(device=device)
         await self._load_heavyweight_models(device=device)
+
+    def require_ready(self) -> ReadyRuntimeResources:
+        """Return the complete resource view guaranteed by successful startup."""
+
+        if not self._started or self._shutdown_complete:
+            raise RuntimeError("Runtime resources are not ready")
+        return cast(ReadyRuntimeResources, self)
 
     def _configure_startup(self, *, num_workers: int | None) -> torch.device:
         load_dotenv()
@@ -308,21 +330,18 @@ class RuntimeResources:
         }
 
     async def shutdown(self) -> None:
-        """Release resources once; concurrent callers join the same teardown."""
+        """Release resources once through the authoritative application owner."""
 
-        async with self._shutdown_lock:
-            if self._shutdown_task is None:
-                self._shutdown_task = asyncio.create_task(
-                    self._shutdown(),
-                    name="runtime-resources-shutdown",
-                )
-            shutdown_task = self._shutdown_task
+        if self._shutdown_complete:
+            if self._shutdown_error is not None:
+                raise self._shutdown_error
+            return
 
-        await asyncio.shield(shutdown_task)
-
-    async def _shutdown(self) -> None:
         failures = await self._teardown(wait=True)
         self._started = False
+        self._shutdown_complete = True
         if failures:
-            raise RuntimeResourcesShutdownError(failures)
+            error = RuntimeResourcesShutdownError(failures)
+            self._shutdown_error = error
+            raise error
         logger.info("Runtime resources shut down")

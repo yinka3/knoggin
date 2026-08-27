@@ -24,7 +24,7 @@ class ProjectRuntime:
         project_id: str,
         entities: EntityResolver,
         knowledge_retrieval: Any,
-        pipeline: TextProcessor,
+        text_processor: TextProcessor,
         scheduler: Scheduler,
         user_name: str,
         readable_project_ids: list[str],
@@ -32,7 +32,7 @@ class ProjectRuntime:
         document_service: DocumentService,
         workspace_service: ProjectWorkspaceService,
         domain_config_store: DomainConfigStore,
-        batch_processor: Optional[Any] = None,
+        ingestion_pipeline: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
     ):
         self.project_id = require_scope_value(
@@ -48,10 +48,10 @@ class ProjectRuntime:
             raise TypeError("ProjectRuntime requires a DomainConfig")
         self.entities = entities
         self.knowledge_retrieval = knowledge_retrieval
-        self.pipeline = pipeline
+        self.text_processor = text_processor
         self.scheduler = scheduler
         self.user_name = user_name
-        self.batch_processor = batch_processor
+        self.ingestion_pipeline = ingestion_pipeline
         self.background_work = background_work
         self.domain_config_store = domain_config_store
         self.domain_config = domain_config
@@ -63,8 +63,6 @@ class ProjectRuntime:
 
         self.episode_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
-        self._shutdown_lock = asyncio.Lock()
-        self._closing = False
         self._closed = False
 
     def add_config_unsubscriber(self, unsubscribe):
@@ -72,56 +70,54 @@ class ProjectRuntime:
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""
-        async with self._shutdown_lock:
-            if self._closed:
-                return
+        if self._closed:
+            return
 
-            logger.info(f"Shutting down ProjectRuntime resources for {self.project_id}")
-            self._closing = True
-            failures = []
+        logger.info(f"Shutting down ProjectRuntime resources for {self.project_id}")
+        failures = []
 
-            for phase, shutdown in (
-                ("scheduler", self.scheduler.stop if self.scheduler else None),
-                ("document indexing", self.document_indexer.shutdown),
+        for phase, shutdown in (
+            ("scheduler", self.scheduler.stop if self.scheduler else None),
+            ("document indexing", self.document_indexer.shutdown),
+            (
+                "background work",
                 (
-                    "background work",
-                    (
-                        lambda: (
-                            self.background_work.cancel_project(self.project_id)
-                            if self.background_work is not None
-                            else None
-                        )
-                    ),
+                    lambda: (
+                        self.background_work.cancel_project(self.project_id)
+                        if self.background_work is not None
+                        else None
+                    )
                 ),
-            ):
-                if shutdown is None:
-                    continue
-                try:
-                    result = shutdown()
-                    if result is not None:
-                        await result
-                except Exception as exc:
-                    logger.exception(
-                        f"Project shutdown phase failed for {self.project_id}: {phase}"
-                    )
-                    failures.append(exc)
+            ),
+        ):
+            if shutdown is None:
+                continue
+            try:
+                result = shutdown()
+                if result is not None:
+                    await result
+            except Exception as exc:
+                logger.exception(
+                    f"Project shutdown phase failed for {self.project_id}: {phase}"
+                )
+                failures.append(exc)
 
-            unsubscribers = self.config_unsubscribers
-            self.config_unsubscribers = []
-            for unsubscribe in unsubscribers:
-                try:
-                    unsubscribe()
-                except Exception as exc:
-                    logger.exception(
-                        f"Project configuration cleanup failed for {self.project_id}"
-                    )
-                    failures.append(exc)
+        unsubscribers = self.config_unsubscribers
+        self.config_unsubscribers = []
+        for unsubscribe in unsubscribers:
+            try:
+                unsubscribe()
+            except Exception as exc:
+                logger.exception(
+                    f"Project configuration cleanup failed for {self.project_id}"
+                )
+                failures.append(exc)
 
-            self._closed = True
-            if failures:
-                raise RuntimeError(
-                    f"ProjectRuntime shutdown failed for {self.project_id}"
-                ) from failures[0]
+        self._closed = True
+        if failures:
+            raise RuntimeError(
+                f"ProjectRuntime shutdown failed for {self.project_id}"
+            ) from failures[0]
         # EntityResolver and others don't have explicit shutdown methods,
         # but they will be garbage collected.
 
@@ -144,7 +140,7 @@ class ProjectRuntime:
     def _install_compiled_domain(self, compiled_domain: CompiledDomain) -> None:
         """Fan one immutable domain snapshot into future ingestion admission."""
 
-        for component in (self.batch_processor, self.pipeline):
+        for component in (self.ingestion_pipeline, self.text_processor):
             setter = getattr(component, "set_compiled_domain", None)
             if setter is not None:
                 setter(compiled_domain)

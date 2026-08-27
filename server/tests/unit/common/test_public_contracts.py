@@ -7,12 +7,10 @@ from common.exceptions import DependencyError, ToolExecutionError
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
-    MessageAcceptance,
     PublicError,
     RunCompletedEvent,
     RunResult,
     StartRunRequest,
-    SubmitMessageRequest,
     UpdateAgentRequest,
     Usage,
     to_public_error,
@@ -81,7 +79,6 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
     with pytest.raises(ValidationError):
         StartRunRequest(session_id="session-1", query="hello", research_mode="turbo")
 
-    accepted = MessageAcceptance(message_id=12, idempotent=True)
     result = RunResult(
         run_id="run-1",
         content="Done",
@@ -92,13 +89,9 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
             total_tokens=3,
         ),
     )
-    assert accepted.model_dump()["message_id"] == 12
     assert result.model_dump(mode="json")["sources"][0]["source_kind"] == (
         "user_pasted_text"
     )
-
-    with pytest.raises(ValidationError):
-        SubmitMessageRequest(content="hello", unexpected=True)
 
 
 @pytest.mark.unit

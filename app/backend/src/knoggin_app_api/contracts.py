@@ -84,8 +84,8 @@ class SessionCreateRequest(BaseModel):
     enabled_tools: Optional[list[str]] = Field(default=None, alias="enabledTools")
 
 
-class MessageCreateRequest(BaseModel):
-    """One user message to submit to an existing session."""
+class RunCreateRequest(BaseModel):
+    """One canonical agent run to start in an existing session."""
 
     model_config = ConfigDict(populate_by_name=True)
 

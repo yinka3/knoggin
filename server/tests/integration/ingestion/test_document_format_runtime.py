@@ -187,7 +187,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         workspace_service=None,
     )
     context.document_service = documents
-    context.consumer = _SignalCounter()
+    context.ingestion_worker = _SignalCounter()
 
     agent = AgentConfig(
         id="format-document-agent",

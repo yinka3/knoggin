@@ -9,7 +9,6 @@ CREATE TABLE IF NOT EXISTS public.projects (
     user_name TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT,
-    access_mode TEXT NOT NULL DEFAULT 'open',
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'archived', 'deleted')),
     domain_config JSONB NOT NULL
@@ -31,6 +30,9 @@ ADD COLUMN IF NOT EXISTS domain_config JSONB NOT NULL
 ALTER TABLE public.projects
 ADD COLUMN IF NOT EXISTS episode_window_size INTEGER NOT NULL DEFAULT 24
     CHECK (episode_window_size BETWEEN 8 AND 72);
+
+ALTER TABLE public.projects
+DROP COLUMN IF EXISTS access_mode;
 
 DO $$
 BEGIN
@@ -229,12 +231,6 @@ ALTER TABLE public.sessions
 ADD COLUMN IF NOT EXISTS episode_participation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
 ADD COLUMN IF NOT EXISTS episode_participation_after_message_id BIGINT NOT NULL DEFAULT 0
     CHECK (episode_participation_after_message_id >= 0);
-
--- Sessions are either usable or tombstoned.  Older "closed" rows had no
--- supported recovery behavior, so preserve their history as deleted sessions.
-UPDATE public.sessions
-SET status = 'deleted', deleted_at = COALESCE(deleted_at, now())
-WHERE status = 'closed';
 
 ALTER TABLE public.sessions
 DROP CONSTRAINT IF EXISTS sessions_status_check;

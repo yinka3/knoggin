@@ -21,6 +21,7 @@ from common.exceptions import (
     LLMProviderError,
     LLMResponseError,
     NotFoundError,
+    SessionBusyError,
     StorageError,
     ToolExecutionError,
 )
@@ -69,9 +70,8 @@ class PublicModel(BaseModel):
 class CreateProjectRequest(PublicModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=10_000)
-    access_mode: str = Field(default="open", min_length=1, max_length=32)
 
-    @field_validator("name", "access_mode")
+    @field_validator("name")
     @classmethod
     def _reject_blank_text(cls, value: str) -> str:
         value = value.strip()
@@ -84,7 +84,6 @@ class ProjectResponse(PublicModel):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     description: str | None = None
-    access_mode: str = Field(min_length=1)
     status: Literal["active", "archived", "deleted"]
     session_count: int = Field(default=0, ge=0)
     allowed_projects: tuple[str, ...] = ()
@@ -104,7 +103,7 @@ class CreateSessionRequest(PublicModel):
 class SessionResponse(PublicModel):
     session_id: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
-    status: Literal["open", "closed", "deleted"] = "open"
+    status: Literal["open", "deleted"] = "open"
     model: str | None = None
     agent_id: str | None = None
     enabled_tools: tuple[str, ...] | None = None
@@ -129,25 +128,6 @@ class UpdateAgentRequest(PublicModel):
         if not self.enabled_tools:
             return "disable_all"
         return "allowlist"
-
-
-class SubmitMessageRequest(PublicModel):
-    content: str = Field(min_length=1, max_length=100_000)
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
-
-    @field_validator("content")
-    @classmethod
-    def _reject_blank_content(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("content must not be blank")
-        return value
-
-
-class MessageAcceptance(PublicModel):
-    message_id: int = Field(gt=0)
-    accepted: bool = True
-    idempotent: bool = False
 
 
 class RunDocumentFocusDocument(PublicModel):
@@ -334,6 +314,11 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
     NotFoundError: (
         "not_found",
         "The requested resource was not found.",
+        False,
+    ),
+    SessionBusyError: (
+        "session_busy",
+        "This session already has an active run.",
         False,
     ),
     StorageError: (

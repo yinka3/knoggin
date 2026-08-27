@@ -34,6 +34,16 @@ class NotFoundError(KnogginError):
         super().__init__(f"Requested {resource} was not found", code="not_found")
 
 
+class SessionBusyError(KnogginError):
+    """Raised when a normal agent run overlaps an active session run."""
+
+    def __init__(self):
+        super().__init__(
+            "This session already has an active run",
+            code="session_busy",
+        )
+
+
 class StorageError(KnogginError):
     """Base class for failures at a durable persistence boundary."""
 

@@ -56,8 +56,15 @@ def _context(scope, *, postgres):
         project_id=scope["project_id"],
         session_id=scope["session_id"],
     )
-    context.consumer = _SignalCounter()
+    context.ingestion_worker = _SignalCounter()
     return context
+
+
+async def _accept_user_turn(context, message: Message) -> Message:
+    """Exercise durable acceptance directly, outside the public run contract."""
+
+    accepted, _created = await context._accept_user_message(message)
+    return accepted
 
 
 async def _message_rows(scope):
@@ -87,7 +94,8 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
 
     results = await asyncio.gather(
         *(
-            context.add(
+            _accept_user_turn(
+                context,
                 Message(content="same concurrent submission", timestamp=timestamp)
             )
             for context in contexts
@@ -113,7 +121,7 @@ async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
     scope = real_server_scope
     context = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 1, tzinfo=timezone.utc)
-    original_signal = context.consumer.signal
+    original_signal = context.ingestion_worker.signal
     calls = 0
 
     def fail_once():
@@ -123,19 +131,21 @@ async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
             raise RuntimeError("simulated local wake outage")
         original_signal()
 
-    monkeypatch.setattr(context.consumer, "signal", fail_once)
+    monkeypatch.setattr(context.ingestion_worker, "signal", fail_once)
     message = Message(content="signal retry", timestamp=timestamp)
 
     with pytest.raises(RuntimeError, match="local wake outage"):
-        await context.add(message)
+        await _accept_user_turn(context, message)
 
     assert await _message_rows(scope) == [
         {"message_id": message.id, "content": "signal retry"}
     ]
 
-    retried = await context.add(Message(content="signal retry", timestamp=timestamp))
+    retried = await _accept_user_turn(
+        context, Message(content="signal retry", timestamp=timestamp)
+    )
     assert retried.id == message.id
-    assert context.consumer.calls == 1
+    assert context.ingestion_worker.calls == 1
 
 
 @pytest.mark.integration
@@ -153,10 +163,10 @@ async def test_real_lost_acceptance_response_is_safe_to_retry(
     second_runtime = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 2, tzinfo=timezone.utc)
 
-    first = await first_runtime.add(
+    first = await _accept_user_turn(first_runtime,
         Message(content="response was lost", timestamp=timestamp)
     )
-    retry = await second_runtime.add(
+    retry = await _accept_user_turn(second_runtime,
         Message(content="response was lost", timestamp=timestamp)
     )
 
@@ -179,12 +189,12 @@ async def test_real_restart_reuses_durable_acceptance(
     scope = real_server_scope
     first_runtime = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 3, tzinfo=timezone.utc)
-    first = await first_runtime.add(
+    first = await _accept_user_turn(first_runtime,
         Message(content="restart durable acceptance", timestamp=timestamp)
     )
 
     restarted = _context(scope, postgres=scope["postgres"])
-    retried = await restarted.add(
+    retried = await _accept_user_turn(restarted,
         Message(content="restart durable acceptance", timestamp=timestamp)
     )
 
@@ -192,7 +202,7 @@ async def test_real_restart_reuses_durable_acceptance(
     assert await _message_rows(scope) == [
         {"message_id": retried.id, "content": "restart durable acceptance"}
     ]
-    assert restarted.consumer.calls == 1
+    assert restarted.ingestion_worker.calls == 1
 
 
 @pytest.mark.integration
@@ -208,9 +218,11 @@ async def test_real_durable_acceptance_does_not_expire(
     scope = real_server_scope
     context = _context(scope, postgres=scope["postgres"])
     timestamp = datetime(2026, 8, 1, 16, 4, tzinfo=timezone.utc)
-    first = await context.add(Message(content="durable acceptance", timestamp=timestamp))
-    retried = await context.add(
-        Message(content="durable acceptance", timestamp=timestamp)
+    first = await _accept_user_turn(
+        context, Message(content="durable acceptance", timestamp=timestamp)
+    )
+    retried = await _accept_user_turn(
+        context, Message(content="durable acceptance", timestamp=timestamp)
     )
 
     assert retried.id == first.id
@@ -242,9 +254,9 @@ async def test_real_same_timestamp_scopes_and_content_remain_distinct(
     timestamp = datetime(2026, 8, 1, 16, 5, tzinfo=timezone.utc)
 
     first_message, second_message, changed_message = await asyncio.gather(
-        first.add(Message(content="same timestamp", timestamp=timestamp)),
-        second.add(Message(content="same timestamp", timestamp=timestamp)),
-        first.add(Message(content="different content", timestamp=timestamp)),
+        _accept_user_turn(first, Message(content="same timestamp", timestamp=timestamp)),
+        _accept_user_turn(second, Message(content="same timestamp", timestamp=timestamp)),
+        _accept_user_turn(first, Message(content="different content", timestamp=timestamp)),
     )
 
     assert len({first_message.id, second_message.id, changed_message.id}) == 3

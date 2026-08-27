@@ -34,7 +34,7 @@ async def test_session_metadata_update_allows_only_configuration_columns():
         project_manager=None,
     )
 
-    updated = await manager.update_session_metadata(
+    updated = await manager.update_session(
         "session-1",
         {"model": "gpt-5", "enabled_tools": ["search_documents"]},
     )
@@ -55,7 +55,7 @@ async def test_session_metadata_update_rejects_lifecycle_and_ownership_columns(p
     )
 
     with pytest.raises(ValueError, match="does not allow"):
-        await manager.update_session_metadata("session-1", payload)
+        await manager.update_session("session-1", payload)
 
     assert resources.postgres.calls == []
 

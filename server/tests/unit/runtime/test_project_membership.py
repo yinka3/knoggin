@@ -21,7 +21,6 @@ def project_row(
         "user_name": "ada",
         "name": name,
         "description": None,
-        "access_mode": "open",
         "status": status,
         "allowed_projects": allowed_projects,
         "session_count": 0,

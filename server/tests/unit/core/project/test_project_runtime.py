@@ -26,6 +26,7 @@ async def test_project_runtime_shutdown_unsubscribes_and_stops_scheduler():
     state.add_config_unsubscriber(lambda: calls.append("second"))
 
     await state.shutdown()
+    await state.shutdown()
 
     assert calls == ["first", "second"]
     assert state.config_unsubscribers == []

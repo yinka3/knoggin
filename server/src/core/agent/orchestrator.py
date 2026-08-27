@@ -51,15 +51,8 @@ class AgentOrchestrator:
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-        simulated_date: Optional[str] = None,
-        agent_temperature: Optional[float] = None,
-        agent_brain: Optional[str] = None,
-        agent_directives: Optional[str] = None,
         conversation_history: Optional[List[Dict]] = None,
         hot_topics: Optional[List[str]] = None,
-        agent_persona_override: Optional[str] = None,
-        agent_name_override: Optional[str] = None,
-        additional_tool_schemas: Optional[List[Dict]] = None,
         user_message_id: Optional[int] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
         request_document_focus: Optional[DocumentFocus] = None,
@@ -86,8 +79,6 @@ class AgentOrchestrator:
             # Identity & Persona
             identity = await self._resolve_agent_identity(
                 agent_id if agent_id is not None else context.agent_id,
-                agent_name_override,
-                agent_persona_override,
             )
             agent_cfg = identity.config
             effective_model = (
@@ -96,16 +87,11 @@ class AgentOrchestrator:
                 else (context.model if context.model is not None else agent_cfg.model)
             )
             effective_temperature = (
-                agent_temperature
-                if agent_temperature is not None
-                else (
-                    agent_cfg.temperature
-                    if agent_cfg and agent_cfg.temperature is not None
-                    else 0.7
-                )
+                agent_cfg.temperature
+                if agent_cfg and agent_cfg.temperature is not None
+                else 0.7
             )
-            effective_brain = agent_brain or (agent_cfg.brain if agent_cfg else "")
-            effective_directives = agent_directives or ""
+            effective_brain = agent_cfg.brain if agent_cfg else ""
 
             # Services (Session-Aware)
             effective_document_focus = await self._resolve_document_focus(
@@ -161,9 +147,7 @@ class AgentOrchestrator:
                 model=effective_model,
                 temperature=effective_temperature,
                 brain=effective_brain,
-                directives=effective_directives,
                 enabled_tools=effective_enabled_tools,
-                additional_tool_schemas=additional_tool_schemas,
                 hot_topics=effective_hot_topics,
                 active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
@@ -188,10 +172,7 @@ class AgentOrchestrator:
                 on_successful_completion=self._agent_manager.mark_turn_completed,
             )
 
-            async for event in executor.execute(
-                user_timezone=user_timezone,
-                simulated_date=simulated_date,
-            ):
+            async for event in executor.execute(user_timezone=user_timezone):
                 yield validate_agent_execution_event(event)
 
         except Exception as e:
@@ -212,8 +193,6 @@ class AgentOrchestrator:
     async def _resolve_agent_identity(
         self,
         agent_id: Optional[str],
-        name_override: Optional[str],
-        persona_override: Optional[str],
     ) -> AgentIdentity:
         """Resolve the durable Postgres agent used for this run."""
         resolved_id = agent_id or await self._agent_manager.get_default_agent_id()
@@ -223,10 +202,9 @@ class AgentOrchestrator:
 
         return AgentIdentity(
             config=agent_cfg,
-            name=name_override or agent_cfg.name,
+            name=agent_cfg.name,
             persona=(
-                persona_override
-                or agent_cfg.persona_markdown
+                agent_cfg.persona_markdown
                 or "A helpful and thorough personal intelligence assistant."
             ),
         )

@@ -30,7 +30,7 @@ class MessageAcceptance:
 class MessageLifecycleWriter:
     """Keep message editing and ingestion eligibility in Postgres.
 
-    Local worker signaling may wake a consumer, but never decides which message
+    Local worker signaling may wake a worker, but never decides which message
     version is ingested.
     """
 

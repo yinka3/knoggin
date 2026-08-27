@@ -142,8 +142,6 @@ async def test_orchestrator_resolves_durable_agent_identity():
 
     identity = await make_orchestrator(context)._resolve_agent_identity(
         agent_id="agent-1",
-        name_override=None,
-        persona_override=None,
     )
 
     assert identity.config.id == "agent-1"
@@ -153,7 +151,7 @@ async def test_orchestrator_resolves_durable_agent_identity():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_orchestrator_identity_overrides_take_precedence():
+async def test_orchestrator_uses_durable_agent_identity():
     context = FakeSession()
     context.resources.postgres.upsert_agent(
         AgentConfig(
@@ -166,13 +164,11 @@ async def test_orchestrator_identity_overrides_take_precedence():
 
     identity = await make_orchestrator(context)._resolve_agent_identity(
         agent_id=None,
-        name_override="Custom",
-        persona_override="Direct",
     )
 
     assert identity.config.id == "agent-1"
-    assert identity.name == "Custom"
-    assert identity.persona == "Direct"
+    assert identity.name == "Researcher"
+    assert "Careful" in identity.persona
 
 
 @pytest.mark.runtime
@@ -265,10 +261,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.temperature == 0.25
     assert "Use memory" in executor.ctx.brain
     assert executor.ctx.enabled_tools == ("episode_check",)
-    assert executor.execute_kwargs == {
-        "user_timezone": None,
-        "simulated_date": None,
-    }
+    assert executor.execute_kwargs == {"user_timezone": None}
     assert tools.closed is True
 
 
@@ -322,14 +315,8 @@ async def test_orchestrator_resolves_request_then_session_then_agent_config(
     assert request_run.ctx.enabled_tools == ("graph_query",)
     assert session_run.ctx.model == "session-model"
     assert session_run.ctx.enabled_tools == ("message_search",)
-    assert request_run.execute_kwargs == {
-        "user_timezone": None,
-        "simulated_date": None,
-    }
-    assert session_run.execute_kwargs == {
-        "user_timezone": None,
-        "simulated_date": None,
-    }
+    assert request_run.execute_kwargs == {"user_timezone": None}
+    assert session_run.execute_kwargs == {"user_timezone": None}
 
 
 @pytest.mark.runtime

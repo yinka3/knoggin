@@ -19,7 +19,6 @@ def project_response(project: dict[str, Any] | None) -> dict[str, Any]:
         "name": str(project.get("name", "")),
         "description": project.get("description"),
         "status": str(project.get("status", "active")),
-        "accessMode": str(project.get("access_mode", "open")),
         "sessionCount": int(project.get("session_count", 0)),
         "createdAt": timestamp(project.get("created_at")),
         "updatedAt": timestamp(project.get("updated_at")),
@@ -53,9 +52,7 @@ def event_response(event: RunEvent) -> dict[str, Any] | None:
     data = event.data
     event_type: str
     public_data: dict[str, Any]
-    if event.event == "run_queued":
-        event_type, public_data = "run.queued", {}
-    elif event.event == "run_started":
+    if event.event == "run_started":
         event_type, public_data = "run.started", {}
     elif event.event == "token":
         event_type, public_data = (

@@ -7,6 +7,7 @@ from common.exceptions import LLMProviderError
 from common.schema.agent.identity import AgentConfig
 from core.agent.executor import AgentExecutor
 from core.agent.executor import _ToolCall as ToolCall
+from core.agent.prompt_context import build_evidence_context
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
 
@@ -191,14 +192,9 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
 
     events = [event async for event in executor._execute_run()]
 
-    assert events[-1]["data"]["content"] == "No matching evidence."
-    assert [call["model"] for call in llm.calls] == [
-        "architect",
-        "architect",
-        "architect",
-    ]
+    assert events[-1]["data"]["content"] == "Still looking."
+    assert [call["model"] for call in llm.calls] == ["architect", "architect"]
     assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
 
 
 @pytest.mark.no_network
@@ -239,6 +235,74 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     assert run.call_count == 2
     assert run.tool_call_counts == {"search_messages": 2}
     assert [item["id"] for item in run.messages] == ["one", "two"]
+
+
+@pytest.mark.no_network
+async def test_fallback_summary_uses_all_canonical_evidence_categories():
+    llm = ScriptedLLM([])
+    run = make_run()
+    run.episodes = [
+        {
+            "resolution": "direct",
+            "results": [
+                {
+                    "entity_name": "Ada",
+                    "episodes": [
+                        {"episode_id": "ep-1", "summary": "Found clue"}
+                    ],
+                }
+            ],
+        }
+    ]
+    run.paths = [{"entity_a": "Ada", "entity_b": "Knoggin", "step": 0}]
+    run.sources = [
+        {
+            "title": "Useful source",
+            "url": "https://example.test/source",
+            "snippet": "Useful evidence.",
+            "source_kind": "web_search_result",
+        }
+    ]
+    run.evidence_summary = "Previously compacted evidence."
+    prompts = []
+
+    async def capture_summary(**kwargs):
+        prompts.append(kwargs["user"])
+        return "Fallback answer."
+
+    llm.generate_text = capture_summary
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    event = await executor._fallback()
+
+    assert event["data"]["content"] == "Fallback answer."
+    assert prompts
+    prompt = prompts[0]
+    assert "Core Evidence Summary" in prompt
+    assert "Episode Check" in prompt
+    assert "Path: Ada -> Knoggin" in prompt
+    assert "Useful source" in prompt
+
+
+@pytest.mark.no_network
+async def test_compaction_token_count_matches_post_compaction_context(monkeypatch):
+    llm = ScriptedLLM([])
+    run = make_run()
+    run.messages = [{"id": "m1", "message": "A retained message"}]
+    run.profiles = [{"id": "p1", "canonical_name": "Ada"}]
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def summarize(_evidence):
+        return "Condensed evidence."
+
+    monkeypatch.setattr(executor, "_generate_evidence_summary", summarize)
+    monkeypatch.setattr("core.agent.executor.MAX_TOKEN_CHUNK_SIZE", 1)
+
+    await executor._manage_context_size()
+
+    assert run.evidence_token_count == llm.count_tokens(
+        build_evidence_context(run)
+    )
 
 
 @pytest.mark.no_network

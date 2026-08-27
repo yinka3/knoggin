@@ -139,8 +139,8 @@ async def test_project_state_load_and_activation_replace_runtime_snapshot():
     state = make_project_state()
     pipeline_receiver = Receiver()
     batch_receiver = Receiver()
-    state.pipeline = pipeline_receiver
-    state.batch_processor = batch_receiver
+    state.text_processor = pipeline_receiver
+    state.ingestion_pipeline = batch_receiver
     state.domain_config_store = Store()
 
     await state.load_domain_config()

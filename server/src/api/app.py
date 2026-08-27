@@ -25,6 +25,7 @@ from common.exceptions import (
     DependencyError,
     LLMProviderError,
     NotFoundError,
+    SessionBusyError,
     StorageError,
     ToolExecutionError,
 )
@@ -35,7 +36,6 @@ from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
     DocumentFocusResponse,
-    MessageAcceptance,
     ProjectResponse,
     PublicError,
     RunCancelledEvent,
@@ -44,7 +44,6 @@ from common.schema.public import (
     RunResult,
     SetDocumentFocusRequest,
     StartRunRequest,
-    SubmitMessageRequest,
     to_public_error,
     validate_public_stream_event,
 )
@@ -72,14 +71,6 @@ class ApplicationPort(Protocol):
         user_name: str,
         request: CreateSessionRequest,
     ) -> Any: ...
-
-    async def submit_message(
-        self,
-        *,
-        user_name: str,
-        session_id: str,
-        request: SubmitMessageRequest,
-    ) -> MessageAcceptance | Mapping[str, Any]: ...
 
     async def get_document_focus(
         self,
@@ -203,7 +194,6 @@ def _project_response(value: Any) -> ProjectResponse:
             "id": _value(data, "id", "project_id"),
             "name": _value(data, "name"),
             "description": _value(data, "description"),
-            "access_mode": _value(data, "access_mode", default="open"),
             "status": status,
             "session_count": _value(data, "session_count", default=0) or 0,
             "allowed_projects": tuple(
@@ -236,19 +226,6 @@ def _session_response(value: Any, request: CreateSessionRequest):
             else None,
             "created_at": _value(data, "created_at"),
             "last_active_at": _value(data, "last_active_at"),
-        }
-    )
-
-
-def _message_acceptance(value: Any) -> MessageAcceptance:
-    if isinstance(value, MessageAcceptance):
-        return value
-    data = _as_data(value)
-    return MessageAcceptance.model_validate(
-        {
-            "message_id": _value(data, "message_id", "id"),
-            "accepted": _value(data, "accepted", default=True),
-            "idempotent": _value(data, "idempotent", default=False),
         }
     )
 
@@ -378,6 +355,8 @@ def _status_for_error(error: Exception) -> int:
         return 422
     if isinstance(error, NotFoundError):
         return 404
+    if isinstance(error, SessionBusyError):
+        return 409
     if isinstance(
         error,
         (DependencyError, StorageError, LLMProviderError),
@@ -412,6 +391,25 @@ async def _stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
         for event in result:
             yield event
         return
+    raise ValueError("application port returned a non-streaming run result")
+
+
+async def _open_stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
+    """Open a stream early when the port supports explicit run admission."""
+
+    method = getattr(port, "open_run_stream", None)
+    if method is None:
+        return _stream_from_port(port, **kwargs)
+    result = await _call(method, **kwargs)
+    if hasattr(result, "__aiter__"):
+        return result
+    if isinstance(result, (list, tuple)):
+
+        async def static_events() -> AsyncIterator[object]:
+            for event in result:
+                yield event
+
+        return static_events()
     raise ValueError("application port returned a non-streaming run result")
 
 
@@ -478,28 +476,6 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             return _session_response(
                 await _call(port.create_session, user_name=user_name, request=body),
                 body,
-            )
-        except Exception as exc:
-            raise exc
-
-    @app.post(
-        "/v1/sessions/{session_id}/messages",
-        response_model=MessageAcceptance,
-    )
-    async def submit_message(
-        session_id: str,
-        body: SubmitMessageRequest,
-        request: Request,
-        user_name: str = Depends(current_user),
-    ) -> MessageAcceptance:
-        try:
-            return _message_acceptance(
-                await _call(
-                    port.submit_message,
-                    user_name=user_name,
-                    session_id=session_id,
-                    request=body,
-                )
             )
         except Exception as exc:
             raise exc
@@ -663,10 +639,8 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             else:
                 events = [
                     event
-                    async for event in _stream_from_port(
-                        port,
-                        user_name=user_name,
-                        request=body,
+                    async for event in await _open_stream_from_port(
+                        port, user_name=user_name, request=body
                     )
                 ]
             parsed = [validate_public_stream_event(event) for event in events]
@@ -687,17 +661,18 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         user_name: str = Depends(current_user),
     ) -> StreamingResponse:
         request_id = _request_id(request)
+        stream = await _open_stream_from_port(
+            port,
+            user_name=user_name,
+            request=body,
+        )
 
         async def events() -> AsyncIterator[str]:
             run_id: str | None = None
             previous_sequence = -1
             terminal = False
             try:
-                async for raw_event in _stream_from_port(
-                    port,
-                    user_name=user_name,
-                    request=body,
-                ):
+                async for raw_event in stream:
                     event = validate_public_stream_event(raw_event)
                     if run_id is None:
                         run_id = event.run_id

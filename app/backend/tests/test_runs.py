@@ -1,5 +1,6 @@
 import pytest
 
+from common.exceptions import SessionBusyError
 from knoggin import Turn
 from knoggin_app_api.runs import RunManager
 
@@ -47,7 +48,6 @@ async def test_run_manager_owns_ui_run_events_and_snapshots():
     events = [event async for event in manager.subscribe_events(submitted.run_id)]
 
     assert [event.event for event in events] == [
-        "run_queued",
         "run_started",
         "thinking",
         "token",
@@ -77,3 +77,20 @@ async def test_run_manager_keeps_idempotency_with_the_ui_api():
     assert second.run_id == first.run_id
     await manager.cancel(first.run_id)
     await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_manager_does_not_create_a_ui_run_when_core_rejects_admission():
+    class BusyKnoggin:
+        async def open_turn_stream(self, **_kwargs):
+            raise SessionBusyError()
+
+    manager = RunManager(BusyKnoggin())
+
+    with pytest.raises(SessionBusyError):
+        await manager.submit_turn(
+            session_id="session-1",
+            turn=Turn(content="Second turn"),
+        )
+
+    assert manager.runs == {}

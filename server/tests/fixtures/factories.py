@@ -43,10 +43,10 @@ def make_project_state(
     postgres=None,
     embedding=None,
     domain_config=None,
-    batch_processor=None,
+    ingestion_pipeline=None,
     background_work=None,
     entities=None,
-    pipeline=None,
+    text_processor=None,
 ):
     scheduler = scheduler or FakeScheduler()
     postgres = postgres or FakePostgresClient()
@@ -66,7 +66,9 @@ def make_project_state(
         project_id=project_id,
         entities=entities,
         knowledge_retrieval=retrieval,
-        pipeline=pipeline if pipeline is not None else FakePipeline(),
+        text_processor=(
+            text_processor if text_processor is not None else FakePipeline()
+        ),
         scheduler=scheduler,
         user_name="ada",
         domain_config=domain_config or make_domain_config(),
@@ -79,6 +81,6 @@ def make_project_state(
             indexer=document_service.indexer,
         ),
         domain_config_store=DomainConfigStore(postgres),
-        batch_processor=batch_processor,
+        ingestion_pipeline=ingestion_pipeline,
         background_work=background_work,
     )

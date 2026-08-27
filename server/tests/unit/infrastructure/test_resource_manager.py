@@ -1,4 +1,3 @@
-import asyncio
 from concurrent.futures import Future
 from unittest.mock import MagicMock
 
@@ -557,17 +556,10 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
     resources.embedding = embedding
     resources.llm_service = llm
 
-    results = await asyncio.gather(
-        resources.shutdown(),
-        resources.shutdown(),
-        return_exceptions=True,
-    )
+    with pytest.raises(resources_module.RuntimeResourcesShutdownError) as error:
+        await resources.shutdown()
 
-    assert all(
-        isinstance(result, resources_module.RuntimeResourcesShutdownError)
-        for result in results
-    )
-    assert [failure.phase for failure in results[0].failures] == [
+    assert [failure.phase for failure in error.value.failures] == [
         "configuration unsubscribe 1",
         "background work",
     ]
@@ -583,3 +575,17 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
     assert background.close_calls == model_work.close_calls == 1
     assert postgres.close_calls == llm.close_calls == 1
     assert executor.shutdown_calls == embedding.cleanup_calls == 1
+
+    with pytest.raises(resources_module.RuntimeResourcesShutdownError) as repeated_error:
+        await resources.shutdown()
+
+    assert repeated_error.value is error.value
+    assert calls == [
+        "unsubscribe",
+        "background",
+        "model_work",
+        "executor",
+        "postgres",
+        "embedding",
+        "llm",
+    ]

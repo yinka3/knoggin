@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import LLMProviderError
+from common.schema.agent.research import resolve_research_profile
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
@@ -25,7 +26,7 @@ class StreamingLLM:
             yield chunk
 
 
-def make_executor(llm, *, additional_tool_schemas=None):
+def make_executor(llm, *, research_profile=None):
     ctx = AgentRun.open(
         user_name="ada",
         project_id="project-1",
@@ -41,10 +42,9 @@ def make_executor(llm, *, additional_tool_schemas=None):
         model="test-model",
         temperature=0.2,
         brain="Use citations",
-        directives="Required:\n- stay grounded",
         enabled_tools=["search_messages"],
-        additional_tool_schemas=additional_tool_schemas,
         active_topics=["Identity", "Testing"],
+        research_profile=research_profile,
     )
     tools = SimpleNamespace(document_service=None)
     return AgentExecutor(ctx, llm, tools)
@@ -126,18 +126,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
         "core.agent.executor.get_agent_prompt",
         fake_agent_prompt,
     )
-    client_tool = {
-        "type": "function",
-        "function": {
-            "name": "client_tool",
-            "capability": "read",
-            "parameters": {"type": "object"},
-        },
-    }
-    executor = make_executor(
-        llm,
-        additional_tool_schemas=[client_tool],
-    )
+    executor = make_executor(llm)
 
     events = [
         event
@@ -180,14 +169,75 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
     assert llm_call["reasoning"] == "high"
     tool_names = [schema["function"]["name"] for schema in llm_call["tools"]]
     assert "search_messages" in tool_names
-    assert "client_tool" in tool_names
+    assert "submit_answer" in tool_names
     assert "search_entity" not in tool_names
 
     _, prompt_kwargs = prompt_calls[0]
     assert prompt_kwargs["documents_context"] == "- file.md"
-    assert prompt_kwargs["agent_directives"] == "Required:\n- stay grounded"
     assert prompt_kwargs["agent_brain"] == "Use citations"
     assert prompt_kwargs["phase"] == "PLAN"
+    assert prompt_kwargs["research_profile"].mode == "normal"
+
+
+@pytest.mark.no_network
+async def test_step_forwards_selected_research_profile_to_prompt(monkeypatch):
+    llm = StreamingLLM(
+        [
+            {
+                "event": "tool_calls",
+                "data": {
+                    "content": "Research first.",
+                    "calls": [
+                        {
+                            "name": "search_messages",
+                            "arguments": '{"query": "profile"}',
+                            "id": "research-call",
+                        }
+                    ],
+                },
+            },
+            {
+                "event": "step_completed",
+                "data": {
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                        "approximate": False,
+                    }
+                },
+            },
+        ]
+    )
+    prompt_kwargs = {}
+
+    def fake_agent_prompt(**kwargs):
+        prompt_kwargs.update(kwargs)
+        return "SYSTEM PROMPT"
+
+    monkeypatch.setattr(
+        "core.agent.executor.get_agent_prompt",
+        fake_agent_prompt,
+    )
+    executor = make_executor(
+        llm,
+        research_profile=resolve_research_profile("deep_research"),
+    )
+
+    _ = [
+        event
+        async for event in executor._step(
+            date="2026-02-03 04:05 UTC",
+            model="test-model",
+            reasoning="high",
+            phase="PLAN",
+            documents_context="",
+            document_focus_context="",
+            last_result=None,
+        )
+    ]
+
+    assert prompt_kwargs["research_profile"].mode == "deep_research"
 
 
 @pytest.mark.no_network

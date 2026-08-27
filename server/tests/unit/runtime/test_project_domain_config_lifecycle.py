@@ -36,7 +36,6 @@ def project_row(status=ProjectStatus.ACTIVE.value):
         "user_name": "ada",
         "name": "Research",
         "description": None,
-        "access_mode": "open",
         "status": status,
         "allowed_projects": [],
         "session_count": 0,

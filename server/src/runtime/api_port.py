@@ -23,7 +23,6 @@ from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
     DocumentFocusResponse,
-    MessageAcceptance,
     MessageDeltaEvent,
     ProjectResponse,
     PublicError,
@@ -34,7 +33,6 @@ from common.schema.public import (
     SetDocumentFocusRequest,
     SourceAddedEvent,
     StartRunRequest,
-    SubmitMessageRequest,
     ToolCompletedEvent,
     ToolStartedEvent,
     Usage,
@@ -94,7 +92,6 @@ class ApplicationRuntimePort:
         project = await self.runtime.projects.create_project(
             name=request.name,
             description=request.description,
-            access_mode=request.access_mode,
             domain_config=self.default_domain_config,
         )
         return ProjectResponse.model_validate(
@@ -133,30 +130,6 @@ class ApplicationRuntimePort:
         if session is None:
             raise NotFoundError("session")
         return session
-
-    async def submit_message(
-        self,
-        *,
-        user_name: str,
-        session_id: str,
-        request: SubmitMessageRequest,
-    ) -> MessageAcceptance:
-        session = await self._session(user_name=user_name, session_id=session_id)
-        message, created = await session.accept_message(
-            Message(
-                content=request.content,
-                metadata=(
-                    {"idempotency_key": request.idempotency_key}
-                    if request.idempotency_key
-                    else {}
-                ),
-            )
-        )
-        return MessageAcceptance(
-            message_id=message.id,
-            accepted=True,
-            idempotent=not created,
-        )
 
     async def get_document_focus(
         self,
@@ -317,12 +290,14 @@ class ApplicationRuntimePort:
             session_id=session_id,
         )
 
-    async def run_stream(
+    async def open_run_stream(
         self,
         *,
         user_name: str,
         request: StartRunRequest,
     ) -> AsyncIterator[object]:
+        """Admit the run before returning its public event stream."""
+
         session = await self._session(
             user_name=user_name,
             session_id=request.session_id,
@@ -331,6 +306,37 @@ class ApplicationRuntimePort:
             session=session,
             request=request,
         )
+        agent_stream = await session.open_agent_run_stream(
+            Message(content=request.query),
+            model=request.model,
+            agent_id=request.agent_id,
+            enabled_tools=request.enabled_tools,
+            document_focus=document_focus,
+            research_mode=request.research_mode,
+        )
+        return self._public_run_stream(
+            session=session,
+            request=request,
+            agent_stream=agent_stream,
+        )
+
+    async def run_stream(
+        self,
+        *,
+        user_name: str,
+        request: StartRunRequest,
+    ) -> AsyncIterator[object]:
+        stream = await self.open_run_stream(user_name=user_name, request=request)
+        async for event in stream:
+            yield event
+
+    async def _public_run_stream(
+        self,
+        *,
+        session: Any,
+        request: StartRunRequest,
+        agent_stream: AsyncIterator[dict[str, Any]],
+    ) -> AsyncIterator[object]:
         run_id = str(uuid4())
         sequence = 0
 
@@ -348,14 +354,7 @@ class ApplicationRuntimePort:
         yield event(RunStartedEvent)
         response_seen = False
         terminal_seen = False
-        async for raw_event in session.run_agent_stream(
-            Message(content=request.query),
-            model=request.model,
-            agent_id=request.agent_id,
-            enabled_tools=request.enabled_tools,
-            document_focus=document_focus,
-            research_mode=request.research_mode,
-        ):
+        async for raw_event in agent_stream:
             event_name = raw_event.get("event") if isinstance(raw_event, Mapping) else None
             data = raw_event.get("data", {}) if isinstance(raw_event, Mapping) else {}
             if event_name == "token":

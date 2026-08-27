@@ -98,9 +98,9 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
         projects=SimpleNamespace(active_projects={}),
         sessions=SessionRuntimeReader(
             {
-                "session-a": SimpleNamespace(
-                    project_id="project-a", consumer=FakeWorker()
-                )
+                    "session-a": SimpleNamespace(
+                        project_id="project-a", ingestion_worker=FakeWorker()
+                    )
             }
         ),
     )
@@ -114,7 +114,7 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
     assert payload["details"]["queue"]["pending_count"] == 2
     assert payload["details"]["queue"]["claimed_count"] == 1
     assert payload["details"]["queue"]["available"] is True
-    assert "postgres" in payload["details"]
+    assert "postgres" not in payload["details"]
 
 
 class FakeWorker:
@@ -238,13 +238,13 @@ async def test_ingestion_health_reports_durable_queue_delay():
     resource_set.knowledge_store = Store()
     service = RuntimeHealthService(
         resources=resource_set,
-        projects=SimpleNamespace(active_projects={}),
-        sessions=SessionRuntimeReader(
-            {
-                "session-a": SimpleNamespace(
-                    project_id="project-a", consumer=FakeWorker()
-                )
-            }
+            projects=SimpleNamespace(active_projects={}),
+            sessions=SessionRuntimeReader(
+                {
+                    "session-a": SimpleNamespace(
+                        project_id="project-a", ingestion_worker=FakeWorker()
+                    )
+                }
         ),
     )
 
@@ -259,7 +259,7 @@ async def test_ingestion_health_reports_durable_queue_delay():
     assert payload["details"]["queue"]["pending_count"] == 1
     assert payload["details"]["queue"]["delay_state"] == "delayed"
     assert payload["details"]["progress"]["message_state"] == "pending"
-    assert "postgres" in payload["details"]
+    assert "postgres" not in payload["details"]
 
 
 @pytest.mark.unit
@@ -277,7 +277,7 @@ async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
         sessions=SessionRuntimeReader(
             {
                 "session-a": SimpleNamespace(
-                    project_id="project-a", consumer=FakeWorker()
+                    project_id="project-a", ingestion_worker=FakeWorker()
                 )
             }
         ),

@@ -1,14 +1,9 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from runtime import application as application_module
-from runtime.application import (
-    ApplicationRuntime,
-    ApplicationShutdownCoordinator,
-    ApplicationShutdownError,
-)
+from runtime.application import ApplicationRuntime, ApplicationShutdownError
 
 
 class RecordingOwner:
@@ -44,56 +39,46 @@ class RecordingSessions(RecordingOwner):
 @pytest.mark.no_network
 async def test_application_shutdown_is_ordered_and_idempotent():
     calls = []
-    sessions = RecordingOwner("sessions", calls)
-    projects = RecordingOwner("projects", calls)
-    resources = RecordingOwner("resources", calls)
-    coordinator = ApplicationShutdownCoordinator(
-        sessions=sessions,
-        projects=projects,
-        resources=resources,
-    )
-
-    await asyncio.gather(coordinator.shutdown(), coordinator.shutdown())
-    await coordinator.shutdown()
-
-    assert calls == ["sessions", "projects", "resources"]
-    assert sessions.shutdown_count == 1
-    assert projects.shutdown_count == 1
-    assert resources.shutdown_count == 1
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_application_shutdown_continues_after_a_phase_failure():
-    calls = []
-    coordinator = ApplicationShutdownCoordinator(
-        sessions=RecordingOwner("sessions", calls, RuntimeError("session failure")),
-        projects=RecordingOwner("projects", calls),
+    runtime = ApplicationRuntime(
         resources=RecordingOwner("resources", calls),
+        projects=RecordingOwner("projects", calls),
+        sessions=RecordingSessions("sessions", calls),
+        agent_manager=SimpleNamespace(),
+        agent_orchestrator=SimpleNamespace(),
+        aac_runtime=RecordingOwner("aac", calls),
     )
 
-    with pytest.raises(ApplicationShutdownError) as error:
-        await coordinator.shutdown()
+    await runtime.shutdown()
+    await runtime.shutdown()
 
-    assert calls == ["sessions", "projects", "resources"]
-    assert [failure.phase for failure in error.value.failures] == ["sessions"]
+    assert calls == ["aac", "sessions", "projects", "resources"]
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_application_runtime_delegates_shutdown_to_the_coordinator():
+async def test_application_shutdown_continues_after_a_phase_failure_and_replays_error():
     calls = []
     runtime = ApplicationRuntime(
         resources=RecordingOwner("resources", calls),
         projects=RecordingOwner("projects", calls),
-        sessions=RecordingOwner("sessions", calls),
+        sessions=RecordingSessions("sessions", calls),
         agent_manager=SimpleNamespace(),
         agent_orchestrator=SimpleNamespace(),
+        aac_runtime=RecordingOwner("aac", calls, RuntimeError("AAC failure")),
     )
 
-    await runtime.shutdown()
+    with pytest.raises(ApplicationShutdownError) as error:
+        await runtime.shutdown()
 
-    assert calls == ["sessions", "projects", "resources"]
+    assert calls == ["aac", "sessions", "projects", "resources"]
+    assert [failure.phase for failure in error.value.failures] == ["aac"]
+
+    with pytest.raises(ApplicationShutdownError) as repeated_error:
+        await runtime.shutdown()
+
+    assert repeated_error.value is error.value
+    assert calls == ["aac", "sessions", "projects", "resources"]
+
 
 
 @pytest.mark.runtime
@@ -108,6 +93,7 @@ async def test_application_runtime_owns_and_explicitly_attaches_health_service()
         sessions=sessions,
         agent_manager=SimpleNamespace(),
         agent_orchestrator=SimpleNamespace(),
+        aac_runtime=RecordingOwner("aac", calls),
     )
 
     assert sessions.health_service is runtime.health_service
@@ -146,6 +132,66 @@ async def test_application_start_cleans_resources_when_composition_fails(monkeyp
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(monkeypatch):
+    calls = []
+    resources = RecordingOwner("resources", calls)
+
+    class KnowledgeStore:
+        async def ensure_identity_entity(self, _user_name, _aliases):
+            return None
+
+    class RecordingAACRuntime(RecordingOwner):
+        @classmethod
+        async def create(cls, **_kwargs):
+            return cls("aac", calls)
+
+        async def start(self):
+            raise RuntimeError("AAC start failed")
+
+    resources.knowledge_store = KnowledgeStore()
+
+    async def create_resources(cls, *, num_workers=None):
+        return resources
+
+    class RecordingAgentManager:
+        def __init__(self, *_args):
+            pass
+
+        async def ensure_default_agent(self):
+            pass
+
+    monkeypatch.setattr(
+        application_module.RuntimeResources,
+        "create",
+        classmethod(create_resources),
+    )
+    monkeypatch.setattr(application_module, "ProjectManager", lambda **_kwargs: object())
+    monkeypatch.setattr(application_module, "AgentManager", RecordingAgentManager)
+    monkeypatch.setattr(
+        application_module,
+        "AgentOrchestrator",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        application_module,
+        "SessionManager",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(application_module, "AACRuntime", RecordingAACRuntime)
+    monkeypatch.setattr(
+        application_module.ConfigManager,
+        "get",
+        staticmethod(lambda: SimpleNamespace(config=SimpleNamespace(user_aliases=[]))),
+    )
+
+    with pytest.raises(RuntimeError, match="AAC start failed"):
+        await application_module.ApplicationRuntime.start(user_name="ada")
+
+    assert calls == ["aac", "resources"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_application_start_establishes_identity_before_managers(monkeypatch):
     calls = []
 
@@ -172,6 +218,20 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
             assert isinstance(manager, RecordingAgentManager)
             calls.append("agent_orchestrator")
 
+    class RecordingAACRuntime:
+        @classmethod
+        async def create(cls, **kwargs):
+            assert kwargs["resources"] is resources
+            assert isinstance(kwargs["agent_manager"], RecordingAgentManager)
+            calls.append("aac_create")
+            return cls()
+
+        async def start(self):
+            calls.append("aac_start")
+
+        async def shutdown(self):
+            calls.append("aac_shutdown")
+
     def create_sessions(**kwargs):
         assert isinstance(kwargs["agent_orchestrator"], RecordingAgentOrchestrator)
         calls.append("sessions")
@@ -189,6 +249,7 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
     monkeypatch.setattr(application_module, "AgentManager", RecordingAgentManager)
     monkeypatch.setattr(application_module, "AgentOrchestrator", RecordingAgentOrchestrator)
     monkeypatch.setattr(application_module, "SessionManager", create_sessions)
+    monkeypatch.setattr(application_module, "AACRuntime", RecordingAACRuntime)
     monkeypatch.setattr(
         application_module.ConfigManager,
         "get",
@@ -203,6 +264,8 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
         "ensure_default_agent",
         "agent_orchestrator",
         "sessions",
+        "aac_create",
+        "aac_start",
     ]
     assert isinstance(runtime.agent_manager, RecordingAgentManager)
     assert isinstance(runtime.agent_orchestrator, RecordingAgentOrchestrator)

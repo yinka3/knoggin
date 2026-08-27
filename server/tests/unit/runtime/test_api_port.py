@@ -6,13 +6,11 @@ import pytest
 
 from common.exceptions import NotFoundError
 from common.schema.artifacts import ArtifactReference
-from common.schema.primitives import Message
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
     SetDocumentFocusDocument,
     StartRunRequest,
-    SubmitMessageRequest,
     validate_public_stream,
 )
 from runtime.api_port import ApplicationRuntimePort
@@ -51,17 +49,14 @@ class FakeSession:
     enabled_tools = ["web_search"]
 
     def __init__(self):
-        self.accepted: list[Message] = []
         self.run_calls: list[dict] = []
         self.document_service = FakeDocumentService()
 
-    async def accept_message(self, message):
-        self.accepted.append(message)
-        message.id = 42
-        return message, len(self.accepted) == 1
-
-    async def run_agent_stream(self, message, **kwargs):
+    async def open_agent_run_stream(self, message, **kwargs):
         self.run_calls.append({"message": message, **kwargs})
+        return self._events()
+
+    async def _events(self):
         yield {"event": "tool_start", "data": {"tool": "web_search"}}
         yield {"event": "token", "data": {"content": "Answer"}}
         yield {
@@ -117,7 +112,6 @@ class FakeProjects:
             "id": "project-2",
             "name": kwargs["name"],
             "description": kwargs["description"],
-            "access_mode": kwargs["access_mode"],
             "status": "active",
             "allowed_projects": [],
         }
@@ -195,7 +189,7 @@ def port():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_runtime_port_translates_project_session_acceptance_and_research_stream(
+async def test_runtime_port_translates_project_session_and_research_stream(
     port,
 ):
     application, runtime, session = port
@@ -212,15 +206,6 @@ async def test_runtime_port_translates_project_session_acceptance_and_research_s
         request=CreateSessionRequest(project_id="project-1"),
     )
     assert created["session_id"] == "session-1"
-
-    accepted = await application.submit_message(
-        user_name="ada",
-        session_id="session-1",
-        request=SubmitMessageRequest(content="hello", idempotency_key="request-1"),
-    )
-    assert accepted.message_id == 42
-    assert accepted.idempotent is False
-    assert session.accepted[0].metadata == {"idempotency_key": "request-1"}
 
     events = [
         event
@@ -249,10 +234,9 @@ async def test_runtime_port_rejects_other_user_and_missing_session(port):
         await application.list_artifacts(user_name="other", project_id="project-1")
 
     with pytest.raises(NotFoundError):
-        await application.submit_message(
+        await application.open_run_stream(
             user_name="ada",
-            session_id="missing",
-            request=SubmitMessageRequest(content="hello"),
+            request=StartRunRequest(session_id="missing", query="hello"),
         )
 
 

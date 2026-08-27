@@ -596,7 +596,6 @@ class FakePostgresClient:
             "user_name": user_name,
             "name": project_id,
             "description": None,
-            "access_mode": "open",
             "status": status,
             "domain_config": {
                 "version": 1,
@@ -649,7 +648,6 @@ class FakePostgresClient:
                 "user_name": params.get("user_name"),
                 "name": params.get("name"),
                 "description": params.get("description"),
-                "access_mode": params.get("access_mode", "open"),
                 "status": params.get("status", "active"),
                 "domain_config": json.loads(params["domain_config"])
                 if isinstance(params.get("domain_config"), str)
@@ -767,7 +765,6 @@ class FakePostgresClient:
                 "user_name": params.get("user_name"),
                 "name": params.get("name"),
                 "description": params.get("description"),
-                "access_mode": params.get("access_mode", "open"),
                 "status": params.get("status", "active"),
                 "domain_config": json.loads(params["domain_config"])
                 if isinstance(params.get("domain_config"), str)
@@ -825,8 +822,6 @@ class FakePostgresClient:
                 )
             if "last_active_at = now()" in normalized:
                 row["last_active_at"] = self._now()
-            if "status = 'closed'" in normalized:
-                row["status"] = "closed"
             if "status = 'deleted'" in normalized:
                 row["status"] = "deleted"
                 row["deleted_at"] = row.get("deleted_at") or self._now()
@@ -1020,7 +1015,7 @@ class FakeScheduler:
         self.running = False
         self.stopped += 1
 
-class FakeConsumer:
+class FakeIngestionWorker:
     def __init__(self):
         self.signaled = 0
         self.stopped = 0

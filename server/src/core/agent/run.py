@@ -127,7 +127,6 @@ class AgentRun:
     model: Optional[str]
     temperature: float
     brain: str
-    directives: str
     enabled_tools: Optional[Tuple[str, ...]]
     additional_tool_schemas: Tuple[Dict[str, Any], ...]
     tool_runtime: ToolRuntime
@@ -154,6 +153,7 @@ class AgentRun:
     episodes: List[Dict] = field(default_factory=list)
     sources: List[Dict] = field(default_factory=list)
     evidence_summary: Optional[str] = None
+    new_evidence_gathered: bool = False
     evidence_token_count: int = 0
     call_count: int = 0
     attempt_count: int = 0
@@ -183,12 +183,21 @@ class AgentRun:
         model: Optional[str] = None,
         temperature: float = 0.7,
         brain: Optional[str] = None,
-        directives: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
         additional_tool_schemas: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
         audit_project_id: str | None | object = _UNSET_AUDIT_PROJECT_ID,
-        **state: Any,
+        research_profile: ResearchProfile | None = None,
+        history: Optional[List[Dict]] = None,
+        document_focus: Optional[DocumentFocus] = None,
+        document_selection_context: Optional[Dict[str, Any]] = None,
+        hot_topics: Optional[List[str]] = None,
+        active_topics: Optional[List[str]] = None,
+        hot_topic_context: Optional[Dict[str, Dict]] = None,
+        is_community: bool = False,
+        current_participants: Optional[List[str]] = None,
+        last_turn_at: Optional[datetime] = None,
+        initial_source_candidates: Optional[List[SourceReferenceCandidate]] = None,
     ) -> "AgentRun":
         """Open an agent run with a fixed scope and policy snapshot."""
 
@@ -204,10 +213,10 @@ class AgentRun:
             if audit_project_id is _UNSET_AUDIT_PROJECT_ID
             else cast(str | None, audit_project_id)
         )
-        effective_state = dict(state)
-        effective_state.setdefault(
-            "last_turn_at",
-            getattr(agent.config, "last_turn_at", None),
+        effective_last_turn_at = (
+            last_turn_at
+            if last_turn_at is not None
+            else getattr(agent.config, "last_turn_at", None)
         )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,
@@ -229,12 +238,21 @@ class AgentRun:
             model=model,
             temperature=temperature,
             brain=brain or "",
-            directives=directives or "",
             enabled_tools=effective_enabled_tools,
             additional_tool_schemas=effective_additional_schemas,
             tool_runtime=tool_runtime,
             limits=limits,
-            **effective_state,
+            research_profile=research_profile or DEFAULT_RESEARCH_PROFILES["normal"],
+            history=list(history or []),
+            document_focus=document_focus,
+            document_selection_context=document_selection_context,
+            hot_topics=list(hot_topics or []),
+            active_topics=list(active_topics or []),
+            hot_topic_context=dict(hot_topic_context or {}),
+            is_community=is_community,
+            current_participants=list(current_participants or []),
+            last_turn_at=effective_last_turn_at,
+            initial_source_candidates=list(initial_source_candidates or []),
         )
 
     @classmethod
@@ -249,11 +267,20 @@ class AgentRun:
         model: Optional[str] = None,
         temperature: float = 0.7,
         brain: Optional[str] = None,
-        directives: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
         additional_tool_schemas: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
-        **state: Any,
+        research_profile: ResearchProfile | None = None,
+        history: Optional[List[Dict]] = None,
+        document_focus: Optional[DocumentFocus] = None,
+        document_selection_context: Optional[Dict[str, Any]] = None,
+        hot_topics: Optional[List[str]] = None,
+        active_topics: Optional[List[str]] = None,
+        hot_topic_context: Optional[Dict[str, Dict]] = None,
+        is_community: bool = False,
+        current_participants: Optional[List[str]] = None,
+        last_turn_at: Optional[datetime] = None,
+        initial_source_candidates: Optional[List[SourceReferenceCandidate]] = None,
     ) -> "AgentRun":
         """Open a user-level AAC run with no durable project audit owner."""
 
@@ -267,12 +294,21 @@ class AgentRun:
             model=model,
             temperature=temperature,
             brain=brain,
-            directives=directives,
             enabled_tools=enabled_tools,
             additional_tool_schemas=additional_tool_schemas,
             run_id=run_id,
             audit_project_id=None,
-            **state,
+            research_profile=research_profile,
+            history=history,
+            document_focus=document_focus,
+            document_selection_context=document_selection_context,
+            hot_topics=hot_topics,
+            active_topics=active_topics,
+            hot_topic_context=hot_topic_context,
+            is_community=is_community,
+            current_participants=current_participants,
+            last_turn_at=last_turn_at,
+            initial_source_candidates=initial_source_candidates,
         )
 
     def _require_active(self) -> None:
@@ -354,14 +390,35 @@ class AgentRun:
         self._require_active()
         self.source_candidates.extend(candidates)
 
-    def accumulate_tool_result(self, tool_name: str, result: Dict) -> None:
+    def accumulate_tool_result(self, tool_name: str, result: Dict) -> bool:
         """Apply one tool result to the aggregate's owned evidence buffers."""
 
         self._require_active()
         # Kept local to avoid a run/prompt-context import cycle.
         from core.agent.prompt_context import update_accumulators
 
+        before = self._evidence_fingerprint()
         update_accumulators(self, tool_name, result)
+        gathered = before != self._evidence_fingerprint()
+        self.new_evidence_gathered = self.new_evidence_gathered or gathered
+        return gathered
+
+    def _evidence_fingerprint(self) -> str:
+        """Serialize evidence state for change detection within one run."""
+
+        return json.dumps(
+            {
+                "messages": self.messages,
+                "profiles": self.profiles,
+                "graph": self.graph,
+                "paths": self.paths,
+                "episodes": self.episodes,
+                "sources": self.sources,
+                "summary": self.evidence_summary,
+            },
+            sort_keys=True,
+            default=str,
+        )
 
     def record_empty_result(self) -> bool:
         """Record an empty tool turn and report whether replanning is due."""

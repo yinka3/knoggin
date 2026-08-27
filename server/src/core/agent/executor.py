@@ -32,9 +32,6 @@ from common.utils.time_utils import get_now
 from core.agent.formatters import (
     format_document_focus_context,
     format_documents_context,
-    format_entity_results,
-    format_graph_results,
-    format_retrieved_messages,
 )
 from core.agent.prompt_context import (
     build_evidence_context,
@@ -125,7 +122,6 @@ class AgentExecutor:
     async def execute(
         self,
         user_timezone: Optional[str] = None,
-        simulated_date: Optional[str] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run one execution from the policy captured on ``AgentRun``."""
 
@@ -138,7 +134,6 @@ class AgentExecutor:
             try:
                 async for event in self._execute_run(
                     user_timezone=user_timezone,
-                    simulated_date=simulated_date,
                 ):
                     yield event
             finally:
@@ -147,15 +142,12 @@ class AgentExecutor:
     async def _execute_run(
         self,
         user_timezone: Optional[str] = None,
-        simulated_date: Optional[str] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Runs the reasoning loop and yields events."""
 
         # Prepare environment
         tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
-        current_time = simulated_date or get_now().astimezone(tz).strftime(
-            "%Y-%m-%d %H:%M %Z"
-        )
+        current_time = get_now().astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
         documents_context = ""
         if self.tools.document_service:
@@ -287,7 +279,10 @@ class AgentExecutor:
                                 step_failed = True
                                 break
 
-                        if phase is not _AgentPhase.SYNTHESIZE:
+                        if (
+                            phase is not _AgentPhase.SYNTHESIZE
+                            and self.ctx.new_evidence_gathered
+                        ):
                             logger.info(
                                 "AgentExecutor: evidence is ready; scheduling synthesis."
                             )
@@ -406,7 +401,6 @@ class AgentExecutor:
             agent_name=self.ctx.agent.name,
             documents_context=documents_context,
             document_focus_context=document_focus_context,
-            agent_directives=self.ctx.directives,
             agent_brain=self.ctx.brain,
             project_context=project_context,
             runtime_instructions=self.ctx.tool_runtime.runtime_instructions,
@@ -414,6 +408,7 @@ class AgentExecutor:
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
             phase=phase,
+            research_profile=self.ctx.research_profile,
         )
 
         user_message = build_user_message(self.ctx, last_result)
@@ -802,20 +797,7 @@ class AgentExecutor:
 
     async def _generate_fallback_summary(self) -> Optional[str]:
         """Generate a final response summary from accumulated evidence."""
-        evidence_ctx = ""
-        if self.ctx.profiles:
-            evidence_ctx += (
-                f"\nProfiles FOUND:\n{format_entity_results(self.ctx.profiles)}\n"
-            )
-        if self.ctx.messages:
-            evidence_ctx += (
-                "\nRelevant Messages:\n"
-                f"{format_retrieved_messages(self.ctx.messages)}\n"
-            )
-        if self.ctx.graph:
-            evidence_ctx += (
-                f"\nGraph Context:\n{format_graph_results(self.ctx.graph)}\n"
-            )
+        evidence_ctx = build_evidence_context(self.ctx)
 
         prompt = get_fallback_summary_prompt(
             self.ctx.user_name, self.ctx.user_query, evidence_ctx
@@ -854,14 +836,11 @@ class AgentExecutor:
             if not summary:
                 self.ctx.compact_evidence(None)
 
-            # Re-calculate token count
-            if summary:
-                self.ctx.set_evidence_token_count(self.llm.count_tokens(summary))
-            else:
-                new_evidence_str = build_evidence_context(self.ctx)
-                self.ctx.set_evidence_token_count(
-                    self.llm.count_tokens(new_evidence_str)
-                )
+            # Recalculate against the actual bounded state retained by the run.
+            post_compaction = build_evidence_context(self.ctx)
+            self.ctx.set_evidence_token_count(
+                self.llm.count_tokens(post_compaction)
+            )
 
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""

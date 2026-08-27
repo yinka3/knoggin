@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.research import resolve_research_profile
 from core.agent.executor import AgentExecutor
@@ -51,17 +52,13 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
         model="run-model",
         temperature=0.2,
         brain="Use evidence.",
-        directives="Be concise.",
         enabled_tools=["search_messages"],
         additional_tool_schemas=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "community_tool",
-                    "capability": "read",
-                    "parameters": {"type": "object"},
-                },
-            }
+            next(
+                schema
+                for schema in AAC_SPECIFIC_SCHEMAS
+                if schema["function"]["name"] == "search_insights"
+            )
         ],
     )
 
@@ -73,26 +70,33 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
     assert run.model == "run-model"
     assert run.temperature == 0.2
     assert run.brain == "Use evidence."
-    assert run.directives == "Be concise."
     assert run.enabled_tools == ("search_messages",)
-    assert run.additional_tool_schemas == (
-        {
-            "type": "function",
-            "function": {
-                "name": "community_tool",
-                "capability": "read",
-                "parameters": {"type": "object"},
-            },
-        },
-    )
+    assert run.additional_tool_schemas[0]["function"]["name"] == "search_insights"
     assert run.tool_runtime.permissions.allowed_tools >= {
         "search_messages",
         "request_clarification",
         "submit_answer",
-        "community_tool",
+        "search_insights",
     }
     with pytest.raises(AttributeError):
         run.limits.max_calls = 4
+
+
+@pytest.mark.no_network
+def test_agent_run_rejects_unregistered_additional_tool_schema():
+    with pytest.raises(ValueError, match="no registered implementation"):
+        make_run(
+            additional_tool_schemas=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "client_tool",
+                        "capability": "read",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ]
+        )
 
 
 @pytest.mark.no_network
@@ -281,9 +285,8 @@ async def test_executor_finalizes_an_agent_run():
     assert run.final_content == "Done"
     assert run.sealed is True
     assert run.released is True
-    # The executor performs a dedicated final synthesis after the first
-    # structured answer, so both model turns contribute usage.
-    assert run.usage["total_tokens"] == 10
+    # A direct answer with no newly gathered evidence finalizes immediately.
+    assert run.usage["total_tokens"] == 5
 
 
 @pytest.mark.no_network

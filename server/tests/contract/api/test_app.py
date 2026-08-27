@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from api.app import create_app
-from common.exceptions import StorageReadError
+from common.exceptions import SessionBusyError, StorageReadError
 from common.schema.artifacts import (
     ArtifactDraft,
     MarkdownArtifactBlock,
@@ -14,12 +14,10 @@ from common.schema.artifacts import (
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
-    MessageAcceptance,
     ProjectResponse,
     RunResult,
     SessionResponse,
     StartRunRequest,
-    SubmitMessageRequest,
 )
 
 
@@ -72,7 +70,6 @@ class FakeApplication:
             id="project-1",
             name=request.name,
             description=request.description,
-            access_mode=request.access_mode,
             status="active",
         )
 
@@ -87,16 +84,6 @@ class FakeApplication:
             if request.enabled_tools is not None
             else None,
         )
-
-    async def submit_message(
-        self,
-        *,
-        user_name,
-        session_id,
-        request: SubmitMessageRequest,
-    ):
-        self.calls.append(("message", user_name, session_id, request))
-        return MessageAcceptance(message_id=42, idempotent=False)
 
     async def get_document_focus(self, *, user_name, session_id):
         self.calls.append(("document_focus_get", user_name, session_id))
@@ -176,6 +163,11 @@ class BrokenStreamApplication(FakeApplication):
         yield {"type": "private.tool.payload", "secret": "do not expose"}
 
 
+class BusyRunApplication(FakeApplication):
+    async def open_run_stream(self, *, user_name, request: StartRunRequest):
+        raise SessionBusyError()
+
+
 async def _client(app):
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
@@ -201,11 +193,6 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
                 "enabled_tools": [" Search_Messages "],
             },
         )
-        message = await client.post(
-            "/v1/sessions/session-1/messages",
-            headers={"X-User-Name": "ada"},
-            json={"content": "remember this", "idempotency_key": "m-1"},
-        )
         result = await client.post(
             "/v1/runs",
             headers={"X-User-Name": "ada"},
@@ -220,11 +207,6 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
     assert project.json()["id"] == "project-1"
     assert session.status_code == 201
     assert session.json()["enabled_tools"] == ["search_messages"]
-    assert message.json() == {
-        "message_id": 42,
-        "accepted": True,
-        "idempotent": False,
-    }
     assert result.status_code == 200
     assert result.json() == {
         "run_id": "run-1",
@@ -239,7 +221,6 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
     assert [call[0] for call in port.calls] == [
         "project",
         "session",
-        "message",
         "run",
     ]
     assert port.calls[-1][2].research_mode == "research"
@@ -293,6 +274,28 @@ async def test_document_focus_routes_keep_selection_request_only():
         "document_focus_set",
         "document_focus_clear",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_run_admission_conflict_is_returned_before_http_or_sse_starts():
+    app = create_app(BusyRunApplication())
+
+    async with await _client(app) as client:
+        run = await client.post(
+            "/v1/runs",
+            headers={"X-User-Name": "ada"},
+            json={"session_id": "session-1", "query": "hello"},
+        )
+        stream = await client.post(
+            "/v1/runs/stream",
+            headers={"X-User-Name": "ada"},
+            json={"session_id": "session-1", "query": "hello"},
+        )
+
+    for response in (run, stream):
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "session_busy"
 
 
 @pytest.mark.unit

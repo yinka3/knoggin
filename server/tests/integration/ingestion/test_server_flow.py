@@ -272,15 +272,28 @@ async def real_server_scope():
 
 
 def _session(resources, *, user_name, project_id, session_id):
-    context = Session(user_name, resources)
-    context.session_id = session_id
-    context.project_id = project_id
-    context.project = SimpleNamespace(
+    project = SimpleNamespace(
         scheduler=object(),
         record_session_activity=lambda: asyncio.sleep(0),
         readable_project_ids=[project_id],
     )
-    return context
+    return Session(
+        user_name,
+        resources,
+        session_id=session_id,
+        project_id=project_id,
+        project=project,
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
+
+
+async def _accept_user_turn(context, message: Message) -> Message:
+    """Exercise the private durable ingestion seam without a public message API."""
+
+    accepted, _created = await context._accept_user_message(message)
+    return accepted
 
 
 def _prepared_graph_callback(store):
@@ -347,7 +360,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             ingestion_batch_settle_delay_seconds=0,
         ),
     )
-    context.consumer = worker
+    context.ingestion_worker = worker
     worker.start()
 
     try:
@@ -359,7 +372,8 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
                 else f"Server-flow episode context {index + 1}."
             )
             accepted_messages.append(
-                await context.add(
+                await _accept_user_turn(
+                    context,
                     Message(
                         content=content,
                         timestamp=datetime(2026, 8, 1, 12, index, tzinfo=timezone.utc),
@@ -576,7 +590,7 @@ async def test_real_document_request_persists_document_source_provenance(
         workspace_service=None,
     )
     context.document_service = documents
-    context.consumer = _SignalCounter()
+    context.ingestion_worker = _SignalCounter()
 
     agent = AgentConfig(
         id="document-flow-agent",
@@ -754,7 +768,7 @@ async def test_real_document_selection_request_persists_selection_provenance(
         workspace_service=None,
     )
     context.document_service = documents
-    context.consumer = _SignalCounter()
+    context.ingestion_worker = _SignalCounter()
 
     agent = AgentConfig(
         id="selected-document-agent",
@@ -912,12 +926,14 @@ async def test_real_concurrent_sessions_accept_one_message_once(
         for _ in range(2)
     ]
     for context in contexts:
-        context.consumer = _SignalCounter()
+        context.ingestion_worker = _SignalCounter()
 
     timestamp = datetime(2026, 8, 1, 13, 0, tzinfo=timezone.utc)
     results = await asyncio.gather(
         *[
-            context.add(Message(content="same accepted turn", timestamp=timestamp))
+            _accept_user_turn(
+                context, Message(content="same accepted turn", timestamp=timestamp)
+            )
             for context in contexts
         ]
     )
@@ -981,11 +997,12 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
             ingestion_batch_settle_delay_seconds=0,
         ),
     )
-    context.consumer = worker
+    context.ingestion_worker = worker
     worker.start()
 
     try:
-        accepted = await context.add(
+        accepted = await _accept_user_turn(
+            context,
             Message(
                 content="Retry this message-log boundary.",
                 timestamp=datetime(2026, 8, 1, 14, 0, tzinfo=timezone.utc),

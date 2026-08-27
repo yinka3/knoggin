@@ -29,7 +29,7 @@ from core.knowledge.store import KnowledgeStore
 from infrastructure.postgres_client import PostgresClient
 from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.factories import make_domain_config
-from tests.fixtures.fakes import FakeConfigValue, FakeConsumer
+from tests.fixtures.fakes import FakeConfigValue, FakeIngestionWorker
 
 
 @pytest_asyncio.fixture
@@ -271,17 +271,20 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres(
             knowledge_store=knowledge_store,
             embedding=embedding_service,
         ),
+        session_id=session_id,
+        project_id=project_id,
+        project=SimpleNamespace(
+            scheduler=object(),
+            readable_project_ids=[project_id],
+        ),
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
     )
-    context.session_id = session_id
-    context.project_id = project_id
-    context.project = SimpleNamespace(
-        scheduler=object(),
-        readable_project_ids=[project_id],
-    )
-    context.consumer = FakeConsumer()
+    context.ingestion_worker = FakeIngestionWorker()
 
     try:
-        accepted = await context.add(
+        accepted, _created = await context._accept_user_message(
             Message(
                 content="The source note says durable memory must stay grounded.",
                 timestamp=datetime(2026, 7, 31, 12, 0, tzinfo=timezone.utc),
@@ -302,7 +305,7 @@ async def test_session_add_and_assistant_sources_are_durable_in_postgres(
             "project_id": project_id,
             "session_id": session_id,
         }
-        assert context.consumer.signaled == 1
+        assert context.ingestion_worker.signaled == 1
 
         excerpt = "durable memory must stay grounded"
         source_candidate = SourceReferenceCandidate(
