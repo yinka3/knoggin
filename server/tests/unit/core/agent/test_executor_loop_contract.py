@@ -155,6 +155,10 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
     assert "CURRENT EXECUTION PHASE: EXECUTE" in llm.calls[1]["system"]
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert [schema["function"]["name"] for schema in llm.calls[-1]["tools"]] == [
+        "request_clarification",
+        "submit_answer",
+    ]
     assert run.attempt_count == 4
     assert run.call_count == 2
     assert run.messages == [
@@ -195,6 +199,63 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
     assert events[-1]["data"]["content"] == "Still looking."
     assert [call["model"] for call in llm.calls] == ["architect", "architect"]
     assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+
+
+@pytest.mark.no_network
+async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
+    monkeypatch,
+):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "profile", "limit": 3}',
+                    "search-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft answer."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final answer."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=2, max_calls=2))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def evidence_result(*_args):
+        return {
+            "data": [
+                {"id": "message-1", "message": "Profile changed", "score": 0.9}
+            ]
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", evidence_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["data"]["content"] == "Final answer."
+    assert [call["model"] for call in llm.calls] == [
+        "architect",
+        "librarian",
+        "architect",
+    ]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert run.attempt_count == 3
+    assert run.synthesis_attempt_count == 1
 
 
 @pytest.mark.no_network

@@ -47,6 +47,8 @@ from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
 from core.agent.tools.registry import (
     Tools,
+    get_runtime_instructions,
+    get_tool_definition,
     install_tool_runtime,
 )
 from infrastructure.llm_client import LLMService
@@ -166,19 +168,24 @@ class AgentExecutor:
         needs_replan = False
         needs_final_synthesis = False
 
-        while self.ctx.attempt_count < self.ctx.limits.max_attempts:
+        while (
+            self.ctx.attempt_count < self.ctx.limits.max_attempts
+            or needs_final_synthesis
+        ):
             if self.ctx.consecutive_errors >= self.ctx.limits.max_consecutive_errors:
                 yield self._terminal_error()
                 return
 
-            if not self.ctx.begin_attempt():
-                break
-
-            if needs_final_synthesis:
+            is_final_synthesis = needs_final_synthesis
+            if is_final_synthesis:
+                if not self.ctx.begin_final_synthesis_attempt():
+                    break
                 phase = _AgentPhase.SYNTHESIZE
                 current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "high"
                 logger.info("AgentExecutor: synthesizing the final response.")
+            elif not self.ctx.begin_attempt():
+                break
             elif self.ctx.attempt_count == 1 or needs_replan:
                 phase = _AgentPhase.PLAN
                 current_model = self.ctx.model or self.llm.agent_model
@@ -382,6 +389,20 @@ class AgentExecutor:
             return
         yield await self._fallback()
 
+    def _tool_schemas_for_phase(self, phase: _AgentPhase) -> list[dict]:
+        """Return the model-visible tools allowed for one executor phase."""
+
+        if phase is not _AgentPhase.SYNTHESIZE:
+            return list(self.ctx.tool_runtime.schemas)
+        return [
+            schema
+            for schema in self.ctx.tool_runtime.schemas
+            if (
+                definition := get_tool_definition(schema["function"]["name"])
+            ) is not None
+            and definition.executor_protocol
+        ]
+
     async def _step(
         self,
         date: str,
@@ -394,6 +415,12 @@ class AgentExecutor:
         project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
+        tool_schemas = self._tool_schemas_for_phase(phase)
+        runtime_instructions = (
+            get_runtime_instructions(tool_schemas)
+            if phase is _AgentPhase.SYNTHESIZE
+            else self.ctx.tool_runtime.runtime_instructions
+        )
         system_prompt = get_agent_prompt(
             user_name=self.ctx.user_name,
             current_time=date,
@@ -403,7 +430,7 @@ class AgentExecutor:
             document_focus_context=document_focus_context,
             agent_brain=self.ctx.brain,
             project_context=project_context,
-            runtime_instructions=self.ctx.tool_runtime.runtime_instructions,
+            runtime_instructions=runtime_instructions,
             active_topics=self.ctx.active_topics,
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
@@ -419,7 +446,7 @@ class AgentExecutor:
             async for event in self.llm.stream_with_tools(
                 system=system_prompt,
                 user=user_message,
-                tools=list(self.ctx.tool_runtime.schemas),
+                tools=tool_schemas,
                 model=model or self.llm.agent_model,
                 temperature=self.ctx.temperature,
                 reasoning=reasoning,

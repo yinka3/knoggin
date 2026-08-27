@@ -157,6 +157,7 @@ class AgentRun:
     evidence_token_count: int = 0
     call_count: int = 0
     attempt_count: int = 0
+    synthesis_attempt_count: int = 0
     consecutive_errors: int = 0
     consecutive_empty_results: int = 0
     tools_used: List[str] = field(default_factory=list)
@@ -323,6 +324,16 @@ class AgentRun:
         self._require_active()
         if self.attempt_count >= self.limits.max_attempts:
             return False
+        self.attempt_count += 1
+        return True
+
+    def begin_final_synthesis_attempt(self) -> bool:
+        """Reserve the one final synthesis pass outside the normal attempt budget."""
+
+        self._require_active()
+        if self.synthesis_attempt_count:
+            return False
+        self.synthesis_attempt_count += 1
         self.attempt_count += 1
         return True
 
