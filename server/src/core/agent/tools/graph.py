@@ -648,32 +648,3 @@ class GraphTools:
             return safe_path
 
         return []
-
-    async def get_hot_topic_context(
-        self, hot_topics: List[str], *, slim: bool = False
-    ) -> Dict[str, Dict]:
-        """
-        Retrieve pre-cached context for frequently accessed topics.
-        Called automatically at start; this data is already in hot_topic_context.
-        Only call manually if hot topics changed mid-conversation.
-
-        Args:
-            hot_topics: List of topic names marked as "hot"
-        Returns: Dict mapping topic name to list of top entities with summaries.
-        """
-        if not hot_topics:
-            return {}
-
-        raw = await self.knowledge_store.get_hot_topic_context_with_messages(
-            hot_topics,
-            msg_limit=10,
-            slim=slim,
-            visible_project_ids=self.readable_project_ids,
-        )
-        for _, data in raw.items():
-            message_refs = data.get("message_refs", data.get("message_ids", []))
-            data["messages"] = await self._hydrate_evidence(message_refs)
-            data.pop("message_refs", None)
-            data.pop("message_ids", None)
-
-        return raw

@@ -121,6 +121,39 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "load_topic_context",
+            "description": (
+                "Load compact entity and supporting-message context for one or "
+                "more active project topics. Use this when the user's question "
+                "materially depends on a listed active topic and more context is "
+                "needed than the pre-fetched hot-topic context provides."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topics": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100,
+                        },
+                        "description": (
+                            "One to three active topic names or configured aliases."
+                        ),
+                    }
+                },
+                "required": ["topics"],
+                "additionalProperties": False,
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_path",
             "description": (
                 "Investigates the narrative link between two specific entities. "

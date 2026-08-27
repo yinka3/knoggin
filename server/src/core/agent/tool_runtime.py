@@ -64,6 +64,20 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} results", count
 
+    if tool_name == "load_topic_context":
+        if not isinstance(data, dict) or not data:
+            return "No topic context found", 0
+        message_count = sum(
+            len(topic.get("messages", []))
+            for topic in data.values()
+            if isinstance(topic, dict) and isinstance(topic.get("messages"), list)
+        )
+        return (
+            f"Loaded context for {len(data)} topic(s) "
+            f"with {message_count} supporting message(s)",
+            len(data),
+        )
+
     if tool_name == "find_path":
         if data:
             return f"Path found: {len(data)} hops", len(data)

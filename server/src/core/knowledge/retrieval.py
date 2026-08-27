@@ -514,14 +514,15 @@ class KnowledgeRetrieval:
             return {}
         raw = await self.knowledge_store.get_hot_topic_context_with_messages(
             hot_topics,
-            msg_limit=10,
-            slim=slim,
+            msg_limit=5,
             visible_project_ids=self.readable_project_ids,
         )
         for data in raw.values():
             refs = data.get("message_refs", data.get("message_ids", []))
-            data["messages"] = await self._hydrate_evidence(
-                refs, session_id=session_id
+            data["messages"] = (
+                []
+                if slim
+                else await self._hydrate_evidence(refs, session_id=session_id)
             )
             data.pop("message_refs", None)
             data.pop("message_ids", None)
@@ -638,13 +639,16 @@ class KnowledgeRetrieval:
                         and item["session_id"] == reference_session_id
                         and item["message_id"] == message["id"]
                     ):
-                        results_by_idx[item["idx"]] = {
+                        hydrated = {
                             "id": f"msg_{message['id']}",
                             "user_name": message.get("user_name"),
                             "session_id": message.get("session_id"),
                             "message": message["content"],
                             "timestamp": rendered_timestamp,
                         }
+                        if message.get("role") is not None:
+                            hydrated["role"] = message["role"]
+                        results_by_idx[item["idx"]] = hydrated
         return [results_by_idx[index] for index in sorted(results_by_idx)]
 
     async def _get_visible_session_ids(self, session_id: str) -> List[str]:

@@ -199,39 +199,6 @@ async def test_find_path_locks_inactive_shortcut_steps_and_strips_evidence():
 
 
 @pytest.mark.no_network
-async def test_hot_topic_context_hydrates_messages_and_removes_raw_refs():
-    class FakeKnowledgeStore:
-        def __init__(self):
-            self.calls = []
-
-        async def get_hot_topic_context_with_messages(
-            self, hot_topics, msg_limit, slim, visible_project_ids
-        ):
-            self.calls.append((hot_topics, msg_limit, slim, visible_project_ids))
-            return {
-                "Identity": {
-                    "entities": [{"name": "Ada"}],
-                    "message_refs": [{"message_id": 7}],
-                }
-            }
-
-    knowledge_store = FakeKnowledgeStore()
-    tool = GraphRetrievalTool()
-    tool.knowledge_store = knowledge_store
-
-    result = await tool.get_hot_topic_context(["Identity"], slim=True)
-
-    assert knowledge_store.calls == [(["Identity"], 10, True, ["project-1"])]
-    assert tool.hydrated_refs == [[{"message_id": 7}]]
-    assert result == {
-        "Identity": {
-            "entities": [{"name": "Ada"}],
-            "messages": [{"id": 7, "message": "evidence"}],
-        }
-    }
-
-
-@pytest.mark.no_network
 def test_graph_result_format_states_that_relationships_are_observed_evidence():
     result = format_graph_results(
         [

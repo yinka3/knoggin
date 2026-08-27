@@ -259,6 +259,69 @@ async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
 
 
 @pytest.mark.no_network
+async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "load_topic_context",
+                    '{"topics": ["Work", "Finance"]}',
+                    "topics-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft answer."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final answer."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=3, max_calls=2))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def topic_context_result(*_args):
+        return {
+            "data": {
+                "Work": {
+                    "entities": [{"name": "Acme"}],
+                    "messages": [
+                        {
+                            "id": "msg_7",
+                            "message": "The offer changes compensation.",
+                        }
+                    ],
+                }
+            }
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", topic_context_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["data"]["content"] == "Final answer."
+    assert "load_topic_context" in [
+        schema["function"]["name"] for schema in llm.calls[0]["tools"]
+    ]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert run.messages[0]["id"] == "msg_7"
+    assert run.messages[0]["context"][0]["content"] == (
+        "The offer changes compensation."
+    )
+
+
+@pytest.mark.no_network
 async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     monkeypatch,
 ):

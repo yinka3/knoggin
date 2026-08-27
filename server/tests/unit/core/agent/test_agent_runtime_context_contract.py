@@ -98,6 +98,72 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
 
 
 @pytest.mark.no_network
+def test_topic_context_tool_accumulates_messages_as_evidence():
+    ctx = make_ctx()
+    result = {
+        "data": {
+            "Work": {
+                "entities": [{"name": "Acme"}],
+                "messages": [
+                    {
+                        "id": "msg_7",
+                        "message": "The offer includes a leadership role.",
+                        "timestamp": "2026-01-01T10:00:00+00:00",
+                    }
+                ],
+            },
+            "Finance": {
+                "entities": [{"name": "Savings"}],
+                "messages": [],
+            },
+        }
+    }
+
+    assert ctx.accumulate_tool_result("load_topic_context", result) is True
+    assert ctx.new_evidence_gathered is True
+    assert summarize_result("load_topic_context", result) == (
+        "Loaded context for 2 topic(s) with 1 supporting message(s)",
+        2,
+    )
+    assert ctx.messages == [
+        {
+            "id": "msg_7",
+            "score": 1.0,
+            "user_name": None,
+            "session_id": None,
+            "context": [
+                {
+                    "role": "assistant",
+                    "timestamp": "2026-01-01T10:00:00+00:00",
+                    "content": "The offer includes a leadership role.",
+                    "is_hit": True,
+                }
+            ],
+        }
+    ]
+
+    message = build_user_message(
+        ctx,
+        last_result=[{"tool": "load_topic_context", "result": result}],
+    )
+
+    assert "Loaded context for 2 topic(s)" in message
+    assert "[TOPIC: Work]" in message
+    assert "The offer includes a leadership role." in message
+
+
+@pytest.mark.no_network
+def test_topic_context_without_messages_does_not_count_as_new_evidence():
+    ctx = make_ctx()
+
+    assert ctx.accumulate_tool_result(
+        "load_topic_context",
+        {"data": {"Work": {"entities": [{"name": "Acme"}], "messages": []}}},
+    ) is False
+    assert ctx.new_evidence_gathered is False
+
+
+@pytest.mark.no_network
 def test_build_user_message_renders_discovered_sources_for_next_step():
     ctx = make_ctx(user_query="Research the latest profile behavior changes")
     result_data = [

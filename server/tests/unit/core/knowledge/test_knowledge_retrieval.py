@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.exceptions import ToolExecutionError
 from core.agent.tools.registry import Tools
 from core.knowledge.retrieval import KnowledgeRetrieval
 
@@ -93,6 +94,85 @@ async def test_entity_search_hydrates_visible_relationship_evidence():
 
 
 @pytest.mark.no_network
+async def test_hot_topic_context_is_compact_or_hydrated_by_retrieval_mode():
+    class Store:
+        def __init__(self):
+            self.calls = []
+
+        async def get_hot_topic_context_with_messages(self, topics, **kwargs):
+            self.calls.append((topics, kwargs))
+            return {
+                "Identity": {
+                    "entities": [{"name": "Ada"}],
+                    "message_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 7,
+                        }
+                    ],
+                }
+            }
+
+        async def get_messages_by_ids(self, message_ids, **kwargs):
+            assert message_ids == [7]
+            assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
+            return [
+                {
+                    "id": 7,
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "content": "Identity evidence",
+                    "timestamp": 1_700_000_000_000,
+                }
+            ]
+
+    store = Store()
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1", "project-2"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=store,
+        postgres=_Postgres(),
+    )
+
+    compact = await retrieval.get_hot_topic_context(
+        ["Identity"], session_id="session-1", slim=True
+    )
+    hydrated = await retrieval.get_hot_topic_context(
+        ["Identity"], session_id="session-1", slim=False
+    )
+
+    assert store.calls == [
+        (
+            ["Identity"],
+            {"msg_limit": 5, "visible_project_ids": ["project-1", "project-2"]},
+        ),
+        (
+            ["Identity"],
+            {"msg_limit": 5, "visible_project_ids": ["project-1", "project-2"]},
+        ),
+    ]
+    assert compact == {"Identity": {"entities": [{"name": "Ada"}], "messages": []}}
+    assert hydrated == {
+        "Identity": {
+            "entities": [{"name": "Ada"}],
+            "messages": [
+                {
+                    "id": "msg_7",
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "message": "Identity evidence",
+                    "timestamp": "2023-11-14T22:13:20+00:00",
+                }
+            ],
+        }
+    }
+
+
+@pytest.mark.no_network
 async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
     class Retrieval:
         def __init__(self):
@@ -124,6 +204,56 @@ async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
         await tools.close()
 
     assert retrieval.calls == [("project memory", "session-1", 3)]
+
+
+@pytest.mark.no_network
+async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
+    class Domain:
+        active_topics = ("Work", "Finance")
+
+        @staticmethod
+        def normalize_topic(topic):
+            return {"work": "Work", "career": "Work", "finance": "Finance"}.get(
+                topic.strip().casefold()
+            )
+
+    class Retrieval:
+        def __init__(self):
+            self.calls = []
+
+        async def get_hot_topic_context(self, topics, *, session_id, slim):
+            self.calls.append((topics, session_id, slim))
+            return {
+                topic: {"entities": [{"name": topic}], "messages": []}
+                for topic in topics
+            }
+
+    retrieval = Retrieval()
+    entities = SimpleNamespace(
+        embedding_service=SimpleNamespace(),
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+    )
+    tools = Tools(
+        user_name="ada",
+        entities=entities,
+        session_id="session-1",
+        compiled_domain=Domain(),
+        knowledge_retrieval=retrieval,
+        knowledge_store=SimpleNamespace(),
+        postgres=SimpleNamespace(),
+    )
+    try:
+        assert await tools.load_topic_context(["career", "Finance", "Work"]) == {
+            "Work": {"entities": [{"name": "Work"}], "messages": []},
+            "Finance": {"entities": [{"name": "Finance"}], "messages": []},
+        }
+        with pytest.raises(ToolExecutionError, match="Unknown or inactive"):
+            await tools.load_topic_context(["Work", "Unknown"])
+    finally:
+        await tools.close()
+
+    assert retrieval.calls == [(["Work", "Finance"], "session-1", False)]
 
 
 @pytest.mark.no_network

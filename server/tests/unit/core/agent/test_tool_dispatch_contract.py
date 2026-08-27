@@ -24,6 +24,13 @@ class DispatchTools:
         self.calls.append(("search_entity", query, limit))
         return [{"id": 1, "query": query}]
 
+    async def load_topic_context(self, topics):
+        self.calls.append(("load_topic_context", topics))
+        return {
+            topic: {"entities": [{"name": topic}], "messages": []}
+            for topic in topics
+        }
+
     async def get_recent_activity(self, entity_name, hours=None):
         self.calls.append(("get_recent_activity", entity_name, hours))
         return [{"entity": entity_name}]
@@ -107,6 +114,11 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         "search_entity",
         {"query": 99, "limit": "2"},
     )
+    topic_context = await execute_tool(
+        tools,
+        "load_topic_context",
+        {"topics": ["Work", "Finance"]},
+    )
     file_content = await execute_tool(
         tools,
         "read_document",
@@ -161,6 +173,12 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     assert result == {"data": [{"id": "msg_1"}]}
     assert activity == {"data": [{"entity": "Knoggin"}]}
     assert entity == {"data": [{"id": 1, "query": "99"}]}
+    assert topic_context == {
+        "data": {
+            "Work": {"entities": [{"name": "Work"}], "messages": []},
+            "Finance": {"entities": [{"name": "Finance"}], "messages": []},
+        }
+    }
     assert file_content == {
         "data": [{"document_id": "file-1", "content": "lines"}]
     }
@@ -182,6 +200,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         ("search_messages", "1234", 5),
         ("get_recent_activity", "Knoggin", 48),
         ("search_entity", "99", 2),
+        ("load_topic_context", ["Work", "Finance"]),
         ("read_document", "file-1", None, 2, 4),
         ("read_web_page", "https://example.test/report", 2, 5, None, None),
         (

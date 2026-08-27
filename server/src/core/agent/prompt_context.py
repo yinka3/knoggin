@@ -99,6 +99,16 @@ def build_user_message(
                     )
                 else:
                     msg += f"- `{tool}`: No results found.\n"
+            elif tool == "load_topic_context":
+                topic_context = data if isinstance(data, dict) else {}
+                if topic_context:
+                    msg += (
+                        f"- `{tool}`: Loaded context for "
+                        f"{len(topic_context)} topic(s).\n"
+                        f"{format_hot_topic_context(topic_context, label='TOPIC')}\n"
+                    )
+                else:
+                    msg += f"- `{tool}`: No results found.\n"
             else:
                 if not data:
                     msg += f"- `{tool}`: No results found\n"
@@ -164,6 +174,15 @@ def _format_evidence(
         for r in results:
             tool = r.get("tool")
             data = r.get("result", {}).get("data")
+            if tool == "load_topic_context" and isinstance(data, dict):
+                new_message_keys = {
+                    _message_evidence_key(message)
+                    for topic_context in data.values()
+                    if isinstance(topic_context, dict)
+                    for message in topic_context.get("messages", [])
+                    if _message_evidence_key(message)
+                }
+                continue
             if not data or not isinstance(data, list):
                 continue
             if tool == "search_entity":
@@ -690,6 +709,33 @@ def update_accumulators(ctx: AgentRun, tool_name: str, result: Dict):
         _merge_unique(ev.sources, items, _source_evidence_key)
         _trim_oldest(ev.sources, cfg.max_accumulated_sources)
 
+    def _acc_topic_context(ev, data, cfg):
+        messages = []
+        for topic_context in data.values() if isinstance(data, dict) else []:
+            if isinstance(topic_context, dict):
+                topic_messages = topic_context.get("messages", [])
+                if isinstance(topic_messages, list):
+                    for message in topic_messages:
+                        if not isinstance(message, dict) or message.get("id") is None:
+                            continue
+                        messages.append(
+                            {
+                                "id": message["id"],
+                                "score": 1.0,
+                                "user_name": message.get("user_name"),
+                                "session_id": message.get("session_id"),
+                                "context": [
+                                    {
+                                        "role": message.get("role", "assistant"),
+                                        "timestamp": message.get("timestamp", ""),
+                                        "content": message.get("message", ""),
+                                        "is_hit": True,
+                                    }
+                                ],
+                            }
+                        )
+        _acc_messages(ev, messages, cfg)
+
     strategies = {
         "search_messages": lambda ev, d, cfg: _acc_messages(ev, d, cfg),
         "search_entity": lambda ev, d, cfg: _acc_unique(
@@ -734,6 +780,7 @@ def update_accumulators(ctx: AgentRun, tool_name: str, result: Dict):
         "web_search": lambda ev, d, cfg: _acc_sources(ev, d, "web_search", cfg),
         "news_search": lambda ev, d, cfg: _acc_sources(ev, d, "news_search", cfg),
         "read_web_page": lambda ev, d, cfg: _acc_web_pages(ev, d, cfg),
+        "load_topic_context": _acc_topic_context,
     }
 
     strategy = strategies.get(tool_name)

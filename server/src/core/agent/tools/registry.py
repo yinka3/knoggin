@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Optional
 import httpx
 
 from common.conf.domain_config import CompiledDomain
+from common.exceptions import ToolExecutionError
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.tool_contracts import (
     CAPABILITY_CLASSES,
@@ -43,6 +44,13 @@ _HEALTH_RUNTIME_INSTRUCTION = (
     "Each health tool is intentionally limited to one call per run. "
     "Health results may describe runtime state but do not authorize any "
     "administrative or mutating action.]"
+)
+
+_TOPIC_CONTEXT_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: load_topic_context retrieves compact supporting context for "
+    "listed active topics. Use it when a topic is materially relevant and deeper "
+    "context is needed; do not use it as a substitute for targeted entity, "
+    "episode, document, or web retrieval.]"
 )
 
 
@@ -98,6 +106,11 @@ TOOL_DEFINITIONS = {
         runtime_instruction=_HEALTH_RUNTIME_INSTRUCTION,
     ),
     "search_entity": _definition("search_entity", default_limit=8),
+    "load_topic_context": _definition(
+        "load_topic_context",
+        default_limit=2,
+        runtime_instruction=_TOPIC_CONTEXT_RUNTIME_INSTRUCTION,
+    ),
     "get_connections": _definition("get_connections", default_limit=8),
     "find_path": _definition("find_path", default_limit=8),
     "search_messages": _definition("search_messages", default_limit=6),
@@ -529,6 +542,32 @@ class Tools(
         return await self.knowledge_retrieval.get_hot_topic_context(
             hot_topics, session_id=self.session_id, slim=slim
         )
+
+    async def load_topic_context(self, topics: list[str]) -> dict:
+        """Load full bounded context for validated active project topics."""
+
+        if self.compiled_domain is None:
+            raise ToolExecutionError(
+                "load_topic_context",
+                "Topic context is unavailable because this run has no project domain.",
+            )
+
+        normalized_topics: list[str] = []
+        invalid_topics: list[str] = []
+        for topic in topics:
+            normalized = self.compiled_domain.normalize_topic(topic)
+            if normalized is None:
+                invalid_topics.append(topic)
+            elif normalized not in normalized_topics:
+                normalized_topics.append(normalized)
+
+        if invalid_topics:
+            raise ToolExecutionError(
+                "load_topic_context",
+                "Unknown or inactive topic(s): " + ", ".join(invalid_topics),
+            )
+
+        return await self.get_hot_topic_context(normalized_topics, slim=False)
 
     async def get_document_manifest(self):
         """Get indexed documents for prompt context."""

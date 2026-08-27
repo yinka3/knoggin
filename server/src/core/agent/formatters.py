@@ -232,8 +232,8 @@ def format_path_results(path: List[Dict]) -> str:
     return header + "".join(steps)
 
 
-def format_hot_topic_context(context: Dict[str, Dict]) -> str:
-    """Format hot topic pre-fetched context."""
+def format_hot_topic_context(context: Dict[str, Dict], *, label: str = "HOT") -> str:
+    """Format compact context for explicit or agent-loaded topics."""
     if not context:
         return ""
 
@@ -241,7 +241,7 @@ def format_hot_topic_context(context: Dict[str, Dict]) -> str:
     for topic, data in context.items():
         entities = data.get("entities", [])
 
-        block = f"[HOT: {topic}]\n"
+        block = f"[{label}: {topic}]\n"
 
         if entities:
             block += "Entities:\n"
