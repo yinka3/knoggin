@@ -481,8 +481,8 @@ class AgentExecutor:
 
     async def _load_project_context(self) -> str:
         """Load canonical project context without making it a run blocker."""
-        workspace_service = getattr(self.tools, "workspace_service", None)
-        reader = getattr(workspace_service, "read_project_context", None)
+        document_service = getattr(self.tools, "document_service", None)
+        reader = getattr(document_service, "read_project_context", None)
         if reader is None:
             return ""
         try:

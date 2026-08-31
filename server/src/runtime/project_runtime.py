@@ -9,7 +9,6 @@ from core.ingestion.text_processor import TextProcessor
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.project.domain_config_store import DomainActivation, DomainConfigStore
-from core.project.workspace_service import ProjectWorkspaceService
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.job.scheduler import Scheduler
 
@@ -30,7 +29,6 @@ class ProjectRuntime:
         readable_project_ids: list[str],
         domain_config: DomainConfig,
         document_service: DocumentService,
-        workspace_service: ProjectWorkspaceService,
         domain_config_store: DomainConfigStore,
         ingestion_pipeline: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
@@ -59,7 +57,6 @@ class ProjectRuntime:
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
         self.document_indexer = document_service.indexer
-        self.workspace_service = workspace_service
 
         self.episode_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []

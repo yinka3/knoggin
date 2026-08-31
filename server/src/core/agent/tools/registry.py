@@ -18,7 +18,7 @@ from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools, create_web_page_http_client
-from core.agent.tools.workspace import WorkspaceTools
+from core.agent.tools.workspace import ProjectFileTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
@@ -144,20 +144,23 @@ TOOL_DEFINITIONS = {
     "check_graph_health": _definition("check_graph_health"),
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
-    "list_workspace_files": _definition("list_workspace_files", default_limit=4),
-    "read_workspace_file": _definition("read_workspace_file", default_limit=4),
-    "create_workspace_file": _definition(
-        "create_workspace_file",
+    "list_files": _definition("list_files", default_limit=4),
+    "read_file": _definition("read_file", default_limit=4),
+    "create_file": _definition(
+        "create_file",
         default_limit=2,
     ),
-    "update_workspace_file": _definition(
-        "update_workspace_file",
+    "update_file": _definition(
+        "update_file",
         default_limit=2,
     ),
-    "append_workspace_file": _definition(
-        "append_workspace_file",
+    "append_file": _definition(
+        "append_file",
         default_limit=2,
     ),
+    "move_file": _definition("move_file", default_limit=2),
+    "delete_file": _definition("delete_file", default_limit=2),
+    "create_folder": _definition("create_folder", default_limit=2),
     "save_insight": _definition("save_insight", default_limit=4),
     "spawn_specialist": _definition("spawn_specialist", default_limit=2),
     "search_insights": _definition("search_insights", default_limit=4),
@@ -444,7 +447,7 @@ class Tools(
     MemoryTools,
     MaintenanceTools,
     HealthTools,
-    WorkspaceTools,
+    ProjectFileTools,
 ):
     def __init__(
         self,
@@ -460,7 +463,6 @@ class Tools(
         postgres=None,
         agent_id: Optional[str] = None,
         health_service=None,
-        workspace_service=None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -478,7 +480,6 @@ class Tools(
         self.readable_project_ids = entities.readable_project_ids
         self.compiled_domain = compiled_domain
         self.document_service = document_service
-        self.workspace_service = workspace_service
         self.document_focus = document_focus
         self.active_topics = (
             list(compiled_domain.active_topics) if compiled_domain else None

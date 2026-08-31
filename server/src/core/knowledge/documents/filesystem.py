@@ -160,6 +160,45 @@ class ProjectFilesystem:
             content_hash=content_hash,
         )
 
+    def move_file(
+        self,
+        source_path: str,
+        destination_path: str,
+        *,
+        expected_content_hash: str | None = None,
+    ) -> ProjectFile:
+        """Atomically move a regular project file to an unused relative path."""
+        source = self._path_for_read(source_path)
+        content = source.read_bytes()
+        content_hash = self._content_hash(content)
+        if expected_content_hash is not None and content_hash != expected_content_hash:
+            raise ProjectFilesystemConflictError("project file changed")
+        destination_normalized = self.normalize_path(destination_path)
+        destination = self._path_for_write(destination_normalized)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(
+                f"project file already exists: {destination_normalized}"
+            )
+        os.replace(source, destination)
+        return ProjectFile(
+            relative_path=destination_normalized,
+            size_bytes=len(content),
+            content_hash=content_hash,
+        )
+
+    def create_folder(self, relative_path: str) -> str:
+        """Create an empty project-relative directory without accepting links."""
+        normalized = self.normalize_path(relative_path)
+        self.ensure_root()
+        folder = self._root.joinpath(*PurePosixPath(normalized).parts)
+        self._ensure_real_parent_directories(folder.parent)
+        if folder.exists() or folder.is_symlink():
+            if folder.is_symlink() or not folder.is_dir():
+                raise FileExistsError(f"project path already exists: {normalized}")
+            return normalized
+        folder.mkdir()
+        return normalized
+
     def iter_files(self, *, limit: int | None = None) -> Iterator[ProjectFile]:
         """Yield regular project files in stable path order without following links."""
         for path in self.iter_paths(limit=limit):

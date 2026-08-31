@@ -5,7 +5,6 @@ from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents import DocumentService
 from core.project.domain_config_store import DomainConfigStore
-from core.project.workspace_service import ProjectWorkspaceService
 from runtime.project_runtime import ProjectRuntime
 from tests.fixtures.fakes import (
     FakeEmbeddingService,
@@ -74,12 +73,6 @@ def make_project_state(
         domain_config=domain_config or make_domain_config(),
         readable_project_ids=[project_id],
         document_service=document_service,
-        workspace_service=ProjectWorkspaceService(
-            project_id=project_id,
-            reader=reader,
-            writer=writer,
-            indexer=document_service.indexer,
-        ),
         domain_config_store=DomainConfigStore(postgres),
         ingestion_pipeline=ingestion_pipeline,
         background_work=background_work,

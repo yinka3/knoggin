@@ -31,7 +31,6 @@ from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
 from core.knowledge.jobs.merge_rollback_cleanup_job import MergeCleanupJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
-from core.project.workspace_service import ProjectWorkspaceService
 from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import ReadyRuntimeResources, RuntimeResources
@@ -135,7 +134,7 @@ class ProjectRuntimeFactory:
             project_id,
             background_work=resources.background_work,
         )
-        document_service, workspace_service = self._create_document_services(
+        document_service = self._create_document_service(
             project_id,
             readable_project_ids=readable_project_ids,
             resources=resources,
@@ -150,7 +149,6 @@ class ProjectRuntimeFactory:
             readable_project_ids=readable_project_ids,
             domain_config=domain_config,
             document_service=document_service,
-            workspace_service=workspace_service,
             domain_config_store=domain_store,
             ingestion_pipeline=ingestion_pipeline,
             background_work=resources.background_work,
@@ -173,13 +171,13 @@ class ProjectRuntimeFactory:
             raise
         return runtime
 
-    def _create_document_services(
+    def _create_document_service(
         self,
         project_id: str,
         *,
         readable_project_ids: list[str],
         resources: ReadyRuntimeResources | None = None,
-    ) -> tuple[DocumentService, ProjectWorkspaceService]:
+    ) -> DocumentService:
         resources = resources or cast(ReadyRuntimeResources, self.resources)
         resource_profile = resources.resource_profile
         runtime_config = ConfigManager.get().config
@@ -225,13 +223,7 @@ class ProjectRuntimeFactory:
                 runtime_config.developer_settings.jobs.document_indexing.reconciliation_interval_seconds
             ),
         )
-        workspace_service = ProjectWorkspaceService(
-            project_id=project_id,
-            reader=reader,
-            writer=writer,
-            indexer=indexer,
-        )
-        return document_service, workspace_service
+        return document_service
 
     async def _verify_user_entity(self, entities: EntityResolver) -> None:
         user_id = await entities.get_id(self.user_name)

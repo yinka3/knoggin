@@ -27,6 +27,7 @@ from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.services.embedding_service import EmbeddingService
+from core.project.project_files import PROJECT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.postgres_client import PostgresClient
 
@@ -265,6 +266,231 @@ class DocumentService:
             "excluded": preview.summary.excluded_count,
         }
 
+    async def list_project_files(
+        self,
+        *,
+        path_prefix: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict]:
+        """List bounded regular files in this project's canonical local tree."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        filesystem = self._filesystem
+        if filesystem is None:
+            return []
+        normalized_prefix = None
+        if path_prefix is not None and path_prefix.strip() not in {"", "."}:
+            normalized_prefix = normalize_relative_path(path_prefix, path_prefix).rstrip("/")
+        files = await self._run_blocking(lambda: list(filesystem.iter_files()))
+        if normalized_prefix is not None:
+            files = [
+                file
+                for file in files
+                if file.relative_path == normalized_prefix
+                or file.relative_path.startswith(normalized_prefix + "/")
+            ]
+        return [
+            {
+                "relative_path": file.relative_path,
+                "original_name": PurePosixPath(file.relative_path).name,
+                "extension": document_extension(file.relative_path),
+                "size_bytes": file.size_bytes,
+                "content_hash": file.content_hash,
+            }
+            for file in files[:limit]
+        ]
+
+    async def read_project_file(
+        self,
+        path: str,
+        *,
+        start_line: int = 1,
+        end_line: Optional[int] = None,
+        max_characters: int = MAX_READ_CHARACTERS,
+    ) -> Dict:
+        """Read a bounded UTF-8 file slice from this project's local tree."""
+        if not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1:
+            raise ValueError("start_line must be a positive integer")
+        if end_line is not None and (
+            not isinstance(end_line, int)
+            or isinstance(end_line, bool)
+            or end_line < start_line
+            or end_line - start_line + 1 > MAX_READ_LINES
+        ):
+            raise ValueError(f"end_line must select at most {MAX_READ_LINES} lines")
+        if (
+            not isinstance(max_characters, int)
+            or isinstance(max_characters, bool)
+            or not 1 <= max_characters <= MAX_READ_CHARACTERS
+        ):
+            raise ValueError(
+                f"max_characters must be between 1 and {MAX_READ_CHARACTERS}"
+            )
+        filesystem = self._filesystem
+        if filesystem is None:
+            raise RuntimeError("No local project filesystem is configured")
+        normalized_path = normalize_relative_path(path, path)
+        content = await self._run_blocking(filesystem.read_bytes, normalized_path)
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("project file is not UTF-8 text") from exc
+        lines = text.splitlines(keepends=True) or [text]
+        if start_line > len(lines):
+            raise ValueError(f"start_line {start_line} exceeds document length {len(lines)}")
+        requested_end = min(
+            end_line or start_line + MAX_READ_LINES - 1,
+            len(lines),
+        )
+        selected = "".join(lines[start_line - 1 : requested_end])
+        character_truncated = len(selected) > max_characters
+        if character_truncated:
+            selected = selected[:max_characters]
+        return {
+            "relative_path": normalized_path,
+            "original_name": PurePosixPath(normalized_path).name,
+            "content": selected,
+            "content_hash": hashlib.sha256(content).hexdigest(),
+            "start_line": start_line,
+            "end_line": requested_end,
+            "total_lines": len(lines),
+            "truncated": character_truncated or requested_end < len(lines),
+        }
+
+    async def read_project_context(self) -> Optional[str]:
+        """Read the canonical project context file without waiting for indexing."""
+        try:
+            return (await self.read_project_file(PROJECT_FILE_PATH))["content"]
+        except FileNotFoundError:
+            return None
+
+    async def create_project_file(self, path: str, content: str) -> Dict:
+        """Create a text project file and reconcile it into the document catalog."""
+        payload = self._validate_project_file_content(path, content)
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        await self._run_blocking(filesystem.write_bytes, normalized_path, payload)
+        await self.reconcile_project_files()
+        return await self.read_project_file(normalized_path)
+
+    async def update_project_file(
+        self,
+        path: str,
+        content: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Replace a text project file only when its caller has the current hash."""
+        payload = self._validate_project_file_content(path, content)
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        await self._run_blocking(
+            filesystem.write_bytes,
+            normalized_path,
+            payload,
+            overwrite=True,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return await self.read_project_file(normalized_path)
+
+    async def append_project_file(
+        self,
+        path: str,
+        content: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Append text to a project file under the same stale-write guard."""
+        if not isinstance(content, str) or not content:
+            raise ValueError("content must not be empty")
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        current = await self._run_blocking(filesystem.read_bytes, normalized_path)
+        payload = current + content.encode("utf-8")
+        self._validate_project_file_bytes(normalized_path, payload)
+        await self._run_blocking(
+            filesystem.write_bytes,
+            normalized_path,
+            payload,
+            overwrite=True,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return await self.read_project_file(normalized_path)
+
+    async def move_project_file(
+        self,
+        source_path: str,
+        destination_path: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Move a project file to an unused path under optimistic concurrency."""
+        filesystem = self._require_filesystem()
+        source = normalize_relative_path(source_path, source_path)
+        destination = normalize_relative_path(destination_path, destination_path)
+        self._validate_project_file_extension(destination)
+        await self._run_blocking(
+            filesystem.move_file,
+            source,
+            destination,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return await self.read_project_file(destination)
+
+    async def delete_project_file(
+        self,
+        path: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Delete one project file and reconcile the durable catalog tombstone."""
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        deleted = await self._run_blocking(
+            filesystem.delete_file,
+            normalized_path,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return {
+            "relative_path": deleted.relative_path,
+            "content_hash": deleted.content_hash,
+            "deleted": True,
+        }
+
+    async def create_project_folder(self, path: str) -> Dict:
+        """Create an empty project directory without introducing catalog state."""
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        return {"relative_path": await self._run_blocking(filesystem.create_folder, normalized_path)}
+
+    def _require_filesystem(self) -> ProjectFilesystem:
+        filesystem = self._filesystem
+        if filesystem is None:
+            raise RuntimeError("No local project filesystem is configured")
+        return filesystem
+
+    @staticmethod
+    def _validate_project_file_extension(path: str) -> None:
+        extension = document_extension(path)
+        if extension not in ACCEPTED_EXTENSIONS - {".pdf", ".docx", *IMAGE_EXTENSIONS}:
+            raise ValueError("agent project files must be text, code, or configuration")
+
+    def _validate_project_file_content(self, path: str, content: str) -> bytes:
+        if not isinstance(content, str) or not content:
+            raise ValueError("content must not be empty")
+        payload = content.encode("utf-8")
+        self._validate_project_file_bytes(path, payload)
+        return payload
+
+    def _validate_project_file_bytes(self, path: str, content: bytes) -> None:
+        self._validate_project_file_extension(path)
+        if len(content) > MAX_DOCUMENT_SIZE:
+            raise ValueError("document exceeds the 50 MB size limit")
+
     async def preview_folder(
         self,
         *,
@@ -499,7 +725,7 @@ class DocumentService:
         )
         if source.get("ownership_mode", "external_sync") != "external_sync":
             raise ValueError(
-                "managed project workspace sources must use ProjectWorkspaceService"
+                "managed project workspace sources are no longer supported"
             )
         validated_entries = [
             entry
@@ -580,7 +806,7 @@ class DocumentService:
         )
         if source.get("ownership_mode", "external_sync") != "external_sync":
             raise ValueError(
-                "managed project workspace sources must use ProjectWorkspaceService"
+                "managed project workspace sources are no longer supported"
             )
         validated_changes = (
             changes

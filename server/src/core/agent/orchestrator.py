@@ -229,7 +229,6 @@ class AgentOrchestrator:
             compiled_domain=context.project.compiled_domain,
             search_config=search_cfg,
             document_service=context.document_service,
-            workspace_service=getattr(context.project, "workspace_service", None),
             document_focus=(
                 dump_document_focus(document_focus)
                 if document_focus is not None

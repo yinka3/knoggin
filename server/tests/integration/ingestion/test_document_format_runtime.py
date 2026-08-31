@@ -184,7 +184,6 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         entities=resolver,
         compiled_domain=make_domain_config().compile(),
         knowledge_retrieval=retrieval,
-        workspace_service=None,
     )
     context.document_service = documents
     context.ingestion_worker = _SignalCounter()

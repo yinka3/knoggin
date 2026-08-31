@@ -58,7 +58,7 @@ async def test_executor_loads_missing_or_unreadable_project_context_non_fatally(
     async def fail_reader():
         raise RuntimeError("workspace unavailable")
 
-    executor.tools.workspace_service = SimpleNamespace(
+    executor.tools.document_service = SimpleNamespace(
         read_project_context=fail_reader
     )
     assert await executor._load_project_context() == ""
@@ -71,7 +71,7 @@ async def test_executor_loads_canonical_project_context_directly():
     async def read_context():
         return "# Project\nUse the repository conventions."
 
-    executor.tools.workspace_service = SimpleNamespace(
+    executor.tools.document_service = SimpleNamespace(
         read_project_context=read_context
     )
     assert await executor._load_project_context() == (

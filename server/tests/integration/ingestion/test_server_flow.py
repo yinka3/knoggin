@@ -587,7 +587,6 @@ async def test_real_document_request_persists_document_source_provenance(
         entities=resolver,
         compiled_domain=make_domain_config().compile(),
         knowledge_retrieval=retrieval,
-        workspace_service=None,
     )
     context.document_service = documents
     context.ingestion_worker = _SignalCounter()
@@ -765,7 +764,6 @@ async def test_real_document_selection_request_persists_selection_provenance(
         entities=resolver,
         compiled_domain=make_domain_config().compile(),
         knowledge_retrieval=retrieval,
-        workspace_service=None,
     )
     context.document_service = documents
     context.ingestion_worker = _SignalCounter()

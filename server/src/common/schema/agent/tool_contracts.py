@@ -1020,11 +1020,11 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_workspace_files",
+            "name": "list_files",
             "description": (
                 "List bounded metadata for files in the current project's "
-                "managed workspace. This is project-scoped and does not expose "
-                "the host filesystem."
+                "local project folder. This is project-scoped and does not expose "
+                "the host filesystem outside that folder."
             ),
             "parameters": {
                 "type": "object",
@@ -1044,16 +1044,16 @@ TOOL_SCHEMAS = [
                 "required": [],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:read", "project", "core"],
+            "tags": ["project-files:read", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "read_workspace_file",
+            "name": "read_file",
             "description": (
                 "Read a bounded line and character slice from one file in the "
-                "current project's managed workspace. PROJECT.md is readable "
+                "current project's local folder. PROJECT.md is readable "
                 "but remains user-owned."
             ),
             "parameters": {
@@ -1063,7 +1063,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative managed-workspace file path.",
+                        "description": "Relative project-file path.",
                     },
                     "start_line": {
                         "type": "integer",
@@ -1085,16 +1085,16 @@ TOOL_SCHEMAS = [
                 "required": ["path"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:read", "project", "core"],
+            "tags": ["project-files:read", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "create_workspace_file",
+            "name": "create_file",
             "description": (
                 "Create a non-empty bounded artifact in the current project's "
-                "managed workspace. Ordinary agent tools cannot create or edit "
+                "local project folder. Ordinary agent tools cannot create or edit "
                 "the user-owned PROJECT.md."
             ),
             "parameters": {
@@ -1104,7 +1104,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative path for the new workspace artifact.",
+                        "description": "Relative path for the new project file.",
                     },
                     "content": {
                         "type": "string",
@@ -1116,15 +1116,15 @@ TOOL_SCHEMAS = [
                 "required": ["path", "content"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:write", "project", "core"],
+            "tags": ["project-files:write", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "update_workspace_file",
+            "name": "update_file",
             "description": (
-                "Replace a managed workspace artifact using optimistic "
+                "Replace a project file using optimistic "
                 "concurrency. The supplied SHA-256 content hash must still be "
                 "current; PROJECT.md cannot be changed by this ordinary tool."
             ),
@@ -1135,7 +1135,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative path of the workspace artifact.",
+                        "description": "Relative path of the project file.",
                     },
                     "content": {
                         "type": "string",
@@ -1153,15 +1153,15 @@ TOOL_SCHEMAS = [
                 "required": ["path", "content", "expected_content_hash"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:write", "project", "core"],
+            "tags": ["project-files:write", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "append_workspace_file",
+            "name": "append_file",
             "description": (
-                "Append bounded UTF-8 content to a managed workspace artifact "
+                "Append bounded UTF-8 content to a project file "
                 "using an expected SHA-256 content hash. PROJECT.md cannot be "
                 "changed by this ordinary tool."
             ),
@@ -1172,7 +1172,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative path of the workspace artifact.",
+                        "description": "Relative path of the project file.",
                     },
                     "content": {
                         "type": "string",
@@ -1190,9 +1190,60 @@ TOOL_SCHEMAS = [
                 "required": ["path", "content", "expected_content_hash"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:write", "project", "core"],
+            "tags": ["project-files:write", "project", "core"],
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_file",
+            "description": "Move one current-project file to an unused relative path using its current SHA-256 hash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "destination_path": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "expected_content_hash": {"type": "string", "minLength": 64, "maxLength": 64},
+                },
+                "required": ["source_path", "destination_path", "expected_content_hash"],
+                "additionalProperties": False,
+            },
+            "tags": ["project-files:write", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete one current-project file only when its SHA-256 hash is current.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "expected_content_hash": {"type": "string", "minLength": 64, "maxLength": 64},
+                },
+                "required": ["path", "expected_content_hash"],
+                "additionalProperties": False,
+            },
+            "tags": ["project-files:write", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_folder",
+            "description": "Create an empty directory inside the current project's local folder.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 512},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "tags": ["project-files:write", "project", "core"],
+        },
+    },
 ]
 
 READ_CAPABILITY = "read"
@@ -1225,9 +1276,12 @@ _TOOL_CAPABILITIES = {
     "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
-    "create_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
-    "update_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
-    "append_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
+    "create_file": REVERSIBLE_WRITE_CAPABILITY,
+    "update_file": REVERSIBLE_WRITE_CAPABILITY,
+    "append_file": REVERSIBLE_WRITE_CAPABILITY,
+    "move_file": REVERSIBLE_WRITE_CAPABILITY,
+    "delete_file": REVERSIBLE_WRITE_CAPABILITY,
+    "create_folder": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:

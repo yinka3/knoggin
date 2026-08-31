@@ -1972,6 +1972,49 @@ async def test_reconciliation_catalogs_local_changes_and_tombstones_missing_file
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_native_project_file_operations_reconcile_the_document_catalog(
+    document_harness,
+):
+    service, postgres = document_harness
+
+    created = await service.create_project_file("notes/draft.md", "one\n")
+    listed = await service.list_project_files(path_prefix="notes")
+    updated = await service.update_project_file(
+        "notes/draft.md",
+        "two\n",
+        expected_content_hash=created["content_hash"],
+    )
+    appended = await service.append_project_file(
+        "notes/draft.md",
+        "three\n",
+        expected_content_hash=updated["content_hash"],
+    )
+    moved = await service.move_project_file(
+        "notes/draft.md",
+        "notes/archive.md",
+        expected_content_hash=appended["content_hash"],
+    )
+
+    assert [entry["relative_path"] for entry in listed] == ["notes/draft.md"]
+    assert moved["relative_path"] == "notes/archive.md"
+    assert moved["content"] == "two\nthree\n"
+    assert await service.create_project_folder("notes/empty") == {
+        "relative_path": "notes/empty"
+    }
+
+    deleted = await service.delete_project_file(
+        "notes/archive.md",
+        expected_content_hash=moved["content_hash"],
+    )
+    assert deleted["deleted"] is True
+    assert any(
+        row["relative_path"] == "notes/draft.md" and row["status"] == "deleted"
+        for row in postgres.rows
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_indexer_reconciles_project_files_when_the_runtime_starts(
     document_harness,
 ):

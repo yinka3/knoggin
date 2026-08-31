@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import uuid
 from collections.abc import Mapping
@@ -9,10 +8,10 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from common.conf.domain_config import DomainConfig
+from common.conf.manager import ConfigManager
 from common.scoping import build_readable_project_ids
-from common.utils.time_utils import get_now_iso
-from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
+from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.project.domain_config_operations import (
     DomainCandidate,
     DomainPreview,
@@ -30,7 +29,7 @@ from core.project.domain_config_store import (
     DomainConfigStore,
 )
 from core.project.maintenance_service import ProjectMaintenanceService
-from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
+from core.project.project_files import PROJECT_FILE_PATH, build_project_markdown
 from runtime.project_factory import ProjectRuntimeFactory
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -77,7 +76,13 @@ def _parse_initial_domain(
 class ProjectManager:
     """Manages the lifecycle and storage of Projects."""
 
-    def __init__(self, resources: RuntimeResources, user_name: str):
+    def __init__(
+        self,
+        resources: RuntimeResources,
+        user_name: str,
+        *,
+        filesystem_factory: ProjectFilesystemFactory | None = None,
+    ):
         self.resources = resources
         self.user_name = user_name
         self.project_factory = ProjectRuntimeFactory(
@@ -86,6 +91,9 @@ class ProjectManager:
             episode_window_size_provider=self.get_episode_window_size,
         )
         self.pg = resources.postgres
+        self._filesystem_factory = filesystem_factory or ProjectFilesystemFactory(
+            ConfigManager.get().config.developer_settings.documents.project_library_root
+        )
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.active_projects: Dict[str, ProjectRuntime] = {}
         self._project_leases: Dict[str, set[str]] = {}
@@ -130,47 +138,44 @@ class ProjectManager:
             )
             VALUES (%(user_name)s, %(project_id)s, %(readable)s)
         """
-        project_workspace_writer = DocumentWriter(self.pg, project_id)
-        workspace_source_id = str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"knoggin-project-workspace:{project_id}",
-            )
-        )
         project_file_content = build_project_markdown(name, description).encode("utf-8")
-        project_file_hash = hashlib.sha256(project_file_content).hexdigest()
-        async with self.pg.transaction() as cur:
-            await cur.execute(
-                project_query,
-                {
-                    "project_id": project_id,
-                    "user_name": self.user_name,
-                    "name": name,
-                    "description": description,
-                    "status": ProjectStatus.ACTIVE.value,
-                    "domain_config": json.dumps(active_domain.to_dict()),
-                },
-            )
-            for allowed_id in allowed_projects:
+        filesystem = self._filesystem_factory.for_project(project_id)
+        await asyncio.to_thread(
+            filesystem.write_bytes,
+            PROJECT_FILE_PATH,
+            project_file_content,
+        )
+        try:
+            async with self.pg.transaction() as cur:
                 await cur.execute(
-                    scope_query,
+                    project_query,
                     {
-                        "user_name": self.user_name,
                         "project_id": project_id,
-                        "readable": allowed_id,
+                        "user_name": self.user_name,
+                        "name": name,
+                        "description": description,
+                        "status": ProjectStatus.ACTIVE.value,
+                        "domain_config": json.dumps(active_domain.to_dict()),
                     },
                 )
-            await project_workspace_writer.insert_managed_workspace_source_and_file(
-                cursor=cur,
-                source_id=workspace_source_id,
-                display_name="Project Workspace",
-                relative_path=PROJECT_FILE_PATH,
-                original_name=PROJECT_FILE_PATH,
-                extension=".md",
-                content=project_file_content,
-                content_hash=project_file_hash,
-                created_at=get_now_iso(),
-            )
+                for allowed_id in allowed_projects:
+                    await cur.execute(
+                        scope_query,
+                        {
+                            "user_name": self.user_name,
+                            "project_id": project_id,
+                            "readable": allowed_id,
+                        },
+                    )
+        except Exception:
+            try:
+                await asyncio.to_thread(
+                    filesystem.delete_file,
+                    PROJECT_FILE_PATH,
+                )
+            except Exception:
+                logger.exception("Could not roll back PROJECT.md after project creation failed")
+            raise
 
         logger.info(f"Created project {project_id} ('{name}')")
         return await self.get_project(project_id)
