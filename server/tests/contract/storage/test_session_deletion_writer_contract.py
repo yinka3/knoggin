@@ -38,7 +38,7 @@ class RecordingClient:
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_session_deletion_tombstones_session_and_preserves_message_evidence():
+async def test_session_deletion_tombstones_only_session_state_and_preserves_evidence():
     client = RecordingClient()
     writer = SessionDeletionWriter(client)
 
@@ -46,36 +46,35 @@ async def test_session_deletion_tombstones_session_and_preserves_message_evidenc
 
     assert client.transaction_exits == ["commit"]
     queries = [query for query, _ in client.cursor.calls]
-    assert "UPDATE public.project_documents" in queries[0]
+    assert len(queries) == 1
+    assert "UPDATE public.sessions" in queries[0]
     assert "status = 'deleted'" in queries[0]
-    assert "DELETE FROM public.document_chunks" in queries[1]
-    assert "DELETE FROM public.document_content" in queries[2]
-    assert "UPDATE public.project_documents" in queries[3]
-    assert "DELETE FROM public.document_folder_uploads" in queries[4]
-    assert "DELETE FROM public.document_workspace_sources" in queries[5]
-    assert "UPDATE public.sessions" in queries[6]
-    assert "status = 'deleted'" in queries[6]
     assert not any("DELETE FROM public.messages" in query for query in queries)
     assert not any("DELETE FROM public.sessions" in query for query in queries)
     assert not any("UPDATE public.messages" in query for query in queries)
+    assert not any("project_documents" in query for query in queries)
+    assert not any("document_chunks" in query for query in queries)
+    assert not any("document_content" in query for query in queries)
+    assert not any("document_folder_uploads" in query for query in queries)
+    assert not any("document_workspace_sources" in query for query in queries)
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_session_deletion_rolls_back_when_document_cleanup_fails():
+async def test_session_deletion_rolls_back_when_session_tombstone_fails():
     client = RecordingClient()
     writer = SessionDeletionWriter(client)
 
     original_execute = client.cursor.execute
 
-    async def fail_document_cleanup(query, params=None):
-        if "UPDATE public.project_documents" in query and "status = 'deleted'" in query:
-            raise RuntimeError("injected document deletion failure")
+    async def fail_session_tombstone(query, params=None):
+        if "UPDATE public.sessions" in query and "status = 'deleted'" in query:
+            raise RuntimeError("injected session tombstone failure")
         await original_execute(query, params)
 
-    client.cursor.execute = fail_document_cleanup
+    client.cursor.execute = fail_session_tombstone
 
-    with pytest.raises(RuntimeError, match="injected document deletion failure"):
+    with pytest.raises(RuntimeError, match="injected session tombstone failure"):
         await writer.delete_session(user_name="ada", session_id="session-1")
 
     assert client.transaction_exits == ["rollback"]
@@ -121,7 +120,7 @@ async def test_session_deletion_preserves_canonical_messages(
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_session_deletion_tombstones_documents_and_removes_all_document_roots(
+async def test_session_deletion_preserves_project_library_rows(
     real_postgres_client,
 ):
     writer = SessionDeletionWriter(real_postgres_client)
@@ -203,29 +202,29 @@ async def test_session_deletion_tombstones_documents_and_removes_all_document_ro
     ) == {"status": "deleted"}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
-        "WHERE session_id = 'session-1' AND status = 'deleted'"
+        "WHERE session_id = 'session-1' AND status <> 'deleted'"
     ) == {"count": 2}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.document_content "
         "WHERE document_id = '33333333-3333-4333-8333-333333333333'"
-    ) == {"count": 0}
+    ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.document_folder_uploads "
         "WHERE session_id = 'session-1'"
-    ) == {"count": 0}
+    ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.document_workspace_sources "
         "WHERE session_id = 'session-1'"
-    ) == {"count": 0}
+    ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         """
         SELECT count(*) AS count
         FROM public.project_documents
         WHERE session_id = 'session-1'
-          AND source_id IS NULL
-          AND folder_root_id IS NULL
+          AND source_id IS NOT NULL
+          AND folder_root_id IS NOT NULL
         """
-    ) == {"count": 2}
+    ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
         "WHERE document_id IN (\n"
