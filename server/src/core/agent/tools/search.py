@@ -861,7 +861,6 @@ class SearchTools:
         document_name: str = None,
         relative_path: str = None,
         path_prefix: str = None,
-        folder_root_id: str = None,
         limit: int = 5,
         use_focus: bool = True,
     ) -> List[Dict]:
@@ -873,7 +872,6 @@ class SearchTools:
             document_name: Optional document name to restrict search
             relative_path: Optional exact path to restrict search
             path_prefix: Optional subtree to restrict search
-            folder_root_id: Optional folder upload batch
             limit: Max chunks to return
 
         Returns:
@@ -908,7 +906,6 @@ class SearchTools:
                     "search_documents is restricted to the selected document"
                 )
             relative_path = None
-            folder_root_id = None
             path_prefix = None
         document_filter = request_document_id
         if request_document_id is None and (
@@ -916,13 +913,11 @@ class SearchTools:
             and document_name is None
             and relative_path is None
             and path_prefix is None
-            and folder_root_id is None
             and self.document_focus
         ):
             if self.document_focus["target_type"] == "document":
                 document_filter = self.document_focus["document_id"]
             else:
-                folder_root_id = self.document_focus.get("folder_root_id")
                 path_prefix = self.document_focus.get("path_prefix")
 
         if document_filter is not None:
@@ -934,7 +929,6 @@ class SearchTools:
         else:
             visible_documents = await self.document_service.list_documents(
                 session_id=self.session_id,
-                folder_root_id=folder_root_id,
                 path_prefix=path_prefix,
                 limit=1000,
             )
@@ -990,7 +984,6 @@ class SearchTools:
             session_id=self.session_id,
             n_results=limit,
             document_filter=document_filter,
-            folder_root_id=folder_root_id,
             relative_path=relative_path,
             path_prefix=path_prefix,
         )

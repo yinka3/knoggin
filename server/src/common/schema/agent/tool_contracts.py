@@ -612,10 +612,6 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": "Optional exact path or subtree prefix.",
                     },
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": "Optional folder ID (for example folder_a3f91c).",
-                    },
                     "limit": {
                         "type": "integer",
                         "description": "Max chunks to return (default 5).",

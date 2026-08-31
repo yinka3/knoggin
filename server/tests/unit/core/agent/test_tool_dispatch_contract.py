@@ -139,26 +139,6 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         "read_web_page",
         {"url": "https://example.test/report.pdf", "page_number": "2"},
     )
-    uploads = await execute_tool(
-        tools,
-        "list_folder_uploads",
-        {"visibility_scope": "project", "limit": "7"},
-    )
-    summary = await execute_tool(
-        tools,
-        "get_folder_upload_summary",
-        {"folder_root_id": "folder-1"},
-    )
-    tree = await execute_tool(
-        tools,
-        "list_folder_tree",
-        {
-            "folder_root_id": "folder-1",
-            "path_prefix": "src",
-            "max_depth": "4",
-            "use_focus": "false",
-        },
-    )
     episode = await execute_tool(
         tools,
         "episode_check",
@@ -191,9 +171,6 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     assert pdf_page_content == {
         "data": [{"url": "https://example.test/report.pdf", "content": "page lines"}]
     }
-    assert uploads == {"data": [{"folder_root_id": "folder-1"}]}
-    assert summary == {"data": {"folder_root_id": "folder-1"}}
-    assert tree == {"data": [{"name": "src", "type": "directory"}]}
     assert episode == {"data": {"resolution": "exact"}}
     assert expanded_episode == {"data": [{"id": "42"}]}
     assert tools.calls == [
@@ -212,9 +189,6 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
             None,
         ),
         ("read_web_page", "https://example.test/report.pdf", None, 150, None, 2),
-        ("list_folder_uploads", "project", 7),
-        ("get_folder_upload_summary", "folder-1"),
-        ("list_folder_tree", "folder-1", "src", 4, False),
         ("episode_check", "What changed?", "7"),
         ("read_episode", "42"),
     ]

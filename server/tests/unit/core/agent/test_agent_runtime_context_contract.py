@@ -738,17 +738,6 @@ def test_update_accumulators_ignores_errors_and_empty_results():
         ("search_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
         ("list_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
         (
-            "list_folder_uploads",
-            {"data": [{"folder_root_id": "folder-1"}]},
-            ("Found 1 items", 1),
-        ),
-        ("list_folder_tree", {"data": []}, ("Found 0 items", 0)),
-        (
-            "get_folder_upload_summary",
-            {"data": {"folder_root_id": "folder-1"}},
-            ("Loaded folder upload summary", 1),
-        ),
-        (
             "read_document",
             {"data": [{"content": "lines"}]},
             ("Read document content", 1),

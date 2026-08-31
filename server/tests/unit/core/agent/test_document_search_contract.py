@@ -222,22 +222,17 @@ class ReadOnlyDocumentService:
 
 
 @pytest.mark.no_network
-def test_folder_document_tool_schemas_expose_expected_filters():
+def test_document_tool_schemas_expose_path_filters_without_folder_handles():
     schemas = {
         schema["function"]["name"]: schema["function"] for schema in TOOL_SCHEMAS
     }
 
     assert {
         "list_documents",
-        "list_folder_uploads",
-        "get_folder_upload_summary",
-        "list_folder_tree",
         "search_documents",
     }.issubset(schemas)
     assert set(schemas["list_documents"]["parameters"]["properties"]) == {
-        "folder_root_id",
         "path_prefix",
-        "visibility_scope",
         "limit",
         "use_focus",
     }
@@ -246,11 +241,9 @@ def test_folder_document_tool_schemas_expose_expected_filters():
         "document_name",
         "relative_path",
         "path_prefix",
-        "folder_root_id",
         "limit",
         "use_focus",
     }
-    assert schemas["list_folder_tree"]["parameters"]["required"] == []
 
 
 @pytest.mark.no_network
@@ -337,9 +330,7 @@ async def test_read_only_document_tools_pass_session_scope_and_bounds():
     tools.session_id = "session-1"
 
     documents = await tools.list_documents(
-        folder_root_id="folder-1",
         path_prefix="docs",
-        visibility_scope="project",
         limit=10,
     )
     info = await tools.get_document_info(document_id="file-1")
@@ -356,9 +347,9 @@ async def test_read_only_document_tools_pass_session_scope_and_bounds():
         (
             "list_documents",
             "session-1",
-            "folder-1",
+            None,
             "docs",
-            "project",
+            None,
             10,
         ),
         ("get_document_info", "session-1", "file-1", None),
@@ -384,48 +375,28 @@ async def test_list_documents_validates_limit():
 
 
 @pytest.mark.no_network
-async def test_folder_read_tools_propagate_session_and_filters():
+async def test_folder_read_tools_are_not_exposed():
     document_service = ReadOnlyDocumentService()
     tools = SearchTools()
     tools.document_service = document_service
     tools.session_id = "session-1"
 
-    uploads = await tools.list_folder_uploads(
-        visibility_scope="session",
-        limit=10,
-    )
-    summary = await tools.get_folder_upload_summary("folder-1")
-    tree = await tools.list_folder_tree(
-        "folder-1",
-        path_prefix="docs",
-        max_depth=4,
-    )
-
-    assert uploads[0]["folder_root_id"] == "folder-1"
-    assert summary["document_count"] == 1
-    assert tree[0]["relative_path"] == "docs"
-    assert document_service.calls == [
-        ("list_folder_uploads", "session-1", "session", 10),
-        ("get_folder_upload_summary", "session-1", "folder-1", None),
-        ("list_folder_tree", "session-1", "folder-1", "docs", 4),
-    ]
+    assert not hasattr(tools, "list_folder_uploads")
+    assert not hasattr(tools, "get_folder_upload_summary")
+    assert not hasattr(tools, "list_folder_tree")
 
 
 @pytest.mark.no_network
-async def test_folder_read_tools_validate_bounds():
+async def test_folder_read_tools_have_no_legacy_boundaries():
     tools = SearchTools()
     tools.document_service = ReadOnlyDocumentService()
     tools.session_id = "session-1"
 
-    with pytest.raises(ValueError, match="between 1 and 100"):
-        await tools.list_folder_uploads(limit=101)
-
-    with pytest.raises(ValueError, match="between 1 and 10"):
-        await tools.list_folder_tree("folder-1", max_depth=11)
+    assert not hasattr(tools, "list_folder_uploads")
 
 
 @pytest.mark.no_network
-async def test_search_documents_passes_folder_and_path_prefix_filters():
+async def test_search_documents_passes_path_prefix_filters():
     document_service = SearchableDocumentService(
         [
             {
@@ -442,7 +413,6 @@ async def test_search_documents_passes_folder_and_path_prefix_filters():
 
     await tools.search_documents(
         "alpha",
-        folder_root_id="folder-1",
         path_prefix="docs",
     )
 
@@ -452,7 +422,7 @@ async def test_search_documents_passes_folder_and_path_prefix_filters():
             "session_id": "session-1",
             "n_results": 5,
             "document_filter": None,
-            "folder_root_id": "folder-1",
+                "folder_root_id": None,
             "relative_path": None,
             "path_prefix": "docs",
         }
@@ -905,29 +875,16 @@ async def test_subtree_focus_defaults_filters_and_explicit_values_override():
     tools.document_service = document_service
     tools.document_focus = {
         "target_type": "subtree",
-        "folder_root_id": "folder-1",
         "path_prefix": "src",
     }
     tools.session_id = "session-1"
 
     await tools.list_documents()
-    await tools.get_folder_upload_summary()
-    await tools.list_folder_tree(path_prefix="tests")
-    await tools.list_documents(
-        folder_root_id="folder-2",
-        path_prefix="docs",
-    )
+    await tools.list_documents(path_prefix="docs")
     await tools.list_documents(use_focus=False)
 
     assert document_service.calls == [
-        ("list_documents", "session-1", "folder-1", "src", None, 50),
-        (
-            "get_folder_upload_summary",
-            "session-1",
-            "folder-1",
-            "src",
-        ),
-        ("list_folder_tree", "session-1", "folder-1", "tests", 3),
-        ("list_documents", "session-1", "folder-2", "docs", None, 50),
+        ("list_documents", "session-1", None, "src", None, 50),
+        ("list_documents", "session-1", None, "docs", None, 50),
         ("list_documents", "session-1", None, None, None, 50),
     ]
