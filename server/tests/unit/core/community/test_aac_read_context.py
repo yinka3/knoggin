@@ -46,7 +46,7 @@ async def test_aac_document_reader_never_grants_session_private_visibility():
         embedding_service=FakeEmbeddingService(),
     )
 
-    await context.documents.list_documents(session_id=None, limit=10)
+    await context.documents.list_documents(limit=10)
     query = postgres.calls[-1][1]
     assert "visibility_scope = 'project'" in query
     assert "visibility_scope = 'session'" in query

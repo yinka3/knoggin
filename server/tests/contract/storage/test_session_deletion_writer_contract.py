@@ -134,22 +134,20 @@ async def test_session_deletion_preserves_project_library_rows(
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, session_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         ) VALUES
             (
-                '33333333-3333-4333-8333-333333333333', 'project-1', 'session-1',
-                'session', 'manual_upload', 'session.txt', 'session.txt', '.txt', 7, 'session-hash'
+                '33333333-3333-4333-8333-333333333333', 'project-1',
+                'first.txt', 'first.txt', '.txt', 7, 'first-hash'
             ),
             (
-                '55555555-5555-4555-8555-555555555555', 'project-1', 'session-2',
-                'session', 'manual_upload', 'other-session.txt',
-                'other-session.txt', '.txt', 7, 'other-session-hash'
+                '55555555-5555-4555-8555-555555555555', 'project-1',
+                'second.txt', 'second.txt', '.txt', 7, 'second-hash'
             ),
             (
-                '66666666-6666-4666-8666-666666666666', 'project-1', NULL,
-                'project', 'manual_upload', 'project-only.txt', 'project-only.txt',
-                '.txt', 7, 'project-only-hash'
+                '66666666-6666-4666-8666-666666666666', 'project-1',
+                'third.txt', 'third.txt', '.txt', 7, 'third-hash'
             )
         """
     )
@@ -170,8 +168,8 @@ async def test_session_deletion_preserves_project_library_rows(
     ) == {"status": "deleted"}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
-        "WHERE session_id = 'session-1' AND status <> 'deleted'"
-    ) == {"count": 1}
+        "WHERE project_id = 'project-1' AND status <> 'deleted'"
+    ) == {"count": 3}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.document_content "
         "WHERE document_id = '33333333-3333-4333-8333-333333333333'"

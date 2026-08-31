@@ -42,7 +42,6 @@ from .constants import (
     MAX_DOCUMENT_SIZE,
     MAX_READ_CHARACTERS,
     MAX_READ_LINES,
-    VALID_VISIBILITY_SCOPES,
     document_extension,
 )
 from .filesystem import ProjectFilesystem, ProjectFilesystemFactory
@@ -143,19 +142,13 @@ class DocumentService:
         return self._filesystem_factory.for_project(self.project_id)
 
     def _filesystem_for_document(self, document: Dict) -> ProjectFilesystem | None:
-        if (
-            self._filesystem_factory is None
-            or document.get("source_kind") != "manual_upload"
-            or document.get("visibility_scope") != "project"
-        ):
+        if self._filesystem_factory is None:
             return None
         return self._filesystem_factory.for_project(document["project_id"])
 
     async def _read_source_bytes(
         self,
         document: Dict,
-        *,
-        session_id: Optional[str],
     ) -> bytes | None:
         filesystem = self._filesystem_for_document(document)
         if filesystem is not None:
@@ -165,7 +158,6 @@ class DocumentService:
             )
         return await self._reader.fetch_document_content(
             document_id=str(document["document_id"]),
-            session_id=session_id,
         )
 
     async def reconcile_project_files(self) -> Dict[str, int]:
@@ -207,7 +199,7 @@ class DocumentService:
         )
         content_by_path = {entry.relative_path: entry.content for entry in entries}
         desired = {entry.relative_path: entry for entry in preview.included}
-        current_rows = await self._reader.list_manual_documents_for_reconciliation(
+        current_rows = await self._reader.list_documents_for_reconciliation(
             limit=_RECONCILIATION_MAX_FILES + 1,
         )
         current = {
@@ -230,15 +222,12 @@ class DocumentService:
             if existing is not None:
                 await self._writer.delete_document(
                     document_id=str(existing["document_id"]),
-                    session_id=None,
                 )
                 changed += 1
             else:
                 created += 1
             await self._writer.insert_document(
                 document_id=str(uuid.uuid4()),
-                session_id=None,
-                visibility_scope="project",
                 original_name=preview_entry.original_name,
                 relative_path=relative_path,
                 extension=preview_entry.extension,
@@ -250,7 +239,6 @@ class DocumentService:
         for document in current.values():
             await self._writer.delete_document(
                 document_id=str(document["document_id"]),
-                session_id=None,
             )
             deleted += 1
         if created or changed or deleted:
@@ -555,18 +543,6 @@ class DocumentService:
         return normalized.rstrip("/")
 
     @staticmethod
-    def _validate_visibility(
-        visibility_scope: str,
-        session_id: Optional[str],
-    ) -> None:
-        if visibility_scope not in VALID_VISIBILITY_SCOPES:
-            raise ValueError(
-                "visibility_scope must be either 'project' or 'session'"
-            )
-        if visibility_scope == "session" and not session_id:
-            raise ValueError("session-visible documents require session_id")
-
-    @staticmethod
     def _public_metadata(row: Dict) -> Dict:
         metadata = dict(row)
         if metadata.get("document_id") is not None:
@@ -581,15 +557,13 @@ class DocumentService:
     async def _get_visible_document(
         self,
         *,
-        session_id: Optional[str],
         document_id: Optional[str],
         relative_path: Optional[str],
     ) -> Dict:
-        """Resolve exactly one non-deleted document visible to this session."""
+        """Resolve exactly one non-deleted document visible to this project."""
         rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
             relative_path=relative_path,
-            session_id=session_id,
         )
         if not rows:
             raise FileNotFoundError("Document not found")
@@ -602,7 +576,6 @@ class DocumentService:
     async def get_document_info(
         self,
         *,
-        session_id: Optional[str] = None,
         document_id: Optional[str] = None,
         relative_path: Optional[str] = None,
     ) -> Dict:
@@ -610,14 +583,12 @@ class DocumentService:
         document = await self._get_visible_document(
             document_id=document_id,
             relative_path=relative_path,
-            session_id=session_id,
         )
         return self._public_metadata(document)
 
     async def read_document(
         self,
         *,
-        session_id: Optional[str] = None,
         document_id: Optional[str] = None,
         relative_path: Optional[str] = None,
         page_number: Optional[int] = None,
@@ -651,7 +622,6 @@ class DocumentService:
         document_metadata = await self._get_visible_document(
             document_id=document_id,
             relative_path=relative_path,
-            session_id=session_id,
         )
         extension = document_metadata["extension"].lower()
         selected_page = None
@@ -659,7 +629,6 @@ class DocumentService:
         if extension == ".pdf":
             raw_bytes = await self._read_source_bytes(
                 document_metadata,
-                session_id=session_id,
             )
             if raw_bytes is None:
                 raise FileNotFoundError("Document content is missing")
@@ -674,7 +643,6 @@ class DocumentService:
         elif extension == ".docx":
             raw_bytes = await self._read_source_bytes(
                 document_metadata,
-                session_id=session_id,
             )
             if raw_bytes is None:
                 raise FileNotFoundError("Document content is missing")
@@ -686,12 +654,10 @@ class DocumentService:
             text = await self._reader.fetch_extracted_text(
                 document_id=str(document_metadata["document_id"]),
                 content_hash=document_metadata["content_hash"],
-                session_id=session_id,
             )
             if text is None:
                 raw_bytes = await self._read_source_bytes(
                     document_metadata,
-                    session_id=session_id,
                 )
                 if raw_bytes is None:
                     raise FileNotFoundError("Document content is missing")
@@ -785,7 +751,6 @@ class DocumentService:
         *,
         document_id: str,
         selection: DocumentSelection,
-        session_id: Optional[str] = None,
     ) -> Dict:
         """Resolve a current, bounded passage selected from one document.
 
@@ -796,7 +761,6 @@ class DocumentService:
         document = await self._get_visible_document(
             document_id=document_id,
             relative_path=None,
-            session_id=session_id,
         )
         if selection.content_hash != document["content_hash"]:
             raise ValueError(
@@ -810,7 +774,6 @@ class DocumentService:
                 raise ValueError("PDF page selections require a PDF document")
             result = await self.read_document(
                 document_id=str(document["document_id"]),
-                session_id=session_id,
                 page_number=locator.page,
             )
             if result["end_line"] != result["total_lines"]:
@@ -821,7 +784,6 @@ class DocumentService:
                 raise ValueError("DOCX paragraph selections require a DOCX document")
             result = await self.read_document(
                 document_id=str(document["document_id"]),
-                session_id=session_id,
                 start_line=locator.start_paragraph,
                 end_line=locator.end_paragraph,
             )
@@ -836,7 +798,6 @@ class DocumentService:
                 raise ValueError("CSV row selections require a CSV document")
             result = await self.read_document(
                 document_id=str(document["document_id"]),
-                session_id=session_id,
                 start_line=locator.start_row,
                 end_line=locator.end_row,
             )
@@ -851,7 +812,6 @@ class DocumentService:
                 raise ValueError("Code line selections require a source-code document")
             result = await self.read_document(
                 document_id=str(document["document_id"]),
-                session_id=session_id,
                 start_line=locator.start_line,
                 end_line=locator.end_line,
             )
@@ -874,7 +834,6 @@ class DocumentService:
                 raise ValueError("Source-code documents require a code line selection")
             result = await self.read_document(
                 document_id=str(document["document_id"]),
-                session_id=session_id,
                 start_line=locator.start_line,
                 end_line=locator.end_line,
             )
@@ -902,7 +861,6 @@ class DocumentService:
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
     ) -> Dict:
         """Purge document content while retaining a minimal provenance record."""
         if not isinstance(document_id, str) or not document_id.strip():
@@ -911,7 +869,6 @@ class DocumentService:
         document = await self._get_visible_document(
             document_id=document_id,
             relative_path=None,
-            session_id=session_id,
         )
         filesystem = self._filesystem_for_document(document)
         if filesystem is not None:
@@ -922,7 +879,6 @@ class DocumentService:
             )
         row = await self._writer.delete_document(
             document_id=document_id,
-            session_id=session_id,
         )
         if row is None:
             raise FileNotFoundError("Document not found")
@@ -938,16 +894,12 @@ class DocumentService:
         selected_paths: Optional[List[str]] = None,
         settings: Optional[FolderScanSettings] = None,
         force_include_paths: Optional[List[str]] = None,
-        session_id: Optional[str] = None,
-        visibility_scope: str = "project",
     ) -> Dict:
         """Copy selected folder entries into the canonical project tree.
 
         A folder upload is an admission event, not a durable object. Relative
         paths become the only lasting selectors once the files are written.
         """
-        if session_id is not None or visibility_scope != "project":
-            raise ValueError("folder imports are always project-owned")
         validated_entries = [
             entry
             if isinstance(entry, FolderUploadEntry)
@@ -1058,10 +1010,8 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
-        session_id: Optional[str] = None,
-        visibility_scope: str = "project",
     ) -> Dict:
-        """Store a manual upload as durable queued indexing work."""
+        """Store a project document as durable queued indexing work."""
         if not isinstance(content, bytes):
             raise TypeError("content must be bytes")
         if not content:
@@ -1079,14 +1029,11 @@ class DocumentService:
                 f"Unsupported file type '{extension}'. "
                 f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
-        self._validate_visibility(visibility_scope, session_id)
         normalized_path = normalize_relative_path(relative_path, original_name)
         document_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
-        filesystem = (
-            self._filesystem if visibility_scope == "project" else None
-        )
+        filesystem = self._filesystem
         if filesystem is not None:
             await self._run_blocking(
                 filesystem.write_bytes,
@@ -1096,8 +1043,6 @@ class DocumentService:
         try:
             await self._writer.insert_document(
                 document_id=document_id,
-                session_id=session_id,
-                visibility_scope=visibility_scope,
                 original_name=original_name,
                 relative_path=normalized_path,
                 extension=extension,
@@ -1122,9 +1067,6 @@ class DocumentService:
         return {
             "document_id": document_id,
             "project_id": self.project_id,
-            "session_id": session_id,
-            "visibility_scope": visibility_scope,
-            "source_kind": "manual_upload",
             "original_name": original_name,
             "relative_path": normalized_path,
             "extension": extension,
@@ -1143,14 +1085,12 @@ class DocumentService:
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
         policy: Optional[DocumentIndexPolicy] = None,
     ) -> Dict:
         """Delegate document derivation to this project's DocumentIndexer."""
 
         row = await self._indexer.index_document(
             document_id=document_id,
-            session_id=session_id,
             policy=policy,
         )
         return self._public_metadata(row)
@@ -1167,33 +1107,26 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
-        session_id: Optional[str] = None,
-        visibility_scope: str = "project",
     ) -> Dict:
         """Persist a document, then index inline or admit durable background work."""
         document = await self.add_document(
             content=content,
             original_name=original_name,
             relative_path=relative_path,
-            session_id=session_id,
-            visibility_scope=visibility_scope,
         )
         return await self.schedule_document_index(
             document_id=document["document_id"],
-            session_id=session_id,
         )
 
     async def schedule_document_index(
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
     ) -> Dict:
         """Delegate durable index admission to the project-owned indexer."""
         return self._public_metadata(
             await self._indexer.schedule_document_index(
                 document_id=document_id,
-                session_id=session_id,
             )
         )
 
@@ -1219,7 +1152,6 @@ class DocumentService:
     async def resolve_focus_target(
         self,
         *,
-        session_id: Optional[str] = None,
         document_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> Dict:
@@ -1230,7 +1162,6 @@ class DocumentService:
                     "document focus cannot include folder filters"
                 )
             document = await self.get_document_info(
-                session_id=session_id,
                 document_id=document_id,
             )
             return {
@@ -1243,7 +1174,6 @@ class DocumentService:
         if normalized_prefix is None:
             raise ValueError("document focus requires document_id or path_prefix")
         documents = await self.list_documents(
-            session_id=session_id,
             path_prefix=normalized_prefix,
             limit=1,
         )
@@ -1257,19 +1187,10 @@ class DocumentService:
     async def list_documents(
         self,
         *,
-        session_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
-        visibility_scope: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
-        """List documents visible to the current project/session context."""
-        if (
-            visibility_scope is not None
-            and visibility_scope not in VALID_VISIBILITY_SCOPES
-        ):
-            raise ValueError(
-                "visibility_scope must be either 'project' or 'session'"
-            )
+        """List documents visible to the current project context."""
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
@@ -1278,8 +1199,6 @@ class DocumentService:
             raise ValueError("limit must be between 1 and 1000")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
         rows = await self._reader.list_documents(
-            session_id=session_id,
-            visibility_scope=visibility_scope,
             path_prefix=normalized_prefix,
             limit=limit,
         )
@@ -1289,13 +1208,12 @@ class DocumentService:
         self,
         query: str,
         *,
-        session_id: Optional[str] = None,
         n_results: int = 5,
         document_filter: Optional[str] = None,
         relative_path: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> List[Dict]:
-        """Search indexed chunks visible to the current project/session context."""
+        """Search indexed chunks visible to the current project context."""
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must not be empty")
         if (
@@ -1334,7 +1252,6 @@ class DocumentService:
             else n_results
         )
         rows = await self._reader.search_chunks(
-            session_id=session_id,
             query_text=query.strip(),
             query_embedding=query_embedding,
             n_results=retrieval_limit,

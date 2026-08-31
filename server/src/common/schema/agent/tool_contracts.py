@@ -471,8 +471,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "list_documents",
             "description": (
-                "List documents visible in the current project and session "
-                "context. Use this to discover document IDs, paths, indexing "
+                "List documents visible in the current project context. Use this "
+                "to discover document IDs, paths, indexing "
                 "status, and sizes."
             ),
             "parameters": {

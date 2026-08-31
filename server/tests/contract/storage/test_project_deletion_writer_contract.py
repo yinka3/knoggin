@@ -118,10 +118,10 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, original_name,
+            document_id, project_id, original_name,
             relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-1', 'project', 'notes.md', 'notes.md', '.md', 5, 'hash')
+        VALUES (%s, 'project-1', 'notes.md', 'notes.md', '.md', 5, 'hash')
         """,
         (document_id,),
     )
@@ -292,15 +292,15 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         await cur.execute(
             """
             INSERT INTO project_documents (
-                document_id, project_id, visibility_scope, original_name,
+                document_id, project_id, original_name,
                 relative_path, extension, size_bytes, content_hash
             ) VALUES
                 (
-                    '77777777-7777-4777-8777-777777777777', 'project-1', 'project',
+                    '77777777-7777-4777-8777-777777777777', 'project-1',
                     'delete.md', 'delete.md', '.md', 6, repeat('1', 64)
                 ),
                 (
-                    '88888888-8888-4888-8888-888888888888', 'project-2', 'project',
+                    '88888888-8888-4888-8888-888888888888', 'project-2',
                     'keep.md', 'keep.md', '.md', 4, repeat('2', 64)
                 )
             """

@@ -96,8 +96,6 @@ class DocumentWriter:
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
-        visibility_scope: str,
         original_name: str,
         relative_path: str,
         extension: str,
@@ -107,8 +105,7 @@ class DocumentWriter:
         created_at: str,
     ) -> None:
         """
-        Insert one manual-upload document row and its raw bytes in a single
-        transaction.
+        Insert one project-owned document row and its raw bytes atomically.
         """
         async with self._client.transaction() as cur:
             await cur.execute(
@@ -116,9 +113,6 @@ class DocumentWriter:
                 INSERT INTO public.project_documents (
                     document_id,
                     project_id,
-                    session_id,
-                    visibility_scope,
-                    source_kind,
                     original_name,
                     relative_path,
                     extension,
@@ -129,15 +123,13 @@ class DocumentWriter:
                     updated_at
                 )
                 VALUES (
-                    %s, %s, %s, %s, 'manual_upload',
+                    %s, %s,
                     %s, %s, %s, %s, %s, 'queued', %s, %s
                 )
                 """,
                 (
                     document_id,
                     self._project_id,
-                    session_id,
-                    visibility_scope,
                     original_name,
                     relative_path,
                     extension,
@@ -159,7 +151,6 @@ class DocumentWriter:
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
     ) -> Optional[Dict]:
         """Purge document content while retaining a provenance tombstone."""
         async with self._client.transaction() as cur:
@@ -174,19 +165,9 @@ class DocumentWriter:
             WHERE document_id = %s
               AND project_id = %s
               AND status <> 'deleted'
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
             RETURNING
                 document_id,
                 project_id,
-                session_id,
-                visibility_scope,
-                source_kind,
                 original_name,
                 relative_path,
                 extension,
@@ -199,7 +180,7 @@ class DocumentWriter:
                 error_message,
                 deleted_at
                 """,
-                (document_id, self._project_id, session_id),
+                (document_id, self._project_id),
             )
             row = await cur.fetchone()
             if row is None:
@@ -224,12 +205,11 @@ class DocumentWriter:
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
         status: str,
         allowed_statuses: tuple[str, ...],
         updated_at: str,
     ) -> Optional[Dict]:
-        """Atomically transition one visible document into a work state."""
+        """Atomically transition one project-owned document into a work state."""
         allowed = tuple(allowed_statuses)
         async with self._client.transaction() as cur:
             await cur.execute(
@@ -242,20 +222,10 @@ class DocumentWriter:
                     updated_at = %s
                 WHERE document_id = %s
                   AND project_id = %s
-                  AND (
-                      visibility_scope = 'project'
-                      OR (
-                          visibility_scope = 'session'
-                          AND session_id = %s
-                      )
-                  )
                   AND status = ANY(%s)
                 RETURNING
                     document_id,
                     project_id,
-                    session_id,
-                    visibility_scope,
-                    source_kind,
                     original_name,
                     relative_path,
                     extension,
@@ -272,7 +242,6 @@ class DocumentWriter:
                     updated_at,
                     document_id,
                     self._project_id,
-                    session_id,
                     list(allowed),
                 ),
             )
@@ -318,11 +287,11 @@ class DocumentWriter:
             (updated_at, self._project_id, document_ids),
         )
         return len(rows)
+
     async def persist_indexed_chunks(
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
         chunks: List[Union["DocumentChunk", str]],
         embeddings: List[List[float]],
         extracted_text: str,
@@ -346,9 +315,6 @@ class DocumentWriter:
                         SELECT
                             document_id,
                             project_id,
-                            session_id,
-                            visibility_scope,
-                            source_kind,
                             original_name,
                             relative_path,
                             extension,
@@ -367,16 +333,9 @@ class DocumentWriter:
                         FROM public.project_documents AS pd
                         WHERE pd.document_id = %s
                           AND pd.project_id = %s
-                          AND (
-                              pd.visibility_scope = 'project'
-                              OR (
-                                  pd.visibility_scope = 'session'
-                                  AND pd.session_id = %s
-                              )
-                          )
                         FOR UPDATE
                         """,
-                (document_id, self._project_id, session_id),
+                (document_id, self._project_id),
             )
             locked = await cur.fetchone()
             if locked is None:
@@ -436,9 +395,6 @@ class DocumentWriter:
                         RETURNING
                             document_id,
                             project_id,
-                            session_id,
-                            visibility_scope,
-                                    source_kind,
                             original_name,
                             relative_path,
                             extension,
@@ -463,7 +419,6 @@ class DocumentWriter:
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
         error_message: str,
         updated_at: str,
     ) -> None:
@@ -479,16 +434,9 @@ class DocumentWriter:
                         FROM public.project_documents
                         WHERE document_id = %s
                           AND project_id = %s
-                          AND (
-                              visibility_scope = 'project'
-                              OR (
-                                  visibility_scope = 'session'
-                                  AND session_id = %s
-                              )
-                          )
                         FOR UPDATE
                         """,
-                (document_id, self._project_id, session_id),
+                (document_id, self._project_id),
             )
             row = await cur.fetchone()
             if row is None or row["status"] == "indexed":

@@ -524,8 +524,7 @@ class Tools(
         )
 
     async def read_recent_episodes(self, limit: int = 2):
-        return await self.knowledge_retrieval.read_recent_episodes(
-            session_id=self.session_id, limit=limit
+        return await self.knowledge_retrieval.read_recent_episodes( limit=limit
         )
 
     async def find_path(self, entity_a: str, entity_b: str):
@@ -568,9 +567,7 @@ class Tools(
         """Get indexed documents for prompt context."""
         if not self.document_service:
             return []
-        documents = await self.document_service.list_documents(
-            session_id=self.session_id
-        )
+        documents = await self.document_service.list_documents()
         return [
             document
             for document in documents

@@ -664,14 +664,12 @@ class SearchTools:
         ):
             if self.document_focus["target_type"] == "document":
                 document = await self.document_service.get_document_info(
-                    session_id=self.session_id,
                     document_id=self.document_focus["document_id"],
                 )
                 return [document]
             path_prefix = self.document_focus.get("path_prefix")
 
         documents = await self.document_service.list_documents(
-            session_id=self.session_id,
             path_prefix=path_prefix,
             limit=limit,
         )
@@ -695,7 +693,6 @@ class SearchTools:
         ):
             document_id = self.document_focus["document_id"]
         return await self.document_service.get_document_info(
-            session_id=self.session_id,
             document_id=document_id,
             relative_path=relative_path,
         )
@@ -741,7 +738,6 @@ class SearchTools:
             end_line=end_line,
         )
         read_kwargs = {
-            "session_id": self.session_id,
             "document_id": document_id,
             "relative_path": relative_path,
             "start_line": start_line,
@@ -922,13 +918,11 @@ class SearchTools:
 
         if document_filter is not None:
             focused_document = await self.document_service.get_document_info(
-                session_id=self.session_id,
                 document_id=document_filter,
             )
             visible_documents = [focused_document]
         else:
             visible_documents = await self.document_service.list_documents(
-                session_id=self.session_id,
                 path_prefix=path_prefix,
                 limit=1000,
             )
@@ -981,7 +975,6 @@ class SearchTools:
 
         results = await self.document_service.search(
             query,
-            session_id=self.session_id,
             n_results=limit,
             document_filter=document_filter,
             relative_path=relative_path,

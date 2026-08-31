@@ -198,7 +198,6 @@ class ApplicationRuntimePort:
             raise RuntimeError("Session document service is unavailable")
 
         target = await document_service.resolve_focus_target(
-            session_id=session.session_id,
             document_id=(
                 requested.document_id
                 if requested.target_type == "document"
@@ -214,7 +213,6 @@ class ApplicationRuntimePort:
             resolved = await document_service.resolve_document_selection(
                 document_id=requested.document_id,
                 selection=requested.selection,
-                session_id=session.session_id,
             )
             target["selection"] = DocumentSelection(
                 content_hash=resolved["content_hash"],
@@ -238,7 +236,6 @@ class ApplicationRuntimePort:
         artifacts = await self.runtime.resources.knowledge_store.list_project_artifacts(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
             limit=limit,
         )
         return ArtifactListResponse(
@@ -258,7 +255,6 @@ class ApplicationRuntimePort:
             artifact_id,
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
         )
         return None if artifact is None else self._artifact_response(artifact)
 
@@ -277,7 +273,6 @@ class ApplicationRuntimePort:
             revision,
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
         )
 
     async def open_run_stream(
@@ -433,7 +428,6 @@ class ApplicationRuntimePort:
             message_id,
             user_name=session.user_name,
             project_id=session.project_id,
-            session_id=session.session_id,
         )
         return [value if isinstance(value, SourceConsulted) else SourceConsulted.model_validate(value) for value in values]
 
@@ -447,7 +441,6 @@ class ApplicationRuntimePort:
             message_id,
             user_name=session.user_name,
             project_id=session.project_id,
-            session_id=session.session_id,
         )
 
     @staticmethod

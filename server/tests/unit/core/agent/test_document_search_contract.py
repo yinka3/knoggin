@@ -6,18 +6,12 @@ from core.agent.tools.search import SearchTools
 
 
 class EmptyDocumentService:
-    def __init__(self):
-        self.session_ids = []
-
     async def list_documents(
         self,
         *,
-        session_id=None,
         path_prefix=None,
-        visibility_scope=None,
         limit=50,
     ):
-        self.session_ids.append(session_id)
         return []
 
 
@@ -30,9 +24,7 @@ class SearchableDocumentService:
     async def list_documents(
         self,
         *,
-        session_id=None,
         path_prefix=None,
-        visibility_scope=None,
         limit=50,
     ):
         return self.files
@@ -40,7 +32,6 @@ class SearchableDocumentService:
     async def get_document_info(
         self,
         *,
-        session_id=None,
         document_id=None,
         relative_path=None,
     ):
@@ -50,7 +41,6 @@ class SearchableDocumentService:
         self,
         query,
         *,
-        session_id=None,
         n_results=5,
         document_filter=None,
         relative_path=None,
@@ -59,7 +49,6 @@ class SearchableDocumentService:
         self.search_calls.append(
             {
                 "query": query,
-                "session_id": session_id,
                 "n_results": n_results,
                 "document_filter": document_filter,
                 "relative_path": relative_path,
@@ -88,17 +77,13 @@ class ReadOnlyDocumentService:
     async def list_documents(
         self,
         *,
-        session_id=None,
         path_prefix=None,
-        visibility_scope=None,
         limit=50,
     ):
         self.calls.append(
             (
                 "list_documents",
-                session_id,
                 path_prefix,
-                visibility_scope,
                 limit,
             )
         )
@@ -113,11 +98,10 @@ class ReadOnlyDocumentService:
     async def get_document_info(
         self,
         *,
-        session_id=None,
         document_id=None,
         relative_path=None,
     ):
-        self.calls.append(("get_document_info", session_id, document_id, relative_path))
+        self.calls.append(("get_document_info", document_id, relative_path))
         return {
             "document_id": document_id or "file-1",
             "relative_path": relative_path or "docs/notes.md",
@@ -126,7 +110,6 @@ class ReadOnlyDocumentService:
     async def read_document(
         self,
         *,
-        session_id=None,
         document_id=None,
         relative_path=None,
         start_line=1,
@@ -135,7 +118,6 @@ class ReadOnlyDocumentService:
         self.calls.append(
             (
                 "read_document",
-                session_id,
                 document_id,
                 relative_path,
                 start_line,
@@ -186,7 +168,6 @@ async def test_search_documents_reports_project_empty_state():
     assert await tools.search_documents("alpha") == [
         {"error": "No indexed documents available in this project"}
     ]
-    assert tools.document_service.session_ids == ["session-1"]
 
 
 @pytest.mark.no_network
@@ -215,7 +196,6 @@ async def test_search_documents_passes_session_and_exact_path_filter():
     assert document_service.search_calls == [
         {
             "query": "alpha",
-            "session_id": "session-1",
             "n_results": 4,
             "document_filter": "file-1",
             "relative_path": None,
@@ -276,15 +256,12 @@ async def test_read_only_document_tools_pass_session_scope_and_bounds():
     assert document_service.calls == [
         (
             "list_documents",
-            "session-1",
             "docs",
-            None,
             10,
         ),
-        ("get_document_info", "session-1", "file-1", None),
+        ("get_document_info", "file-1", None),
         (
             "read_document",
-            "session-1",
             None,
             "docs/notes.md",
             2,
@@ -348,7 +325,6 @@ async def test_search_documents_passes_path_prefix_filters():
     assert document_service.search_calls == [
         {
             "query": "alpha",
-            "session_id": "session-1",
             "n_results": 5,
             "document_filter": None,
             "relative_path": None,
@@ -389,7 +365,6 @@ async def test_exact_document_focus_defaults_reads_and_search():
                 "document_id": "file-1",
                 "original_name": "notes.md",
                 "relative_path": "docs/notes.md",
-                "visibility_scope": "project",
                 "status": "indexed",
             }
         ]
@@ -428,8 +403,8 @@ async def test_exact_document_focus_defaults_info_and_content_reads():
     await tools.read_document()
 
     assert document_service.calls == [
-        ("get_document_info", "session-1", "file-1", None),
-        ("read_document", "session-1", "file-1", None, 1, None),
+        ("get_document_info", "file-1", None),
+        ("read_document", "file-1", None, 1, None),
     ]
 
 
@@ -453,7 +428,7 @@ async def test_request_document_focus_cannot_be_bypassed_by_tool_arguments():
         await tools.read_document(relative_path="docs/other.md")
 
     assert document_service.calls == [
-        ("read_document", "session-1", "file-1", None, 1, None),
+        ("read_document", "file-1", None, 1, None),
     ]
 
 
@@ -465,14 +440,12 @@ async def test_request_document_focus_forces_search_to_the_selected_document():
                 "document_id": "file-1",
                 "original_name": "notes.md",
                 "relative_path": "docs/notes.md",
-                "visibility_scope": "project",
                 "status": "indexed",
             },
             {
                 "document_id": "file-2",
                 "original_name": "other.md",
                 "relative_path": "docs/other.md",
-                "visibility_scope": "project",
                 "status": "indexed",
             },
         ]
@@ -549,9 +522,9 @@ async def test_search_documents_adds_source_context_from_the_stored_chunk():
     candidate = SourceReferenceCandidate.model_validate(
         {
             **results[0]["source_context"],
-            "project_id": "project-1",
-            "session_id": "session-1",
-            "encounter_kind": "document_search",
+                "project_id": "project-1",
+                "session_id": "session-1",
+                "encounter_kind": "document_search",
             "agent_run_id": "run-1",
             "tool_call_id": "call-1",
             "result_position": 0,
@@ -630,13 +603,12 @@ async def test_request_document_selection_defaults_reads_to_the_selected_range()
     await tools.read_document()
 
     assert tools.document_service.calls == [
-        ("read_document", "session-1", "file-1", None, 3, 4)
+        ("read_document", "file-1", None, 3, 4)
     ]
 
     await tools.read_document(start_line=8, end_line=9)
     assert tools.document_service.calls[-1] == (
         "read_document",
-        "session-1",
         "file-1",
         None,
         8,
@@ -812,7 +784,7 @@ async def test_subtree_focus_defaults_filters_and_explicit_values_override():
     await tools.list_documents(use_focus=False)
 
     assert document_service.calls == [
-        ("list_documents", "session-1", "src", None, 50),
-        ("list_documents", "session-1", "docs", None, 50),
-        ("list_documents", "session-1", None, None, 50),
+        ("list_documents", "src", 50),
+        ("list_documents", "docs", 50),
+        ("list_documents", None, 50),
     ]

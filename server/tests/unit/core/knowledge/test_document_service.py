@@ -49,24 +49,12 @@ class MemoryPostgres:
                 yield cursor
 
     @staticmethod
-    def _visible(row, project_id, session_id):
-        return row["project_id"] == project_id and (
-            row["visibility_scope"] == "project"
-            or (
-                row["visibility_scope"] == "session" and row["session_id"] == session_id
-            )
-        )
+    def _visible(row, project_id):
+        return row["project_id"] == project_id
 
     @staticmethod
-    def _read_visible(row, readable_project_ids, project_id, session_id):
-        return row["project_id"] in readable_project_ids and (
-            row["visibility_scope"] == "project"
-            or (
-                row["project_id"] == project_id
-                and row["visibility_scope"] == "session"
-                and row["session_id"] == session_id
-            )
-        )
+    def _read_visible(row, readable_project_ids):
+        return row["project_id"] in readable_project_ids
 
     async def execute(self, query, params=None):
         self.calls.append(("execute", query, params))
@@ -91,7 +79,6 @@ class MemoryPostgres:
         self.calls.append(("fetch_all", query, params))
         if (
             "FROM public.project_documents AS pd" in query
-            and "pd.source_kind = 'manual_upload'" in query
             and "ORDER BY pd.relative_path ASC" in query
         ):
             project_id, limit = params
@@ -102,38 +89,18 @@ class MemoryPostgres:
                     key=lambda row: (row["relative_path"], row["document_id"]),
                 )
                 if row["project_id"] == project_id
-                and row["visibility_scope"] == "project"
-                and row["source_kind"] == "manual_upload"
                 and row["status"] != "deleted"
             ][:limit]
-        if (
-            "FROM public.project_documents" in query
-            and "status = 'deleted'" in query
-            and "lower(original_name) = lower(%s)" in query
-        ):
-            project_id, visibility_scope, relative_path, original_name, session_id = params
-            return [
-                deepcopy(row)
-                for row in self.rows
-                if row["project_id"] == project_id
-                and row["status"] == "deleted"
-                and row["visibility_scope"] == visibility_scope
-                and self._visible(row, project_id, session_id)
-                and (
-                    row["relative_path"] == relative_path
-                    or row["original_name"].lower() == original_name.lower()
-                )
-            ][:5]
         if query.lstrip().startswith("DELETE FROM public.project_documents"):
             if self.delete_error is not None:
                 raise self.delete_error
-            document_id, project_id, session_id = params
+            document_id, project_id = params
             row = next(
                 (
                     row
                     for row in self.rows
                     if row["document_id"] == document_id
-                    and self._visible(row, project_id, session_id)
+                    and self._visible(row, project_id)
                 ),
                 None,
             )
@@ -209,7 +176,7 @@ class MemoryPostgres:
             row = self.scan_settings.get(params[0])
             return [deepcopy(row)] if row else []
         if "dc.extracted_text" in query:
-            document_id, content_hash, readable_project_ids, project_id, session_id = params
+            document_id, content_hash, readable_project_ids = params
             document = next(
                 (
                     row
@@ -218,8 +185,6 @@ class MemoryPostgres:
                     and self._read_visible(
                         row,
                         readable_project_ids,
-                        project_id,
-                        session_id,
                     )
                 ),
                 None,
@@ -231,7 +196,7 @@ class MemoryPostgres:
                 return []
             return [{"extracted_text": cached[1]}]
         if "FROM public.document_content" in query:
-            document_id, readable_project_ids, project_id, session_id = params
+            document_id, readable_project_ids = params
             document = next(
                 (
                     row
@@ -240,8 +205,6 @@ class MemoryPostgres:
                     and self._read_visible(
                         row,
                         readable_project_ids,
-                        project_id,
-                        session_id,
                     )
                 ),
                 None,
@@ -260,7 +223,7 @@ class MemoryPostgres:
         if "LIMIT 2" in query and (
             "pd.document_id = %s" in query or "pd.relative_path = %s" in query
         ):
-            selector_value, readable_project_ids, project_id, session_id = params
+            selector_value, readable_project_ids = params
             selector_key = (
                 "document_id" if "pd.document_id = %s" in query else "relative_path"
             )
@@ -269,8 +232,6 @@ class MemoryPostgres:
                 if row[selector_key] == selector_value and self._read_visible(
                     row,
                     readable_project_ids,
-                    project_id,
-                    session_id,
                 ):
                     result = dict(row)
                     result["chunk_count"] = sum(
@@ -280,10 +241,7 @@ class MemoryPostgres:
                     results.append(result)
             return results[:2]
 
-        readable_project_ids, project_id, session_id, *filters = params
-        scope = None
-        if "pd.visibility_scope = %s" in query:
-            scope = filters.pop(0)
+        readable_project_ids, *filters = params
         path_prefix = None
         if "pd.relative_path LIKE %s" in query:
             path_prefix = filters.pop(0)
@@ -294,10 +252,7 @@ class MemoryPostgres:
             if self._read_visible(
                 row,
                 readable_project_ids,
-                project_id,
-                session_id,
             )
-            and (scope is None or row["visibility_scope"] == scope)
             and (
                 path_prefix is None
                 or row["relative_path"] == path_prefix
@@ -413,13 +368,13 @@ class MemoryCursor:
 
 
         if normalized.startswith("SELECT") and "FOR UPDATE" in normalized:
-            document_id, project_id, session_id = params
+            document_id, project_id = params
             row = next(
                 (
                     row
                     for row in self.postgres.rows
                     if row["document_id"] == document_id
-                    and self.postgres._visible(row, project_id, session_id)
+                    and self.postgres._visible(row, project_id)
                 ),
                 None,
             )
@@ -439,13 +394,13 @@ class MemoryCursor:
             normalized.startswith("UPDATE public.project_documents")
             and "SET status = %s" in normalized
         ):
-            status, updated_at, document_id, project_id, session_id, allowed = params
+            status, updated_at, document_id, project_id, allowed = params
             row = next(
                 (
                     row
                     for row in self.postgres.rows
                     if row["document_id"] == document_id
-                    and self.postgres._visible(row, project_id, session_id)
+                    and self.postgres._visible(row, project_id)
                     and row["status"] in allowed
                 ),
                 None,
@@ -470,7 +425,7 @@ class MemoryCursor:
         ):
             if self.postgres.delete_error is not None:
                 raise self.postgres.delete_error
-            document_id, project_id, session_id = params
+            document_id, project_id = params
             row = next(
                 (
                     row
@@ -478,7 +433,7 @@ class MemoryCursor:
                     if row["document_id"] == document_id
                     and row["project_id"] == project_id
                     and row["status"] != "deleted"
-                    and self.postgres._visible(row, project_id, session_id)
+                    and self.postgres._visible(row, project_id)
                 ),
                 None,
             )
@@ -520,14 +475,14 @@ class MemoryCursor:
         if normalized.startswith("DELETE FROM public.project_documents"):
             if self.postgres.delete_error is not None:
                 raise self.postgres.delete_error
-            document_id, project_id, session_id = params
+            document_id, project_id = params
             row = next(
                 (
                     row
                     for row in self.postgres.rows
                     if row["document_id"] == document_id
                     and row["project_id"] == project_id
-                    and self.postgres._visible(row, project_id, session_id)
+                    and self.postgres._visible(row, project_id)
                 ),
                 None,
             )
@@ -569,12 +524,10 @@ class MemoryCursor:
 
 
         if normalized.startswith("INSERT INTO public.project_documents"):
-            if "'manual_upload'" in normalized and "'queued'" in normalized:
+            if "'queued'" in normalized:
                 (
                     document_id,
                     project_id,
-                    session_id,
-                    visibility_scope,
                     original_name,
                     relative_path,
                     extension,
@@ -587,9 +540,6 @@ class MemoryCursor:
                     {
                         "document_id": document_id,
                         "project_id": project_id,
-                        "session_id": session_id,
-                        "visibility_scope": visibility_scope,
-                        "source_kind": "manual_upload",
                         "original_name": original_name,
                         "relative_path": relative_path,
                         "extension": extension,
@@ -958,14 +908,11 @@ async def test_add_document_stores_bytes_and_persists_metadata(document_harness)
     )
 
     assert metadata["project_id"] == "project-1"
-    assert metadata["visibility_scope"] == "project"
-    assert metadata["session_id"] is None
     assert metadata["relative_path"] == "docs/Notes.MD"
     assert metadata["extension"] == ".md"
     assert metadata["size_bytes"] == len(content)
     assert metadata["content_hash"] == hashlib.sha256(content).hexdigest()
     assert metadata["status"] == "queued"
-    assert metadata["source_kind"] == "manual_upload"
     assert metadata["chunk_count"] == 0
     assert "storage_key" not in metadata
 
@@ -1096,7 +1043,7 @@ async def test_indexer_reconciles_project_files_when_the_runtime_starts(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_visibility_rules_are_applied_when_listing_files():
+async def test_document_listing_is_scoped_to_the_active_project():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
     project_one = DocumentService("project-1", postgres, embedding)
@@ -1106,40 +1053,28 @@ async def test_visibility_rules_are_applied_when_listing_files():
         content=b"project",
         original_name="project.md",
     )
-    session_one = await project_one.add_document(
+    second_project_one_file = await project_one.add_document(
         content=b"one",
         original_name="one.md",
-        session_id="session-1",
-        visibility_scope="session",
     )
     await project_one.add_document(
         content=b"two",
         original_name="two.md",
-        session_id="session-2",
-        visibility_scope="session",
     )
     await project_two.add_document(
         content=b"other project",
         original_name="other.md",
     )
 
-    visible_to_one = await project_one.list_documents(session_id="session-1")
-    visible_to_two = await project_one.list_documents(session_id="session-2")
-    project_only = await project_one.list_documents(
-        session_id="session-1",
-        visibility_scope="project",
-    )
+    visible = await project_one.list_documents()
 
-    assert {row["document_id"] for row in visible_to_one} == {
+    assert {row["document_id"] for row in visible} == {
         project_file["document_id"],
-        session_one["document_id"],
+        second_project_one_file["document_id"],
+        next(row["document_id"] for row in postgres.rows if row["original_name"] == "two.md"),
     }
-    assert {row["original_name"] for row in visible_to_two} == {
-        "project.md",
-        "two.md",
-    }
-    assert [row["original_name"] for row in project_only] == ["project.md"]
-    assert all("storage_key" not in row for row in visible_to_one)
+    assert all(row["project_id"] == "project-1" for row in visible)
+    assert all("storage_key" not in row for row in visible)
 
 
 @pytest.mark.storage
@@ -1199,18 +1134,6 @@ async def test_add_document_rejects_invalid_content_scope_and_size(
 
     with pytest.raises(ValueError, match="must not be empty"):
         await service.add_document(content=b"", original_name="notes.md")
-    with pytest.raises(ValueError, match="either 'project' or 'session'"):
-        await service.add_document(
-            content=b"alpha",
-            original_name="notes.md",
-            visibility_scope="private",
-        )
-    with pytest.raises(ValueError, match="require session_id"):
-        await service.add_document(
-            content=b"alpha",
-            original_name="notes.md",
-            visibility_scope="session",
-        )
     with pytest.raises(ValueError, match="Unsupported file type"):
         await service.add_document(content=b"data", original_name="video.mp4")
     with pytest.raises(ValueError, match="Unsupported file type"):
@@ -1235,8 +1158,6 @@ async def test_list_documents_normalizes_database_timestamps(document_harness):
         {
             "document_id": "a785ecfe-b738-4a43-9e6d-bbdc3f831b20",
             "project_id": "project-1",
-            "session_id": None,
-            "visibility_scope": "project",
             "original_name": "notes.md",
             "relative_path": "notes.md",
             "extension": ".md",
@@ -1278,15 +1199,13 @@ async def test_get_document_info_resolves_visible_document_without_storage_key(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_get_document_info_enforces_visibility_and_reference_rules():
+async def test_get_document_info_enforces_reference_rules():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
     service = DocumentService("project-1", postgres, embedding)
     uploaded = await service.add_document(
         content=b"private",
         original_name="private.txt",
-        session_id="session-1",
-        visibility_scope="session",
     )
 
     with pytest.raises(ValueError, match="exactly one"):
@@ -1296,15 +1215,8 @@ async def test_get_document_info_enforces_visibility_and_reference_rules():
             document_id=uploaded["document_id"],
             relative_path="private.txt",
         )
-    with pytest.raises(FileNotFoundError, match="Document not found"):
-        await service.get_document_info(
-            document_id=uploaded["document_id"],
-            session_id="session-2",
-        )
-
     info = await service.get_document_info(
         document_id=uploaded["document_id"],
-        session_id="session-1",
     )
     assert info["document_id"] == uploaded["document_id"]
 
@@ -1545,7 +1457,7 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_delete_document_enforces_project_and_session_visibility():
+async def test_delete_document_enforces_project_ownership():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
     project_one = DocumentService("project-1", postgres, embedding)
@@ -1553,25 +1465,16 @@ async def test_delete_document_enforces_project_and_session_visibility():
     uploaded = await project_one.add_document(
         content=b"private",
         original_name="private.txt",
-        session_id="session-1",
-        visibility_scope="session",
     )
 
     with pytest.raises(FileNotFoundError, match="Document not found"):
-        await project_one.delete_document(
-            document_id=uploaded["document_id"],
-            session_id="session-2",
-        )
-    with pytest.raises(FileNotFoundError, match="Document not found"):
         await project_two.delete_document(
             document_id=uploaded["document_id"],
-            session_id="session-1",
         )
 
     assert len(postgres.rows) == 1
     deleted = await project_one.delete_document(
         document_id=uploaded["document_id"],
-        session_id="session-1",
     )
     assert deleted["deleted"] is True
     assert postgres.rows[0]["status"] == "deleted"
@@ -1705,7 +1608,7 @@ async def test_document_service_search_remains_empty(document_harness):
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_document_service_search_embeds_query_and_enforces_visibility(
+async def test_document_service_search_embeds_query_with_project_scope(
     document_harness,
 ):
     service, postgres = document_harness
@@ -1723,7 +1626,6 @@ async def test_document_service_search_embeds_query_and_enforces_visibility(
 
     results = await service.search(
         "  alpha question  ",
-        session_id="session-1",
         n_results=3,
     )
 
@@ -1740,19 +1642,15 @@ async def test_document_service_search_embeds_query_and_enforces_visibility(
         }
     ]
     _, sql, params = postgres.calls[-1]
-    assert "pd.project_id = %s" in sql
+    assert "pd.project_id = ANY(%s)" in sql
     assert "pd.status = 'indexed'" in sql
-    assert "pd.visibility_scope = 'project'" in sql
-    assert "pd.session_id = %s" in sql
     assert "websearch_to_tsquery('simple', %s)" in sql
     assert "ts_rank_cd(vc.search_vector, sq.terms)" in sql
     assert "1.0 / (60 + sc.semantic_rank)" in sql
-    assert params[0:5] == (
+    assert params[0:3] == (
         "alpha question",
         json.dumps([0.1] * 1024),
         ["project-1"],
-        "project-1",
-        "session-1",
     )
     assert params[-1] == 3
 
@@ -1813,13 +1711,12 @@ async def test_document_service_search_applies_document_filter(document_harness)
 
     await service.search(
         "alpha",
-        session_id="session-1",
         document_filter="a785ecfe-b738-4a43-9e6d-bbdc3f831b20",
     )
 
     _, sql, params = postgres.calls[-1]
     assert "AND pd.document_id = %s" in sql
-    assert params[5] == "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
+    assert params[3] == "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
 
 
 @pytest.mark.storage
@@ -2205,7 +2102,7 @@ async def test_index_document_records_document_parser_errors(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_enforces_project_and_session_visibility():
+async def test_index_document_enforces_project_ownership():
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
     project_one = DocumentService("project-1", postgres, embedding)
@@ -2213,24 +2110,15 @@ async def test_index_document_enforces_project_and_session_visibility():
     uploaded = await project_one.add_document(
         content=b"session content",
         original_name="private.txt",
-        session_id="session-1",
-        visibility_scope="session",
     )
 
     with pytest.raises(FileNotFoundError, match="Document not found"):
-        await project_one.index_document(
-            document_id=uploaded["document_id"],
-            session_id="session-2",
-        )
-    with pytest.raises(FileNotFoundError, match="Document not found"):
         await project_two.index_document(
             document_id=uploaded["document_id"],
-            session_id="session-1",
         )
 
     indexed = await project_one.index_document(
         document_id=uploaded["document_id"],
-        session_id="session-1",
     )
     assert indexed["status"] == "indexed"
 
@@ -2358,7 +2246,6 @@ async def test_accept_folder_indexes_selected_subset_atomically(
     assert result["path_prefix"] is None
     assert len(postgres.rows) == 2
     assert len(postgres.chunks) == 0
-    assert all(row["source_kind"] == "manual_upload" for row in postgres.rows)
 
 
 @pytest.mark.storage
@@ -2522,13 +2409,6 @@ async def test_accept_folder_rejects_unknown_and_excluded_selections(
             entries=entries,
             selected_paths=[".env"],
             force_include_paths=[".env"],
-        )
-    with pytest.raises(ValueError, match="project-owned"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=entries,
-            selected_paths=["notes.txt"],
-            visibility_scope="session",
         )
     with pytest.raises(ValueError, match="duplicates"):
         await service.accept_folder(

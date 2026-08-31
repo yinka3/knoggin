@@ -137,7 +137,6 @@ class AgentOrchestrator:
 
             run = AgentRun.open(
                 user_name=context.user_name,
-                session_id=context.session_id,
                 project_id=context.project_id or "",
                 user_query=user_query,
                 run_id=run_id,
@@ -225,7 +224,6 @@ class AgentOrchestrator:
         tools = Tools(
             user_name=context.user_name,
             entities=context.project.entities,
-            session_id=context.session_id,
             compiled_domain=context.project.compiled_domain,
             search_config=search_cfg,
             document_service=context.document_service,
@@ -256,7 +254,6 @@ class AgentOrchestrator:
         candidates = (
             build_pasted_text_candidates(
                 project_id=context.project_id or "",
-                session_id=context.session_id,
                 source_message_id=user_message_id,
                 message_content=message_content,
                 agent_run_id=run_id,
@@ -269,7 +266,6 @@ class AgentOrchestrator:
             candidates.append(
                 build_document_selection_candidate(
                     project_id=context.project_id or "",
-                    session_id=context.session_id,
                     agent_run_id=run_id,
                     selection_context=selection_context,
                 )
@@ -287,7 +283,6 @@ class AgentOrchestrator:
         try:
             persisted = parse_document_focus(focus)
             target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
                 document_id=(
                     persisted.document_id
                     if persisted.target_type == "document"
@@ -334,7 +329,6 @@ class AgentOrchestrator:
         result = await context.document_service.resolve_document_selection(
             document_id=focus.document_id,
             selection=focus.selection,
-            session_id=context.session_id,
         )
         return {
             "document_id": result["document_id"],

@@ -867,7 +867,6 @@ async def test_real_document_selection_request_persists_selection_provenance(
 
     await documents.delete_document(
         document_id=document["document_id"],
-        session_id=None,
     )
     after_delete = await store.get_assistant_message_with_sources(
         response.result.assistant_message_id,

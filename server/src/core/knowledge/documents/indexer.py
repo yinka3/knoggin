@@ -97,7 +97,6 @@ class DocumentIndexer:
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
         policy: Optional[DocumentIndexPolicy] = None,
     ) -> Dict:
         """Claim, derive, and atomically publish one document's index."""
@@ -106,7 +105,6 @@ class DocumentIndexer:
         rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
             relative_path=None,
-            session_id=session_id,
         )
         metadata = rows[0] if rows else None
         if metadata is None:
@@ -116,7 +114,6 @@ class DocumentIndexer:
 
         claimed = await self._writer.transition_index_status(
             document_id=document_id,
-            session_id=session_id,
             status="indexing",
             allowed_statuses=("queued", "failed"),
             updated_at=get_now_iso(),
@@ -125,7 +122,6 @@ class DocumentIndexer:
             refreshed = await self._reader.fetch_documents_by_reference(
                 document_id=document_id,
                 relative_path=None,
-                session_id=session_id,
             )
             if not refreshed:
                 raise FileNotFoundError("Document not found")
@@ -134,9 +130,8 @@ class DocumentIndexer:
         try:
             async with self._index_claim(
                 document_id=document_id,
-                session_id=session_id,
             ):
-                raw_bytes = await self._source_bytes(claimed, session_id=session_id)
+                raw_bytes = await self._source_bytes(claimed)
                 if raw_bytes is None:
                     raise FileNotFoundError("Document content is missing")
                 extraction = await self._run_blocking(
@@ -155,7 +150,6 @@ class DocumentIndexer:
                 self._validate_embeddings(embeddings, chunks)
                 row = await self._writer.persist_indexed_chunks(
                     document_id=document_id,
-                    session_id=session_id,
                     chunks=chunks,
                     embeddings=embeddings,
                     extracted_text=extraction.text,
@@ -166,7 +160,6 @@ class DocumentIndexer:
                     refreshed = await self._reader.fetch_documents_by_reference(
                         document_id=document_id,
                         relative_path=None,
-                        session_id=session_id,
                     )
                     if not refreshed:
                         raise FileNotFoundError("Document not found")
@@ -185,25 +178,18 @@ class DocumentIndexer:
     async def _source_bytes(
         self,
         document: Dict,
-        *,
-        session_id: Optional[str],
     ) -> bytes | None:
-        """Read current manual-upload bytes from the local project tree.
+        """Read current document bytes from the local project tree.
 
         All project documents currently resolve through the durable source route.
         """
-        if (
-            self._filesystem is not None
-            and document.get("source_kind") == "manual_upload"
-            and document.get("visibility_scope") == "project"
-        ):
+        if self._filesystem is not None:
             return await self._run_blocking(
                 self._filesystem.read_bytes,
                 document["relative_path"],
             )
         return await self._reader.fetch_document_content(
             document_id=str(document["document_id"]),
-            session_id=session_id,
         )
 
     @staticmethod
@@ -242,7 +228,6 @@ class DocumentIndexer:
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
     ) -> AsyncIterator[None]:
         try:
             yield
@@ -256,7 +241,6 @@ class DocumentIndexer:
             detail = str(exc).strip() or type(exc).__name__
             await self._writer.record_index_failure(
                 document_id=document_id,
-                session_id=session_id,
                 error_message=detail[:MAX_ERROR_MESSAGE_LENGTH],
                 updated_at=get_now_iso(),
             )
@@ -266,7 +250,6 @@ class DocumentIndexer:
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
     ) -> Dict:
         """Admit one durable document into inline or bounded background work."""
         if self._stopping:
@@ -274,7 +257,6 @@ class DocumentIndexer:
         rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
             relative_path=None,
-            session_id=session_id,
         )
         if not rows:
             raise FileNotFoundError("Document not found")
@@ -286,7 +268,6 @@ class DocumentIndexer:
         else:
             queued = await self._writer.transition_index_status(
                 document_id=document_id,
-                session_id=session_id,
                 status="queued",
                 allowed_statuses=("failed",),
                 updated_at=get_now_iso(),
@@ -300,7 +281,6 @@ class DocumentIndexer:
         ):
             return await self.index_document(
                 document_id=document_id,
-                session_id=session_id,
                 policy=self._policy,
             )
 
@@ -313,7 +293,6 @@ class DocumentIndexer:
                 self.project_id,
                 lambda: self.index_document(
                     document_id=document_id,
-                    session_id=session_id,
                     policy=self._policy,
                 ),
                 name="document-index",
@@ -416,7 +395,6 @@ class DocumentIndexer:
                 continue
             await self.schedule_document_index(
                 document_id=document_id,
-                session_id=document.get("session_id"),
             )
             submitted += 1
             if submitted >= limit:

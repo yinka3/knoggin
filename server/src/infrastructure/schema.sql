@@ -1432,9 +1432,6 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     document_id UUID PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES public.projects(project_id)
         ON DELETE CASCADE,
-    session_id TEXT,
-    visibility_scope TEXT NOT NULL,
-    source_kind TEXT NOT NULL DEFAULT 'manual_upload',
     original_name TEXT NOT NULL,
     relative_path TEXT NOT NULL,
     extension TEXT NOT NULL DEFAULT '',
@@ -1446,10 +1443,6 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT project_documents_visibility_scope_check
-        CHECK (visibility_scope IN ('project', 'session')),
-    CONSTRAINT project_documents_session_visibility_check
-        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
     CONSTRAINT project_documents_status_check
         CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted')),
     CONSTRAINT project_documents_size_check
@@ -1465,17 +1458,12 @@ ALTER TABLE public.project_documents
 ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_status_check;
 ALTER TABLE public.project_documents
-    DROP CONSTRAINT IF EXISTS project_documents_source_kind_check;
+    DROP CONSTRAINT IF EXISTS project_documents_visibility_scope_check;
 ALTER TABLE public.project_documents
-    DROP CONSTRAINT IF EXISTS project_documents_folder_source_check;
--- Workspace rows belong to the removed database-backed file subsystem. The
--- unreleased target state is the real project tree, so stale rows are rebuilt
--- there through normal reconciliation rather than migrated as virtual files.
-DELETE FROM public.project_documents WHERE source_kind = 'workspace';
--- Folder-upload records were admission batches, not durable hierarchy. Keep
--- tombstones for provenance, but discard active rows that only existed in the
--- removed batch storage and rebuild them from the real project tree. The
--- conditional accommodates a fresh schema, which never has folder_root_id.
+    DROP CONSTRAINT IF EXISTS project_documents_session_visibility_check;
+
+-- The unreleased target state has one project-owned catalog. Discard obsolete
+-- virtual workspace/folder rows before removing their old discriminator.
 DO $$
 BEGIN
     IF EXISTS (
@@ -1483,16 +1471,16 @@ BEGIN
         FROM information_schema.columns
         WHERE table_schema = 'public'
           AND table_name = 'project_documents'
-          AND column_name = 'folder_root_id'
+          AND column_name = 'source_kind'
     ) THEN
-        UPDATE public.project_documents
-        SET source_kind = 'manual_upload', folder_root_id = NULL
-        WHERE status = 'deleted' AND source_kind = 'folder_upload';
+        DELETE FROM public.project_documents
+        WHERE source_kind IN ('workspace', 'folder_upload');
     END IF;
 END $$;
-DELETE FROM public.project_documents
-WHERE status <> 'deleted' AND source_kind = 'folder_upload';
 ALTER TABLE public.project_documents DROP COLUMN IF EXISTS folder_root_id;
+ALTER TABLE public.project_documents DROP COLUMN IF EXISTS source_kind;
+ALTER TABLE public.project_documents DROP COLUMN IF EXISTS visibility_scope;
+ALTER TABLE public.project_documents DROP COLUMN IF EXISTS session_id;
 DROP TABLE IF EXISTS public.document_folder_uploads;
 ALTER TABLE public.project_documents
     ALTER COLUMN status SET DEFAULT 'queued';
@@ -1517,8 +1505,11 @@ ALTER TABLE public.project_documents
 CREATE INDEX IF NOT EXISTS project_documents_project_idx
 ON public.project_documents(project_id, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS project_documents_visibility_idx
-ON public.project_documents(project_id, visibility_scope, session_id);
+DROP INDEX IF EXISTS project_documents_visibility_idx;
+
+CREATE UNIQUE INDEX IF NOT EXISTS project_documents_live_path_idx
+ON public.project_documents(project_id, relative_path)
+WHERE status <> 'deleted';
 
 CREATE INDEX IF NOT EXISTS project_documents_hash_idx
 ON public.project_documents(project_id, content_hash);

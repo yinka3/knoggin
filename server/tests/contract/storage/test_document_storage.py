@@ -17,10 +17,10 @@ async def test_document_content_is_deleted_with_parent_document(
     await real_postgres_client.execute(
         """
         INSERT INTO project_documents (
-            document_id, project_id, visibility_scope, original_name,
+            document_id, project_id, original_name,
             relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-1', 'project', 'notes.md',
+        VALUES (%s, 'project-1', 'notes.md',
                 'notes.md', '.md', 5, 'hash')
         """,
         (document_id,),
@@ -58,10 +58,10 @@ async def test_document_chunks_are_deleted_with_parent_document(
     await real_postgres_client.execute(
         """
         INSERT INTO project_documents (
-            document_id, project_id, visibility_scope, original_name,
+            document_id, project_id, original_name,
             relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-1', 'project', 'notes.md',
+        VALUES (%s, 'project-1', 'notes.md',
                 'notes.md', '.md', 5, 'hash')
         """,
         (document_id,),
@@ -96,10 +96,10 @@ async def test_document_reader_cannot_cross_project_scope(real_postgres_client):
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-2', 'project', 'manual_upload',
+        VALUES (%s, 'project-2',
                 'private.md', 'private.md', '.md', 7, 'private-hash')
         """,
         (document_id,),
@@ -118,16 +118,13 @@ async def test_document_reader_cannot_cross_project_scope(real_postgres_client):
     assert await project_one.fetch_documents_by_reference(
         document_id=document_id,
         relative_path=None,
-        session_id=None,
     ) == []
     assert await project_one.fetch_document_content(
         document_id=document_id,
-        session_id=None,
     ) is None
     assert str((await project_two.fetch_documents_by_reference(
         document_id=document_id,
         relative_path=None,
-        session_id=None,
     ))[0]["document_id"]) == document_id
 
 
@@ -145,7 +142,12 @@ async def test_document_catalog_has_no_folder_batch_identity(real_postgres_clien
             FROM information_schema.columns
             WHERE table_schema = 'public'
               AND table_name = 'project_documents'
-              AND column_name = 'folder_root_id'
+              AND column_name IN (
+                  'folder_root_id',
+                  'session_id',
+                  'visibility_scope',
+                  'source_kind'
+              )
         ) AS missing
         """
     ) == {"missing": True}
@@ -163,11 +165,11 @@ async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash,
             status
         )
-        VALUES (%s, 'project-1', 'project', 'manual_upload',
+        VALUES (%s, 'project-1',
                 'notes.md', 'notes.md', '.md', 5, 'a'::text, 'indexed')
         """,
         (document_id,),
@@ -187,7 +189,6 @@ async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks
 
     deleted = await DocumentWriter(real_postgres_client, "project-1").delete_document(
         document_id=document_id,
-        session_id=None,
     )
 
     assert deleted is not None

@@ -27,21 +27,13 @@ class DocumentReader:
             raise ValueError("DocumentReader readable_project_ids must include project_id")
 
     def _document_visibility_sql(self, alias: str = "pd") -> str:
-        """Return the active-session and cross-project document read policy."""
+        """Return the readable-project document policy."""
         return f"""
               AND {alias}.project_id = ANY(%s)
-              AND (
-                  {alias}.visibility_scope = 'project'
-                  OR (
-                      {alias}.project_id = %s
-                      AND {alias}.visibility_scope = 'session'
-                      AND {alias}.session_id = %s
-                  )
-              )
         """
 
-    def _document_visibility_params(self, session_id: Optional[str]) -> tuple:
-        return (self._readable_project_ids, self._project_id, session_id)
+    def _document_visibility_params(self) -> tuple:
+        return (self._readable_project_ids,)
 
     @staticmethod
     def _escape_like(value: str) -> str:
@@ -68,7 +60,6 @@ class DocumentReader:
         *,
         document_id: Optional[str],
         relative_path: Optional[str],
-        session_id: Optional[str],
     ) -> List[Dict]:
         """
         Return up to 2 visible document rows matching either document_id or
@@ -91,9 +82,6 @@ class DocumentReader:
             SELECT
                 pd.document_id,
                 pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
                 pd.extension,
@@ -120,14 +108,13 @@ class DocumentReader:
             ORDER BY pd.created_at DESC, pd.document_id DESC
             LIMIT 2
             """,
-            (selector_value, *self._document_visibility_params(session_id)),
+            (selector_value, *self._document_visibility_params()),
         )
 
     async def fetch_document_content(
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
     ) -> Optional[bytes]:
         """Return raw bytes only when the document is visible in this scope."""
         rows = await self._client.fetch_all(
@@ -142,7 +129,7 @@ class DocumentReader:
             + self._document_visibility_sql()
             + """
             """,
-            (document_id, *self._document_visibility_params(session_id)),
+            (document_id, *self._document_visibility_params()),
         )
         if not rows:
             return None
@@ -153,7 +140,6 @@ class DocumentReader:
         *,
         document_id: str,
         content_hash: str,
-        session_id: Optional[str],
     ) -> Optional[str]:
         """Return visible derived text only when it matches the source hash."""
         rows = await self._client.fetch_all(
@@ -171,7 +157,7 @@ class DocumentReader:
             + self._document_visibility_sql()
             + """
             """,
-            (document_id, content_hash, *self._document_visibility_params(session_id)),
+            (document_id, content_hash, *self._document_visibility_params()),
         )
         return rows[0]["extracted_text"] if rows else None
 
@@ -182,9 +168,6 @@ class DocumentReader:
             SELECT
                 document_id,
                 project_id,
-                session_id,
-                visibility_scope,
-                source_kind,
                 original_name,
                 relative_path,
                 extension,
@@ -205,20 +188,17 @@ class DocumentReader:
             (self._project_id, limit),
         )
 
-    async def list_manual_documents_for_reconciliation(
+    async def list_documents_for_reconciliation(
         self,
         *,
         limit: int,
     ) -> List[Dict]:
-        """Return this project's active manual-file catalog in path order."""
+        """Return this project's active catalog in path order."""
         return await self._client.fetch_all(
             """
             SELECT
                 pd.document_id,
                 pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
                 pd.extension,
@@ -232,8 +212,6 @@ class DocumentReader:
                 0::INTEGER AS chunk_count
             FROM public.project_documents AS pd
             WHERE pd.project_id = %s
-              AND pd.visibility_scope = 'project'
-              AND pd.source_kind = 'manual_upload'
               AND pd.status <> 'deleted'
             ORDER BY pd.relative_path ASC, pd.document_id ASC
             LIMIT %s
@@ -256,19 +234,14 @@ class DocumentReader:
     async def list_documents(
         self,
         *,
-        session_id: Optional[str],
-        visibility_scope: Optional[str] = None,
         path_prefix: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
-        """Paginated list of documents visible to this project/session."""
+        """Paginated list of documents visible to this project."""
         query = """
             SELECT
                 pd.document_id,
                 pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
                 pd.extension,
@@ -285,11 +258,8 @@ class DocumentReader:
                 ON dc.document_id = pd.document_id
             WHERE pd.status <> 'deleted'
         """
-        params: list = list(self._document_visibility_params(session_id))
+        params: list = list(self._document_visibility_params())
         query += self._document_visibility_sql()
-        if visibility_scope is not None:
-            query += " AND pd.visibility_scope = %s"
-            params.append(visibility_scope)
         if path_prefix is not None:
             escaped = self._escape_like(path_prefix)
             query += (
@@ -307,7 +277,6 @@ class DocumentReader:
     async def search_chunks(
         self,
         *,
-        session_id: Optional[str],
         query_text: str,
         query_embedding: List[float],
         n_results: int,
@@ -360,7 +329,7 @@ class DocumentReader:
         """
         params: list = [query_text, embedding_json]
         sql += self._document_visibility_sql()
-        params.extend(self._document_visibility_params(session_id))
+        params.extend(self._document_visibility_params())
         if document_filter is not None:
             sql += " AND pd.document_id = %s"
             params.append(document_filter)
