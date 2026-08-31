@@ -3334,23 +3334,15 @@ async def test_accept_folder_indexes_selected_subset_atomically(
     )
 
     assert result["document_count"] == 2
-    assert {item["relative_path"] for item in result["documents"]} == {
+    assert set(result["relative_paths"]) == {
         "README.md",
         "src/main.py",
     }
-    assert all(item["status"] == "indexed" for item in result["documents"])
-    assert len(service._embedding.calls) == 2
-    assert len(postgres.folders) == 1
+    assert result["path_prefix"] is None
+    assert len(postgres.folders) == 0
     assert len(postgres.rows) == 2
-    assert len(postgres.chunks) == 2
-    assert all(row["source_kind"] == "folder_upload" for row in postgres.rows)
-    assert all(
-        row["folder_root_id"] == result["folder_root_id"] for row in postgres.rows
-    )
-    # bytes are stored in the DB, not on disk
-    assert all(
-        postgres.contents.get(row["document_id"]) is not None for row in postgres.rows
-    )
+    assert len(postgres.chunks) == 0
+    assert all(row["source_kind"] == "manual_upload" for row in postgres.rows)
 
 
 @pytest.mark.storage
@@ -3446,7 +3438,7 @@ async def test_accept_folder_without_selection_accepts_all_eligible_documents(
         selected_paths=None,
     )
 
-    assert {item["relative_path"] for item in result["documents"]} == {
+    assert set(result["relative_paths"]) == {
         "a.txt",
         "b.md",
     }
@@ -3456,7 +3448,7 @@ async def test_accept_folder_without_selection_accepts_all_eligible_documents(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_repeated_folder_acceptance_creates_independent_batches(
+async def test_repeated_folder_acceptance_rejects_an_existing_project_path(
     monkeypatch,
     document_harness,
 ):
@@ -3481,16 +3473,15 @@ async def test_repeated_folder_acceptance_creates_independent_batches(
         entries=entries,
         selected_paths=["notes.txt"],
     )
-    second = await service.accept_folder(
-        folder_name="repo",
-        entries=entries,
-        selected_paths=["notes.txt"],
-    )
-
-    assert first["folder_root_id"] != second["folder_root_id"]
-    assert first["documents"][0]["document_id"] != second["documents"][0]["document_id"]
-    assert len(postgres.folders) == 2
-    assert len(postgres.rows) == 2
+    with pytest.raises(FileExistsError):
+        await service.accept_folder(
+            folder_name="repo",
+            entries=entries,
+            selected_paths=["notes.txt"],
+        )
+    assert first["relative_paths"] == ["notes.txt"]
+    assert postgres.folders == []
+    assert len(postgres.rows) == 1
 
 
 @pytest.mark.storage
@@ -3517,7 +3508,7 @@ async def test_accept_folder_rejects_unknown_and_excluded_selections(
             selected_paths=[".env"],
             force_include_paths=[".env"],
         )
-    with pytest.raises(ValueError, match="require session_id"):
+    with pytest.raises(ValueError, match="project-owned"):
         await service.accept_folder(
             folder_name="repo",
             entries=entries,
@@ -3543,33 +3534,28 @@ async def test_accept_folder_rejects_unknown_and_excluded_selections(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_accept_folder_indexing_failure_retains_admitted_state(
+async def test_accept_folder_admits_bytes_without_creating_a_folder_batch(
     document_harness,
 ):
     service, postgres = document_harness
 
-    with pytest.raises(RuntimeError, match="valid UTF-8"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=[
-                FolderUploadEntry(
-                    relative_path="broken.txt",
-                    content=b"\xff",
-                )
-            ],
-            selected_paths=["broken.txt"],
-        )
+    result = await service.accept_folder(
+        folder_name="repo",
+        entries=[FolderUploadEntry(relative_path="broken.txt", content=b"\xff")],
+        selected_paths=["broken.txt"],
+    )
 
-    assert len(postgres.folders) == 1
+    assert result["relative_paths"] == ["broken.txt"]
+    assert len(postgres.folders) == 0
     assert len(postgres.rows) == 1
-    assert postgres.rows[0]["status"] == "failed"
+    assert postgres.rows[0]["status"] == "queued"
     assert postgres.chunks == []
     assert postgres.contents[postgres.rows[0]["document_id"]] == b"\xff"
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_accept_folder_persists_all_raw_bytes_before_index_failure(
+async def test_accept_folder_admits_selected_paths_before_background_indexing(
     monkeypatch,
     document_harness,
 ):
@@ -3587,22 +3573,20 @@ async def test_accept_folder_persists_all_raw_bytes_before_index_failure(
         "SentenceSplitter",
         OneChunkSplitter,
     )
-    postgres.transaction_error_at_chunk = 1
+    result = await service.accept_folder(
+        folder_name="repo",
+        entries=[
+            FolderUploadEntry(relative_path="a.txt", content=b"alpha"),
+            FolderUploadEntry(relative_path="b.txt", content=b"beta"),
+        ],
+        selected_paths=["a.txt", "b.txt"],
+    )
 
-    with pytest.raises(RuntimeError, match="chunk insert failed"):
-        await service.accept_folder(
-            folder_name="repo",
-            entries=[
-                FolderUploadEntry(relative_path="a.txt", content=b"alpha"),
-                FolderUploadEntry(relative_path="b.txt", content=b"beta"),
-            ],
-            selected_paths=["a.txt", "b.txt"],
-        )
-
-    assert len(postgres.folders) == 1
+    assert result["relative_paths"] == ["a.txt", "b.txt"]
+    assert len(postgres.folders) == 0
     assert len(postgres.rows) == 2
-    assert len(postgres.chunks) == 1
-    assert {row["status"] for row in postgres.rows} == {"indexed", "failed"}
+    assert len(postgres.chunks) == 0
+    assert {row["status"] for row in postgres.rows} == {"queued"}
     assert set(postgres.contents.values()) == {b"alpha", b"beta"}
 
 

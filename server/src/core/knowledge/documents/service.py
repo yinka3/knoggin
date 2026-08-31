@@ -1273,8 +1273,13 @@ class DocumentService:
         session_id: Optional[str] = None,
         visibility_scope: str = "project",
     ) -> Dict:
-        """Durably admit a selected folder batch before indexing its files."""
-        self._validate_visibility(visibility_scope, session_id)
+        """Copy selected folder entries into the canonical project tree.
+
+        A folder upload is an admission event, not a durable object. Relative
+        paths become the only lasting selectors once the files are written.
+        """
+        if session_id is not None or visibility_scope != "project":
+            raise ValueError("folder imports are always project-owned")
         validated_entries = [
             entry
             if isinstance(entry, FolderUploadEntry)
@@ -1329,70 +1334,55 @@ class DocumentService:
                 + ", ".join(sorted(unavailable))
             )
 
-        folder_root_id = str(uuid.uuid4())
-        created_at = get_now_iso()
         candidate_bytes = sum(len(entry.content) for entry in validated_entries)
-        prepared_documents = []
-
-        for relative_path in normalized_selected:
-            content = entry_content[relative_path]
-            preview_entry = included_by_path[relative_path]
-            prepared_documents.append(
-                {
-                    "document_id": str(uuid.uuid4()),
-                    "relative_path": relative_path,
-                    "original_name": preview_entry.original_name,
-                    "extension": preview_entry.extension,
-                    "size_bytes": preview_entry.size_bytes,
-                    "content_hash": preview_entry.content_hash,
-                    "content": content,
-                }
-            )
-
-        await self._writer.insert_folder_batch(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-            folder_name=folder_name.strip(),
-            candidate_count=len(validated_entries),
-            candidate_bytes=candidate_bytes,
-            excluded_count=preview.summary.excluded_count,
-            excluded_bytes=preview.summary.excluded_bytes,
-            excluded_directory_count=preview.summary.excluded_directory_count,
-            excluded_reason_counts=preview.summary.reason_counts,
-            scan_settings=preview.settings.model_dump(mode="json"),
-            documents=prepared_documents,
-            created_at=created_at,
-        )
-
-        documents = [
-            await self.schedule_document_index(
-                document_id=document["document_id"],
-                session_id=session_id,
-            )
-            for document in prepared_documents
-        ]
+        filesystem = self._require_filesystem()
+        written: list[tuple[str, str]] = []
+        try:
+            for relative_path in normalized_selected:
+                content = entry_content[relative_path]
+                file = await self._run_blocking(
+                    filesystem.write_bytes,
+                    relative_path,
+                    content,
+                )
+                written.append((relative_path, file.content_hash))
+        except Exception:
+            for relative_path, content_hash in reversed(written):
+                try:
+                    await self._run_blocking(
+                        filesystem.delete_file,
+                        relative_path,
+                        expected_content_hash=content_hash,
+                    )
+                except Exception:
+                    logger.exception("Could not roll back folder import file {}", relative_path)
+            raise
+        await self.reconcile_project_files()
         return {
-            "folder_root_id": folder_root_id,
             "project_id": self.project_id,
-            "session_id": session_id,
-            "visibility_scope": visibility_scope,
-            "folder_name": folder_name.strip(),
+            "path_prefix": self._common_path_prefix(normalized_selected),
             "candidate_count": len(validated_entries),
             "candidate_bytes": candidate_bytes,
-            "document_count": len(documents),
-            "total_size_bytes": sum(
-                document["size_bytes"] for document in prepared_documents
-            ),
+            "document_count": len(written),
+            "total_size_bytes": sum(len(entry_content[path]) for path in normalized_selected),
             "excluded_count": preview.summary.excluded_count,
             "excluded_bytes": preview.summary.excluded_bytes,
             "excluded_directory_count": preview.summary.excluded_directory_count,
             "excluded_reason_counts": preview.summary.reason_counts,
             "scan_settings": preview.settings.model_dump(mode="json"),
-            "created_at": created_at,
-            "indexed_at": None,
-            "documents": documents,
+            "relative_paths": normalized_selected,
         }
+
+    @staticmethod
+    def _common_path_prefix(paths: List[str]) -> Optional[str]:
+        """Return a stable shared directory when an imported tree has one."""
+        parents = [PurePosixPath(path).parent.parts for path in paths]
+        shared: list[str] = []
+        for parts in zip(*parents):
+            if len(set(parts)) != 1 or parts[0] == ".":
+                break
+            shared.append(parts[0])
+        return PurePosixPath(*shared).as_posix() if shared else None
 
     async def add_document(
         self,
