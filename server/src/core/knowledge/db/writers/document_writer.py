@@ -101,11 +101,10 @@ class DocumentWriter:
         extension: str,
         size_bytes: int,
         content_hash: str,
-        content: bytes,
         created_at: str,
     ) -> None:
         """
-        Insert one project-owned document row and its raw bytes atomically.
+        Insert one project-owned document catalog row atomically.
         """
         async with self._client.transaction() as cur:
             await cur.execute(
@@ -138,13 +137,6 @@ class DocumentWriter:
                     created_at,
                     created_at,
                 ),
-            )
-            await cur.execute(
-                """
-                INSERT INTO public.document_content (document_id, content)
-                VALUES (%s, %s)
-                """,
-                (document_id, content),
             )
 
     async def delete_document(
@@ -194,7 +186,7 @@ class DocumentWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM public.document_content
+                DELETE FROM public.document_extractions
                 WHERE document_id = %s
                 """,
                 (document_id,),
@@ -374,13 +366,18 @@ class DocumentWriter:
             )
             await cur.execute(
                 """
-                UPDATE public.document_content
+                INSERT INTO public.document_extractions (
+                    document_id,
+                    extracted_text,
+                    extracted_content_hash
+                )
+                VALUES (%s, %s, %s)
+                ON CONFLICT (document_id) DO UPDATE
                 SET
-                    extracted_text = %s,
-                    extracted_content_hash = %s
-                WHERE document_id = %s
+                    extracted_text = EXCLUDED.extracted_text,
+                    extracted_content_hash = EXCLUDED.extracted_content_hash
                 """,
-                (extracted_text, locked["content_hash"], document_id),
+                (document_id, extracted_text, locked["content_hash"]),
             )
 
             await cur.execute(

@@ -9,7 +9,7 @@ from core.knowledge.db.writers.document_writer import DocumentWriter
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-async def test_document_content_is_deleted_with_parent_document(
+async def test_document_extraction_is_deleted_with_parent_document(
     real_postgres_client,
 ):
     document_id = str(uuid.uuid4())
@@ -27,10 +27,11 @@ async def test_document_content_is_deleted_with_parent_document(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO document_content (document_id, content)
-        VALUES (%s, %s)
+        INSERT INTO document_extractions (
+            document_id, extracted_text, extracted_content_hash
+        ) VALUES (%s, %s, 'hash')
         """,
-        (document_id, b"hello"),
+        (document_id, "hello"),
     )
 
     await real_postgres_client.execute(
@@ -38,7 +39,7 @@ async def test_document_content_is_deleted_with_parent_document(
         (document_id,),
     )
     rows = await real_postgres_client.fetch_all(
-        "SELECT document_id FROM document_content WHERE document_id = %s",
+        "SELECT document_id FROM document_extractions WHERE document_id = %s",
         (document_id,),
     )
 
@@ -91,7 +92,7 @@ async def test_document_chunks_are_deleted_with_parent_document(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_document_reader_cannot_cross_project_scope(real_postgres_client):
+async def test_document_reader_cannot_cross_project_catalog_scope(real_postgres_client):
     document_id = str(uuid.uuid4())
     await real_postgres_client.execute(
         """
@@ -104,14 +105,6 @@ async def test_document_reader_cannot_cross_project_scope(real_postgres_client):
         """,
         (document_id,),
     )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.document_content (document_id, content)
-        VALUES (%s, %s)
-        """,
-        (document_id, b"private"),
-    )
-
     project_one = DocumentReader(real_postgres_client, "project-1")
     project_two = DocumentReader(real_postgres_client, "project-2")
 
@@ -119,9 +112,6 @@ async def test_document_reader_cannot_cross_project_scope(real_postgres_client):
         document_id=document_id,
         relative_path=None,
     ) == []
-    assert await project_one.fetch_document_content(
-        document_id=document_id,
-    ) is None
     assert str((await project_two.fetch_documents_by_reference(
         document_id=document_id,
         relative_path=None,
@@ -156,7 +146,7 @@ async def test_document_catalog_has_no_folder_batch_identity(real_postgres_clien
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks(
+async def test_document_writer_tombstones_metadata_and_purges_extractions_and_chunks(
     real_postgres_client,
 ):
     document_id = str(uuid.uuid4())
@@ -175,8 +165,12 @@ async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks
         (document_id,),
     )
     await real_postgres_client.execute(
-        "INSERT INTO public.document_content (document_id, content) VALUES (%s, %s)",
-        (document_id, b"hello"),
+        """
+        INSERT INTO public.document_extractions (
+            document_id, extracted_text, extracted_content_hash
+        ) VALUES (%s, %s, 'a')
+        """,
+        (document_id, "hello"),
     )
     await real_postgres_client.execute(
         """
@@ -202,7 +196,7 @@ async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks
         (document_id,),
     ) == {"status": "deleted", "has_deleted_at": True}
     assert await real_postgres_client.fetch_all(
-        "SELECT document_id FROM public.document_content WHERE document_id = %s",
+        "SELECT document_id FROM public.document_extractions WHERE document_id = %s",
         (document_id,),
     ) == []
     assert await real_postgres_client.fetch_all(

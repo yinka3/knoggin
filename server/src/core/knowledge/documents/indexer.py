@@ -188,9 +188,7 @@ class DocumentIndexer:
                 self._filesystem.read_bytes,
                 document["relative_path"],
             )
-        return await self._reader.fetch_document_content(
-            document_id=str(document["document_id"]),
-        )
+        raise RuntimeError("Document source filesystem is not configured")
 
     @staticmethod
     def _validate_embeddings(

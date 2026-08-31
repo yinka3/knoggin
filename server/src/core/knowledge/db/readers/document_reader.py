@@ -111,30 +111,6 @@ class DocumentReader:
             (selector_value, *self._document_visibility_params()),
         )
 
-    async def fetch_document_content(
-        self,
-        *,
-        document_id: str,
-    ) -> Optional[bytes]:
-        """Return raw bytes only when the document is visible in this scope."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT dc.content
-            FROM public.document_content AS dc
-            JOIN public.project_documents AS pd
-                ON pd.document_id = dc.document_id
-            WHERE dc.document_id = %s
-              AND pd.status <> 'deleted'
-            """
-            + self._document_visibility_sql()
-            + """
-            """,
-            (document_id, *self._document_visibility_params()),
-        )
-        if not rows:
-            return None
-        return bytes(rows[0]["content"])
-
     async def fetch_extracted_text(
         self,
         *,
@@ -144,14 +120,14 @@ class DocumentReader:
         """Return visible derived text only when it matches the source hash."""
         rows = await self._client.fetch_all(
             """
-            SELECT dc.extracted_text
-            FROM public.document_content AS dc
+            SELECT de.extracted_text
+            FROM public.document_extractions AS de
             JOIN public.project_documents AS pd
-                ON pd.document_id = dc.document_id
-            WHERE dc.document_id = %s
+                ON pd.document_id = de.document_id
+            WHERE de.document_id = %s
               AND pd.content_hash = %s
-              AND dc.extracted_content_hash = pd.content_hash
-              AND dc.extracted_text IS NOT NULL
+              AND de.extracted_content_hash = pd.content_hash
+              AND de.extracted_text IS NOT NULL
               AND pd.status <> 'deleted'
             """
             + self._document_visibility_sql()

@@ -26,12 +26,15 @@ from core.knowledge.documents.constants import document_extension
 from infrastructure.background_work import BackgroundWorkRejected
 
 
+async def run_inline(function, *args, **kwargs):
+    return function(*args, **kwargs)
+
+
 class MemoryPostgres:
     def __init__(self):
         self.rows = []
         self.scan_settings = {}
         self.chunks = []
-        self.contents = {}  # document_id -> bytes
         self.extracted_text = {}  # document_id -> (content_hash, text)
         self.calls = []
         self.write_error = None
@@ -110,7 +113,7 @@ class MemoryPostgres:
             self.chunks = [
                 chunk for chunk in self.chunks if chunk["document_id"] != document_id
             ]
-            self.contents.pop(document_id, None)
+            self.extracted_text.pop(document_id, None)
             return [dict(row)]
         if (
             query.lstrip().startswith("UPDATE public.project_documents")
@@ -175,7 +178,7 @@ class MemoryPostgres:
         if "FROM public.project_document_scan_settings" in query:
             row = self.scan_settings.get(params[0])
             return [deepcopy(row)] if row else []
-        if "dc.extracted_text" in query:
+        if "de.extracted_text" in query:
             document_id, content_hash, readable_project_ids = params
             document = next(
                 (
@@ -195,26 +198,6 @@ class MemoryPostgres:
             if cached is None or cached[0] != content_hash:
                 return []
             return [{"extracted_text": cached[1]}]
-        if "FROM public.document_content" in query:
-            document_id, readable_project_ids = params
-            document = next(
-                (
-                    row
-                    for row in self.rows
-                    if row["document_id"] == document_id
-                    and self._read_visible(
-                        row,
-                        readable_project_ids,
-                    )
-                ),
-                None,
-            )
-            if document is None:
-                return []
-            raw = self.contents.get(document_id)
-            if raw is None:
-                return []
-            return [{"content": raw}]
         if (
             "FROM public.document_chunks AS dc" in query
             and "JOIN public.project_documents AS pd" in query
@@ -464,9 +447,8 @@ class MemoryCursor:
             self.result = None
             return
 
-        if normalized.startswith("DELETE FROM public.document_content"):
+        if normalized.startswith("DELETE FROM public.document_extractions"):
             document_id = params[0]
-            self.postgres.contents.pop(document_id, None)
             self.postgres.extracted_text.pop(document_id, None)
             self.result = None
             return
@@ -495,26 +477,12 @@ class MemoryCursor:
                 for chunk in self.postgres.chunks
                 if chunk["document_id"] != document_id
             ]
-            self.postgres.contents.pop(document_id, None)
             self.postgres.extracted_text.pop(document_id, None)
             self.result = dict(row)
             return
 
-        if normalized.startswith("INSERT INTO public.document_content"):
-            document_id, content, *derived = params
-            self.postgres.contents[document_id] = bytes(content)
-            if derived:
-                self.postgres.extracted_text[document_id] = (
-                    derived[1],
-                    derived[0],
-                )
-            else:
-                self.postgres.extracted_text.pop(document_id, None)
-            self.result = None
-            return
-
-        if normalized.startswith("UPDATE public.document_content"):
-            extracted_text, content_hash, document_id = params
+        if normalized.startswith("INSERT INTO public.document_extractions"):
+            document_id, extracted_text, content_hash = params
             self.postgres.extracted_text[document_id] = (
                 content_hash,
                 extracted_text,
@@ -623,7 +591,6 @@ class MemoryTransaction:
     async def __aenter__(self):
         self.rows = deepcopy(self.postgres.rows)
         self.chunks = deepcopy(self.postgres.chunks)
-        self.contents = deepcopy(self.postgres.contents)
         self.extracted_text = deepcopy(self.postgres.extracted_text)
         return self
 
@@ -631,7 +598,6 @@ class MemoryTransaction:
         if exc_type is not None or self.postgres.transaction_commit_error:
             self.postgres.rows = self.rows
             self.postgres.chunks = self.chunks
-            self.postgres.contents = self.contents
             self.postgres.extracted_text = self.extracted_text
         if exc_type is None and self.postgres.transaction_commit_error:
             raise self.postgres.transaction_commit_error
@@ -881,9 +847,6 @@ def document_harness(tmp_path):
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
 
-    async def run_inline(function, *args, **kwargs):
-        return function(*args, **kwargs)
-
     service = DocumentService(
         project_id="project-1",
         postgres_client=postgres,
@@ -897,7 +860,7 @@ def document_harness(tmp_path):
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_add_document_stores_bytes_and_persists_metadata(document_harness):
+async def test_add_document_writes_project_file_and_persists_metadata(document_harness):
     service, postgres = document_harness
     content = b"alpha beta gamma"
 
@@ -916,7 +879,7 @@ async def test_add_document_stores_bytes_and_persists_metadata(document_harness)
     assert metadata["chunk_count"] == 0
     assert "storage_key" not in metadata
 
-    assert postgres.contents[metadata["document_id"]] == content
+    assert service._filesystem.read_bytes("docs/Notes.MD") == content
     assert postgres.rows[0]["original_name"] == "Notes.MD"
     assert postgres.transaction_count == 1
 
@@ -931,7 +894,6 @@ async def test_database_failure_leaves_no_content_or_metadata(document_harness):
         await service.add_document(content=b"alpha", original_name="notes.md")
 
     assert postgres.rows == []
-    assert postgres.contents == {}
     assert list(service._filesystem.iter_files()) == []
 
 
@@ -946,8 +908,6 @@ async def test_manual_project_documents_read_and_index_from_the_local_file(
         content=b"current local text",
         original_name="notes.md",
     )
-    postgres.contents[document["document_id"]] = b"stale database text"
-
     read = await service.read_document(document_id=document["document_id"])
     indexed = await service.index_document(document_id=document["document_id"])
 
@@ -1043,11 +1003,24 @@ async def test_indexer_reconciles_project_files_when_the_runtime_starts(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_document_listing_is_scoped_to_the_active_project():
+async def test_document_listing_is_scoped_to_the_active_project(tmp_path):
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, embedding)
-    project_two = DocumentService("project-2", postgres, embedding)
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    project_one = DocumentService(
+        "project-1",
+        postgres,
+        embedding,
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
+    project_two = DocumentService(
+        "project-2",
+        postgres,
+        embedding,
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
 
     project_file = await project_one.add_document(
         content=b"project",
@@ -1199,10 +1172,16 @@ async def test_get_document_info_resolves_visible_document_without_storage_key(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_get_document_info_enforces_reference_rules():
+async def test_get_document_info_enforces_reference_rules(tmp_path):
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    service = DocumentService("project-1", postgres, embedding)
+    service = DocumentService(
+        "project-1",
+        postgres,
+        embedding,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+        blocking_runner=run_inline,
+    )
     uploaded = await service.add_document(
         content=b"private",
         original_name="private.txt",
@@ -1440,9 +1419,8 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
     assert deleted["document_id"] == first["document_id"]
     assert deleted["deleted"] is True
     assert "storage_key" not in deleted
-    assert first["document_id"] not in postgres.contents
-    assert postgres.contents.get(second["document_id"]) == b"same content"
     assert not service._filesystem.root.joinpath("notes.txt").exists()
+    assert service._filesystem.read_bytes("archive/copy.txt") == b"same content"
     tombstone = next(
         row for row in postgres.rows if row["document_id"] == first["document_id"]
     )
@@ -1457,11 +1435,24 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_delete_document_enforces_project_ownership():
+async def test_delete_document_enforces_project_ownership(tmp_path):
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, embedding)
-    project_two = DocumentService("project-2", postgres, embedding)
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    project_one = DocumentService(
+        "project-1",
+        postgres,
+        embedding,
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
+    project_two = DocumentService(
+        "project-2",
+        postgres,
+        embedding,
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
     uploaded = await project_one.add_document(
         content=b"private",
         original_name="private.txt",
@@ -2102,11 +2093,24 @@ async def test_index_document_records_document_parser_errors(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_enforces_project_ownership():
+async def test_index_document_enforces_project_ownership(tmp_path):
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
-    project_one = DocumentService("project-1", postgres, embedding)
-    project_two = DocumentService("project-2", postgres, embedding)
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    project_one = DocumentService(
+        "project-1",
+        postgres,
+        embedding,
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
+    project_two = DocumentService(
+        "project-2",
+        postgres,
+        embedding,
+        filesystem_factory=filesystem_factory,
+        blocking_runner=run_inline,
+    )
     uploaded = await project_one.add_document(
         content=b"session content",
         original_name="private.txt",
@@ -2443,7 +2447,7 @@ async def test_accept_folder_admits_bytes_without_creating_a_folder_batch(
     assert len(postgres.rows) == 1
     assert postgres.rows[0]["status"] == "queued"
     assert postgres.chunks == []
-    assert postgres.contents[postgres.rows[0]["document_id"]] == b"\xff"
+    assert service._filesystem.read_bytes("broken.txt") == b"\xff"
 
 
 @pytest.mark.storage
@@ -2479,7 +2483,10 @@ async def test_accept_folder_admits_selected_paths_before_background_indexing(
     assert len(postgres.rows) == 2
     assert len(postgres.chunks) == 0
     assert {row["status"] for row in postgres.rows} == {"queued"}
-    assert set(postgres.contents.values()) == {b"alpha", b"beta"}
+    assert {
+        service._filesystem.read_bytes("a.txt"),
+        service._filesystem.read_bytes("b.txt"),
+    } == {b"alpha", b"beta"}
 
 
 @pytest.mark.storage
@@ -2518,4 +2525,4 @@ async def test_accept_folder_commit_failure_removes_rows_and_bytes(
 
     assert postgres.rows == []
     assert postgres.chunks == []
-    assert postgres.contents == {}
+    assert list(service._filesystem.iter_files()) == []

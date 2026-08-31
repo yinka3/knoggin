@@ -127,10 +127,11 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO public.document_content (document_id, content)
-        VALUES (%s, %s)
+        INSERT INTO public.document_extractions (
+            document_id, extracted_text, extracted_content_hash
+        ) VALUES (%s, %s, 'hash')
         """,
-        (document_id, b"hello"),
+        (document_id, "hello"),
     )
     await real_postgres_client.execute(
         """
@@ -156,7 +157,7 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
         "WHERE project_id = 'project-1'"
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.document_content WHERE document_id = %s",
+        "SELECT count(*) AS count FROM public.document_extractions WHERE document_id = %s",
         (document_id,),
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
@@ -307,10 +308,12 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         )
         await cur.execute(
             """
-            INSERT INTO document_content (document_id, content)
+            INSERT INTO document_extractions (
+                document_id, extracted_text, extracted_content_hash
+            )
             VALUES
-                ('77777777-7777-4777-8777-777777777777', 'delete'),
-                ('88888888-8888-4888-8888-888888888888', 'keep')
+                ('77777777-7777-4777-8777-777777777777', 'delete', repeat('1', 64)),
+                ('88888888-8888-4888-8888-888888888888', 'keep', repeat('2', 64))
             """
         )
         await cur.execute(
@@ -381,8 +384,8 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-1'"
         ),
-        "content": (
-            "SELECT count(*) AS count FROM document_content c "
+        "extractions": (
+            "SELECT count(*) AS count FROM document_extractions c "
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-1'"
         ),
@@ -413,8 +416,8 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-2'"
         ),
-        "content": (
-            "SELECT count(*) AS count FROM document_content c "
+        "extractions": (
+            "SELECT count(*) AS count FROM document_extractions c "
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-2'"
         ),

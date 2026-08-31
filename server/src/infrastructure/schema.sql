@@ -1516,19 +1516,20 @@ ON public.project_documents(project_id, content_hash);
 
 
 
--- Raw document bytes, stored separately to keep the project_documents table lean.
--- Deleted automatically when the parent project_documents row is removed.
-CREATE TABLE IF NOT EXISTS public.document_content (
+-- The project filesystem owns current bytes. This is only a derived extraction
+-- cache for bounded document reads and is invalidated by its content hash.
+DROP TABLE IF EXISTS public.document_content;
+
+CREATE TABLE IF NOT EXISTS public.document_extractions (
     document_id UUID PRIMARY KEY
         REFERENCES public.project_documents(document_id) ON DELETE CASCADE,
-    content BYTEA NOT NULL,
     extracted_text TEXT,
     extracted_content_hash TEXT
 );
 
-ALTER TABLE public.document_content
+ALTER TABLE public.document_extractions
     ADD COLUMN IF NOT EXISTS extracted_text TEXT;
-ALTER TABLE public.document_content
+ALTER TABLE public.document_extractions
     ADD COLUMN IF NOT EXISTS extracted_content_hash TEXT;
 
 CREATE TABLE IF NOT EXISTS public.document_chunks (

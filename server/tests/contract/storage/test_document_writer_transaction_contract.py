@@ -66,14 +66,12 @@ async def test_insert_document_uses_public_transaction_contract():
         extension=".md",
         size_bytes=5,
         content_hash="hash",
-        content=b"hello",
         created_at="2026-07-12T00:00:00+00:00",
     )
 
     assert client.transaction_count == 1
-    assert len(client.cursor.calls) == 2
+    assert len(client.cursor.calls) == 1
     assert "INSERT INTO public.project_documents" in client.cursor.calls[0][0]
-    assert "INSERT INTO public.document_content" in client.cursor.calls[1][0]
 
 
 @pytest.mark.storage

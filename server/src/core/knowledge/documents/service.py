@@ -151,13 +151,11 @@ class DocumentService:
         document: Dict,
     ) -> bytes | None:
         filesystem = self._filesystem_for_document(document)
-        if filesystem is not None:
-            return await self._run_blocking(
-                filesystem.read_bytes,
-                document["relative_path"],
-            )
-        return await self._reader.fetch_document_content(
-            document_id=str(document["document_id"]),
+        if filesystem is None:
+            raise RuntimeError("Document source filesystem is not configured")
+        return await self._run_blocking(
+            filesystem.read_bytes,
+            document["relative_path"],
         )
 
     async def reconcile_project_files(self) -> Dict[str, int]:
@@ -233,7 +231,6 @@ class DocumentService:
                 extension=preview_entry.extension,
                 size_bytes=preview_entry.size_bytes,
                 content_hash=preview_entry.content_hash,
-                content=content,
                 created_at=now,
             )
         for document in current.values():
@@ -977,7 +974,21 @@ class DocumentService:
                 except Exception:
                     logger.exception("Could not roll back folder import file {}", relative_path)
             raise
-        await self.reconcile_project_files()
+        try:
+            await self.reconcile_project_files()
+        except Exception:
+            for relative_path, content_hash in reversed(written):
+                try:
+                    await self._run_blocking(
+                        filesystem.delete_file,
+                        relative_path,
+                        expected_content_hash=content_hash,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not roll back folder import file {}", relative_path
+                    )
+            raise
         return {
             "project_id": self.project_id,
             "path_prefix": self._common_path_prefix(normalized_selected),
@@ -1034,12 +1045,13 @@ class DocumentService:
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
         filesystem = self._filesystem
-        if filesystem is not None:
-            await self._run_blocking(
-                filesystem.write_bytes,
-                normalized_path,
-                content,
-            )
+        if filesystem is None:
+            raise RuntimeError("Document source filesystem is not configured")
+        await self._run_blocking(
+            filesystem.write_bytes,
+            normalized_path,
+            content,
+        )
         try:
             await self._writer.insert_document(
                 document_id=document_id,
@@ -1048,21 +1060,19 @@ class DocumentService:
                 extension=extension,
                 size_bytes=len(content),
                 content_hash=content_hash,
-                content=content,
                 created_at=created_at,
             )
         except Exception:
-            if filesystem is not None:
-                try:
-                    await self._run_blocking(
-                        filesystem.delete_file,
-                        normalized_path,
-                        expected_content_hash=content_hash,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Could not roll back local document file after catalog failure"
-                    )
+            try:
+                await self._run_blocking(
+                    filesystem.delete_file,
+                    normalized_path,
+                    expected_content_hash=content_hash,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not roll back local document file after catalog failure"
+                )
             raise
         return {
             "document_id": document_id,
