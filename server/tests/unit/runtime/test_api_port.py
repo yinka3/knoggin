@@ -144,7 +144,7 @@ class FakeSessions:
             if kwargs["document_id"] is not None
             else "subtree"
             if kwargs["path_prefix"] is not None
-            else "folder_upload"
+            else "subtree"
         )
         self.document_focus = {
             "mode": "pinned",
@@ -152,7 +152,6 @@ class FakeSessions:
             "target_type": target_type,
             "document_id": kwargs["document_id"],
             "relative_path": "docs/notes.py" if kwargs["document_id"] else None,
-            "folder_root_id": kwargs["folder_root_id"],
             "path_prefix": kwargs["path_prefix"],
         }
         return self.document_focus

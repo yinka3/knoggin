@@ -161,11 +161,6 @@ class ApplicationRuntimePort:
                     if target["target_type"] == "document"
                     else None
                 ),
-                folder_root_id=(
-                    target["folder_root_id"]
-                    if target["target_type"] != "document"
-                    else None
-                ),
                 path_prefix=(
                     target["path_prefix"]
                     if target["target_type"] == "subtree"
@@ -207,11 +202,6 @@ class ApplicationRuntimePort:
             document_id=(
                 requested.document_id
                 if requested.target_type == "document"
-                else None
-            ),
-            folder_root_id=(
-                requested.folder_root_id
-                if requested.target_type != "document"
                 else None
             ),
             path_prefix=(

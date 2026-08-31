@@ -466,7 +466,6 @@ class SessionManager:
         session_id: str,
         *,
         document_id: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> dict:
         """Validate and persist one pinned document focus for a session."""
@@ -480,7 +479,6 @@ class SessionManager:
             target = await context.document_service.resolve_focus_target(
                 session_id=session_id,
                 document_id=document_id,
-                folder_root_id=folder_root_id,
                 path_prefix=path_prefix,
             )
             focus = dump_document_focus(

@@ -472,7 +472,6 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
         "target_type": "subtree",
         "document_id": None,
         "relative_path": None,
-        "folder_root_id": "folder-1",
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
@@ -481,14 +480,12 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
             assert kwargs == {
                 "session_id": "session-1",
                 "document_id": None,
-                "folder_root_id": "folder-1",
                 "path_prefix": "src",
             }
             return {
                 "target_type": "subtree",
                 "document_id": None,
                 "relative_path": None,
-                "folder_root_id": "folder-1",
                 "path_prefix": "src",
             }
 
@@ -503,7 +500,6 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
     assert loaded is not None
     assert loaded.mode == "pinned"
     assert loaded.target_type == "subtree"
-    assert loaded.folder_root_id == "folder-1"
     assert loaded.path_prefix == "src"
 
 
@@ -519,8 +515,8 @@ async def test_orchestrator_ignores_stale_document_focus():
     context.document_service = MissingFocusService()
     context.document_focus = {
         "mode": "pinned",
-        "target_type": "folder_upload",
-        "folder_root_id": "missing-folder",
+        "target_type": "subtree",
+        "path_prefix": "missing-folder",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
 
@@ -540,7 +536,6 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
             assert kwargs == {
                 "session_id": "session-1",
                 "document_id": "document-1",
-                "folder_root_id": None,
                 "path_prefix": None,
             }
             return {

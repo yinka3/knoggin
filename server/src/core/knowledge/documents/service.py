@@ -1608,12 +1608,11 @@ class DocumentService:
         *,
         session_id: Optional[str] = None,
         document_id: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> Dict:
         """Validate and canonicalize one visible document-focus target."""
         if document_id is not None:
-            if folder_root_id is not None or path_prefix is not None:
+            if path_prefix is not None:
                 raise ValueError(
                     "document focus cannot include folder filters"
                 )
@@ -1627,37 +1626,19 @@ class DocumentService:
                 "relative_path": document["relative_path"],
             }
 
-        if folder_root_id is None:
-            raise ValueError(
-                "document focus requires document_id or folder_root_id"
-            )
-        folder_root_id = folder_root_id.strip()
-        if not folder_root_id:
-            raise ValueError("folder_root_id must not be empty")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        folder = await self._reader.fetch_folder_upload(
-            folder_root_id=folder_root_id,
+        if normalized_prefix is None:
+            raise ValueError("document focus requires document_id or path_prefix")
+        documents = await self.list_documents(
             session_id=session_id,
+            path_prefix=normalized_prefix,
+            limit=1,
         )
-        if folder is None:
+        if not documents:
             raise FileNotFoundError("Document focus target not found")
-        if normalized_prefix is not None:
-            documents = await self.list_documents(
-                session_id=session_id,
-                folder_root_id=folder_root_id,
-                path_prefix=normalized_prefix,
-                limit=1,
-            )
-            if not documents:
-                raise FileNotFoundError("Document focus target not found")
-            return {
-                "target_type": "subtree",
-                "folder_root_id": folder_root_id,
-                "path_prefix": normalized_prefix,
-            }
         return {
-            "target_type": "folder_upload",
-            "folder_root_id": folder_root_id,
+            "target_type": "subtree",
+            "path_prefix": normalized_prefix,
         }
 
     @staticmethod

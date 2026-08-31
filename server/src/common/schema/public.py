@@ -139,26 +139,14 @@ class RunDocumentFocusDocument(PublicModel):
 
 
 class RunDocumentFocusSubtree(PublicModel):
-    """One request-scoped subtree in a folder upload."""
+    """One request-scoped project-relative subtree."""
 
     target_type: Literal["subtree"]
-    folder_root_id: str = Field(min_length=1)
     path_prefix: str = Field(min_length=1)
 
 
-class RunDocumentFocusFolderUpload(PublicModel):
-    """One request-scoped uploaded folder."""
-
-    target_type: Literal["folder_upload"]
-    folder_root_id: str = Field(min_length=1)
-
-
 RunDocumentFocus = Annotated[
-    Union[
-        RunDocumentFocusDocument,
-        RunDocumentFocusSubtree,
-        RunDocumentFocusFolderUpload,
-    ],
+    Union[RunDocumentFocusDocument, RunDocumentFocusSubtree],
     Field(discriminator="target_type"),
 ]
 
@@ -171,26 +159,14 @@ class SetDocumentFocusDocument(PublicModel):
 
 
 class SetDocumentFocusSubtree(PublicModel):
-    """Persisted focus for one folder subtree."""
+    """Persisted focus for one project-relative subtree."""
 
     target_type: Literal["subtree"]
-    folder_root_id: str = Field(min_length=1)
     path_prefix: str = Field(min_length=1)
 
 
-class SetDocumentFocusFolderUpload(PublicModel):
-    """Persisted focus for one complete uploaded folder."""
-
-    target_type: Literal["folder_upload"]
-    folder_root_id: str = Field(min_length=1)
-
-
 SetDocumentFocusRequest = Annotated[
-    Union[
-        SetDocumentFocusDocument,
-        SetDocumentFocusSubtree,
-        SetDocumentFocusFolderUpload,
-    ],
+    Union[SetDocumentFocusDocument, SetDocumentFocusSubtree],
     Field(discriminator="target_type"),
 ]
 
@@ -200,10 +176,9 @@ class DocumentFocusResponse(PublicModel):
 
     mode: Literal["pinned"]
     created_at: datetime
-    target_type: Literal["document", "subtree", "folder_upload"]
+    target_type: Literal["document", "subtree"]
     document_id: str | None = None
     relative_path: str | None = None
-    folder_root_id: str | None = None
     path_prefix: str | None = None
 
 

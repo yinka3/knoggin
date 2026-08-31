@@ -293,11 +293,6 @@ class AgentOrchestrator:
                     if persisted.target_type == "document"
                     else None
                 ),
-                folder_root_id=(
-                    persisted.folder_root_id
-                    if persisted.target_type != "document"
-                    else None
-                ),
                 path_prefix=(
                     persisted.path_prefix
                     if persisted.target_type == "subtree"

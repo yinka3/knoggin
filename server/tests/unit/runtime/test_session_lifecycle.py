@@ -128,8 +128,8 @@ async def test_resume_reconstructs_all_durable_session_configuration(
     manager, resources, project_manager, factory = session_manager
     focus = {
         "mode": "pinned",
-        "target_type": "folder_upload",
-        "folder_root_id": "folder-1",
+        "target_type": "subtree",
+        "path_prefix": "folder-1",
         "created_at": "2026-08-20T12:00:00+00:00",
     }
     resources.postgres.sessions["session-1"] = {

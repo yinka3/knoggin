@@ -216,13 +216,12 @@ class DocumentFocusDocument(_DocumentFocusBase):
 
 
 class DocumentFocusSubtree(_DocumentFocusBase):
-    """A focus targeting a path subtree within one uploaded folder."""
+    """A focus targeting one project-relative path subtree."""
 
     target_type: Literal["subtree"]
-    folder_root_id: str = Field(min_length=1)
     path_prefix: str = Field(min_length=1)
 
-    @field_validator("folder_root_id", "path_prefix")
+    @field_validator("path_prefix")
     @classmethod
     def _normalize_selectors(cls, value: str) -> str:
         if not (normalized := value.strip()):
@@ -230,22 +229,8 @@ class DocumentFocusSubtree(_DocumentFocusBase):
         return normalized
 
 
-class DocumentFocusFolderUpload(_DocumentFocusBase):
-    """A focus targeting every visible document from one folder upload."""
-
-    target_type: Literal["folder_upload"]
-    folder_root_id: str = Field(min_length=1)
-
-    @field_validator("folder_root_id")
-    @classmethod
-    def _normalize_folder_root_id(cls, value: str) -> str:
-        if not (normalized := value.strip()):
-            raise ValueError("document focus selectors must not be blank")
-        return normalized
-
-
 DocumentFocus = Annotated[
-    Union[DocumentFocusDocument, DocumentFocusSubtree, DocumentFocusFolderUpload],
+    Union[DocumentFocusDocument, DocumentFocusSubtree],
     Field(discriminator="target_type"),
 ]
 
@@ -253,7 +238,6 @@ _DOCUMENT_FOCUS_ADAPTER = TypeAdapter(DocumentFocus)
 _LEGACY_OPTIONAL_SELECTORS = {
     "document_id",
     "relative_path",
-    "folder_root_id",
     "path_prefix",
 }
 
@@ -268,7 +252,7 @@ def parse_document_focus(value: object) -> DocumentFocus:
 
     if isinstance(
         value,
-        (DocumentFocusDocument, DocumentFocusSubtree, DocumentFocusFolderUpload),
+        (DocumentFocusDocument, DocumentFocusSubtree),
     ):
         return value
     if not isinstance(value, dict):
