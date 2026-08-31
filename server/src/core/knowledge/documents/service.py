@@ -868,12 +868,13 @@ class DocumentService:
             relative_path=None,
         )
         filesystem = self._filesystem_for_document(document)
-        if filesystem is not None:
-            await self._run_blocking(
-                filesystem.delete_file,
-                document["relative_path"],
-                expected_content_hash=document["content_hash"],
-            )
+        if filesystem is None:
+            raise RuntimeError("Document source filesystem is not configured")
+        await self._run_blocking(
+            filesystem.delete_file,
+            document["relative_path"],
+            expected_content_hash=document["content_hash"],
+        )
         row = await self._writer.delete_document(
             document_id=document_id,
         )
