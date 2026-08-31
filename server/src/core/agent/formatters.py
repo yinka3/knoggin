@@ -314,10 +314,8 @@ def format_document_focus_context(
     if target_type == "document":
         lines.append(f"- relative_path: {focus.get('relative_path', '')}")
     elif target_type == "subtree":
-        lines.append("- scope: selected folder upload")
+        lines.append("- scope: selected project subtree")
         lines.append(f"- path_prefix: {focus.get('path_prefix', '')}")
-    elif target_type == "folder_upload":
-        lines.append("- scope: selected folder upload")
     if selection_context:
         locator = selection_context.get("locator")
         excerpt = selection_context.get("excerpt")

@@ -1419,56 +1419,6 @@ DROP FUNCTION IF EXISTS public.sync_entity_search_canonical_name() CASCADE;
 DROP TABLE IF EXISTS public.project_search_revisions;
 DROP TABLE IF EXISTS public.identity_search_revisions;
 
--- Project-owned folder upload batches.
-CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
-    folder_root_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    session_id TEXT,
-    visibility_scope TEXT NOT NULL,
-    folder_name TEXT NOT NULL,
-    candidate_count INTEGER NOT NULL,
-    candidate_bytes BIGINT NOT NULL,
-    document_count INTEGER NOT NULL,
-    total_size_bytes BIGINT NOT NULL,
-    excluded_count INTEGER NOT NULL,
-    excluded_bytes BIGINT NOT NULL,
-    excluded_directory_count INTEGER NOT NULL,
-    excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
-    scan_settings JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    indexed_at TIMESTAMPTZ,
-    CONSTRAINT document_folder_uploads_visibility_scope_check
-        CHECK (visibility_scope IN ('project', 'session')),
-    CONSTRAINT document_folder_uploads_session_visibility_check
-        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
-    CONSTRAINT document_folder_uploads_counts_check
-        CHECK (
-            candidate_count >= 0
-            AND candidate_bytes >= 0
-            AND document_count >= 0
-            AND total_size_bytes >= 0
-            AND excluded_count >= 0
-            AND excluded_bytes >= 0
-            AND excluded_directory_count >= 0
-        ),
-    CONSTRAINT document_folder_uploads_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS document_folder_uploads_project_idx
-ON public.document_folder_uploads(project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS document_folder_uploads_visibility_idx
-ON public.document_folder_uploads(
-    project_id,
-    visibility_scope,
-    session_id
-);
-
-ALTER TABLE public.document_folder_uploads
-    ALTER COLUMN indexed_at DROP NOT NULL;
-
 CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
     project_id TEXT PRIMARY KEY REFERENCES public.projects(project_id)
         ON DELETE CASCADE,
@@ -1484,8 +1434,6 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
         ON DELETE CASCADE,
     session_id TEXT,
     visibility_scope TEXT NOT NULL,
-    folder_root_id UUID REFERENCES public.document_folder_uploads(folder_root_id)
-        ON DELETE CASCADE,
     source_kind TEXT NOT NULL DEFAULT 'manual_upload',
     original_name TEXT NOT NULL,
     relative_path TEXT NOT NULL,
@@ -1504,25 +1452,6 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
         CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
     CONSTRAINT project_documents_status_check
         CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted')),
-    CONSTRAINT project_documents_source_kind_check
-        CHECK (source_kind IN ('manual_upload', 'folder_upload')),
-    CONSTRAINT project_documents_folder_source_check
-        CHECK (
-            (
-                status = 'deleted'
-                AND folder_root_id IS NULL
-            )
-            OR
-            (
-                source_kind = 'manual_upload'
-                AND folder_root_id IS NULL
-            )
-            OR
-            (
-                source_kind = 'folder_upload'
-                AND folder_root_id IS NOT NULL
-            )
-        ),
     CONSTRAINT project_documents_size_check
         CHECK (size_bytes >= 0)
 );
@@ -1543,6 +1472,28 @@ ALTER TABLE public.project_documents
 -- unreleased target state is the real project tree, so stale rows are rebuilt
 -- there through normal reconciliation rather than migrated as virtual files.
 DELETE FROM public.project_documents WHERE source_kind = 'workspace';
+-- Folder-upload records were admission batches, not durable hierarchy. Keep
+-- tombstones for provenance, but discard active rows that only existed in the
+-- removed batch storage and rebuild them from the real project tree. The
+-- conditional accommodates a fresh schema, which never has folder_root_id.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'project_documents'
+          AND column_name = 'folder_root_id'
+    ) THEN
+        UPDATE public.project_documents
+        SET source_kind = 'manual_upload', folder_root_id = NULL
+        WHERE status = 'deleted' AND source_kind = 'folder_upload';
+    END IF;
+END $$;
+DELETE FROM public.project_documents
+WHERE status <> 'deleted' AND source_kind = 'folder_upload';
+ALTER TABLE public.project_documents DROP COLUMN IF EXISTS folder_root_id;
+DROP TABLE IF EXISTS public.document_folder_uploads;
 ALTER TABLE public.project_documents
     ALTER COLUMN status SET DEFAULT 'queued';
 UPDATE public.project_documents
@@ -1558,27 +1509,6 @@ ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_status_check
     CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted'));
 ALTER TABLE public.project_documents
-    ADD CONSTRAINT project_documents_source_kind_check
-    CHECK (source_kind IN ('manual_upload', 'folder_upload'));
-ALTER TABLE public.project_documents
-    ADD CONSTRAINT project_documents_folder_source_check
-    CHECK (
-        (
-            status = 'deleted'
-            AND folder_root_id IS NULL
-        )
-        OR
-        (
-            source_kind = 'manual_upload'
-            AND folder_root_id IS NULL
-        )
-        OR
-        (
-            source_kind = 'folder_upload'
-            AND folder_root_id IS NOT NULL
-        )
-    );
-ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_relative_path_size_check;
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_relative_path_size_check
@@ -1593,8 +1523,6 @@ ON public.project_documents(project_id, visibility_scope, session_id);
 CREATE INDEX IF NOT EXISTS project_documents_hash_idx
 ON public.project_documents(project_id, content_hash);
 
-CREATE INDEX IF NOT EXISTS project_documents_folder_root_idx
-ON public.project_documents(folder_root_id, relative_path);
 
 
 -- Raw document bytes, stored separately to keep the project_documents table lean.
@@ -2435,15 +2363,6 @@ BEGIN
     ) THEN
         ALTER TABLE public.entity_merge_audits
         ADD CONSTRAINT entity_merge_audits_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'document_folder_uploads_project_fk'
-    ) THEN
-        ALTER TABLE public.document_folder_uploads
-        ADD CONSTRAINT document_folder_uploads_project_fk
         FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
         ON DELETE CASCADE;
     END IF;

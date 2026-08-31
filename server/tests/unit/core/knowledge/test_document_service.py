@@ -29,7 +29,6 @@ from infrastructure.background_work import BackgroundWorkRejected
 class MemoryPostgres:
     def __init__(self):
         self.rows = []
-        self.folders = []
         self.scan_settings = {}
         self.chunks = []
         self.contents = {}  # document_id -> bytes
@@ -209,37 +208,6 @@ class MemoryPostgres:
         if "FROM public.project_document_scan_settings" in query:
             row = self.scan_settings.get(params[0])
             return [deepcopy(row)] if row else []
-        if "FROM public.document_folder_uploads" in query:
-            if "folder_root_id = %s" in query:
-                folder_root_id, readable_project_ids, project_id, session_id = params
-                return [
-                    deepcopy(folder)
-                    for folder in self.folders
-                    if folder["folder_root_id"] == folder_root_id
-                    and self._read_visible(
-                        folder,
-                        readable_project_ids,
-                        project_id,
-                        session_id,
-                    )
-                ]
-            readable_project_ids, project_id, session_id, *filters = params
-            scope = None
-            if "visibility_scope = %s" in query:
-                scope = filters.pop(0)
-            limit = filters[-1]
-            folders = [
-                deepcopy(folder)
-                for folder in reversed(self.folders)
-                if self._read_visible(
-                    folder,
-                    readable_project_ids,
-                    project_id,
-                    session_id,
-                )
-                and (scope is None or folder["visibility_scope"] == scope)
-            ]
-            return folders[:limit]
         if "dc.extracted_text" in query:
             document_id, content_hash, readable_project_ids, project_id, session_id = params
             document = next(
@@ -285,48 +253,6 @@ class MemoryPostgres:
                 return []
             return [{"content": raw}]
         if (
-            "FROM public.project_documents AS pd" in query
-            and "pd.folder_root_id = %s" in query
-            and "pd.original_name" in query
-            and "pd.content_hash" not in query
-        ):
-            folder_root_id, readable_project_ids, project_id, session_id, *path_filters = params
-            rows = [
-                row
-                for row in self.rows
-                if row.get("folder_root_id") == folder_root_id
-                and self._read_visible(
-                    row,
-                    readable_project_ids,
-                    project_id,
-                    session_id,
-                )
-            ]
-            if path_filters:
-                prefix = path_filters[0]
-                rows = [
-                    row
-                    for row in rows
-                    if row["relative_path"] == prefix
-                    or row["relative_path"].startswith(f"{prefix}/")
-                ]
-            return [
-                {
-                    "document_id": row["document_id"],
-                    "folder_root_id": row["folder_root_id"],
-                    "original_name": row["original_name"],
-                    "relative_path": row["relative_path"],
-                    "extension": row["extension"],
-                    "size_bytes": row["size_bytes"],
-                    "status": row["status"],
-                    "chunk_count": sum(
-                        chunk["document_id"] == row["document_id"]
-                        for chunk in self.chunks
-                    ),
-                }
-                for row in sorted(rows, key=lambda item: item["relative_path"])
-            ]
-        if (
             "FROM public.document_chunks AS dc" in query
             and "JOIN public.project_documents AS pd" in query
         ):
@@ -358,9 +284,6 @@ class MemoryPostgres:
         scope = None
         if "pd.visibility_scope = %s" in query:
             scope = filters.pop(0)
-        folder_root_id = None
-        if "pd.folder_root_id = %s" in query:
-            folder_root_id = filters.pop(0)
         path_prefix = None
         if "pd.relative_path LIKE %s" in query:
             path_prefix = filters.pop(0)
@@ -375,7 +298,6 @@ class MemoryPostgres:
                 session_id,
             )
             and (scope is None or row["visibility_scope"] == scope)
-            and (folder_root_id is None or row.get("folder_root_id") == folder_root_id)
             and (
                 path_prefix is None
                 or row["relative_path"] == path_prefix
@@ -566,7 +488,6 @@ class MemoryCursor:
             row.update(
                 {
                     "status": "deleted",
-                    "folder_root_id": None,
                     "deleted_at": row.get("deleted_at") or "deleted-now",
                     "indexed_at": None,
                     "error_message": None,
@@ -646,67 +567,6 @@ class MemoryCursor:
             self.result = None
             return
 
-        if normalized.startswith("INSERT INTO public.document_folder_uploads"):
-            if len(params) == 15:
-                (
-                    folder_root_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_name,
-                    candidate_count,
-                    candidate_bytes,
-                    document_count,
-                    total_size_bytes,
-                    excluded_count,
-                    excluded_bytes,
-                    excluded_directory_count,
-                    excluded_reason_counts,
-                    scan_settings,
-                    created_at,
-                ) = params
-                indexed_at = None
-            else:
-                (
-                    folder_root_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_name,
-                    candidate_count,
-                    candidate_bytes,
-                    document_count,
-                    total_size_bytes,
-                    excluded_count,
-                    excluded_bytes,
-                    excluded_directory_count,
-                    excluded_reason_counts,
-                    scan_settings,
-                    created_at,
-                    indexed_at,
-                ) = params
-            self.postgres.folders.append(
-                {
-                    "folder_root_id": folder_root_id,
-                    "project_id": project_id,
-                    "session_id": session_id,
-                    "visibility_scope": visibility_scope,
-                    "folder_name": folder_name,
-                    "candidate_count": candidate_count,
-                    "candidate_bytes": candidate_bytes,
-                    "document_count": document_count,
-                    "total_size_bytes": total_size_bytes,
-                    "excluded_count": excluded_count,
-                    "excluded_bytes": excluded_bytes,
-                    "excluded_directory_count": excluded_directory_count,
-                    "excluded_reason_counts": json.loads(excluded_reason_counts),
-                    "scan_settings": json.loads(scan_settings),
-                    "created_at": created_at,
-                    "indexed_at": indexed_at,
-                }
-            )
-            self.result = None
-            return
 
         if normalized.startswith("INSERT INTO public.project_documents"):
             if "'manual_upload'" in normalized and "'queued'" in normalized:
@@ -729,7 +589,6 @@ class MemoryCursor:
                         "project_id": project_id,
                         "session_id": session_id,
                         "visibility_scope": visibility_scope,
-                        "folder_root_id": None,
                         "source_kind": "manual_upload",
                         "original_name": original_name,
                         "relative_path": relative_path,
@@ -747,82 +606,6 @@ class MemoryCursor:
                 )
                 self.result = None
                 return
-            if "'folder_upload'" in normalized and "'queued'" in normalized:
-                (
-                    document_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_root_id,
-                    original_name,
-                    relative_path,
-                    extension,
-                    size_bytes,
-                    content_hash,
-                    created_at,
-                    updated_at,
-                ) = params
-                self.postgres.rows.append(
-                    {
-                        "document_id": document_id,
-                        "project_id": project_id,
-                        "session_id": session_id,
-                        "visibility_scope": visibility_scope,
-                        "folder_root_id": folder_root_id,
-                        "source_kind": "folder_upload",
-                        "original_name": original_name,
-                        "relative_path": relative_path,
-                        "extension": extension,
-                        "size_bytes": size_bytes,
-                        "content_hash": content_hash,
-                        "status": "queued",
-                        "indexed_at": None,
-                        "error_message": None,
-                        "created_at": created_at,
-                        "updated_at": updated_at,
-                        "chunk_count": 0,
-                    }
-                )
-                self.result = None
-                return
-            (
-                document_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_root_id,
-                original_name,
-                relative_path,
-                extension,
-                size_bytes,
-                content_hash,
-                indexed_at,
-                created_at,
-                updated_at,
-            ) = params
-            self.postgres.rows.append(
-                {
-                    "document_id": document_id,
-                    "project_id": project_id,
-                    "session_id": session_id,
-                    "visibility_scope": visibility_scope,
-                    "folder_root_id": folder_root_id,
-                    "source_kind": "folder_upload",
-                    "original_name": original_name,
-                    "relative_path": relative_path,
-                    "extension": extension,
-                    "size_bytes": size_bytes,
-                    "content_hash": content_hash,
-                    "status": "indexed",
-                    "indexed_at": indexed_at,
-                    "error_message": None,
-                    "created_at": created_at,
-                    "updated_at": updated_at,
-                    "chunk_count": 0,
-                }
-            )
-            self.result = None
-            return
 
         if "SET status = 'indexed'" in normalized and "ANY(%s)" in normalized:
             indexed_at, updated_at, document_ids = params
@@ -890,7 +673,6 @@ class MemoryTransaction:
     async def __aenter__(self):
         self.rows = deepcopy(self.postgres.rows)
         self.chunks = deepcopy(self.postgres.chunks)
-        self.folders = deepcopy(self.postgres.folders)
         self.contents = deepcopy(self.postgres.contents)
         self.extracted_text = deepcopy(self.postgres.extracted_text)
         return self
@@ -899,7 +681,6 @@ class MemoryTransaction:
         if exc_type is not None or self.postgres.transaction_commit_error:
             self.postgres.rows = self.rows
             self.postgres.chunks = self.chunks
-            self.postgres.folders = self.folders
             self.postgres.contents = self.contents
             self.postgres.extracted_text = self.extracted_text
         if exc_type is None and self.postgres.transaction_commit_error:
@@ -1184,7 +965,6 @@ async def test_add_document_stores_bytes_and_persists_metadata(document_harness)
     assert metadata["size_bytes"] == len(content)
     assert metadata["content_hash"] == hashlib.sha256(content).hexdigest()
     assert metadata["status"] == "queued"
-    assert metadata["folder_root_id"] is None
     assert metadata["source_kind"] == "manual_upload"
     assert metadata["chunk_count"] == 0
     assert "storage_key" not in metadata
@@ -1757,7 +1537,6 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
     assert tombstone["status"] == "deleted"
     assert tombstone["deleted_at"]
     assert tombstone["content_hash"] == first["content_hash"]
-    assert tombstone["folder_root_id"] is None
     assert second["document_id"] in [row["document_id"] for row in postgres.rows]
     assert all(
         chunk["document_id"] != first["document_id"] for chunk in postgres.chunks
@@ -2577,7 +2356,6 @@ async def test_accept_folder_indexes_selected_subset_atomically(
         "src/main.py",
     }
     assert result["path_prefix"] is None
-    assert len(postgres.folders) == 0
     assert len(postgres.rows) == 2
     assert len(postgres.chunks) == 0
     assert all(row["source_kind"] == "manual_upload" for row in postgres.rows)
@@ -2718,7 +2496,6 @@ async def test_repeated_folder_acceptance_rejects_an_existing_project_path(
             selected_paths=["notes.txt"],
         )
     assert first["relative_paths"] == ["notes.txt"]
-    assert postgres.folders == []
     assert len(postgres.rows) == 1
 
 
@@ -2766,7 +2543,6 @@ async def test_accept_folder_rejects_unknown_and_excluded_selections(
             selected_paths=[],
         )
 
-    assert postgres.folders == []
     assert postgres.rows == []
 
 
@@ -2784,7 +2560,6 @@ async def test_accept_folder_admits_bytes_without_creating_a_folder_batch(
     )
 
     assert result["relative_paths"] == ["broken.txt"]
-    assert len(postgres.folders) == 0
     assert len(postgres.rows) == 1
     assert postgres.rows[0]["status"] == "queued"
     assert postgres.chunks == []
@@ -2821,7 +2596,6 @@ async def test_accept_folder_admits_selected_paths_before_background_indexing(
     )
 
     assert result["relative_paths"] == ["a.txt", "b.txt"]
-    assert len(postgres.folders) == 0
     assert len(postgres.rows) == 2
     assert len(postgres.chunks) == 0
     assert {row["status"] for row in postgres.rows} == {"queued"}
@@ -2862,34 +2636,6 @@ async def test_accept_folder_commit_failure_removes_rows_and_bytes(
             selected_paths=["notes.txt"],
         )
 
-    assert postgres.folders == []
     assert postgres.rows == []
     assert postgres.chunks == []
     assert postgres.contents == {}
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_folder_search_adds_folder_and_path_filters(document_harness):
-    service, postgres = document_harness
-    folder_root_id = "a785ecfe-b738-4a43-9e6d-bbdc3f831b20"
-    postgres.folders.append(
-        {
-            "folder_root_id": folder_root_id,
-            "project_id": "project-1",
-            "session_id": None,
-            "visibility_scope": "project",
-        }
-    )
-
-    await service.search(
-        "alpha",
-        folder_root_id=folder_root_id,
-        path_prefix="src",
-    )
-
-    _, sql, params = postgres.calls[-1]
-    assert "pd.folder_root_id = %s" in sql
-    assert "pd.relative_path LIKE %s" in sql
-    assert folder_root_id in params
-    assert "src/%" in params

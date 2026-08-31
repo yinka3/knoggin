@@ -118,7 +118,6 @@ class DocumentWriter:
                     project_id,
                     session_id,
                     visibility_scope,
-                    folder_root_id,
                     source_kind,
                     original_name,
                     relative_path,
@@ -130,7 +129,7 @@ class DocumentWriter:
                     updated_at
                 )
                 VALUES (
-                    %s, %s, %s, %s, NULL, 'manual_upload',
+                    %s, %s, %s, %s, 'manual_upload',
                     %s, %s, %s, %s, %s, 'queued', %s, %s
                 )
                 """,
@@ -168,7 +167,6 @@ class DocumentWriter:
                 """
             UPDATE public.project_documents
             SET status = 'deleted',
-                folder_root_id = NULL,
                 deleted_at = COALESCE(deleted_at, now()),
                 indexed_at = NULL,
                 error_message = NULL,
@@ -188,7 +186,6 @@ class DocumentWriter:
                 project_id,
                 session_id,
                 visibility_scope,
-                folder_root_id,
                 source_kind,
                 original_name,
                 relative_path,
@@ -258,7 +255,6 @@ class DocumentWriter:
                     project_id,
                     session_id,
                     visibility_scope,
-                    folder_root_id,
                     source_kind,
                     original_name,
                     relative_path,
@@ -322,128 +318,6 @@ class DocumentWriter:
             (updated_at, self._project_id, document_ids),
         )
         return len(rows)
-
-    async def insert_folder_batch(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-        visibility_scope: str,
-        folder_name: str,
-        candidate_count: int,
-        candidate_bytes: int,
-        excluded_count: int,
-        excluded_bytes: int,
-        excluded_directory_count: int,
-        excluded_reason_counts: Dict,
-        scan_settings: Dict,
-        documents: List[Dict],
-        created_at: str,
-    ) -> None:
-        """
-        Atomically insert one folder-upload batch record together with each
-        document's queued metadata and raw bytes.
-
-        Each element of `documents` must contain:
-            document_id, original_name, relative_path, extension,
-            size_bytes, content_hash, and content (bytes).
-        """
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                        INSERT INTO public.document_folder_uploads (
-                            folder_root_id,
-                            project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_name,
-                            candidate_count,
-                            candidate_bytes,
-                            document_count,
-                            total_size_bytes,
-                            excluded_count,
-                            excluded_bytes,
-                            excluded_directory_count,
-                            excluded_reason_counts,
-                            scan_settings,
-                            created_at
-                        )
-                        VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s
-                        )
-                        """,
-                (
-                    folder_root_id,
-                    self._project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_name,
-                    candidate_count,
-                    candidate_bytes,
-                    len(documents),
-                    sum(d["size_bytes"] for d in documents),
-                    excluded_count,
-                    excluded_bytes,
-                    excluded_directory_count,
-                    json.dumps(excluded_reason_counts),
-                    json.dumps(scan_settings),
-                    created_at,
-                ),
-            )
-
-            for document in documents:
-                await cur.execute(
-                    """
-                            INSERT INTO public.project_documents (
-                                document_id,
-                                project_id,
-                                session_id,
-                                visibility_scope,
-                                folder_root_id,
-                                source_kind,
-                                original_name,
-                                relative_path,
-                                extension,
-                                size_bytes,
-                                content_hash,
-                                status,
-                                created_at,
-                                updated_at
-                            )
-                            VALUES (
-                                %s, %s, %s, %s, %s, 'folder_upload',
-                                %s, %s, %s, %s, %s, 'queued', %s, %s
-                            )
-                            """,
-                    (
-                        document["document_id"],
-                        self._project_id,
-                        session_id,
-                        visibility_scope,
-                        folder_root_id,
-                        document["original_name"],
-                        document["relative_path"],
-                        document["extension"],
-                        document["size_bytes"],
-                        document["content_hash"],
-                        created_at,
-                        created_at,
-                    ),
-                )
-                await cur.execute(
-                    """
-                            INSERT INTO public.document_content (
-                                document_id, content
-                            )
-                            VALUES (%s, %s)
-                            """,
-                    (
-                        document["document_id"],
-                        document["content"],
-                    ),
-                )
-
     async def persist_indexed_chunks(
         self,
         *,
@@ -474,7 +348,6 @@ class DocumentWriter:
                             project_id,
                             session_id,
                             visibility_scope,
-                            folder_root_id,
                             source_kind,
                             original_name,
                             relative_path,
@@ -565,8 +438,7 @@ class DocumentWriter:
                             project_id,
                             session_id,
                             visibility_scope,
-                            folder_root_id,
-                            source_kind,
+                                    source_kind,
                             original_name,
                             relative_path,
                             extension,

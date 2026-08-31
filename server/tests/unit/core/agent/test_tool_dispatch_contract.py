@@ -63,33 +63,6 @@ class DispatchTools:
         )
         return [{"url": url, "content": "page lines"}]
 
-    async def list_folder_uploads(self, visibility_scope=None, limit=25):
-        self.calls.append(
-            ("list_folder_uploads", visibility_scope, limit)
-        )
-        return [{"folder_root_id": "folder-1"}]
-
-    async def get_folder_upload_summary(self, folder_root_id):
-        self.calls.append(("get_folder_upload_summary", folder_root_id))
-        return {"folder_root_id": folder_root_id}
-
-    async def list_folder_tree(
-        self,
-        folder_root_id,
-        path_prefix=None,
-        max_depth=3,
-        use_focus=True,
-    ):
-        self.calls.append(
-            (
-                "list_folder_tree",
-                folder_root_id,
-                path_prefix,
-                max_depth,
-                use_focus,
-            )
-        )
-        return [{"name": "src", "type": "directory"}]
 
     async def broken(self):
         raise RuntimeError("method exploded")

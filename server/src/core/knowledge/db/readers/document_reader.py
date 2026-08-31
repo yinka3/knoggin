@@ -93,7 +93,6 @@ class DocumentReader:
                 pd.project_id,
                 pd.session_id,
                 pd.visibility_scope,
-                pd.folder_root_id,
                 pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
@@ -185,7 +184,6 @@ class DocumentReader:
                 project_id,
                 session_id,
                 visibility_scope,
-                folder_root_id,
                 source_kind,
                 original_name,
                 relative_path,
@@ -220,7 +218,6 @@ class DocumentReader:
                 pd.project_id,
                 pd.session_id,
                 pd.visibility_scope,
-                pd.folder_root_id,
                 pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
@@ -261,7 +258,6 @@ class DocumentReader:
         *,
         session_id: Optional[str],
         visibility_scope: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
@@ -272,7 +268,6 @@ class DocumentReader:
                 pd.project_id,
                 pd.session_id,
                 pd.visibility_scope,
-                pd.folder_root_id,
                 pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
@@ -295,9 +290,6 @@ class DocumentReader:
         if visibility_scope is not None:
             query += " AND pd.visibility_scope = %s"
             params.append(visibility_scope)
-        if folder_root_id is not None:
-            query += " AND pd.folder_root_id = %s"
-            params.append(folder_root_id)
         if path_prefix is not None:
             escaped = self._escape_like(path_prefix)
             query += (
@@ -312,124 +304,6 @@ class DocumentReader:
         """
         params.append(limit)
         return await self._client.fetch_all(query, tuple(params))
-
-    async def fetch_folder_upload(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-    ) -> Optional[Dict]:
-        """Return one visible folder-upload row, or None."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT
-                folder_root_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_name,
-                candidate_count,
-                candidate_bytes,
-                document_count,
-                total_size_bytes,
-                excluded_count,
-                excluded_bytes,
-                excluded_directory_count,
-                excluded_reason_counts,
-                scan_settings,
-                created_at,
-                indexed_at
-            FROM public.document_folder_uploads
-            WHERE folder_root_id = %s
-            """
-            + self._document_visibility_sql(alias="document_folder_uploads")
-            + """
-            """,
-            (folder_root_id, *self._document_visibility_params(session_id)),
-        )
-        return rows[0] if rows else None
-
-    async def list_folder_uploads(
-        self,
-        *,
-        session_id: Optional[str],
-        visibility_scope: Optional[str] = None,
-        limit: int = 25,
-    ) -> List[Dict]:
-        """Paginated list of folder-upload batches visible to this project/session."""
-        query = """
-            SELECT
-                folder_root_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_name,
-                candidate_count,
-                candidate_bytes,
-                document_count,
-                total_size_bytes,
-                excluded_count,
-                excluded_bytes,
-                excluded_directory_count,
-                excluded_reason_counts,
-                scan_settings,
-                created_at,
-                indexed_at
-            FROM public.document_folder_uploads
-            WHERE TRUE
-        """
-        params: list = list(self._document_visibility_params(session_id))
-        query += self._document_visibility_sql(alias="document_folder_uploads")
-        if visibility_scope is not None:
-            query += " AND visibility_scope = %s"
-            params.append(visibility_scope)
-        query += " ORDER BY created_at DESC, folder_root_id DESC LIMIT %s"
-        params.append(limit)
-        return await self._client.fetch_all(query, tuple(params))
-
-    async def fetch_folder_documents(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-        path_prefix: Optional[str] = None,
-    ) -> List[Dict]:
-        """
-        Return lightweight document rows for a folder upload, used for tree
-        construction.  Optionally filtered to a path prefix subtree.
-        """
-        query = """
-            SELECT
-                pd.document_id,
-                pd.project_id,
-                pd.folder_root_id,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.status,
-                COUNT(dc.chunk_id)::INTEGER AS chunk_count
-            FROM public.project_documents AS pd
-            LEFT JOIN public.document_chunks AS dc
-                ON dc.document_id = pd.document_id
-            WHERE pd.folder_root_id = %s
-              AND pd.status <> 'deleted'
-        """
-        query += self._document_visibility_sql()
-        params: list = [folder_root_id, *self._document_visibility_params(session_id)]
-        if path_prefix is not None:
-            escaped = self._escape_like(path_prefix)
-            query += (
-                " AND (pd.relative_path = %s "
-                "OR pd.relative_path LIKE %s ESCAPE '\\')"
-            )
-            params.extend([path_prefix, f"{escaped}/%"])
-        query += """
-            GROUP BY pd.document_id
-            ORDER BY pd.relative_path, pd.document_id
-        """
-        return await self._client.fetch_all(query, tuple(params))
-
     async def search_chunks(
         self,
         *,
@@ -439,7 +313,6 @@ class DocumentReader:
         n_results: int,
         candidate_limit: int,
         document_filter: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         relative_path: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> List[Dict]:
@@ -461,7 +334,6 @@ class DocumentReader:
                     dc.chunk_id,
                     dc.document_id,
                     pd.project_id,
-                    pd.folder_root_id,
                     pd.original_name,
                     pd.relative_path,
                     pd.extension,
@@ -492,9 +364,6 @@ class DocumentReader:
         if document_filter is not None:
             sql += " AND pd.document_id = %s"
             params.append(document_filter)
-        if folder_root_id is not None:
-            sql += " AND pd.folder_root_id = %s"
-            params.append(folder_root_id)
         if relative_path is not None:
             sql += " AND pd.relative_path = %s"
             params.append(relative_path)
@@ -548,7 +417,6 @@ class DocumentReader:
             SELECT
                 vc.document_id,
                 vc.project_id,
-                vc.folder_root_id,
                 vc.original_name,
                 vc.relative_path,
                 vc.extension,

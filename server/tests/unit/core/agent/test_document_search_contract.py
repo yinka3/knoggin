@@ -13,7 +13,6 @@ class EmptyDocumentService:
         self,
         *,
         session_id=None,
-        folder_root_id=None,
         path_prefix=None,
         visibility_scope=None,
         limit=50,
@@ -32,7 +31,6 @@ class SearchableDocumentService:
         self,
         *,
         session_id=None,
-        folder_root_id=None,
         path_prefix=None,
         visibility_scope=None,
         limit=50,
@@ -55,7 +53,6 @@ class SearchableDocumentService:
         session_id=None,
         n_results=5,
         document_filter=None,
-        folder_root_id=None,
         relative_path=None,
         path_prefix=None,
     ):
@@ -65,7 +62,6 @@ class SearchableDocumentService:
                 "session_id": session_id,
                 "n_results": n_results,
                 "document_filter": document_filter,
-                "folder_root_id": folder_root_id,
                 "relative_path": relative_path,
                 "path_prefix": path_prefix,
             }
@@ -93,7 +89,6 @@ class ReadOnlyDocumentService:
         self,
         *,
         session_id=None,
-        folder_root_id=None,
         path_prefix=None,
         visibility_scope=None,
         limit=50,
@@ -102,7 +97,6 @@ class ReadOnlyDocumentService:
             (
                 "list_documents",
                 session_id,
-                folder_root_id,
                 path_prefix,
                 visibility_scope,
                 limit,
@@ -156,69 +150,6 @@ class ReadOnlyDocumentService:
             "content": "2: alpha\n3: beta",
         }
 
-    async def list_folder_uploads(
-        self,
-        *,
-        session_id=None,
-        visibility_scope=None,
-        limit=25,
-    ):
-        self.calls.append(
-            (
-                "list_folder_uploads",
-                session_id,
-                visibility_scope,
-                limit,
-            )
-        )
-        return [{"folder_root_id": "folder-1", "folder_name": "repo"}]
-
-    async def get_folder_upload_summary(
-        self,
-        *,
-        folder_root_id,
-        session_id=None,
-        path_prefix=None,
-    ):
-        self.calls.append(
-            (
-                "get_folder_upload_summary",
-                session_id,
-                folder_root_id,
-                path_prefix,
-            )
-        )
-        return {
-            "folder_root_id": folder_root_id,
-            "folder_name": "repo",
-            "document_count": 1,
-        }
-
-    async def list_folder_tree(
-        self,
-        *,
-        folder_root_id,
-        session_id=None,
-        path_prefix=None,
-        max_depth=3,
-    ):
-        self.calls.append(
-            (
-                "list_folder_tree",
-                session_id,
-                folder_root_id,
-                path_prefix,
-                max_depth,
-            )
-        )
-        return [
-            {
-                "name": "docs",
-                "relative_path": "docs",
-                "type": "directory",
-                "children": [],
-            }
-        ]
 
 
 @pytest.mark.no_network
@@ -287,7 +218,6 @@ async def test_search_documents_passes_session_and_exact_path_filter():
             "session_id": "session-1",
             "n_results": 4,
             "document_filter": "file-1",
-            "folder_root_id": None,
             "relative_path": None,
             "path_prefix": None,
         }
@@ -347,7 +277,6 @@ async def test_read_only_document_tools_pass_session_scope_and_bounds():
         (
             "list_documents",
             "session-1",
-            None,
             "docs",
             None,
             10,
@@ -422,7 +351,6 @@ async def test_search_documents_passes_path_prefix_filters():
             "session_id": "session-1",
             "n_results": 5,
             "document_filter": None,
-                "folder_root_id": None,
             "relative_path": None,
             "path_prefix": "docs",
         }
@@ -884,7 +812,7 @@ async def test_subtree_focus_defaults_filters_and_explicit_values_override():
     await tools.list_documents(use_focus=False)
 
     assert document_service.calls == [
-        ("list_documents", "session-1", None, "src", None, 50),
-        ("list_documents", "session-1", None, "docs", None, 50),
-        ("list_documents", "session-1", None, None, None, 50),
+        ("list_documents", "session-1", "src", None, 50),
+        ("list_documents", "session-1", "docs", None, 50),
+        ("list_documents", "session-1", None, None, 50),
     ]

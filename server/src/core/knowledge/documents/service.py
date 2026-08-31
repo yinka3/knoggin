@@ -599,17 +599,6 @@ class DocumentService:
             )
         return rows[0]
 
-    @staticmethod
-    def _public_folder_metadata(row: Dict) -> Dict:
-        metadata = dict(row)
-        if metadata.get("folder_root_id") is not None:
-            metadata["folder_root_id"] = str(metadata["folder_root_id"])
-        for key in ("created_at", "indexed_at"):
-            value = metadata.get(key)
-            if isinstance(value, datetime):
-                metadata[key] = value.isoformat()
-        return metadata
-
     async def get_document_info(
         self,
         *,
@@ -1135,7 +1124,6 @@ class DocumentService:
             "project_id": self.project_id,
             "session_id": session_id,
             "visibility_scope": visibility_scope,
-            "folder_root_id": None,
             "source_kind": "manual_upload",
             "original_name": original_name,
             "relative_path": normalized_path,
@@ -1228,60 +1216,6 @@ class DocumentService:
         """Return a bounded public projection of indexing metrics."""
         return sanitize_health_details(self.indexing_snapshot())
 
-    async def list_folder_uploads(
-        self,
-        *,
-        session_id: Optional[str] = None,
-        visibility_scope: Optional[str] = None,
-        limit: int = 25,
-    ) -> List[Dict]:
-        """List folder upload batches visible to the current session."""
-        if (
-            visibility_scope is not None
-            and visibility_scope not in VALID_VISIBILITY_SCOPES
-        ):
-            raise ValueError(
-                "visibility_scope must be either 'project' or 'session'"
-            )
-        if (
-            not isinstance(limit, int)
-            or isinstance(limit, bool)
-            or not 1 <= limit <= 100
-        ):
-            raise ValueError("limit must be between 1 and 100")
-        rows = await self._reader.list_folder_uploads(
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-            limit=limit,
-        )
-        return [self._public_folder_metadata(row) for row in rows]
-
-    async def get_folder_upload_summary(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str] = None,
-        path_prefix: Optional[str] = None,
-    ) -> Dict:
-        """Return one visible folder batch and a shallow document tree."""
-        folder_root_id = folder_root_id.strip()
-        if not folder_root_id:
-            raise ValueError("folder_root_id must not be empty")
-        folder = await self._reader.fetch_folder_upload(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-        )
-        if folder is None:
-            raise FileNotFoundError("Folder upload not found")
-        result = self._public_folder_metadata(folder)
-        result["tree"] = await self.list_folder_tree(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-            path_prefix=path_prefix,
-            max_depth=2,
-        )
-        return result
-
     async def resolve_focus_target(
         self,
         *,
@@ -1320,96 +1254,10 @@ class DocumentService:
             "path_prefix": normalized_prefix,
         }
 
-    @staticmethod
-    def _build_folder_tree(rows: List[Dict], max_depth: int) -> List[Dict]:
-        root = {"children": {}}
-        for row in rows:
-            parts = PurePosixPath(row["relative_path"]).parts
-            current = root
-            for depth, part in enumerate(parts[:-1], start=1):
-                relative_path = PurePosixPath(*parts[:depth]).as_posix()
-                children = current["children"]
-                node = children.setdefault(
-                    part,
-                    {
-                        "name": part,
-                        "relative_path": relative_path,
-                        "type": "directory",
-                        "children": {},
-                    },
-                )
-                if depth >= max_depth:
-                    node["truncated"] = True
-                    current = None
-                    break
-                current = node
-            if current is None:
-                continue
-            name = parts[-1]
-            current["children"][f"\0{name}:{row['document_id']}"] = {
-                "name": name,
-                "relative_path": row["relative_path"],
-                "type": "document",
-                "document_id": str(row["document_id"]),
-                "status": row["status"],
-                "size_bytes": row["size_bytes"],
-                "chunk_count": row.get("chunk_count", 0),
-            }
-
-        def finalize(node):
-            children = list(node.pop("children", {}).values())
-            children.sort(
-                key=lambda item: (
-                    item["type"] == "document",
-                    item["name"].lower(),
-                    item["relative_path"],
-                )
-            )
-            for child in children:
-                if child["type"] == "directory":
-                    finalize(child)
-            node["children"] = children
-
-        finalize(root)
-        return root["children"]
-
-    async def list_folder_tree(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str] = None,
-        path_prefix: Optional[str] = None,
-        max_depth: int = 3,
-    ) -> List[Dict]:
-        """Return a deterministic tree for one visible folder upload."""
-        folder_root_id = folder_root_id.strip()
-        if not folder_root_id:
-            raise ValueError("folder_root_id must not be empty")
-        if (
-            not isinstance(max_depth, int)
-            or isinstance(max_depth, bool)
-            or not 1 <= max_depth <= 10
-        ):
-            raise ValueError("max_depth must be between 1 and 10")
-        normalized_prefix = self._normalize_path_prefix(path_prefix)
-        folder = await self._reader.fetch_folder_upload(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-        )
-        if folder is None:
-            raise FileNotFoundError("Folder upload not found")
-        rows = await self._reader.fetch_folder_documents(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-            path_prefix=normalized_prefix,
-        )
-        return self._build_folder_tree(rows, max_depth)
-
     async def list_documents(
         self,
         *,
         session_id: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
         visibility_scope: Optional[str] = None,
         limit: int = 50,
@@ -1429,20 +1277,9 @@ class DocumentService:
         ):
             raise ValueError("limit must be between 1 and 1000")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        if folder_root_id is not None:
-            folder_root_id = folder_root_id.strip()
-            if not folder_root_id:
-                raise ValueError("folder_root_id must not be empty")
-            folder = await self._reader.fetch_folder_upload(
-                folder_root_id=folder_root_id,
-                session_id=session_id,
-            )
-            if folder is None:
-                raise FileNotFoundError("Folder upload not found")
         rows = await self._reader.list_documents(
             session_id=session_id,
             visibility_scope=visibility_scope,
-            folder_root_id=folder_root_id,
             path_prefix=normalized_prefix,
             limit=limit,
         )
@@ -1455,7 +1292,6 @@ class DocumentService:
         session_id: Optional[str] = None,
         n_results: int = 5,
         document_filter: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         relative_path: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> List[Dict]:
@@ -1484,16 +1320,6 @@ class DocumentService:
             else None
         )
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        if folder_root_id is not None:
-            folder_root_id = folder_root_id.strip()
-            if not folder_root_id:
-                raise ValueError("folder_root_id must not be empty")
-            folder = await self._reader.fetch_folder_upload(
-                folder_root_id=folder_root_id,
-                session_id=session_id,
-            )
-            if folder is None:
-                raise FileNotFoundError("Folder upload not found")
 
         query_embedding = await self._embedding.encode_single(query.strip())
         if len(query_embedding) != EXPECTED_EMBEDDING_DIMENSION:
@@ -1520,7 +1346,6 @@ class DocumentService:
                 ),
             ),
             document_filter=document_filter,
-            folder_root_id=folder_root_id,
             relative_path=normalized_relative_path,
             path_prefix=normalized_prefix,
         )

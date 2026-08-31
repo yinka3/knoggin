@@ -100,7 +100,6 @@ class FakeApplication:
             "relative_path": "docs/notes.py"
             if target["target_type"] == "document"
             else None,
-            "folder_root_id": target.get("folder_root_id"),
             "path_prefix": target.get("path_prefix"),
         }
         return self.document_focus
