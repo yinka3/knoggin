@@ -221,6 +221,9 @@ class ProjectRuntimeFactory:
             filesystem_factory=ProjectFilesystemFactory(
                 document_settings.project_library_root
             ),
+            reconciliation_interval_seconds=(
+                runtime_config.developer_settings.jobs.document_indexing.reconciliation_interval_seconds
+            ),
         )
         workspace_service = ProjectWorkspaceService(
             project_id=project_id,

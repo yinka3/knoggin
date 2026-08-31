@@ -55,6 +55,7 @@ class IngestionSettings(ConfigModel):
 class DocumentIndexingSettings(ConfigModel):
     recovery_interval_seconds: int = Field(60, ge=10)
     recovery_batch_size: int = Field(16, ge=1, le=100)
+    reconciliation_interval_seconds: int = Field(60, ge=10)
 
 
 class DocumentSettings(ConfigModel):
@@ -96,6 +97,9 @@ class ConflictDiscoverySettings(ConfigModel):
 
 
 class JobSettings(ConfigModel):
+    document_indexing: DocumentIndexingSettings = Field(
+        default_factory=DocumentIndexingSettings
+    )
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
     audit_retention: AuditRetentionSettings = Field(

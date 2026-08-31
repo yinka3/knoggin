@@ -26,6 +26,14 @@ class ProjectFile:
     content_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectFilePath:
+    """A regular file location discovered without reading its bytes."""
+
+    relative_path: str
+    size_bytes: int
+
+
 class ProjectFilesystem:
     """Read and write one project's local directory without escaping its root.
 
@@ -154,6 +162,16 @@ class ProjectFilesystem:
 
     def iter_files(self, *, limit: int | None = None) -> Iterator[ProjectFile]:
         """Yield regular project files in stable path order without following links."""
+        for path in self.iter_paths(limit=limit):
+            content = self.read_bytes(path.relative_path)
+            yield ProjectFile(
+                relative_path=path.relative_path,
+                size_bytes=len(content),
+                content_hash=self._content_hash(content),
+            )
+
+    def iter_paths(self, *, limit: int | None = None) -> Iterator[ProjectFilePath]:
+        """Yield regular project paths in stable order without following links."""
         if limit is not None and (
             not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
         ):
@@ -162,7 +180,7 @@ class ProjectFilesystem:
             return
         self.ensure_root()
 
-        files: list[ProjectFile] = []
+        files: list[ProjectFilePath] = []
         pending = [self._root]
         while pending:
             directory = pending.pop()
@@ -179,12 +197,10 @@ class ProjectFilesystem:
                 if not entry.is_file(follow_symlinks=False):
                     continue
                 relative_path = entry_path.relative_to(self._root).as_posix()
-                content = self.read_bytes(relative_path)
                 files.append(
-                    ProjectFile(
+                    ProjectFilePath(
                         relative_path=relative_path,
-                        size_bytes=len(content),
-                        content_hash=self._content_hash(content),
+                        size_bytes=entry.stat(follow_symlinks=False).st_size,
                     )
                 )
             pending.extend(reversed(directories))

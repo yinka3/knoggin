@@ -60,6 +60,7 @@ from .storage import (
 )
 
 BlockingRunner = Callable[..., Awaitable[Any]]
+_RECONCILIATION_MAX_FILES = 10_000
 
 
 async def _run_in_worker(
@@ -88,6 +89,7 @@ class DocumentService:
         document_rerank_candidates: int = DOCUMENT_RERANK_DEFAULT_CANDIDATES,
         workspace_prepare_concurrency: int = WORKSPACE_PREPARE_CONCURRENCY,
         filesystem_factory: ProjectFilesystemFactory | None = None,
+        reconciliation_interval_seconds: int = 60,
     ):
         self.project_id = project_id
         self._embedding = embedding_service
@@ -125,6 +127,17 @@ class DocumentService:
             raise ValueError("document_rerank_candidates must be between 1 and 50")
         self._document_rerank_enabled = document_rerank_enabled
         self._document_rerank_candidates = document_rerank_candidates
+        if (
+            not isinstance(reconciliation_interval_seconds, int)
+            or isinstance(reconciliation_interval_seconds, bool)
+            or reconciliation_interval_seconds < 10
+        ):
+            raise ValueError("reconciliation_interval_seconds must be at least 10")
+        if self._filesystem_factory is not None:
+            self._indexer.set_reconciliation_callback(
+                self.reconcile_project_files,
+                interval_seconds=reconciliation_interval_seconds,
+            )
 
     @property
     def _filesystem(self) -> ProjectFilesystem | None:
@@ -157,6 +170,100 @@ class DocumentService:
             document_id=str(document["document_id"]),
             session_id=session_id,
         )
+
+    async def reconcile_project_files(self) -> Dict[str, int]:
+        """Bring the manual-document catalog into line with the local project tree.
+
+        Reconciliation deliberately uses the existing folder admission policy so
+        ignored, generated, sensitive, binary, and oversized files do not enter
+        the document catalog merely because an editor created them locally.
+        """
+        filesystem = self._filesystem
+        if filesystem is None:
+            return {"created": 0, "changed": 0, "deleted": 0, "excluded": 0}
+
+        paths = await self._run_blocking(
+            lambda: list(filesystem.iter_paths(limit=_RECONCILIATION_MAX_FILES + 1))
+        )
+        if len(paths) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError(
+                "project filesystem reconciliation exceeds the "
+                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+            )
+        settings = await self.get_scan_settings()
+        entries: list[FolderUploadEntry] = []
+        for path in paths:
+            if path.size_bytes > settings.max_document_size_bytes:
+                continue
+            content = await self._run_blocking(
+                filesystem.read_bytes,
+                path.relative_path,
+                max_bytes=settings.max_document_size_bytes,
+            )
+            entries.append(
+                FolderUploadEntry(relative_path=path.relative_path, content=content)
+            )
+        preview = await self.preview_folder(
+            folder_name=self.project_id,
+            entries=entries,
+            settings=settings,
+        )
+        content_by_path = {entry.relative_path: entry.content for entry in entries}
+        desired = {entry.relative_path: entry for entry in preview.included}
+        current_rows = await self._reader.list_manual_documents_for_reconciliation(
+            limit=_RECONCILIATION_MAX_FILES + 1,
+        )
+        current = {
+            row["relative_path"]: row
+            for row in current_rows
+        }
+        if len(current) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError(
+                "document catalog reconciliation exceeds the "
+                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+            )
+
+        created = changed = deleted = 0
+        now = get_now_iso()
+        for relative_path, preview_entry in desired.items():
+            content = content_by_path[relative_path]
+            existing = current.pop(relative_path, None)
+            if existing is not None and existing["content_hash"] == preview_entry.content_hash:
+                continue
+            if existing is not None:
+                await self._writer.delete_document(
+                    document_id=str(existing["document_id"]),
+                    session_id=None,
+                )
+                changed += 1
+            else:
+                created += 1
+            await self._writer.insert_document(
+                document_id=str(uuid.uuid4()),
+                session_id=None,
+                visibility_scope="project",
+                original_name=preview_entry.original_name,
+                relative_path=relative_path,
+                extension=preview_entry.extension,
+                size_bytes=preview_entry.size_bytes,
+                content_hash=preview_entry.content_hash,
+                content=content,
+                created_at=now,
+            )
+        for document in current.values():
+            await self._writer.delete_document(
+                document_id=str(document["document_id"]),
+                session_id=None,
+            )
+            deleted += 1
+        if created or changed or deleted:
+            self._indexer.wake_pending_indexes()
+        return {
+            "created": created,
+            "changed": changed,
+            "deleted": deleted,
+            "excluded": preview.summary.excluded_count,
+        }
 
     async def preview_folder(
         self,

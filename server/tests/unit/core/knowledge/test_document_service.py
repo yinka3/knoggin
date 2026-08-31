@@ -93,6 +93,23 @@ class MemoryPostgres:
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
         if (
+            "FROM public.project_documents AS pd" in query
+            and "pd.source_kind = 'manual_upload'" in query
+            and "ORDER BY pd.relative_path ASC" in query
+        ):
+            project_id, limit = params
+            return [
+                deepcopy(row)
+                for row in sorted(
+                    self.rows,
+                    key=lambda row: (row["relative_path"], row["document_id"]),
+                )
+                if row["project_id"] == project_id
+                and row["visibility_scope"] == "project"
+                and row["source_kind"] == "manual_upload"
+                and row["status"] != "deleted"
+            ][:limit]
+        if (
             "FROM public.project_documents" in query
             and "status = 'deleted'" in query
             and "lower(original_name) = lower(%s)" in query
@@ -1927,6 +1944,48 @@ async def test_manual_project_documents_read_and_index_from_the_local_file(
     assert read["content"] == "1: current local text"
     assert indexed["status"] == "indexed"
     assert postgres.chunks[0]["content"] == "current local text"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_catalogs_local_changes_and_tombstones_missing_files(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("external.md", b"first external version")
+
+    created = await service.reconcile_project_files()
+    current = next(row for row in postgres.rows if row["relative_path"] == "external.md")
+
+    filesystem.write_bytes("external.md", b"second external version", overwrite=True)
+    changed = await service.reconcile_project_files()
+    filesystem.delete_file("external.md")
+    deleted = await service.reconcile_project_files()
+
+    assert created["created"] == 1
+    assert changed["changed"] == 1
+    assert deleted["deleted"] == 1
+    assert current["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_indexer_reconciles_project_files_when_the_runtime_starts(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("startup.md", b"discover this at startup")
+
+    await service.indexer.start()
+    try:
+        assert any(row["relative_path"] == "startup.md" for row in postgres.rows)
+        assert service.indexer._reconciliation_task is not None
+    finally:
+        await service.indexer.shutdown()
 
 
 @pytest.mark.storage

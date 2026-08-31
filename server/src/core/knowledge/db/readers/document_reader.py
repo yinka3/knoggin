@@ -412,6 +412,43 @@ class DocumentReader:
             (self._project_id, limit),
         )
 
+    async def list_manual_documents_for_reconciliation(
+        self,
+        *,
+        limit: int,
+    ) -> List[Dict]:
+        """Return this project's active manual-file catalog in path order."""
+        return await self._client.fetch_all(
+            """
+            SELECT
+                pd.document_id,
+                pd.project_id,
+                pd.session_id,
+                pd.visibility_scope,
+                pd.folder_root_id,
+                pd.source_kind,
+                pd.original_name,
+                pd.relative_path,
+                pd.extension,
+                pd.size_bytes,
+                pd.content_hash,
+                pd.status,
+                pd.created_at,
+                pd.updated_at,
+                pd.indexed_at,
+                pd.error_message,
+                0::INTEGER AS chunk_count
+            FROM public.project_documents AS pd
+            WHERE pd.project_id = %s
+              AND pd.visibility_scope = 'project'
+              AND pd.source_kind = 'manual_upload'
+              AND pd.status <> 'deleted'
+            ORDER BY pd.relative_path ASC, pd.document_id ASC
+            LIMIT %s
+            """,
+            (self._project_id, limit),
+        )
+
     async def count_documents_for_index_recovery(self) -> int:
         rows = await self._client.fetch_all(
             """

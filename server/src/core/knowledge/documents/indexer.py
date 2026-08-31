@@ -61,6 +61,9 @@ class DocumentIndexer:
         self._background_tasks: set[asyncio.Task] = set()
         self._document_tasks: dict[str, asyncio.Task] = {}
         self._workspace_source_tasks: dict[str, asyncio.Task] = {}
+        self._reconciliation_callback: Callable[[], Awaitable[Dict]] | None = None
+        self._reconciliation_interval_seconds: int | None = None
+        self._reconciliation_task: asyncio.Task | None = None
         self._drain_task: asyncio.Task | None = None
         self._drain_wakeup = asyncio.Event()
         self._recovered_count = 0
@@ -74,6 +77,22 @@ class DocumentIndexer:
 
     def update_policy(self, policy: DocumentIndexPolicy) -> None:
         self._policy = policy
+
+    def set_reconciliation_callback(
+        self,
+        callback: Callable[[], Awaitable[Dict]],
+        *,
+        interval_seconds: int,
+    ) -> None:
+        """Install the project-local reconciliation hook owned by DocumentService."""
+        if (
+            not isinstance(interval_seconds, int)
+            or isinstance(interval_seconds, bool)
+            or interval_seconds < 10
+        ):
+            raise ValueError("reconciliation interval must be at least 10 seconds")
+        self._reconciliation_callback = callback
+        self._reconciliation_interval_seconds = interval_seconds
 
     async def index_document(
         self,
@@ -591,6 +610,10 @@ class DocumentIndexer:
                 name=f"document-index-drain:{self.project_id}",
             )
 
+    def wake_pending_indexes(self) -> None:
+        """Request bounded durable admission after an external catalog update."""
+        self._request_drain()
+
     async def _drain_durable_work(self) -> None:
         """Admit queued durable work in bounded batches until the project is clear."""
         try:
@@ -654,19 +677,59 @@ class DocumentIndexer:
         if self._started:
             return
         self._stopping = False
-        await self.recover_pending_indexes()
         self._started = True
+        await self._reconcile_project_files()
+        await self.recover_pending_indexes()
+        if self._reconciliation_callback is not None:
+            self._reconciliation_task = asyncio.create_task(
+                self._reconcile_periodically(),
+                name=f"document-reconcile:{self.project_id}",
+            )
         self._request_drain()
+
+    async def _reconcile_periodically(self) -> None:
+        assert self._reconciliation_interval_seconds is not None
+        try:
+            while not self._stopping:
+                await asyncio.sleep(self._reconciliation_interval_seconds)
+                if self._stopping:
+                    return
+                await self._reconcile_project_files()
+        except asyncio.CancelledError:
+            raise
+
+    async def _reconcile_project_files(self) -> None:
+        callback = self._reconciliation_callback
+        if callback is None:
+            return
+        try:
+            result = await callback()
+        except Exception:
+            logger.exception("Document filesystem reconciliation failed for {}", self.project_id)
+            return
+        if any(result.get(key, 0) for key in ("created", "changed", "deleted")):
+            logger.info(
+                "Document filesystem reconciliation for {}: created={}, changed={}, deleted={}",
+                self.project_id,
+                result.get("created", 0),
+                result.get("changed", 0),
+                result.get("deleted", 0),
+            )
+            self._request_drain()
 
     async def shutdown(self) -> None:
         """Cancel local submitters; cancellation requeues active durable claims."""
         self._stopping = True
         drain_task = self._drain_task
         self._drain_task = None
+        reconciliation_task = self._reconciliation_task
+        self._reconciliation_task = None
         self._drain_wakeup.set()
         tasks = [task for task in self._background_tasks if not task.done()]
         if drain_task is not None and not drain_task.done():
             tasks.append(drain_task)
+        if reconciliation_task is not None and not reconciliation_task.done():
+            tasks.append(reconciliation_task)
         for task in tasks:
             task.cancel()
         if tasks:

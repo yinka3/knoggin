@@ -4,6 +4,7 @@ Documents subpackage — document storage, retrieval, scanning, and indexing.
 
 from core.knowledge.documents.filesystem import (
     ProjectFile,
+    ProjectFilePath,
     ProjectFilesystem,
     ProjectFilesystemConflictError,
     ProjectFilesystemFactory,
@@ -19,6 +20,7 @@ __all__ = [
     "DocumentReadService",
     "DocumentService",
     "ProjectFile",
+    "ProjectFilePath",
     "ProjectFilesystem",
     "ProjectFilesystemConflictError",
     "ProjectFilesystemFactory",
