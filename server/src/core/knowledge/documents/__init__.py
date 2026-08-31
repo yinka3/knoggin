@@ -6,6 +6,7 @@ from core.knowledge.documents.filesystem import (
     ProjectFile,
     ProjectFilesystem,
     ProjectFilesystemConflictError,
+    ProjectFilesystemFactory,
 )
 from core.knowledge.documents.indexer import DocumentIndexer
 from core.knowledge.documents.policy import DocumentIndexPolicy
@@ -20,4 +21,5 @@ __all__ = [
     "ProjectFile",
     "ProjectFilesystem",
     "ProjectFilesystemConflictError",
+    "ProjectFilesystemFactory",
 ]

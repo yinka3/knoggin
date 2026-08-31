@@ -133,6 +133,25 @@ class ProjectFilesystem:
             content_hash=self._content_hash(content),
         )
 
+    def delete_file(
+        self,
+        relative_path: str,
+        *,
+        expected_content_hash: str | None = None,
+    ) -> ProjectFile:
+        """Remove one regular file, optionally only when its hash is current."""
+        path = self._path_for_read(relative_path)
+        content = path.read_bytes()
+        content_hash = self._content_hash(content)
+        if expected_content_hash is not None and content_hash != expected_content_hash:
+            raise ProjectFilesystemConflictError("project file changed")
+        path.unlink()
+        return ProjectFile(
+            relative_path=self.normalize_path(relative_path),
+            size_bytes=len(content),
+            content_hash=content_hash,
+        )
+
     def iter_files(self, *, limit: int | None = None) -> Iterator[ProjectFile]:
         """Yield regular project files in stable path order without following links."""
         if limit is not None and (
@@ -209,3 +228,25 @@ class ProjectFilesystem:
     @staticmethod
     def _content_hash(content: bytes) -> str:
         return hashlib.sha256(content).hexdigest()
+
+
+class ProjectFilesystemFactory:
+    """Create one confined filesystem boundary for each local project root."""
+
+    def __init__(self, library_root: Path | str) -> None:
+        self._library_root = Path(library_root).expanduser().resolve()
+
+    @property
+    def library_root(self) -> Path:
+        return self._library_root
+
+    def for_project(self, project_id: str) -> ProjectFilesystem:
+        if (
+            not isinstance(project_id, str)
+            or not project_id.strip()
+            or any(separator in project_id for separator in ("/", "\\", "\x00"))
+        ):
+            raise ValueError("project_id must be a single path component")
+        if self._library_root.is_symlink():
+            raise ValueError("project library root must not be a symlink")
+        return ProjectFilesystem(self._library_root / project_id)

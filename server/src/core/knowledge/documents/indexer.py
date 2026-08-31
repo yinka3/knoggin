@@ -16,6 +16,7 @@ from core.knowledge.documents.constants import (
     EXPECTED_EMBEDDING_DIMENSION,
     MAX_ERROR_MESSAGE_LENGTH,
 )
+from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.documents.policy import DocumentIndexPolicy
 from core.knowledge.documents.storage import (
     DocumentChunk,
@@ -47,6 +48,7 @@ class DocumentIndexer:
         policy: DocumentIndexPolicy,
         blocking_runner: BlockingRunner,
         background_work: Optional[BackgroundWorkCoordinator] = None,
+        filesystem: ProjectFilesystem | None = None,
     ) -> None:
         self.project_id = project_id
         self._reader = reader
@@ -55,6 +57,7 @@ class DocumentIndexer:
         self._policy = policy
         self._run_blocking = blocking_runner
         self._background_work = background_work
+        self._filesystem = filesystem
         self._background_tasks: set[asyncio.Task] = set()
         self._document_tasks: dict[str, asyncio.Task] = {}
         self._workspace_source_tasks: dict[str, asyncio.Task] = {}
@@ -115,10 +118,7 @@ class DocumentIndexer:
                 document_id=document_id,
                 session_id=session_id,
             ):
-                raw_bytes = await self._reader.fetch_document_content(
-                    document_id=str(claimed["document_id"]),
-                    session_id=session_id,
-                )
+                raw_bytes = await self._source_bytes(claimed, session_id=session_id)
                 if raw_bytes is None:
                     raise FileNotFoundError("Document content is missing")
                 extraction = await self._run_blocking(
@@ -163,6 +163,31 @@ class DocumentIndexer:
             raise RuntimeError(
                 f"Failed to index document: {detail[:MAX_ERROR_MESSAGE_LENGTH]}"
             ) from exc
+
+    async def _source_bytes(
+        self,
+        document: Dict,
+        *,
+        session_id: Optional[str],
+    ) -> bytes | None:
+        """Read current manual-upload bytes from the local project tree.
+
+        Folder and managed-workspace sources are still migrated in later
+        commits, so they retain their existing durable source route for now.
+        """
+        if (
+            self._filesystem is not None
+            and document.get("source_kind") == "manual_upload"
+            and document.get("visibility_scope") == "project"
+        ):
+            return await self._run_blocking(
+                self._filesystem.read_bytes,
+                document["relative_path"],
+            )
+        return await self._reader.fetch_document_content(
+            document_id=str(document["document_id"]),
+            session_id=session_id,
+        )
 
     @staticmethod
     def _validate_embeddings(

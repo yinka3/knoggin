@@ -5,6 +5,7 @@ import pytest
 from core.knowledge.documents.filesystem import (
     ProjectFilesystem,
     ProjectFilesystemConflictError,
+    ProjectFilesystemFactory,
 )
 
 
@@ -85,3 +86,16 @@ def test_project_filesystem_does_not_follow_symlinks_inside_the_project_root(tmp
 
     assert outside.read_text() == "private"
     assert list(filesystem.iter_files()) == []
+
+
+def test_project_filesystem_factory_creates_isolated_project_roots(tmp_path):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+
+    first = factory.for_project("project-1")
+    second = factory.for_project("project-2")
+    first.write_bytes("notes.md", b"first")
+
+    assert first.root != second.root
+    assert not second.root.exists()
+    with pytest.raises(ValueError, match="path component"):
+        factory.for_project("../outside")

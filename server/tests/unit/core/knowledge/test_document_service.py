@@ -15,7 +15,11 @@ from common.schema.document import (
     FolderUploadEntry,
     WorkspaceSyncChanges,
 )
-from core.knowledge.documents import DocumentIndexPolicy, DocumentService
+from core.knowledge.documents import (
+    DocumentIndexPolicy,
+    DocumentService,
+    ProjectFilesystemFactory,
+)
 from core.knowledge.documents import (
     storage as storage_module,
 )
@@ -1503,7 +1507,7 @@ def test_notebook_cells_become_retrievable_chunks():
 
 
 @pytest.fixture
-def document_harness():
+def document_harness(tmp_path):
     postgres = MemoryPostgres()
     embedding = FakeEmbeddingService()
 
@@ -1516,6 +1520,7 @@ def document_harness():
         embedding_service=embedding,
         blocking_runner=run_inline,
         document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
     return service, postgres
 
@@ -1900,6 +1905,28 @@ async def test_database_failure_leaves_no_content_or_metadata(document_harness):
 
     assert postgres.rows == []
     assert postgres.contents == {}
+    assert list(service._filesystem.iter_files()) == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_manual_project_documents_read_and_index_from_the_local_file(
+    document_harness,
+):
+    service, postgres = document_harness
+
+    document = await service.add_document(
+        content=b"current local text",
+        original_name="notes.md",
+    )
+    postgres.contents[document["document_id"]] = b"stale database text"
+
+    read = await service.read_document(document_id=document["document_id"])
+    indexed = await service.index_document(document_id=document["document_id"])
+
+    assert read["content"] == "1: current local text"
+    assert indexed["status"] == "indexed"
+    assert postgres.chunks[0]["content"] == "current local text"
 
 
 @pytest.mark.storage
@@ -1952,7 +1979,7 @@ async def test_visibility_rules_are_applied_when_listing_files():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_repeated_uploads_create_separate_records(document_harness):
+async def test_repeated_uploads_reject_a_live_path_collision(document_harness):
     service, postgres = document_harness
 
     first = await service.add_document(
@@ -1960,15 +1987,15 @@ async def test_repeated_uploads_create_separate_records(document_harness):
         original_name="notes.md",
         relative_path="docs/notes.md",
     )
-    second = await service.add_document(
-        content=b"same",
-        original_name="notes.md",
-        relative_path="docs/notes.md",
-    )
+    with pytest.raises(FileExistsError, match="already exists"):
+        await service.add_document(
+            content=b"same",
+            original_name="notes.md",
+            relative_path="docs/notes.md",
+        )
 
-    assert first["document_id"] != second["document_id"]
-    assert first["content_hash"] == second["content_hash"]
-    assert len(postgres.rows) == 2
+    assert first["content_hash"] == hashlib.sha256(b"same").hexdigest()
+    assert len(postgres.rows) == 1
 
 
 @pytest.mark.storage
@@ -2119,7 +2146,7 @@ async def test_get_document_info_enforces_visibility_and_reference_rules():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_relative_path_lookup_requires_document_id_when_uploads_repeat(
+async def test_relative_path_lookup_is_unambiguous_within_the_project_tree(
     document_harness,
 ):
     service, _ = document_harness
@@ -2128,18 +2155,14 @@ async def test_relative_path_lookup_requires_document_id_when_uploads_repeat(
         original_name="notes.txt",
         relative_path="docs/notes.txt",
     )
-    await service.add_document(
+    second = await service.add_document(
         content=b"second",
         original_name="notes.txt",
-        relative_path="docs/notes.txt",
+        relative_path="archive/notes.txt",
     )
 
-    with pytest.raises(ValueError, match="Multiple visible uploads"):
-        await service.get_document_info(relative_path="docs/notes.txt")
-
-    assert (await service.get_document_info(document_id=first["document_id"]))[
-        "document_id"
-    ] == first["document_id"]
+    assert (await service.get_document_info(relative_path="docs/notes.txt"))["document_id"] == first["document_id"]
+    assert (await service.get_document_info(relative_path="archive/notes.txt"))["document_id"] == second["document_id"]
 
 
 @pytest.mark.storage
@@ -2330,7 +2353,8 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
     )
     second = await service.add_document(
         content=b"same content",
-        original_name="notes.txt",
+        original_name="copy.txt",
+        relative_path="archive/copy.txt",
     )
     await service.index_document(document_id=first["document_id"])
 
@@ -2341,6 +2365,7 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
     assert "storage_key" not in deleted
     assert first["document_id"] not in postgres.contents
     assert postgres.contents.get(second["document_id"]) == b"same content"
+    assert not service._filesystem.root.joinpath("notes.txt").exists()
     tombstone = next(
         row for row in postgres.rows if row["document_id"] == first["document_id"]
     )

@@ -20,6 +20,7 @@ from core.knowledge.documents import (
     DocumentIndexer,
     DocumentIndexPolicy,
     DocumentService,
+    ProjectFilesystemFactory,
 )
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
@@ -201,6 +202,9 @@ class ProjectRuntimeFactory:
             ),
             blocking_runner=asyncio.to_thread,
             background_work=resources.background_work,
+            filesystem=ProjectFilesystemFactory(
+                document_settings.project_library_root
+            ).for_project(project_id),
         )
         document_service = DocumentService(
             project_id=project_id,
@@ -214,6 +218,9 @@ class ProjectRuntimeFactory:
             blocking_runner=asyncio.to_thread,
             document_rerank_enabled=document_settings.rerank_enabled,
             document_rerank_candidates=document_settings.rerank_candidates,
+            filesystem_factory=ProjectFilesystemFactory(
+                document_settings.project_library_root
+            ),
         )
         workspace_service = ProjectWorkspaceService(
             project_id=project_id,

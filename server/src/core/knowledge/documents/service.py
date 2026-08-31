@@ -46,6 +46,7 @@ from .constants import (
     WORKSPACE_PREPARE_CONCURRENCY,
     document_extension,
 )
+from .filesystem import ProjectFilesystem, ProjectFilesystemFactory
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
 from .scanning import build_folder_preview, normalize_relative_path
@@ -86,6 +87,7 @@ class DocumentService:
         document_rerank_enabled: bool = True,
         document_rerank_candidates: int = DOCUMENT_RERANK_DEFAULT_CANDIDATES,
         workspace_prepare_concurrency: int = WORKSPACE_PREPARE_CONCURRENCY,
+        filesystem_factory: ProjectFilesystemFactory | None = None,
     ):
         self.project_id = project_id
         self._embedding = embedding_service
@@ -96,6 +98,7 @@ class DocumentService:
         )
         self._writer = writer or DocumentWriter(postgres_client, project_id)
         self._run_blocking = blocking_runner
+        self._filesystem_factory = filesystem_factory
         if indexer is None:
             indexing_policy = DocumentIndexPolicy.capture(
                 inline_index_max_bytes=inline_index_max_bytes,
@@ -109,6 +112,7 @@ class DocumentService:
                 policy=indexing_policy,
                 blocking_runner=blocking_runner,
                 background_work=background_work,
+                filesystem=self._filesystem,
             )
         self._indexer = indexer
         if not isinstance(document_rerank_enabled, bool):
@@ -121,6 +125,38 @@ class DocumentService:
             raise ValueError("document_rerank_candidates must be between 1 and 50")
         self._document_rerank_enabled = document_rerank_enabled
         self._document_rerank_candidates = document_rerank_candidates
+
+    @property
+    def _filesystem(self) -> ProjectFilesystem | None:
+        if self._filesystem_factory is None:
+            return None
+        return self._filesystem_factory.for_project(self.project_id)
+
+    def _filesystem_for_document(self, document: Dict) -> ProjectFilesystem | None:
+        if (
+            self._filesystem_factory is None
+            or document.get("source_kind") != "manual_upload"
+            or document.get("visibility_scope") != "project"
+        ):
+            return None
+        return self._filesystem_factory.for_project(document["project_id"])
+
+    async def _read_source_bytes(
+        self,
+        document: Dict,
+        *,
+        session_id: Optional[str],
+    ) -> bytes | None:
+        filesystem = self._filesystem_for_document(document)
+        if filesystem is not None:
+            return await self._run_blocking(
+                filesystem.read_bytes,
+                document["relative_path"],
+            )
+        return await self._reader.fetch_document_content(
+            document_id=str(document["document_id"]),
+            session_id=session_id,
+        )
 
     async def preview_folder(
         self,
@@ -620,8 +656,8 @@ class DocumentService:
         selected_page = None
         docx_paragraphs = None
         if extension == ".pdf":
-            raw_bytes = await self._reader.fetch_document_content(
-                document_id=str(document_metadata["document_id"]),
+            raw_bytes = await self._read_source_bytes(
+                document_metadata,
                 session_id=session_id,
             )
             if raw_bytes is None:
@@ -635,8 +671,8 @@ class DocumentService:
                 )
             text = pages[selected_page - 1].text
         elif extension == ".docx":
-            raw_bytes = await self._reader.fetch_document_content(
-                document_id=str(document_metadata["document_id"]),
+            raw_bytes = await self._read_source_bytes(
+                document_metadata,
                 session_id=session_id,
             )
             if raw_bytes is None:
@@ -652,8 +688,8 @@ class DocumentService:
                 session_id=session_id,
             )
             if text is None:
-                raw_bytes = await self._reader.fetch_document_content(
-                    document_id=str(document_metadata["document_id"]),
+                raw_bytes = await self._read_source_bytes(
+                    document_metadata,
                     session_id=session_id,
                 )
                 if raw_bytes is None:
@@ -870,8 +906,21 @@ class DocumentService:
         """Purge document content while retaining a minimal provenance record."""
         if not isinstance(document_id, str) or not document_id.strip():
             raise ValueError("document_id must not be empty")
+        document_id = document_id.strip()
+        document = await self._get_visible_document(
+            document_id=document_id,
+            relative_path=None,
+            session_id=session_id,
+        )
+        filesystem = self._filesystem_for_document(document)
+        if filesystem is not None:
+            await self._run_blocking(
+                filesystem.delete_file,
+                document["relative_path"],
+                expected_content_hash=document["content_hash"],
+            )
         row = await self._writer.delete_document(
-            document_id=document_id.strip(),
+            document_id=document_id,
             session_id=session_id,
         )
         if row is None:
@@ -1044,19 +1093,41 @@ class DocumentService:
         document_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
-
-        await self._writer.insert_document(
-            document_id=document_id,
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-            original_name=original_name,
-            relative_path=normalized_path,
-            extension=extension,
-            size_bytes=len(content),
-            content_hash=content_hash,
-            content=content,
-            created_at=created_at,
+        filesystem = (
+            self._filesystem if visibility_scope == "project" else None
         )
+        if filesystem is not None:
+            await self._run_blocking(
+                filesystem.write_bytes,
+                normalized_path,
+                content,
+            )
+        try:
+            await self._writer.insert_document(
+                document_id=document_id,
+                session_id=session_id,
+                visibility_scope=visibility_scope,
+                original_name=original_name,
+                relative_path=normalized_path,
+                extension=extension,
+                size_bytes=len(content),
+                content_hash=content_hash,
+                content=content,
+                created_at=created_at,
+            )
+        except Exception:
+            if filesystem is not None:
+                try:
+                    await self._run_blocking(
+                        filesystem.delete_file,
+                        normalized_path,
+                        expected_content_hash=content_hash,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not roll back local document file after catalog failure"
+                    )
+            raise
         return {
             "document_id": document_id,
             "project_id": self.project_id,
