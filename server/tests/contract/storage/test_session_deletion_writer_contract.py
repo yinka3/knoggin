@@ -217,13 +217,12 @@ async def test_session_deletion_preserves_project_library_rows(
         "WHERE session_id = 'session-1'"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.project_documents
-        WHERE session_id = 'session-1'
-          AND source_id IS NOT NULL
-          AND folder_root_id IS NOT NULL
-        """
+        "SELECT count(*) AS count FROM public.project_documents "
+        "WHERE session_id = 'session-1' AND source_id IS NOT NULL"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.project_documents "
+        "WHERE session_id = 'session-1' AND folder_root_id IS NOT NULL"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
