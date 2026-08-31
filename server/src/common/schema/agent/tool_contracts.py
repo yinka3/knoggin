@@ -478,18 +478,9 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": "Optional folder ID (for example folder_a3f91c).",
-                    },
                     "path_prefix": {
                         "type": "string",
                         "description": "Optional exact path or subtree prefix.",
-                    },
-                    "visibility_scope": {
-                        "type": "string",
-                        "enum": ["project", "session"],
-                        "description": "Optional visibility scope filter.",
                     },
                     "limit": {
                         "type": "integer",
@@ -501,93 +492,8 @@ TOOL_SCHEMAS = [
                         "type": "boolean",
                         "description": (
                             "Apply active document focus when no explicit path "
-                            "or folder filter is provided (default true)."
+                            "filter is provided (default true)."
                         ),
-                    },
-                },
-                "required": [],
-            },
-            "tags": ["documents:read", "core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_folder_uploads",
-            "description": "List folder upload batches visible in this context.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "visibility_scope": {
-                        "type": "string",
-                        "enum": ["project", "session"],
-                        "description": "Optional visibility scope filter.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum batches to return (default 25).",
-                    },
-                },
-                "required": [],
-            },
-            "tags": ["documents:read", "core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_folder_upload_summary",
-            "description": (
-                "Get metadata, scan aggregates, and a shallow tree for one "
-                "visible folder upload. The active folder focus is used when "
-                "folder_root_id is omitted."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": (
-                            "The folder ID (for example folder_a3f91c); "
-                            "optional with folder focus."
-                        ),
-                    },
-                    "use_focus": {
-                        "type": "boolean",
-                        "description": "Use active folder focus (default true).",
-                    },
-                },
-                "required": [],
-            },
-            "tags": ["documents:read", "core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_folder_tree",
-            "description": (
-                "Inspect the document tree for one visible folder upload. The "
-                "active folder focus is used when folder_root_id is omitted."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": "The folder ID (for example folder_a3f91c).",
-                    },
-                    "path_prefix": {
-                        "type": "string",
-                        "description": "Optional exact path or subtree prefix.",
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "description": "Tree depth from 1 to 10 (default 3).",
-                    },
-                    "use_focus": {
-                        "type": "boolean",
-                        "description": "Use active folder focus (default true).",
                     },
                 },
                 "required": [],

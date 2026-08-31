@@ -109,14 +109,9 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Found {count} relevant chunks", count
         return "No results", 0
 
-    if tool_name in ("list_documents", "list_folder_uploads", "list_folder_tree"):
+    if tool_name == "list_documents":
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} items", count
-
-    if tool_name == "get_folder_upload_summary":
-        if isinstance(data, dict):
-            return "Loaded folder upload summary", 1
-        return "No results", 0
 
     return "Completed", 1
 

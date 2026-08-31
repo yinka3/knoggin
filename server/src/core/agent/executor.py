@@ -86,8 +86,6 @@ def _local_reference_type(tool_name: str) -> str:
         return "document"
     if tool_name in {
         "list_documents",
-        "get_folder_upload_summary",
-        "list_folder_tree",
         "search_documents",
     }:
         return "folder"

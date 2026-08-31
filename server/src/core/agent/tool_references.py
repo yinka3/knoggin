@@ -19,31 +19,10 @@ if TYPE_CHECKING:
 _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
     "episode_check": {"episode_id": "ep"},
     "read_recent_episodes": {"episode_id": "ep"},
-    "list_documents": {
-        "document_id": "doc",
-        "folder_root_id": "folder",
-    },
-    "list_folder_uploads": {"folder_root_id": "folder"},
-    "get_folder_upload_summary": {
-        "document_id": "doc",
-        "folder_root_id": "folder",
-    },
-    "list_folder_tree": {
-        "document_id": "doc",
-        "folder_root_id": "folder",
-    },
-    "get_document_info": {
-        "document_id": "doc",
-        "folder_root_id": "folder",
-    },
-    "read_document": {
-        "document_id": "doc",
-        "folder_root_id": "folder",
-    },
-    "search_documents": {
-        "document_id": "doc",
-        "folder_root_id": "folder",
-    },
+    "list_documents": {"document_id": "doc"},
+    "get_document_info": {"document_id": "doc"},
+    "read_document": {"document_id": "doc"},
+    "search_documents": {"document_id": "doc"},
     "check_graph_health": {
         "episode_id": "ep",
         "evidence_episode_ids": "ep",
@@ -56,12 +35,8 @@ _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
 
 _TOOL_ARGUMENT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
     "read_episode": {"episode_id": "ep"},
-    "list_documents": {"folder_root_id": "folder"},
-    "get_folder_upload_summary": {"folder_root_id": "folder"},
-    "list_folder_tree": {"folder_root_id": "folder"},
     "get_document_info": {"document_id": "doc"},
     "read_document": {"document_id": "doc"},
-    "search_documents": {"folder_root_id": "folder"},
     "propose_entity_merge": {
         "evidence_episode_ids": "ep",
     },

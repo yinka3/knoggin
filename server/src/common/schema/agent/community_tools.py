@@ -13,7 +13,6 @@ AAC_READ_TOOL_NAMES = [
     "read_document",
     "list_documents",
     "get_document_info",
-    "list_folder_tree",
     "read_brain",
     "list_brain_snapshots",
     "read_brain_snapshot",

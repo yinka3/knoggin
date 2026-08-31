@@ -643,9 +643,7 @@ class SearchTools:
 
     async def list_documents(
         self,
-        folder_root_id: str = None,
         path_prefix: str = None,
-        visibility_scope: str = None,
         limit: int = 50,
         use_focus: bool = True,
     ) -> List[Dict]:
@@ -661,7 +659,6 @@ class SearchTools:
 
         if (
             use_focus
-            and folder_root_id is None
             and path_prefix is None
             and self.document_focus
         ):
@@ -670,112 +667,15 @@ class SearchTools:
                     session_id=self.session_id,
                     document_id=self.document_focus["document_id"],
                 )
-                if (
-                    visibility_scope is None
-                    or document["visibility_scope"] == visibility_scope
-                ):
-                    return [document]
-                return []
-            folder_root_id = self.document_focus.get("folder_root_id")
+                return [document]
             path_prefix = self.document_focus.get("path_prefix")
 
         documents = await self.document_service.list_documents(
             session_id=self.session_id,
-            folder_root_id=folder_root_id,
             path_prefix=path_prefix,
-            visibility_scope=visibility_scope,
             limit=limit,
         )
         return documents
-
-    async def list_folder_uploads(
-        self,
-        visibility_scope: str = None,
-        limit: int = 25,
-    ) -> List[Dict]:
-        """List visible folder upload batches."""
-        if not self.document_service:
-            return [{"error": "No project document service available"}]
-        if (
-            not isinstance(limit, int)
-            or isinstance(limit, bool)
-            or not 1 <= limit <= 100
-        ):
-            raise ValueError("limit must be between 1 and 100")
-        return await self.document_service.list_folder_uploads(
-            session_id=self.session_id,
-            visibility_scope=visibility_scope,
-            limit=limit,
-        )
-
-    async def get_folder_upload_summary(
-        self,
-        folder_root_id: str = None,
-        use_focus: bool = True,
-    ) -> Dict:
-        """Get one visible folder upload summary."""
-        if not self.document_service:
-            return {"error": "No project document service available"}
-        explicit_folder = folder_root_id is not None
-        if folder_root_id is None and use_focus and self.document_focus:
-            if self.document_focus["target_type"] in (
-                "folder_upload",
-                "subtree",
-            ):
-                folder_root_id = self.document_focus["folder_root_id"]
-        focus_path_prefix = None
-        if (
-            use_focus
-            and self.document_focus
-            and self.document_focus["target_type"] == "subtree"
-            and not explicit_folder
-            and folder_root_id == self.document_focus["folder_root_id"]
-        ):
-            focus_path_prefix = self.document_focus["path_prefix"]
-        if folder_root_id is None:
-            raise ValueError("folder_root_id is required without folder focus")
-        return await self.document_service.get_folder_upload_summary(
-            folder_root_id=folder_root_id,
-            session_id=self.session_id,
-            path_prefix=focus_path_prefix,
-        )
-
-    async def list_folder_tree(
-        self,
-        folder_root_id: str = None,
-        path_prefix: str = None,
-        max_depth: int = 3,
-        use_focus: bool = True,
-    ) -> List[Dict]:
-        """List the visible document tree for one folder upload."""
-        if not self.document_service:
-            return [{"error": "No project document service available"}]
-        if (
-            not isinstance(max_depth, int)
-            or isinstance(max_depth, bool)
-            or not 1 <= max_depth <= 10
-        ):
-            raise ValueError("max_depth must be between 1 and 10")
-        if (
-            folder_root_id is None
-            and use_focus
-            and self.document_focus
-            and self.document_focus["target_type"] in (
-                "folder_upload",
-                "subtree",
-            )
-        ):
-            folder_root_id = self.document_focus["folder_root_id"]
-            if path_prefix is None:
-                path_prefix = self.document_focus.get("path_prefix")
-        if folder_root_id is None:
-            raise ValueError("folder_root_id is required without folder focus")
-        return await self.document_service.list_folder_tree(
-            folder_root_id=folder_root_id,
-            session_id=self.session_id,
-            path_prefix=path_prefix,
-            max_depth=max_depth,
-        )
 
     async def get_document_info(
         self,

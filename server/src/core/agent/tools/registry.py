@@ -128,12 +128,6 @@ TOOL_DEFINITIONS = {
     "edit_brain": _definition("edit_brain", default_limit=2),
     "restore_brain_section": _definition("restore_brain_section", default_limit=2),
     "list_documents": _definition("list_documents", default_limit=4),
-    "list_folder_uploads": _definition("list_folder_uploads", default_limit=4),
-    "get_folder_upload_summary": _definition(
-        "get_folder_upload_summary",
-        default_limit=6,
-    ),
-    "list_folder_tree": _definition("list_folder_tree", default_limit=6),
     "get_document_info": _definition("get_document_info", default_limit=6),
     "read_document": _definition("read_document", default_limit=6),
     "search_documents": _definition("search_documents", default_limit=8),
