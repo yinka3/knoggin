@@ -1469,93 +1469,6 @@ ON public.document_folder_uploads(
 ALTER TABLE public.document_folder_uploads
     ALTER COLUMN indexed_at DROP NOT NULL;
 
--- A durable identity for a synchronizable local workspace.  Folder uploads
--- remain immutable snapshots; a workspace source will later own repeated
--- manifest syncs and incremental indexing.
-CREATE TABLE IF NOT EXISTS public.document_workspace_sources (
-    source_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    session_id TEXT,
-    visibility_scope TEXT NOT NULL,
-    ownership_mode TEXT NOT NULL DEFAULT 'external_sync',
-    display_name TEXT NOT NULL,
-    last_synced_at TIMESTAMPTZ,
-    last_manifest_candidate_count INTEGER NOT NULL DEFAULT 0,
-    last_manifest_included_count INTEGER NOT NULL DEFAULT 0,
-    last_manifest_excluded_count INTEGER NOT NULL DEFAULT 0,
-    last_manifest_excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT document_workspace_sources_visibility_scope_check
-        CHECK (visibility_scope IN ('project', 'session')),
-    CONSTRAINT document_workspace_sources_ownership_mode_check
-        CHECK (
-            ownership_mode IN ('external_sync', 'managed_project_workspace')
-            AND (
-                ownership_mode = 'external_sync'
-                OR (visibility_scope = 'project' AND session_id IS NULL)
-            )
-        ),
-    CONSTRAINT document_workspace_sources_session_visibility_check
-        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
-    CONSTRAINT document_workspace_sources_manifest_counts_check
-        CHECK (
-            last_manifest_candidate_count >= 0
-            AND last_manifest_included_count >= 0
-            AND last_manifest_excluded_count >= 0
-        ),
-    CONSTRAINT document_workspace_sources_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS ownership_mode TEXT NOT NULL DEFAULT 'external_sync';
-ALTER TABLE public.document_workspace_sources
-    DROP CONSTRAINT IF EXISTS document_workspace_sources_ownership_mode_check;
-ALTER TABLE public.document_workspace_sources
-    ADD CONSTRAINT document_workspace_sources_ownership_mode_check
-    CHECK (
-        ownership_mode IN ('external_sync', 'managed_project_workspace')
-        AND (
-            ownership_mode = 'external_sync'
-            OR (visibility_scope = 'project' AND session_id IS NULL)
-        )
-    );
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_candidate_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_included_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_excluded_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE public.document_workspace_sources
-    DROP CONSTRAINT IF EXISTS document_workspace_sources_manifest_counts_check;
-ALTER TABLE public.document_workspace_sources
-    ADD CONSTRAINT document_workspace_sources_manifest_counts_check
-    CHECK (
-        last_manifest_candidate_count >= 0
-        AND last_manifest_included_count >= 0
-        AND last_manifest_excluded_count >= 0
-    );
-
-CREATE INDEX IF NOT EXISTS document_workspace_sources_project_idx
-ON public.document_workspace_sources(project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS document_workspace_sources_visibility_idx
-ON public.document_workspace_sources(
-    project_id,
-    visibility_scope,
-    session_id
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS document_workspace_sources_managed_project_unique
-ON public.document_workspace_sources(project_id)
-WHERE ownership_mode = 'managed_project_workspace';
-
 CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
     project_id TEXT PRIMARY KEY REFERENCES public.projects(project_id)
         ON DELETE CASCADE,
@@ -1572,8 +1485,6 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     session_id TEXT,
     visibility_scope TEXT NOT NULL,
     folder_root_id UUID REFERENCES public.document_folder_uploads(folder_root_id)
-        ON DELETE CASCADE,
-    source_id UUID REFERENCES public.document_workspace_sources(source_id)
         ON DELETE CASCADE,
     source_kind TEXT NOT NULL DEFAULT 'manual_upload',
     original_name TEXT NOT NULL,
@@ -1594,31 +1505,22 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
     CONSTRAINT project_documents_status_check
         CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted')),
     CONSTRAINT project_documents_source_kind_check
-        CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace')),
+        CHECK (source_kind IN ('manual_upload', 'folder_upload')),
     CONSTRAINT project_documents_folder_source_check
         CHECK (
             (
                 status = 'deleted'
                 AND folder_root_id IS NULL
-                AND source_id IS NULL
             )
             OR
             (
                 source_kind = 'manual_upload'
                 AND folder_root_id IS NULL
-                AND source_id IS NULL
             )
             OR
             (
                 source_kind = 'folder_upload'
                 AND folder_root_id IS NOT NULL
-                AND source_id IS NULL
-            )
-            OR
-            (
-                source_kind = 'workspace'
-                AND folder_root_id IS NULL
-                AND source_id IS NOT NULL
             )
         ),
     CONSTRAINT project_documents_size_check
@@ -1627,9 +1529,8 @@ CREATE TABLE IF NOT EXISTS public.project_documents (
 
 -- Migration: drop storage_key if it exists from a previous schema version.
 ALTER TABLE public.project_documents DROP COLUMN IF EXISTS storage_key;
-ALTER TABLE public.project_documents
-    ADD COLUMN IF NOT EXISTS source_id UUID
-        REFERENCES public.document_workspace_sources(source_id) ON DELETE CASCADE;
+ALTER TABLE public.project_documents DROP COLUMN IF EXISTS source_id;
+DROP TABLE IF EXISTS public.document_workspace_sources;
 ALTER TABLE public.project_documents
     ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 ALTER TABLE public.project_documents
@@ -1638,6 +1539,10 @@ ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_source_kind_check;
 ALTER TABLE public.project_documents
     DROP CONSTRAINT IF EXISTS project_documents_folder_source_check;
+-- Workspace rows belong to the removed database-backed file subsystem. The
+-- unreleased target state is the real project tree, so stale rows are rebuilt
+-- there through normal reconciliation rather than migrated as virtual files.
+DELETE FROM public.project_documents WHERE source_kind = 'workspace';
 ALTER TABLE public.project_documents
     ALTER COLUMN status SET DEFAULT 'queued';
 UPDATE public.project_documents
@@ -1654,32 +1559,23 @@ ALTER TABLE public.project_documents
     CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted'));
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_source_kind_check
-    CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace'));
+    CHECK (source_kind IN ('manual_upload', 'folder_upload'));
 ALTER TABLE public.project_documents
     ADD CONSTRAINT project_documents_folder_source_check
     CHECK (
         (
             status = 'deleted'
             AND folder_root_id IS NULL
-            AND source_id IS NULL
         )
         OR
         (
             source_kind = 'manual_upload'
             AND folder_root_id IS NULL
-            AND source_id IS NULL
         )
         OR
         (
             source_kind = 'folder_upload'
             AND folder_root_id IS NOT NULL
-            AND source_id IS NULL
-        )
-        OR
-        (
-            source_kind = 'workspace'
-            AND folder_root_id IS NULL
-            AND source_id IS NOT NULL
         )
     );
 ALTER TABLE public.project_documents
@@ -1700,12 +1596,6 @@ ON public.project_documents(project_id, content_hash);
 CREATE INDEX IF NOT EXISTS project_documents_folder_root_idx
 ON public.project_documents(folder_root_id, relative_path);
 
-CREATE INDEX IF NOT EXISTS project_documents_source_idx
-ON public.project_documents(source_id, relative_path);
-
-CREATE UNIQUE INDEX IF NOT EXISTS project_documents_workspace_path_unique
-ON public.project_documents(source_id, relative_path)
-WHERE source_id IS NOT NULL;
 
 -- Raw document bytes, stored separately to keep the project_documents table lean.
 -- Deleted automatically when the parent project_documents row is removed.
@@ -2554,15 +2444,6 @@ BEGIN
     ) THEN
         ALTER TABLE public.document_folder_uploads
         ADD CONSTRAINT document_folder_uploads_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'document_workspace_sources_project_fk'
-    ) THEN
-        ALTER TABLE public.document_workspace_sources
-        ADD CONSTRAINT document_workspace_sources_project_fk
         FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
         ON DELETE CASCADE;
     END IF;

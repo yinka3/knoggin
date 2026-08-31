@@ -179,7 +179,6 @@ class ProjectRuntimeFactory:
         resources: ReadyRuntimeResources | None = None,
     ) -> DocumentService:
         resources = resources or cast(ReadyRuntimeResources, self.resources)
-        resource_profile = resources.resource_profile
         runtime_config = ConfigManager.get().config
         document_settings = runtime_config.developer_settings.documents
         reader = DocumentReader(
@@ -193,11 +192,7 @@ class ProjectRuntimeFactory:
             reader=reader,
             writer=writer,
             embedding_service=resources.embedding,
-            policy=DocumentIndexPolicy.capture(
-                workspace_prepare_concurrency=(
-                    resource_profile.workspace_prepare_concurrency
-                )
-            ),
+            policy=DocumentIndexPolicy.capture(),
             blocking_runner=asyncio.to_thread,
             background_work=resources.background_work,
             filesystem=ProjectFilesystemFactory(

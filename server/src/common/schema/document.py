@@ -25,15 +25,6 @@ class FolderUploadEntry(BaseModel):
     content: bytes = Field(repr=False)
 
 
-class WorkspaceSyncChanges(BaseModel):
-    """Incremental changes to one previously synchronized workspace source."""
-
-    model_config = ConfigDict(frozen=True)
-
-    upserts: tuple[FolderUploadEntry, ...] = Field(default_factory=tuple)
-    deleted_paths: tuple[str, ...] = Field(default_factory=tuple)
-
-
 class FolderScanSettings(BaseModel):
     """Validated, caller-supplied rules for a folder preview scan."""
 

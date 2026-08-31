@@ -87,7 +87,6 @@ def test_document_runtime_uses_typed_settings_and_shared_explicit_dependencies(
         postgres=object(),
         embedding=object(),
         background_work=None,
-        resource_profile=SimpleNamespace(workspace_prepare_concurrency=2),
     )
     factory = ProjectRuntimeFactory(
         resources=resources,
@@ -99,17 +98,13 @@ def test_document_runtime_uses_typed_settings_and_shared_explicit_dependencies(
         staticmethod(lambda: config_manager),
     )
 
-    documents, workspace = factory._create_document_services(
+    documents = factory._create_document_service(
         "project-1",
         readable_project_ids=["project-1"],
     )
 
-    assert workspace._reader is documents._reader
-    assert workspace._writer is documents._writer
-    assert workspace._indexer is documents.indexer
     assert documents._document_rerank_enabled is False
     assert documents._document_rerank_candidates == 7
-    assert documents.indexer.policy.workspace_prepare_concurrency == 2
 
 
 @pytest.mark.runtime

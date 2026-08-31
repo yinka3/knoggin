@@ -147,40 +147,24 @@ async def test_session_deletion_preserves_project_library_rows(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO public.document_workspace_sources (
-            source_id, project_id, session_id, visibility_scope, display_name
-        ) VALUES (
-            '22222222-2222-4222-8222-222222222222', 'project-1', 'session-1',
-            'session', 'Session workspace'
-        )
-        """
-    )
-    await real_postgres_client.execute(
-        """
         INSERT INTO public.project_documents (
             document_id, project_id, session_id, visibility_scope, folder_root_id,
-            source_id, source_kind,
+            source_kind,
             original_name, relative_path, extension, size_bytes, content_hash
         ) VALUES
             (
                 '33333333-3333-4333-8333-333333333333', 'project-1', 'session-1',
-                'session', '11111111-1111-4111-8111-111111111111', NULL,
+                'session', '11111111-1111-4111-8111-111111111111',
                 'folder_upload', 'session.txt', 'session.txt', '.txt', 7, 'session-hash'
             ),
             (
-                '44444444-4444-4444-8444-444444444444', 'project-1', 'session-1',
-                'project', NULL, '22222222-2222-4222-8222-222222222222', 'workspace',
-                'project-visible.txt',
-                'project-visible.txt', '.txt', 7, 'project-visible-hash'
-            ),
-            (
                 '55555555-5555-4555-8555-555555555555', 'project-1', 'session-2',
-                'session', NULL, NULL, 'manual_upload', 'other-session.txt',
+                'session', NULL, 'manual_upload', 'other-session.txt',
                 'other-session.txt', '.txt', 7, 'other-session-hash'
             ),
             (
                 '66666666-6666-4666-8666-666666666666', 'project-1', NULL,
-                'project', NULL, NULL, 'manual_upload', 'project-only.txt', 'project-only.txt',
+                'project', NULL, 'manual_upload', 'project-only.txt', 'project-only.txt',
                 '.txt', 7, 'project-only-hash'
             )
         """
@@ -203,7 +187,7 @@ async def test_session_deletion_preserves_project_library_rows(
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
         "WHERE session_id = 'session-1' AND status <> 'deleted'"
-    ) == {"count": 2}
+    ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.document_content "
         "WHERE document_id = '33333333-3333-4333-8333-333333333333'"
@@ -211,14 +195,6 @@ async def test_session_deletion_preserves_project_library_rows(
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.document_folder_uploads "
         "WHERE session_id = 'session-1'"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.document_workspace_sources "
-        "WHERE session_id = 'session-1'"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.project_documents "
-        "WHERE session_id = 'session-1' AND source_id IS NOT NULL"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "

@@ -6,7 +6,6 @@ _PROFILE_VARIABLES = (
     "KNOGGIN_RESOURCE_PROFILE",
     "KNOGGIN_WORKERS",
     "KNOGGIN_EMBEDDING_BATCH_SIZE",
-    "KNOGGIN_WORKSPACE_PREPARE_CONCURRENCY",
     "KNOGGIN_BACKGROUND_JOB_WORKERS",
     "KNOGGIN_FOREGROUND_MODEL_WORKERS",
     "KNOGGIN_BACKGROUND_MODEL_WORKERS",
@@ -28,7 +27,6 @@ def test_resource_profile_defaults_to_existing_balanced_limits(monkeypatch):
         name="balanced",
         worker_count=4,
         embedding_batch_size=32,
-        workspace_prepare_concurrency=4,
         background_job_workers=1,
         foreground_model_workers=1,
         background_model_workers=1,
@@ -40,14 +38,12 @@ def test_resource_profile_is_explicit_and_allows_manual_overrides(monkeypatch):
     _clear_profile_variables(monkeypatch)
     monkeypatch.setenv("KNOGGIN_RESOURCE_PROFILE", "conservative")
     monkeypatch.setenv("KNOGGIN_EMBEDDING_BATCH_SIZE", "12")
-    monkeypatch.setenv("KNOGGIN_WORKSPACE_PREPARE_CONCURRENCY", "3")
 
     profile = ResourceProfile.from_environment()
 
     assert profile.name == "conservative"
     assert profile.worker_count == 2
     assert profile.embedding_batch_size == 12
-    assert profile.workspace_prepare_concurrency == 3
     assert profile.background_job_workers == 1
 
 
