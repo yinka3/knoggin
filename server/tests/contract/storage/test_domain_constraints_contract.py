@@ -212,21 +212,18 @@ async def test_additive_constraints_reject_invalid_graph_and_episode_values(
             project_id, entity_id, user_name, entity_type, topic
         ) VALUES ('project-1', 5, 'ada', 'person', 'People');
         INSERT INTO episodes (episode_id, project_id, summary)
-        VALUES ('episode-1', 'project-1', 'Focus limit');
+        VALUES ('episode-1', 'project-1', 'Memberships are unranked');
         INSERT INTO episode_entities (
-            episode_id, project_id, entity_id, is_focus_entity
+            episode_id, project_id, entity_id
         )
         VALUES
-            ('episode-1', 'project-1', 2, TRUE),
-            ('episode-1', 'project-1', 3, TRUE);
+            ('episode-1', 'project-1', 2),
+            ('episode-1', 'project-1', 3);
         """
     )
-    with pytest.raises(CheckViolation, match="at most two focus entities"):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO episode_entities (
-                episode_id, project_id, entity_id, is_focus_entity
-            )
-            VALUES ('episode-1', 'project-1', 5, TRUE)
-            """
-        )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO episode_entities (episode_id, project_id, entity_id)
+        VALUES ('episode-1', 'project-1', 5)
+        """
+    )

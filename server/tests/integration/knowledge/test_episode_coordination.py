@@ -27,10 +27,7 @@ class DeterministicEpisodeLLM:
                     action="create",
                     summary="The durable episode coordination path completed.",
                     new_developments=["The source window was persisted exactly once."],
-                    message_influences=[
-                        {"message_id": "message:1", "influence_weight": 0.8},
-                        {"message_id": "message:2", "influence_weight": 0.9},
-                    ],
+                    message_influences=["message:1", "message:2"],
                 )
             ],
         )

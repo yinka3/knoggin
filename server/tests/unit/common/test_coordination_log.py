@@ -110,7 +110,7 @@ def test_policy_persists_episode_metrics_without_episode_content():
             "session_id": "session-1",
             "strategy": "semantic",
             "episode_count": 3,
-            "focus_episode_count": 1,
+            "matched_entity_episode_count": 1,
             "retrieval_latency_ms": 12.5,
             "used_raw_message_fallback": False,
             "summary": "episode summary must not be logged",

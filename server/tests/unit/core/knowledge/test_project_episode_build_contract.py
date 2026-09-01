@@ -1,6 +1,5 @@
 from common.schema.episode.generation import (
     LLMEpisodeDecision,
-    LLMEpisodeMessageInfluence,
     LLMEpisodeWindowDecision,
 )
 from common.schema.episode.models import (
@@ -24,8 +23,7 @@ def _build(*, prior=None):
             {"message_id": 11, "session_id": "session-a", "role": "assistant", "content": "Drafted plan", "timestamp_ms": 2, "user_msg_id": 10},
             {"message_id": 12, "session_id": "session-b", "role": "user", "content": "Budget approved", "timestamp_ms": 3},
         ],
-        entity_ids_by_message={}, relationship_ids_by_message={},
-        entity_catalog=[], relationship_catalog=[], prior_episodes=prior or [],
+        prior_episodes=prior or [],
     )
 
 
@@ -38,16 +36,12 @@ def test_brief_is_readable_and_preserves_source_sessions():
     assert "Session session-a:" in brief
     assert "[message:1] source-position=1 USER: Plan launch" in brief
     assert "paired-with message:1" in brief
-    assert "ENTITIES:" in brief
-    assert "RELATIONSHIPS:" in brief
     assert '"message_id"' not in brief
 
 
 def test_window_rejects_overlapping_proposals():
     proposal = LLMEpisodeDecision(
-        action="create", summary="Launch planning", message_influences=[
-            LLMEpisodeMessageInfluence(message_id="message:1", influence_weight=1.0)
-        ],
+        action="create", summary="Launch planning", message_influences=["message:1"],
     )
     try:
         LLMEpisodeWindowDecision(proposals=[proposal, proposal])
@@ -69,7 +63,7 @@ def test_user_modified_prior_episode_is_not_an_automation_target():
     # revision candidates, so their local target cannot be resolved.
     output = LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
         action="consolidate", target_episode_id="episode:1", summary="Changed",
-        message_influences=[LLMEpisodeMessageInfluence(message_id="message:1", influence_weight=1.0)],
+        message_influences=["message:1"],
     )])
     try:
         build.apply_llm_output(output)
@@ -85,9 +79,7 @@ def test_server_rejects_a_narrative_over_the_hard_character_limit():
     output = LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
         action="create",
         summary="x" * 4001,
-        message_influences=[
-            LLMEpisodeMessageInfluence(message_id="message:1", influence_weight=1.0)
-        ],
+        message_influences=["message:1"],
     )])
 
     try:
@@ -98,32 +90,22 @@ def test_server_rejects_a_narrative_over_the_hard_character_limit():
         raise AssertionError("over-limit episode narrative must be rejected")
 
 
-def test_server_rejects_catalog_items_outside_selected_message_evidence():
+def test_server_rejects_unknown_catalog_message_reference():
     build = _build()
-    build.entity_ids_by_message = {10: [2], 11: [3]}
-    build.relationship_ids_by_message = {10: ["project-1:2:3"]}
-    build.entity_catalog = [
-        {"entity_id": 2, "canonical_name": "Ada", "type": "person"},
-        {"entity_id": 3, "canonical_name": "Knoggin", "type": "product"},
-    ]
-    build.relationship_catalog = [
-        {"relationship_id": "project-1:2:3", "relationship_type": "uses"}
-    ]
     build.prepare_local_references()
 
     output = LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
         action="create",
         summary="Ada described the plan.",
-        message_influences=[{"message_id": "message:1", "influence_weight": 1.0}],
-        focus_entities=[{"entity_id": "entity:2", "prominence_weight": 1.0}],
+        message_influences=["message:99"],
     )])
 
     try:
         build.apply_llm_output(output)
     except ValueError as exc:
-        assert "outside its selected evidence" in str(exc)
+        assert "Unknown local ID" in str(exc)
     else:
-        raise AssertionError("catalog evidence must come from selected messages")
+        raise AssertionError("unknown catalog evidence must be rejected")
 
 
 def test_server_assigns_source_positions_instead_of_using_llm_order():
@@ -133,8 +115,8 @@ def test_server_assigns_source_positions_instead_of_using_llm_order():
         action="create",
         summary="The plan and approval are one coherent thread.",
         message_influences=[
-            {"message_id": "message:3", "influence_weight": 0.4},
-            {"message_id": "message:1", "influence_weight": 0.9},
+            "message:3",
+            "message:1",
         ],
     )])
 

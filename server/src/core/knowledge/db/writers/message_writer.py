@@ -96,7 +96,7 @@ class MessageWriter:
                         ingestion_claimed_at_ms
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (user_name, session_id, message_id)
                     DO UPDATE SET message_id = EXCLUDED.message_id,
@@ -162,7 +162,7 @@ class MessageWriter:
                 ingestion_claimed_at_ms
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (user_name, session_id, acceptance_key)
             WHERE acceptance_key IS NOT NULL

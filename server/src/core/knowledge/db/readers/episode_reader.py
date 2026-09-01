@@ -7,11 +7,10 @@ from common.schema.episode.models import (
     EntityEpisode,
     Episode,
     EpisodeCheckpoint,
-    EpisodeVersion,
     MessageEpisode,
     RelationshipEpisode,
 )
-from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
+from common.scoping import require_scope_value
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -50,7 +49,7 @@ class EpisodeReader:
         session_id: str,
         limit: int = 10,
     ) -> List[Episode]:
-        """Return all matching episodes, prioritizing focus memberships."""
+        """Return all matching episodes in source chronology."""
 
         if entity_id <= 0:
             raise ValueError("get_episodes_for_entity requires a positive entity_id")
@@ -68,10 +67,7 @@ class EpisodeReader:
                 "JOIN episode_entities ee ON ee.episode_id = e.episode_id "
                 "AND ee.project_id = e.project_id"
             ),
-            ordering=(
-                "ee.is_focus_entity DESC, ee.prominence_weight DESC, "
-                "e.importance DESC, e.updated_at DESC"
-            ),
+            ordering="e.last_message_at DESC NULLS LAST, e.updated_at DESC",
             limit=True,
         )
         rows = await self.client.fetch_all(query, (entity_id, *scope, limit))
@@ -108,12 +104,10 @@ class EpisodeReader:
                 e.new_developments,
                 e.updates,
                 e.unresolved,
-                e.importance,
                 e.source_message_count,
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
-                e.version_history,
                 e.created_at,
                 e.updated_at,
                 COUNT(DISTINCT ee.entity_id) AS entity_overlap
@@ -216,16 +210,9 @@ class EpisodeReader:
                     e.episode_id,
                     e.session_id,
                     e.summary,
-                    e.importance,
-                    ee.is_focus_entity,
-                    ee.prominence_weight,
                     ROW_NUMBER() OVER (
                         PARTITION BY ee.entity_id
-                        ORDER BY
-                            ee.is_focus_entity DESC,
-                            ee.prominence_weight DESC,
-                            e.importance DESC,
-                            e.updated_at DESC
+                        ORDER BY e.last_message_at DESC NULLS LAST, e.updated_at DESC
                     ) AS evidence_rank
                 FROM episode_entities ee
                 JOIN episodes e
@@ -256,10 +243,9 @@ class EpisodeReader:
                         m.role,
                         m.content,
                         m.timestamp_ms,
-                        em.influence_weight,
                         ROW_NUMBER() OVER (
                             PARTITION BY em.episode_id
-                            ORDER BY em.influence_weight DESC, em.message_position
+                            ORDER BY em.message_position
                         ) AS source_rank
                     FROM episode_messages em
                     JOIN episodes e
@@ -290,7 +276,6 @@ class EpisodeReader:
                         "text": str(row.get("content") or ""),
                         "role": row.get("role"),
                         "timestamp_ms": row.get("timestamp_ms"),
-                        "influence_weight": float(row["influence_weight"]),
                     }
                 )
 
@@ -303,9 +288,6 @@ class EpisodeReader:
                     "episode_id": episode_id,
                     "session_id": str(row["session_id"]),
                     "text": str(row.get("summary") or ""),
-                    "importance": float(row["importance"]),
-                    "is_focus_entity": bool(row["is_focus_entity"]),
-                    "prominence_weight": float(row["prominence_weight"]),
                 }
             )
             evidence_by_entity[entity_id].extend(
@@ -345,12 +327,10 @@ class EpisodeReader:
                 e.new_developments,
                 e.updates,
                 e.unresolved,
-                e.importance,
                 e.source_message_count,
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
-                e.version_history,
                 e.created_at,
                 e.updated_at
             FROM episodes e
@@ -364,7 +344,7 @@ class EpisodeReader:
               AND e.search_tsvector @@ q.terms
             ORDER BY
                 ts_rank_cd(e.search_tsvector, q.terms) DESC,
-                e.importance DESC,
+                e.last_message_at DESC NULLS LAST,
                 e.updated_at DESC
             LIMIT %s
             """,
@@ -405,13 +385,11 @@ class EpisodeReader:
                 e.new_developments,
                 e.updates,
                 e.unresolved,
-                e.importance,
                 e.source_message_count,
                 e.first_message_at,
                 e.last_message_at,
                 e.embedding,
                 e.generator_metadata,
-                e.version_history,
                 e.created_at,
                 e.updated_at,
                 1 - (e.embedding <=> %s::vector) AS similarity
@@ -441,7 +419,7 @@ class EpisodeReader:
         session_id: str,
         limit: int = 1,
     ) -> List[Episode]:
-        """Return the most recently updated episodes in one conversation."""
+        """Return the most recent source episodes in one conversation."""
 
         if limit <= 0:
             return []
@@ -452,7 +430,9 @@ class EpisodeReader:
             "get_recent_episodes",
         )
         rows = await self.client.fetch_all(
-            self._episode_query("TRUE", limit=True),
+            self._episode_query(
+                "TRUE", ordering="e.last_message_at DESC NULLS LAST, e.updated_at DESC", limit=True
+            ),
             (*scope, limit),
         )
         return [await self._hydrate_episode(row) for row in rows]
@@ -484,8 +464,6 @@ class EpisodeReader:
             m.role,
             m.content,
             m.timestamp_ms,
-            em.influence_weight,
-            em.influence_reason,
             em.message_position,
             em.attached_at
         FROM episodes e
@@ -859,7 +837,7 @@ class EpisodeReader:
             """
             SELECT e.* FROM episodes e JOIN projects p ON p.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
-            ORDER BY e.updated_at DESC LIMIT %s
+            ORDER BY e.last_message_at DESC NULLS LAST, e.updated_at DESC LIMIT %s
             """,
             (visible_project_ids or [project_id], user_name, limit),
         )
@@ -882,7 +860,7 @@ class EpisodeReader:
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
               AND e.search_tsvector @@ terms.query
             ORDER BY ts_rank_cd(e.search_tsvector, terms.query) DESC,
-                     e.importance DESC, e.updated_at DESC LIMIT %s
+                     e.last_message_at DESC NULLS LAST, e.updated_at DESC LIMIT %s
             """,
             (query, visible_project_ids or [project_id], user_name, limit),
         )
@@ -937,9 +915,9 @@ class EpisodeReader:
             JOIN projects p ON p.project_id = e.project_id
             JOIN episode_entities ee ON ee.episode_id = e.episode_id AND ee.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s AND ee.entity_id = ANY(%s)
-              AND e.user_modified = FALSE
             GROUP BY e.episode_id
-            ORDER BY entity_overlap DESC, e.updated_at DESC LIMIT %s
+            ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
+                     e.updated_at DESC LIMIT %s
             """,
             (visible_project_ids or [project_id], user_name, entity_ids, limit),
         )
@@ -956,7 +934,7 @@ class EpisodeReader:
         return await self.client.fetch_all(
             """
             SELECT m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
-                   em.influence_weight, em.influence_reason, em.message_position,
+                   em.message_position,
                    em.attached_at
             FROM episodes e
             JOIN projects p ON p.project_id = e.project_id
@@ -967,210 +945,6 @@ class EpisodeReader:
             ORDER BY em.message_position
             """,
             (episode_id, visible_project_ids or [project_id], user_name),
-        )
-
-    async def get_relationship_ids_for_messages(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Dict[int, List[str]]:
-        """Return canonical relationship evidence attached to source messages."""
-
-        normalized_message_ids = sorted({int(message_id) for message_id in message_ids})
-        if not normalized_message_ids:
-            return {}
-        if any(message_id <= 0 for message_id in normalized_message_ids):
-            raise ValueError(
-                "get_relationship_ids_for_messages requires positive message IDs"
-            )
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_relationship_ids_for_messages",
-        )
-        rows = await self.client.fetch_all(
-            """
-            SELECT rer.message_id, rer.relationship_id
-            FROM relationship_observations rer
-            JOIN relationships r
-              ON r.relationship_id = rer.relationship_id
-             AND r.project_id = rer.project_id
-            JOIN messages m
-              ON m.user_name = rer.user_name
-             AND m.session_id = rer.session_id
-             AND m.message_id = rer.message_id
-             AND m.project_id = rer.project_id
-            WHERE rer.message_id = ANY(%s)
-              AND rer.user_name = %s
-              AND rer.session_id = %s
-              AND r.project_id = %s
-              AND m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-            ORDER BY rer.message_id, rer.relationship_id
-            """,
-            (normalized_message_ids, scope[0], scope[2], scope[1], *scope),
-        )
-        relationships_by_message = {
-            message_id: [] for message_id in normalized_message_ids
-        }
-        for row in rows:
-            relationships_by_message[int(row["message_id"])].append(
-                str(row["relationship_id"])
-            )
-        return relationships_by_message
-
-    async def get_episode_generation_catalog(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> tuple[List[Dict], List[Dict]]:
-        """Return the resolved entity and relationship catalogs for source messages."""
-
-        normalized_message_ids = sorted({int(message_id) for message_id in message_ids})
-        if not normalized_message_ids:
-            return [], []
-        if any(message_id <= 0 for message_id in normalized_message_ids):
-            raise ValueError(
-                "get_episode_generation_catalog requires positive message IDs"
-            )
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_episode_generation_catalog",
-        )
-        entity_rows = await self.client.fetch_all(
-            """
-            SELECT
-                e.entity_id,
-                e.canonical_name,
-                context.entity_type AS type,
-                COALESCE(
-                    array_agg(DISTINCT ea.alias)
-                        FILTER (WHERE ea.alias IS NOT NULL),
-                    ARRAY[]::text[]
-                ) AS aliases
-            FROM message_entity_refs mer
-            JOIN messages m ON m.message_id = mer.message_id
-            JOIN entities e ON e.entity_id = mer.entity_id
-            LEFT JOIN project_entity_contexts context
-              ON context.entity_id = e.entity_id
-             AND context.project_id = m.project_id
-            LEFT JOIN entity_aliases ea ON ea.entity_id = e.entity_id
-            WHERE mer.message_id = ANY(%s)
-              AND m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-              AND (context.entity_id IS NOT NULL OR e.entity_id = %s)
-            GROUP BY e.entity_id, e.canonical_name, context.entity_type
-            ORDER BY e.entity_id
-            """,
-            (normalized_message_ids, *scope, IDENTITY_ENTITY_ID),
-        )
-        relationship_rows = await self.client.fetch_all(
-            """
-            SELECT
-                r.relationship_id,
-                r.entity_a_id,
-                entity_a.canonical_name AS entity_a_name,
-                entity_a_context.entity_type AS entity_a_type,
-                r.entity_b_id,
-                entity_b.canonical_name AS entity_b_name,
-                entity_b_context.entity_type AS entity_b_type,
-                r.relationship_type,
-                MAX(rer.confidence) AS confidence,
-                (array_agg(rer.context ORDER BY rer.observed_at_ms DESC)
-                    FILTER (WHERE rer.context IS NOT NULL))[1] AS context,
-                array_agg(DISTINCT rer.message_id ORDER BY rer.message_id)
-                    AS evidence_message_ids
-            FROM relationship_observations rer
-            JOIN relationships r
-              ON r.relationship_id = rer.relationship_id
-             AND r.project_id = rer.project_id
-            JOIN messages m
-              ON m.user_name = rer.user_name
-             AND m.session_id = rer.session_id
-             AND m.message_id = rer.message_id
-             AND m.project_id = rer.project_id
-            JOIN entities entity_a ON entity_a.entity_id = r.entity_a_id
-            JOIN entities entity_b ON entity_b.entity_id = r.entity_b_id
-            LEFT JOIN project_entity_contexts entity_a_context
-              ON entity_a_context.entity_id = entity_a.entity_id
-             AND entity_a_context.project_id = r.project_id
-            LEFT JOIN project_entity_contexts entity_b_context
-              ON entity_b_context.entity_id = entity_b.entity_id
-             AND entity_b_context.project_id = r.project_id
-            WHERE rer.message_id = ANY(%s)
-              AND rer.user_name = %s
-              AND rer.session_id = %s
-              AND m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-              AND r.project_id = %s
-              AND (entity_a_context.entity_id IS NOT NULL OR entity_a.entity_id = %s)
-              AND (entity_b_context.entity_id IS NOT NULL OR entity_b.entity_id = %s)
-            GROUP BY
-                r.relationship_id,
-                r.entity_a_id,
-                entity_a.canonical_name,
-                entity_a_context.entity_type,
-                r.entity_b_id,
-                entity_b.canonical_name,
-                entity_b_context.entity_type,
-                r.relationship_type
-            ORDER BY r.relationship_id
-            """,
-            (
-                normalized_message_ids,
-                scope[0],
-                scope[2],
-                *scope,
-                project_id,
-                IDENTITY_ENTITY_ID,
-                IDENTITY_ENTITY_ID,
-            ),
-        )
-        return (
-            [
-                {
-                    "entity_id": int(row["entity_id"]),
-                    "canonical_name": str(row["canonical_name"]),
-                    "type": row.get("type"),
-                    "aliases": list(row.get("aliases") or []),
-                }
-                for row in entity_rows
-            ],
-            [
-                {
-                    "relationship_id": str(row["relationship_id"]),
-                    "entity_a": {
-                        "entity_id": int(row["entity_a_id"]),
-                        "canonical_name": str(row["entity_a_name"]),
-                        "type": row.get("entity_a_type"),
-                    },
-                    "entity_b": {
-                        "entity_id": int(row["entity_b_id"]),
-                        "canonical_name": str(row["entity_b_name"]),
-                        "type": row.get("entity_b_type"),
-                    },
-                    "relationship_type": row.get("relationship_type"),
-                    "confidence": float(row["confidence"]),
-                    "context": row.get("context"),
-                    "evidence_message_ids": [
-                        int(message_id)
-                        for message_id in row.get("evidence_message_ids") or []
-                    ],
-                }
-                for row in relationship_rows
-            ],
         )
 
     @staticmethod
@@ -1202,13 +976,11 @@ class EpisodeReader:
             e.new_developments,
             e.updates,
             e.unresolved,
-            e.importance,
             e.source_message_count,
             e.first_message_at,
             e.last_message_at,
             e.embedding,
             e.generator_metadata,
-            e.version_history,
             e.created_at,
             e.updated_at
         FROM episodes e
@@ -1244,7 +1016,6 @@ class EpisodeReader:
             new_developments=self._json_list(row.get("new_developments")),
             updates=self._json_list(row.get("updates")),
             unresolved=self._json_list(row.get("unresolved")),
-            importance=float(row["importance"]),
             source_message_count=int(row.get("source_message_count") or 0),
             first_message_at=row.get("first_message_at"),
             last_message_at=row.get("last_message_at"),
@@ -1252,7 +1023,6 @@ class EpisodeReader:
             messages=messages,
             entities=entities,
             relationships=relationships,
-            version_history=self._episode_version_list(row.get("version_history")),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             generator_metadata=self._json_dict(row.get("generator_metadata")),
@@ -1265,8 +1035,6 @@ class EpisodeReader:
             SELECT
                 message_id,
                 session_id,
-                influence_weight,
-                influence_reason,
                 message_position,
                 attached_at
             FROM episode_messages
@@ -1279,8 +1047,6 @@ class EpisodeReader:
             MessageEpisode(
                 message_id=int(row["message_id"]),
                 session_id=str(row["session_id"]),
-                influence_weight=float(row["influence_weight"]),
-                influence_reason=row.get("influence_reason"),
                 message_position=int(row["message_position"]),
                 attached_at=row.get("attached_at"),
             )
@@ -1292,24 +1058,18 @@ class EpisodeReader:
             """
             SELECT
                 entity_id,
-                prominence_weight,
-                role,
-                is_focus_entity,
                 source_message_count,
                 first_seen_at,
                 last_seen_at
             FROM episode_entities
             WHERE episode_id = %s
-            ORDER BY is_focus_entity DESC, prominence_weight DESC, entity_id
+            ORDER BY entity_id
             """,
             (episode_id,),
         )
         return [
             EntityEpisode(
                 entity_id=int(row["entity_id"]),
-                prominence_weight=float(row["prominence_weight"]),
-                role=row.get("role"),
-                is_focus_entity=bool(row["is_focus_entity"]),
                 source_message_count=int(row["source_message_count"]),
                 first_seen_at=row.get("first_seen_at"),
                 last_seen_at=row.get("last_seen_at"),
@@ -1322,21 +1082,16 @@ class EpisodeReader:
             """
             SELECT
                 relationship_id,
-                prominence_weight,
-                is_central_relationship,
                 source_message_count
             FROM episode_relationships
             WHERE episode_id = %s
-            ORDER BY is_central_relationship DESC, prominence_weight DESC,
-                relationship_id
+            ORDER BY relationship_id
             """,
             (episode_id,),
         )
         return [
             RelationshipEpisode(
                 relationship_id=str(row["relationship_id"]),
-                prominence_weight=float(row["prominence_weight"]),
-                is_central_relationship=bool(row["is_central_relationship"]),
                 source_message_count=int(row["source_message_count"]),
             )
             for row in rows
@@ -1353,13 +1108,6 @@ class EpisodeReader:
         if isinstance(value, str):
             value = json.loads(value)
         return dict(value or {})
-
-    @staticmethod
-    def _episode_version_list(value) -> List[EpisodeVersion]:
-        return [
-            EpisodeVersion.model_validate(item)
-            for item in EpisodeReader._json_list(value)
-        ]
 
     @staticmethod
     def _vector_list(value) -> List[float] | None:

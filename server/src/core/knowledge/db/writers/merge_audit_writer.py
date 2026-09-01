@@ -345,18 +345,12 @@ class MergeAuditWriter:
                         episode_id,
                         project_id,
                         entity_id,
-                        prominence_weight,
-                        role,
-                        is_focus_entity,
                         source_message_count,
                         first_seen_at,
                         last_seen_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (episode_id, entity_id) DO UPDATE SET
-                        prominence_weight = EXCLUDED.prominence_weight,
-                        role = EXCLUDED.role,
-                        is_focus_entity = EXCLUDED.is_focus_entity,
                         source_message_count = EXCLUDED.source_message_count,
                         first_seen_at = EXCLUDED.first_seen_at,
                         last_seen_at = EXCLUDED.last_seen_at
@@ -365,9 +359,6 @@ class MergeAuditWriter:
                         episode_entity["episode_id"],
                         project_id,
                         int(episode_entity["entity_id"]),
-                        float(episode_entity.get("prominence_weight") or 0.0),
-                        episode_entity.get("role"),
-                        bool(episode_entity.get("is_focus_entity")),
                         int(episode_entity.get("source_message_count") or 0),
                         episode_entity.get("first_seen_at"),
                         episode_entity.get("last_seen_at"),
@@ -470,22 +461,16 @@ class MergeAuditWriter:
                         episode_id,
                         project_id,
                         relationship_id,
-                        prominence_weight,
-                        is_central_relationship,
                         source_message_count
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s)
                     ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
-                        prominence_weight = EXCLUDED.prominence_weight,
-                        is_central_relationship = EXCLUDED.is_central_relationship,
                         source_message_count = EXCLUDED.source_message_count
                     """,
                     (
                         episode_relationship["episode_id"],
                         project_id,
                         episode_relationship["relationship_id"],
-                        float(episode_relationship.get("prominence_weight") or 0.0),
-                        bool(episode_relationship.get("is_central_relationship")),
                         int(episode_relationship.get("source_message_count") or 0),
                     ),
                 )

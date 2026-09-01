@@ -15,7 +15,6 @@ def episode(episode_id: str, entity_id: int = 2) -> Episode:
         session_id="session-1",
         summary="Ada chose the episodic memory approach.",
         new_developments=["Episode generation is scheduled."],
-        importance=0.8,
         source_message_count=1,
         first_message_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
         last_message_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
@@ -23,15 +22,12 @@ def episode(episode_id: str, entity_id: int = 2) -> Episode:
             MessageEpisode(
                 message_id=7,
                 session_id="session-1",
-                influence_weight=0.9,
                 message_position=0,
             )
         ],
         entities=[
             EntityEpisode(
                 entity_id=entity_id,
-                is_focus_entity=True,
-                prominence_weight=0.9,
                 first_seen_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
                 last_seen_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
             )
@@ -45,8 +41,6 @@ def source_message(message_id: int = 7) -> dict:
         "role": "user",
         "content": "Let's use episodic memory.",
         "timestamp_ms": 1760000000000,
-        "influence_weight": 0.9,
-        "influence_reason": "Decision stated explicitly.",
         "message_position": 0,
         "attached_at": datetime(2025, 1, 1, tzinfo=timezone.utc),
     }
@@ -91,9 +85,7 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
 
         async def get_project_episode_source_messages(self, episode_id, **scope):
             assert episode_id == "episode-1"
-            weaker = source_message(8)
-            weaker["influence_weight"] = 0.1
-            return [source_message(), weaker]
+            return [source_message(), source_message(8)]
 
     knowledge_store = FakeKnowledgeStore()
     tool = EpisodeTool()
@@ -228,7 +220,7 @@ async def test_episode_check_emits_retrieval_and_expansion_metrics(monkeypatch):
     )
     assert data["strategy"] == "exact_entity"
     assert data["episode_count"] == 1
-    assert data["focus_episode_count"] == 1
+    assert data["matched_entity_episode_count"] == 1
     assert data["expanded_source_message_count"] == 1
     assert data["returned_evidence_count"] == 1
     assert data["retrieval_latency_ms"] >= 0

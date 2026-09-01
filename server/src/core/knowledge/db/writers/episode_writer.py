@@ -16,10 +16,6 @@ from common.schema.episode.models import (
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
 from infrastructure.postgres_client import PostgresClient
 
-# UI may expose prior automated narratives, but source messages stay canonical.
-# Keep history bounded so a long-lived project episode cannot grow without limit.
-EPISODE_VERSION_HISTORY_LIMIT = 10
-
 
 def _storage_write(operation: str):
     """Translate infrastructure failures without hiding contract violations."""
@@ -119,6 +115,56 @@ class EpisodeWriter:
                     (checkpoint.last_evaluated_message_id, checkpoint.last_evaluated_timestamp_ms, project_id, session_id),
                 )
         return True
+
+    @_storage_write("edit_episode")
+    async def edit_episode(
+        self,
+        *,
+        episode_id: str,
+        user_name: str,
+        project_id: str,
+        summary: str,
+        new_developments: List[str],
+        updates: List[str],
+        unresolved: List[str],
+    ) -> None:
+        """Apply a user-owned narrative edit without changing source evidence."""
+
+        if not summary.strip():
+            raise ValueError("Episode summary must not be blank")
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE episodes AS episode
+                SET summary = %s,
+                    new_developments = %s::jsonb,
+                    updates = %s::jsonb,
+                    unresolved = %s::jsonb,
+                    user_modified = TRUE,
+                    updated_at = NOW()
+                WHERE episode.episode_id = %s
+                  AND episode.project_id = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM projects AS project
+                      WHERE project.project_id = episode.project_id
+                        AND project.user_name = %s
+                  )
+                RETURNING episode_id
+                """,
+                (
+                    summary.strip(),
+                    json.dumps(new_developments),
+                    json.dumps(updates),
+                    json.dumps(unresolved),
+                    episode_id,
+                    project_id,
+                    user_name,
+                ),
+            )
+            if await cur.fetchone() is None:
+                raise ValueError("Episode is unavailable for editing")
+        return None
 
     async def _write_project_episode(self, cur, episode: Episode, *, user_name: str) -> None:
         if episode.generator_metadata.get("effective_action") == "consolidate":
@@ -445,14 +491,6 @@ class EpisodeWriter:
             if timestamps
             else None
         )
-        version_history = [
-            version.model_dump(mode="json") for version in episode.version_history
-        ]
-        if episode.generator_metadata.get("effective_action") == "consolidate":
-            version_history = await EpisodeWriter._snapshot_before_consolidation(
-                cur,
-                episode,
-            )
         await cur.execute(
             """
             INSERT INTO episodes (
@@ -462,38 +500,29 @@ class EpisodeWriter:
                 new_developments,
                 updates,
                 unresolved,
-                importance,
                 source_message_count,
                 first_message_at,
                 last_message_at,
                 embedding,
                 generator_metadata,
-                version_history,
                 user_modified,
                 created_at,
                 updated_at
             )
             VALUES (
                 %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                %s, %s, %s, %s, %s::vector, %s::jsonb, %s::jsonb, %s, %s, %s
+                %s, %s, %s, %s::vector, %s::jsonb, %s, %s, %s
             )
             ON CONFLICT (episode_id) DO UPDATE
             SET summary = EXCLUDED.summary,
                 new_developments = EXCLUDED.new_developments,
                 updates = EXCLUDED.updates,
                 unresolved = EXCLUDED.unresolved,
-                importance = EXCLUDED.importance,
                 source_message_count = EXCLUDED.source_message_count,
                 first_message_at = EXCLUDED.first_message_at,
                 last_message_at = EXCLUDED.last_message_at,
                 embedding = EXCLUDED.embedding,
                 generator_metadata = EXCLUDED.generator_metadata,
-                version_history = CASE
-                    WHEN EXCLUDED.generator_metadata->>'effective_action'
-                        = 'consolidate'
-                    THEN EXCLUDED.version_history
-                    ELSE episodes.version_history
-                END,
                 updated_at = EXCLUDED.updated_at
             WHERE episodes.project_id = EXCLUDED.project_id
             RETURNING episode_id
@@ -505,7 +534,6 @@ class EpisodeWriter:
                 json.dumps(episode.new_developments),
                 json.dumps(episode.updates),
                 json.dumps(episode.unresolved),
-                episode.importance,
                 len(source_message_timestamps),
                 first_message_at,
                 last_message_at,
@@ -515,7 +543,6 @@ class EpisodeWriter:
                     else None
                 ),
                 json.dumps(episode.generator_metadata),
-                json.dumps(version_history),
                 episode.user_modified,
                 episode.created_at,
                 episode.updated_at,
@@ -523,103 +550,6 @@ class EpisodeWriter:
         )
         if await cur.fetchone() is None:
             raise ValueError("Episode ID belongs to a different episode scope")
-
-    @staticmethod
-    async def _snapshot_before_consolidation(cur, episode: Episode) -> List[Dict]:
-        """Retain bounded automated narrative snapshots before replacement."""
-
-        await cur.execute(
-            """
-            SELECT
-                summary,
-                new_developments,
-                updates,
-                unresolved,
-                importance,
-                first_message_at,
-                last_message_at,
-                generator_metadata,
-                version_history
-            FROM episodes
-            WHERE episode_id = %s
-              AND project_id = %s
-            FOR UPDATE
-            """,
-            (episode.episode_id, episode.project_id),
-        )
-        existing = await cur.fetchone()
-        if existing is None:
-            return [
-                version.model_dump(mode="json") for version in episode.version_history
-            ]
-
-        await cur.execute(
-            """
-            SELECT message_id
-            FROM episode_messages
-            WHERE episode_id = %s
-            ORDER BY message_position
-            """,
-            (episode.episode_id,),
-        )
-        source_message_ids = [int(row["message_id"]) for row in await cur.fetchall()]
-        if not source_message_ids:
-            source_message_ids = [
-                message.message_id
-                for message in sorted(
-                    episode.messages,
-                    key=lambda message: message.message_position,
-                )
-            ]
-
-        history = EpisodeWriter._json_list(existing.get("version_history"))
-        next_version = (
-            max(
-                (int(item.get("version") or 0) for item in history),
-                default=0,
-            )
-            + 1
-        )
-        history.append(
-            {
-                "version": next_version,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "summary": str(existing["summary"]),
-                "new_developments": EpisodeWriter._json_list(
-                    existing.get("new_developments")
-                ),
-                "updates": EpisodeWriter._json_list(existing.get("updates")),
-                "unresolved": EpisodeWriter._json_list(existing.get("unresolved")),
-                "importance": float(existing["importance"]),
-                "first_message_at": EpisodeWriter._isoformat(
-                    existing.get("first_message_at")
-                ),
-                "last_message_at": EpisodeWriter._isoformat(
-                    existing.get("last_message_at")
-                ),
-                "source_message_ids": source_message_ids,
-                "generator_metadata": EpisodeWriter._json_dict(
-                    existing.get("generator_metadata")
-                ),
-            }
-        )
-        return history[-EPISODE_VERSION_HISTORY_LIMIT:]
-
-    @staticmethod
-    def _json_list(value) -> List:
-        if isinstance(value, str):
-            value = json.loads(value)
-        return list(value or [])
-
-    @staticmethod
-    def _json_dict(value) -> Dict:
-        if isinstance(value, str):
-            value = json.loads(value)
-        return dict(value or {})
-
-    @staticmethod
-    def _isoformat(value):
-        return value.isoformat() if hasattr(value, "isoformat") else value
 
     @staticmethod
     async def _upsert_messages(cur, episode: Episode) -> None:
@@ -631,23 +561,17 @@ class EpisodeWriter:
                     project_id,
                     session_id,
                     message_id,
-                    influence_weight,
-                    influence_reason,
                     message_position
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (episode_id, message_id) DO UPDATE
-                SET influence_weight = EXCLUDED.influence_weight,
-                    influence_reason = EXCLUDED.influence_reason,
-                    message_position = EXCLUDED.message_position
+                SET message_position = EXCLUDED.message_position
                 """,
                 (
                     episode.episode_id,
                     episode.project_id,
                     message.session_id,
                     message.message_id,
-                    message.influence_weight,
-                    message.influence_reason,
                     message.message_position,
                 ),
             )
@@ -659,8 +583,6 @@ class EpisodeWriter:
         entities_by_message: Dict[int, Set[int]],
         source_message_timestamps: Dict[int, int | None],
     ) -> None:
-        messages_by_id = {message.message_id: message for message in episode.messages}
-        supplied_entities = {entity.entity_id: entity for entity in episode.entities}
         entity_ids = set().union(*entities_by_message.values())
 
         for entity_id in sorted(entity_ids):
@@ -669,15 +591,6 @@ class EpisodeWriter:
                 for message_id, message_entities in entities_by_message.items()
                 if entity_id in message_entities
             ]
-            baseline_prominence = sum(
-                messages_by_id[message_id].influence_weight
-                for message_id in source_message_ids
-            )
-            ranked = supplied_entities.get(entity_id)
-            prominence_weight = max(
-                baseline_prominence,
-                ranked.prominence_weight if ranked else 0.0,
-            )
             timestamps = [
                 source_message_timestamps[message_id]
                 for message_id in source_message_ids
@@ -699,19 +612,13 @@ class EpisodeWriter:
                     episode_id,
                     project_id,
                     entity_id,
-                    prominence_weight,
-                    role,
-                    is_focus_entity,
                     source_message_count,
                     first_seen_at,
                     last_seen_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (episode_id, entity_id) DO UPDATE
-                SET prominence_weight = EXCLUDED.prominence_weight,
-                    role = EXCLUDED.role,
-                    is_focus_entity = EXCLUDED.is_focus_entity,
-                    source_message_count = EXCLUDED.source_message_count,
+                SET source_message_count = EXCLUDED.source_message_count,
                     first_seen_at = EXCLUDED.first_seen_at,
                     last_seen_at = EXCLUDED.last_seen_at
                 """,
@@ -719,9 +626,6 @@ class EpisodeWriter:
                     episode.episode_id,
                     episode.project_id,
                     entity_id,
-                    prominence_weight,
-                    ranked.role if ranked else None,
-                    ranked.is_focus_entity if ranked else False,
                     len(source_message_ids),
                     first_seen_at,
                     last_seen_at,
@@ -734,11 +638,6 @@ class EpisodeWriter:
         episode: Episode,
         relationships_by_message: Dict[int, Set[str]],
     ) -> None:
-        messages_by_id = {message.message_id: message for message in episode.messages}
-        supplied_relationships = {
-            relationship.relationship_id: relationship
-            for relationship in episode.relationships
-        }
         relationship_ids = set().union(*relationships_by_message.values())
 
         for relationship_id in sorted(relationship_ids):
@@ -749,37 +648,22 @@ class EpisodeWriter:
                 )
                 if relationship_id in message_relationships
             ]
-            baseline_prominence = sum(
-                messages_by_id[message_id].influence_weight
-                for message_id in source_message_ids
-            )
-            ranked = supplied_relationships.get(relationship_id)
-            prominence_weight = max(
-                baseline_prominence,
-                ranked.prominence_weight if ranked else 0.0,
-            )
             await cur.execute(
                 """
                 INSERT INTO episode_relationships (
                     episode_id,
                     project_id,
                     relationship_id,
-                    prominence_weight,
-                    is_central_relationship,
                     source_message_count
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (episode_id, relationship_id) DO UPDATE
-                SET prominence_weight = EXCLUDED.prominence_weight,
-                    is_central_relationship = EXCLUDED.is_central_relationship,
-                    source_message_count = EXCLUDED.source_message_count
+                SET source_message_count = EXCLUDED.source_message_count
                 """,
                 (
                     episode.episode_id,
                     episode.project_id,
                     relationship_id,
-                    prominence_weight,
-                    ranked.is_central_relationship if ranked else False,
                     len(source_message_ids),
                 ),
             )

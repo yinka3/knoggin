@@ -16,7 +16,7 @@ def test_episode_decision_accepts_complete_create_and_skip_shapes():
     create = EpisodeDecision(
         action="create",
         summary="The team decided to store episode attachments in Postgres.",
-        message_influences=[{"message_id": 11, "influence_weight": 0.9}],
+        message_influences=[11],
     )
     skip = EpisodeDecision(action="skip", skip_reason="Only acknowledgement text.")
 
@@ -39,11 +39,11 @@ def test_episode_repair_prompt_and_contract_require_all_influences():
     prompt = get_episode_narrative_repair_prompt("Ada", max_narrative_chars=4000)
     consolidation = EpisodeConsolidation(
         summary="The stored episode was regenerated from all source messages.",
-        message_influences=[{"message_id": 11, "influence_weight": 0.9}],
+        message_influences=[11],
     )
 
     assert "4000" in prompt
-    assert consolidation.message_influences[0].message_id == 11
+    assert consolidation.message_influences == [11]
 
 
 def test_llm_episode_decision_requires_typed_local_references():
@@ -51,11 +51,7 @@ def test_llm_episode_decision_requires_typed_local_references():
         action="consolidate",
         target_episode_id="episode:1",
         summary="The conversation continued an existing thread.",
-        message_influences=[{"message_id": "message:1", "influence_weight": 0.9}],
-        focus_entities=[{"entity_id": "entity:1", "prominence_weight": 0.8}],
-        central_relationships=[
-            {"relationship_id": "relationship:1", "prominence_weight": 0.7}
-        ],
+        message_influences=["message:1"],
     )
 
     assert decision.target_episode_id == "episode:1"
@@ -64,7 +60,7 @@ def test_llm_episode_decision_requires_typed_local_references():
         LLMEpisodeDecision(
             action="create",
             summary="A summary.",
-            message_influences=[{"message_id": 11, "influence_weight": 0.9}],
+            message_influences=[11],
         )
 
 
@@ -76,17 +72,17 @@ def test_llm_episode_decision_requires_typed_local_references():
             "action": "create",
             "summary": "A summary.",
             "target_episode_id": "episode-1",
-            "message_influences": [{"message_id": 11, "influence_weight": 0.8}],
+            "message_influences": [11],
         },
         {
             "action": "consolidate",
             "summary": "A summary.",
-            "message_influences": [{"message_id": 11, "influence_weight": 0.8}],
+            "message_influences": [11],
         },
         {
             "action": "skip",
             "skip_reason": "Low signal.",
-            "message_influences": [{"message_id": 11, "influence_weight": 0.8}],
+            "message_influences": [11],
         },
     ],
 )

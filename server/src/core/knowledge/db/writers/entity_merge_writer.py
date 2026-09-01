@@ -308,18 +308,12 @@ class EntityMergeWriter:
                         episode_id,
                         project_id,
                         entity_id,
-                        prominence_weight,
-                        role,
-                        is_focus_entity,
                         source_message_count
                     )
                     SELECT
                         ee.episode_id,
                         ee.project_id,
                         %s,
-                        ee.prominence_weight,
-                        ee.role,
-                        ee.is_focus_entity,
                         ee.source_message_count
                     FROM episode_entities ee
                     JOIN episodes episode
@@ -328,18 +322,6 @@ class EntityMergeWriter:
                     WHERE ee.entity_id = %s
                       AND episode.project_id = %s
                     ON CONFLICT (episode_id, entity_id) DO UPDATE SET
-                        prominence_weight = GREATEST(
-                            episode_entities.prominence_weight,
-                            EXCLUDED.prominence_weight
-                        ),
-                        role = COALESCE(
-                            episode_entities.role,
-                            EXCLUDED.role
-                        ),
-                        is_focus_entity = (
-                            episode_entities.is_focus_entity
-                            OR EXCLUDED.is_focus_entity
-                        ),
                         source_message_count = GREATEST(
                             episode_entities.source_message_count,
                             EXCLUDED.source_message_count
@@ -364,10 +346,6 @@ class EntityMergeWriter:
                         SELECT
                             em.episode_id,
                             COUNT(DISTINCT em.message_id) AS source_message_count,
-                            COALESCE(
-                                SUM(em.influence_weight),
-                                0.0
-                            ) AS prominence_weight,
                             MIN(m.timestamp_ms) AS first_seen_at_ms,
                             MAX(m.timestamp_ms) AS last_seen_at_ms
                         FROM episode_messages em
@@ -387,10 +365,6 @@ class EntityMergeWriter:
                     UPDATE episode_entities ee
                     SET
                         source_message_count = source_stats.source_message_count,
-                        prominence_weight = GREATEST(
-                            ee.prominence_weight,
-                            source_stats.prominence_weight
-                        ),
                         first_seen_at = CASE
                             WHEN source_stats.first_seen_at_ms IS NULL THEN NULL
                             ELSE to_timestamp(
@@ -607,29 +581,17 @@ class EntityMergeWriter:
                             episode_id,
                             project_id,
                             relationship_id,
-                            prominence_weight,
-                            is_central_relationship,
                             source_message_count
                         )
                         SELECT
                             episode_id,
                             project_id,
                             %s,
-                            prominence_weight,
-                            is_central_relationship,
                             source_message_count
                         FROM episode_relationships
                         WHERE relationship_id = %s
                           AND project_id = %s
                         ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
-                            prominence_weight = GREATEST(
-                                episode_relationships.prominence_weight,
-                                EXCLUDED.prominence_weight
-                            ),
-                            is_central_relationship = (
-                                episode_relationships.is_central_relationship
-                                OR EXCLUDED.is_central_relationship
-                            ),
                             source_message_count = GREATEST(
                                 episode_relationships.source_message_count,
                                 EXCLUDED.source_message_count
@@ -642,11 +604,7 @@ class EntityMergeWriter:
                         WITH source_stats AS (
                             SELECT
                                 em.episode_id,
-                                COUNT(DISTINCT em.message_id) AS source_message_count,
-                                COALESCE(
-                                    SUM(em.influence_weight),
-                                    0.0
-                                ) AS prominence_weight
+                                COUNT(DISTINCT em.message_id) AS source_message_count
                             FROM episode_messages em
                             JOIN relationship_observations rer
                               ON rer.message_id = em.message_id
@@ -658,11 +616,7 @@ class EntityMergeWriter:
                         )
                         UPDATE episode_relationships er
                         SET
-                            source_message_count = source_stats.source_message_count,
-                            prominence_weight = GREATEST(
-                                er.prominence_weight,
-                                source_stats.prominence_weight
-                            )
+                            source_message_count = source_stats.source_message_count
                         FROM source_stats
                         WHERE er.episode_id = source_stats.episode_id
                           AND er.relationship_id = %s

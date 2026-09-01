@@ -95,18 +95,7 @@ class DeterministicEpisodeLLM:
                     action="create",
                     summary="The team agreed to use durable episodic memory for retrieval.",
                     new_developments=["The memory path is now grounded in source messages."],
-                    message_influences=[
-                        {
-                            "message_id": "m1",
-                            "influence_weight": 0.8,
-                            "influence_reason": "The first message stated the design goal.",
-                        },
-                        {
-                            "message_id": "m2",
-                            "influence_weight": 0.9,
-                            "influence_reason": "The second message recorded the decision.",
-                        },
-                    ],
+                    message_influences=["message:1", "message:2"],
                 )
             ],
         )
@@ -160,22 +149,34 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
         "Agreed: source messages must ground every memory answer.",
         *[f"Supporting retrieval context {index}." for index in range(3, 9)],
     ]
-    for index, (message_id, content) in enumerate(zip(message_ids, contents)):
+    for index in range(0, len(message_ids), 2):
+        user_message_id = message_ids[index]
+        assistant_message_id = message_ids[index + 1]
         await real_postgres_client.execute(
             """
             INSERT INTO messages (
                 user_name, session_id, message_id, project_id, role, content,
-                timestamp_ms, ingestion_state
+                timestamp_ms, user_msg_id, lifecycle_state, ingestion_state
             )
-            VALUES (%s, %s, %s, %s, 'user', %s, %s, 'processed')
+            VALUES
+                (%s, %s, %s, %s, 'user', %s, %s, %s, 'sealed', 'processed'),
+                (%s, %s, %s, %s, 'assistant', %s, %s, %s, 'sealed', 'excluded')
             """,
             (
                 user_name,
                 session_id,
-                message_id,
+                user_message_id,
                 project_id,
-                content,
+                contents[index],
                 1700000000000 + index * 1000,
+                user_message_id,
+                user_name,
+                session_id,
+                assistant_message_id,
+                project_id,
+                contents[index + 1],
+                1700000000000 + (index + 1) * 1000,
+                user_message_id,
             ),
         )
 
@@ -238,8 +239,8 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
     assert retrieved[0]["episode_id"] == episode_id
     assert retrieved[0]["summary"].startswith("The team agreed")
     assert [evidence["message_id"] for evidence in retrieved[0]["evidence"]] == [
-        second_message_id,
         first_message_id,
+        second_message_id,
     ]
 
 

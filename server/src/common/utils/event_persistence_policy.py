@@ -80,7 +80,7 @@ SAFE_FIELDS = frozenset(
         "source_message_count",
         "episode_source_message_count",
         "episode_count",
-        "focus_episode_count",
+        "matched_entity_episode_count",
         "relationship_link_count",
         "returned_evidence_count",
         "expanded_source_message_count",
@@ -99,7 +99,7 @@ SAFE_FIELDS = frozenset(
         "consolidation_limit_hit",
         "episode_at_max_size",
         "invalid_identifier",
-        "focus_entity_retrieval",
+        "entity_retrieval",
         "used_raw_message_fallback",
     }
 )

@@ -134,9 +134,6 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
             {
                 "episode_id": "episode-1",
                 "entity_id": 2,
-                "prominence_weight": 0.8,
-                "role": "subject",
-                "is_focus_entity": True,
                 "source_message_count": 1,
             }
         ],
@@ -147,6 +144,7 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
                 "project_id": "project-1",
                 "entity_a_id": 2,
                 "entity_b_id": 9,
+                "relationship_type": "worked_with",
                 "weight": 1,
                 "confidence": 0.8,
                 "context": "worked with",
@@ -183,8 +181,6 @@ async def test_merge_audit_writer_restores_before_state_transactionally():
             {
                 "episode_id": "episode-1",
                 "relationship_id": "project-1:2:9",
-                "prominence_weight": 0.7,
-                "is_central_relationship": True,
                 "source_message_count": 1,
             }
         ],

@@ -11,14 +11,11 @@ Keep the combined narrative text in every proposal at or below
 </task>
 
 <grounding>
-- The evidence brief is a server-defined catalog. `message:N`, `entity:N`,
-  `relationship:N`, and `episode:N` are the only valid references; they are
+- The evidence brief is a server-defined catalog. `message:N` and `episode:N`
+  are the only valid references; they are
   local to this response and never database IDs.
 - Session boundaries and the supplied pairing/topic hints are evidence aids,
   not mandatory groups. Decide coherence yourself.
-- You may select at most two focus entities and only from the supplied entity
-  memberships. You may select central relationships only from the supplied
-  relationship memberships.
 - A revision target must be one of the supplied `episode:N` prior episodes.
 </grounding>
 

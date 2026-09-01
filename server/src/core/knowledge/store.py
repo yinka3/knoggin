@@ -534,6 +534,27 @@ class KnowledgeStore:
             episodes, window_messages, user_name=user_name, project_id=project_id
         )
 
+    async def edit_episode(
+        self,
+        *,
+        episode_id: str,
+        user_name: str,
+        project_id: str,
+        summary: str,
+        new_developments: List[str],
+        updates: List[str],
+        unresolved: List[str],
+    ) -> None:
+        await self._episode_writer.edit_episode(
+            episode_id=episode_id,
+            user_name=user_name,
+            project_id=project_id,
+            summary=summary,
+            new_developments=new_developments,
+            updates=updates,
+            unresolved=unresolved,
+        )
+
     async def get_episode_checkpoint(
         self,
         *,
@@ -725,21 +746,6 @@ class KnowledgeStore:
             project_id=project_id,
             session_id=session_id,
             limit=limit,
-        )
-
-    async def get_episode_generation_catalog(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> tuple[List[Dict], List[Dict]]:
-        return await self._episode_reader.get_episode_generation_catalog(
-            message_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
         )
 
     async def get_merge_evidence_for_entities(
@@ -1083,21 +1089,6 @@ class KnowledgeStore:
         project_id: str,
     ) -> Dict[int, List[int]]:
         return await self._entity_reader.get_entity_ids_for_messages(
-            message_ids,
-            user_name=user_name,
-            session_id=session_id,
-            project_id=project_id,
-        )
-
-    async def get_relationship_ids_for_messages(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        session_id: str,
-        project_id: str,
-    ) -> Dict[int, List[str]]:
-        return await self._episode_reader.get_relationship_ids_for_messages(
             message_ids,
             user_name=user_name,
             session_id=session_id,

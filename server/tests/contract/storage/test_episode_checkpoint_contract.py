@@ -154,3 +154,48 @@ async def test_project_episode_window_advances_each_source_session_cursor(
         project_id="project-1",
         message_count=1,
     )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_user_episode_edit_marks_the_narrative_as_user_modified(
+    real_postgres_client,
+):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO episodes (
+            episode_id, project_id, summary, source_message_count,
+            user_modified, created_at, updated_at
+        ) VALUES (
+            'episode-user-edit', 'project-1', 'Generated summary', 0,
+            FALSE, NOW(), NOW()
+        )
+        """
+    )
+    writer = EpisodeWriter(real_postgres_client)
+
+    await writer.edit_episode(
+        episode_id="episode-user-edit",
+        user_name="ada",
+        project_id="project-1",
+        summary="User-curated summary",
+        new_developments=["The user clarified the decision."],
+        updates=[],
+        unresolved=["The implementation date is open."],
+    )
+
+    row = await real_postgres_client.fetch_one(
+        """
+        SELECT summary, new_developments, unresolved, user_modified
+        FROM episodes
+        WHERE episode_id = 'episode-user-edit'
+        """
+    )
+    assert row == {
+        "summary": "User-curated summary",
+        "new_developments": ["The user clarified the decision."],
+        "unresolved": ["The implementation date is open."],
+        "user_modified": True,
+    }

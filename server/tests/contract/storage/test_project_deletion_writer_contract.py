@@ -207,7 +207,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
                 timestamp_ms
             ) VALUES
                 ('ada', 'session-1', 101, 'project-1', 'user', 'Delete project one', 1000),
-                ('ada', 'session-2', 201, 'project-2', 'user', 'Keep project two', 2000, TRUE)
+                ('ada', 'session-2', 201, 'project-2', 'user', 'Keep project two', 2000)
             """
         )
         await cur.execute(
@@ -283,32 +283,29 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         await cur.execute(
             """
             INSERT INTO episode_messages (
-                episode_id, project_id, session_id, message_id,
-                influence_weight, message_position
+                episode_id, project_id, session_id, message_id, message_position
             ) VALUES
-                ('episode-1', 'project-1', 'session-1', 101, 1.0, 0),
-                ('episode-2', 'project-2', 'session-2', 201, 1.0, 0)
+                ('episode-1', 'project-1', 'session-1', 101, 0),
+                ('episode-2', 'project-2', 'session-2', 201, 0)
             """
         )
         await cur.execute(
             """
             INSERT INTO episode_entities (
-                episode_id, project_id, entity_id, prominence_weight,
-                is_focus_entity, source_message_count
+                episode_id, project_id, entity_id, source_message_count
             ) VALUES
-                ('episode-1', 'project-1', 42, 1.0, TRUE, 1),
-                ('episode-2', 'project-2', 52, 1.0, TRUE, 1),
-                ('episode-2', 'project-2', 60, 0.5, FALSE, 1)
+                ('episode-1', 'project-1', 42, 1),
+                ('episode-2', 'project-2', 52, 1),
+                ('episode-2', 'project-2', 60, 1)
             """
         )
         await cur.execute(
             """
             INSERT INTO episode_relationships (
-                episode_id, project_id, relationship_id, prominence_weight,
-                is_central_relationship, source_message_count
+                episode_id, project_id, relationship_id, source_message_count
             ) VALUES
-                ('episode-1', 'project-1', 'project-1:42:43:related', 1.0, TRUE, 1),
-                ('episode-2', 'project-2', 'project-2:52:53:related', 1.0, TRUE, 1)
+                ('episode-1', 'project-1', 'project-1:42:43:related', 1),
+                ('episode-2', 'project-2', 'project-2:52:53:related', 1)
             """
         )
         await cur.execute(

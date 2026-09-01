@@ -828,8 +828,6 @@ CREATE TABLE IF NOT EXISTS public.episodes (
     new_developments JSONB NOT NULL DEFAULT '[]'::jsonb,
     updates JSONB NOT NULL DEFAULT '[]'::jsonb,
     unresolved JSONB NOT NULL DEFAULT '[]'::jsonb,
-    importance DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (importance >= 0.0 AND importance <= 1.0),
     search_tsvector TSVECTOR GENERATED ALWAYS AS (
         to_tsvector(
             'simple',
@@ -843,7 +841,6 @@ CREATE TABLE IF NOT EXISTS public.episodes (
     last_message_at TIMESTAMPTZ,
     embedding vector(1024),
     generator_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    version_history JSONB NOT NULL DEFAULT '[]'::jsonb,
     user_modified BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -866,8 +863,11 @@ ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS source_message_count INTEGER NOT NULL DEFAULT 0
     CHECK (source_message_count >= 0),
 ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS version_history JSONB NOT NULL DEFAULT '[]'::jsonb;
+ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ;
+
+ALTER TABLE public.episodes
+    DROP COLUMN IF EXISTS importance,
+    DROP COLUMN IF EXISTS version_history;
 
 CREATE INDEX IF NOT EXISTS episodes_project_updated_idx
 ON public.episodes(project_id, updated_at DESC);
@@ -884,9 +884,6 @@ CREATE TABLE IF NOT EXISTS public.episode_messages (
     project_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     message_id BIGINT NOT NULL,
-    influence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (influence_weight >= 0.0),
-    influence_reason TEXT,
     message_position INTEGER NOT NULL CHECK (message_position >= 0),
     attached_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (episode_id, message_id),
@@ -906,6 +903,10 @@ ON public.episode_messages(message_id, episode_id);
 
 ALTER TABLE public.episode_messages
 ADD COLUMN IF NOT EXISTS attached_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE public.episode_messages
+    DROP COLUMN IF EXISTS influence_weight,
+    DROP COLUMN IF EXISTS influence_reason;
 
 ALTER TABLE public.episode_messages
 ADD COLUMN IF NOT EXISTS project_id TEXT,
@@ -1004,10 +1005,6 @@ CREATE TABLE IF NOT EXISTS public.episode_entities (
     episode_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     entity_id BIGINT NOT NULL,
-    prominence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (prominence_weight >= 0.0),
-    role TEXT,
-    is_focus_entity BOOLEAN NOT NULL DEFAULT FALSE,
     source_message_count INTEGER NOT NULL DEFAULT 0
         CHECK (source_message_count >= 0),
     first_seen_at TIMESTAMPTZ,
@@ -1023,15 +1020,17 @@ CREATE TABLE IF NOT EXISTS public.episode_entities (
         ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS episode_entities_focus_lookup_idx
-ON public.episode_entities(entity_id, is_focus_entity, episode_id);
-
 CREATE INDEX IF NOT EXISTS episode_entities_lookup_idx
 ON public.episode_entities(entity_id, episode_id);
 
 ALTER TABLE public.episode_entities
 ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ,
 ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+
+ALTER TABLE public.episode_entities
+    DROP COLUMN IF EXISTS prominence_weight,
+    DROP COLUMN IF EXISTS role,
+    DROP COLUMN IF EXISTS is_focus_entity CASCADE;
 
 ALTER TABLE public.episode_entities
 ADD COLUMN IF NOT EXISTS project_id TEXT;
@@ -1203,9 +1202,6 @@ CREATE TABLE IF NOT EXISTS public.episode_relationships (
     episode_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     relationship_id TEXT NOT NULL,
-    prominence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (prominence_weight >= 0.0),
-    is_central_relationship BOOLEAN NOT NULL DEFAULT FALSE,
     source_message_count INTEGER NOT NULL DEFAULT 0
         CHECK (source_message_count >= 0),
     PRIMARY KEY (episode_id, relationship_id),
@@ -1224,6 +1220,10 @@ ON public.episode_relationships(relationship_id, episode_id);
 
 ALTER TABLE public.episode_relationships
 ADD COLUMN IF NOT EXISTS project_id TEXT;
+
+ALTER TABLE public.episode_relationships
+    DROP COLUMN IF EXISTS prominence_weight,
+    DROP COLUMN IF EXISTS is_central_relationship;
 
 UPDATE public.episode_relationships episode_relationship
 SET project_id = episode.project_id
@@ -2474,31 +2474,9 @@ BEGIN
     END IF;
 END $$;
 
-CREATE OR REPLACE FUNCTION public.enforce_episode_focus_entity_limit()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF NEW.is_focus_entity AND (
-        SELECT count(*)
-        FROM public.episode_entities
-        WHERE episode_id = NEW.episode_id
-          AND is_focus_entity
-    ) > 2 THEN
-        RAISE EXCEPTION
-            'episodes may contain at most two focus entities'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
 DROP TRIGGER IF EXISTS episode_entities_focus_limit_trigger
     ON public.episode_entities;
-CREATE TRIGGER episode_entities_focus_limit_trigger
-AFTER INSERT OR UPDATE OF episode_id, is_focus_entity
-ON public.episode_entities
-FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();
+DROP FUNCTION IF EXISTS public.enforce_episode_focus_entity_limit();
 
 -- Existing unreleased databases may predate the direct project foreign keys
 -- above.  Make project deletion one cascade root rather than a handwritten

@@ -372,41 +372,27 @@ def format_episode_results(results: List[Dict]) -> str:
                         if entities:
                             block += "    entities:\n"
                             for entity in entities:
-                                focus = (
-                                    " focus"
-                                    if entity.get("is_focus_entity")
-                                    else ""
-                                )
-                                role = entity.get("role") or "context"
                                 block += (
                                     "      - "
                                     f"{entity.get('entity_id', '?')} "
-                                    f"({role}{focus}, "
-                                    f"{entity.get('source_message_count', 0)} "
+                                    f"({entity.get('source_message_count', 0)} "
                                     "messages)\n"
                                 )
                         relationships = episode.get("relationships", [])
                         if relationships:
                             block += "    relationships:\n"
                             for relationship in relationships:
-                                central = (
-                                    " central"
-                                    if relationship.get("is_central_relationship")
-                                    else ""
-                                )
                                 block += (
                                     "      - "
                                     f"{relationship.get('relationship_id', '?')} "
                                     f"({relationship.get('source_message_count', 0)} "
-                                    f"messages{central})\n"
+                                    "messages)\n"
                                 )
                         for source in episode.get("evidence", []):
                             block += (
                                 "    evidence: "
                                 f"[{source.get('message_id', '?')}] "
-                                f"{source.get('content', '')}"
-                                " (influence="
-                                f"{source.get('influence_weight', 0.0):.2f})\n"
+                                f"{source.get('content', '')}\n"
                             )
                 else:
                     block += "  - No contextual episodes recorded\n"

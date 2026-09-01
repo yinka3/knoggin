@@ -23,7 +23,6 @@ class EpisodeNarrative(BaseModel):
     new_developments: List[str] = Field(default_factory=list)
     updates: List[str] = Field(default_factory=list)
     unresolved: List[str] = Field(default_factory=list)
-    importance: float = Field(0.0, ge=0.0, le=1.0)
 
     def narrative_character_count(self) -> int:
         """Count the exact text persisted in the narrative fields."""
@@ -53,8 +52,6 @@ class MessageEpisode(BaseModel):
 
     message_id: int = Field(..., gt=0)
     session_id: str = Field(..., min_length=1)
-    influence_weight: float = Field(0.0, ge=0.0)
-    influence_reason: Optional[str] = None
     message_position: int = Field(..., ge=0)
     attached_at: Optional[datetime] = None
 
@@ -63,9 +60,6 @@ class EntityEpisode(BaseModel):
     """An entity observed in an episode's source messages."""
 
     entity_id: int = Field(..., gt=0)
-    prominence_weight: float = Field(0.0, ge=0.0)
-    role: Optional[str] = None
-    is_focus_entity: bool = False
     source_message_count: int = Field(0, ge=0)
     first_seen_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
@@ -75,8 +69,6 @@ class RelationshipEpisode(BaseModel):
     """A relationship evidenced by an episode's source messages."""
 
     relationship_id: str = Field(..., min_length=1)
-    prominence_weight: float = Field(0.0, ge=0.0)
-    is_central_relationship: bool = False
     source_message_count: int = Field(0, ge=0)
 
 
@@ -85,18 +77,6 @@ class EpisodeCheckpoint(BaseModel):
 
     last_evaluated_message_id: int = Field(0, ge=0)
     last_evaluated_timestamp_ms: Optional[int] = None
-
-
-class EpisodeVersion(EpisodeNarrative):
-    """One bounded snapshot of an episode before consolidation."""
-
-    version: int = Field(..., gt=0)
-    saved_at: datetime
-    summary: str = Field(..., min_length=1)
-    first_message_at: Optional[datetime] = None
-    last_message_at: Optional[datetime] = None
-    source_message_ids: List[int] = Field(..., min_length=1)
-    generator_metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class Episode(EpisodeNarrative):
@@ -112,7 +92,6 @@ class Episode(EpisodeNarrative):
     messages: List[MessageEpisode] = Field(..., min_length=1)
     entities: List[EntityEpisode] = Field(default_factory=list)
     relationships: List[RelationshipEpisode] = Field(default_factory=list)
-    version_history: List[EpisodeVersion] = Field(default_factory=list)
     # Automation must never silently replace an episode that a person curated.
     user_modified: bool = False
     created_at: datetime = Field(default_factory=get_now)
@@ -180,8 +159,6 @@ class Episode(EpisodeNarrative):
         entity_ids = [entity.entity_id for entity in entities]
         if len(set(entity_ids)) != len(entity_ids):
             raise ValueError("entities must not contain duplicate entity IDs")
-        if sum(entity.is_focus_entity for entity in entities) > 2:
-            raise ValueError("episodes may contain at most two focus entities")
         return entities
 
     @field_validator("relationships")

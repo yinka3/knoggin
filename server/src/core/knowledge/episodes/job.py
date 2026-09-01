@@ -93,22 +93,11 @@ class EpisodeJob(BaseJob):
         if not messages:
             return None
         entity_ids_by_message: dict[int, list[int]] = {}
-        relationship_ids_by_message: dict[int, list[str]] = {}
-        entity_catalog: list[dict] = []
-        relationship_catalog: list[dict] = []
         for session_id in sorted({str(item["session_id"]) for item in messages}):
             ids = [int(item["message_id"]) for item in messages if item["session_id"] == session_id]
             entity_ids_by_message.update(await self.knowledge_store.get_entity_ids_for_messages(
                 ids, user_name=user_name, project_id=project_id, session_id=session_id
             ))
-            relationship_ids_by_message.update(await self.knowledge_store.get_relationship_ids_for_messages(
-                ids, user_name=user_name, project_id=project_id, session_id=session_id
-            ))
-            entities, relationships = await self.knowledge_store.get_episode_generation_catalog(
-                ids, user_name=user_name, project_id=project_id, session_id=session_id
-            )
-            entity_catalog.extend(entities)
-            relationship_catalog.extend(relationships)
         source_entities = sorted({value for values in entity_ids_by_message.values() for value in values})
         prior = await self.knowledge_store.get_recent_project_episodes(
             user_name=user_name, project_id=project_id, limit=1
@@ -121,10 +110,6 @@ class EpisodeJob(BaseJob):
         deduped = {episode.episode_id: episode for episode in prior}
         return ProjectEpisodeBuild(
             project_id=project_id, policy=self._policy, messages=messages,
-            entity_ids_by_message=entity_ids_by_message,
-            relationship_ids_by_message=relationship_ids_by_message,
-            entity_catalog=list({int(item["entity_id"]): item for item in entity_catalog}.values()),
-            relationship_catalog=list({str(item["relationship_id"]): item for item in relationship_catalog}.values()),
             prior_episodes=list(deduped.values())[:self._policy.prior_episode_candidate_count],
         )
 

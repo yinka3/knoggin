@@ -55,13 +55,7 @@ class _DeterministicEpisodeLLM:
                     new_developments=[
                         "The complete server path is grounded in its source."
                     ],
-                    message_influences=[
-                        {
-                            "message_id": "m1",
-                            "influence_weight": 1.0,
-                            "influence_reason": "The accepted message records the decision.",
-                        }
-                    ],
+                    message_influences=["message:1"],
                 )
             ],
         )
@@ -387,6 +381,12 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         await asyncio.sleep(1.05)
         accepted = accepted_messages[-1]
         await worker.flush()
+        for index, accepted_message in enumerate(accepted_messages):
+            await context.add_assistant_turn(
+                f"Server-flow assistant outcome {index + 1}.",
+                datetime(2026, 8, 1, 12, index, 30, tzinfo=timezone.utc),
+                user_msg_id=accepted_message.id,
+            )
 
         message = await postgres.fetch_one(
             "SELECT role, content, ingestion_state FROM messages "
@@ -497,7 +497,8 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             source_candidates=persisted_candidates,
         )
         assistant = await postgres.fetch_one(
-            "SELECT message_id FROM messages WHERE session_id = %s AND role = 'assistant'",
+                "SELECT message_id FROM messages WHERE session_id = %s AND role = 'assistant' "
+                "ORDER BY message_id DESC LIMIT 1",
             (scope["session_id"],),
         )
         assert assistant is not None

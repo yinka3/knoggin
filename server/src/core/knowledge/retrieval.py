@@ -200,7 +200,9 @@ class KnowledgeRetrieval:
                 strategy="exact_entity",
                 started_at=started_at,
                 episode_count=len(episodes),
-                focus_episode_count=self._focus_episode_count(episodes, entity_id),
+                matched_entity_episode_count=self._matched_entity_episode_count(
+                    episodes, entity_id
+                ),
                 metrics=metrics,
             )
             return {
@@ -243,7 +245,7 @@ class KnowledgeRetrieval:
                     strategy="semantic",
                     started_at=started_at,
                     episode_count=len(episodes),
-                    focus_episode_count=0,
+                    matched_entity_episode_count=0,
                     metrics=metrics,
                 )
                 return {
@@ -268,7 +270,7 @@ class KnowledgeRetrieval:
                 strategy="lexical",
                 started_at=started_at,
                 episode_count=len(episodes),
-                focus_episode_count=0,
+                matched_entity_episode_count=0,
                 metrics=metrics,
             )
             return {
@@ -282,7 +284,7 @@ class KnowledgeRetrieval:
             strategy="raw_message_fallback",
             started_at=started_at,
             episode_count=0,
-            focus_episode_count=0,
+            matched_entity_episode_count=0,
             metrics={"used_raw_message_fallback": 1},
         )
         return {"resolution": "fallback", "results": fallback}
@@ -339,7 +341,7 @@ class KnowledgeRetrieval:
             strategy="recent",
             started_at=started_at,
             episode_count=len(episodes),
-            focus_episode_count=0,
+            matched_entity_episode_count=0,
             metrics=metrics,
         )
         return {
@@ -610,11 +612,7 @@ class KnowledgeRetrieval:
             )
             expansion_latency_ms += (perf_counter() - started_at) * 1000
             expanded_count += len(sources)
-            evidence = sorted(
-                (self._as_message_evidence(source) for source in sources),
-                key=lambda source: float(source.get("influence_weight", 0.0)),
-                reverse=True,
-            )
+            evidence = [self._as_message_evidence(source) for source in sources]
             returned_count += len(evidence)
             source_reader = getattr(
                 self.knowledge_store, "get_project_episode_source_refs", None
@@ -634,7 +632,6 @@ class KnowledgeRetrieval:
                 "new_developments": episode.new_developments,
                 "updates": episode.updates,
                 "unresolved": episode.unresolved,
-                "importance": episode.importance,
                 "source_message_count": episode.source_message_count,
                 "first_message_at": (
                     episode.first_message_at.isoformat() if episode.first_message_at else None
@@ -645,9 +642,6 @@ class KnowledgeRetrieval:
                 "entities": [
                     {
                         "entity_id": entity.entity_id,
-                        "prominence_weight": entity.prominence_weight,
-                        "role": entity.role,
-                        "is_focus_entity": entity.is_focus_entity,
                         "source_message_count": entity.source_message_count,
                         "first_seen_at": entity.first_seen_at.isoformat() if entity.first_seen_at else None,
                         "last_seen_at": entity.last_seen_at.isoformat() if entity.last_seen_at else None,
@@ -657,14 +651,9 @@ class KnowledgeRetrieval:
                 "relationships": [
                     {
                         "relationship_id": relationship.relationship_id,
-                        "prominence_weight": relationship.prominence_weight,
-                        "is_central_relationship": relationship.is_central_relationship,
                         "source_message_count": relationship.source_message_count,
                     }
                     for relationship in episode.relationships
-                ],
-                "version_history": [
-                    version.model_dump(mode="json") for version in episode.version_history
                 ],
                 "evidence": evidence,
                 "sources_consulted": [
@@ -696,7 +685,7 @@ class KnowledgeRetrieval:
         strategy: str,
         started_at: float,
         episode_count: int,
-        focus_episode_count: int,
+        matched_entity_episode_count: int,
         metrics: Dict[str, int | float],
     ) -> None:
         await emit(
@@ -708,8 +697,8 @@ class KnowledgeRetrieval:
                 "session_id": session_id,
                 "strategy": strategy,
                 "episode_count": episode_count,
-                "focus_episode_count": focus_episode_count,
-                "focus_entity_retrieval": strategy in {"exact_entity", "vector_entity"},
+                "matched_entity_episode_count": matched_entity_episode_count,
+                "entity_retrieval": strategy in {"exact_entity", "vector_entity"},
                 "retrieval_latency_ms": round((perf_counter() - started_at) * 1000, 3),
                 **metrics,
             },
@@ -729,12 +718,9 @@ class KnowledgeRetrieval:
         return int(raw_id)
 
     @staticmethod
-    def _focus_episode_count(episodes, entity_id: int) -> int:
+    def _matched_entity_episode_count(episodes, entity_id: int) -> int:
         return sum(
-            any(
-                entity.entity_id == entity_id and entity.is_focus_entity
-                for entity in episode.entities
-            )
+            any(entity.entity_id == entity_id for entity in episode.entities)
             for episode in episodes
         )
 
@@ -747,14 +733,12 @@ class KnowledgeRetrieval:
             "content": source.get("content", ""),
             "role": source.get("role", "assistant"),
             "timestamp_ms": source.get("timestamp_ms"),
-            "influence_weight": source.get("influence_weight", 0.0),
-            "influence_reason": source.get("influence_reason"),
             "attached_at": (
                 source["attached_at"].isoformat()
                 if source.get("attached_at") and hasattr(source["attached_at"], "isoformat")
                 else source.get("attached_at")
             ),
-            "score": source.get("influence_weight", 0.0),
+            "score": 1.0,
             "context": [
                 {
                     "role": source.get("role", "assistant"),

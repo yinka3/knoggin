@@ -329,16 +329,12 @@ class RelationshipReclassificationWriter:
                 episode_id,
                 project_id,
                 relationship_id,
-                prominence_weight,
-                is_central_relationship,
                 source_message_count
             )
             SELECT
                 episode_message.episode_id,
                 episode_message.project_id,
                 observation.relationship_id,
-                COALESCE(SUM(episode_message.influence_weight), 0.0),
-                FALSE,
                 COUNT(DISTINCT episode_message.message_id)
             FROM public.episode_messages episode_message
             JOIN public.relationship_observations observation
@@ -352,10 +348,6 @@ class RelationshipReclassificationWriter:
                 episode_message.project_id,
                 observation.relationship_id
             ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
-                prominence_weight = GREATEST(
-                    public.episode_relationships.prominence_weight,
-                    EXCLUDED.prominence_weight
-                ),
                 source_message_count = GREATEST(
                     public.episode_relationships.source_message_count,
                     EXCLUDED.source_message_count

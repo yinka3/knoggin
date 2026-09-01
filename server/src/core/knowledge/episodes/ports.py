@@ -47,23 +47,6 @@ class EpisodeStore(Protocol):
         session_id: str,
     ) -> dict[int, list[int]]: ...
 
-    async def get_relationship_ids_for_messages(
-        self,
-        message_ids: list[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> dict[int, list[str]]: ...
-
-    async def get_episode_generation_catalog(
-        self,
-        message_ids: list[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
 
 
 @runtime_checkable
