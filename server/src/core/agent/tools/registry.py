@@ -503,19 +503,19 @@ class Tools(
             query, session_id=self.session_id, limit=limit
         )
 
-    async def get_connections(self, entity_name: str):
+    async def get_connections(self, entity_id: int):
         return await self.knowledge_retrieval.get_connections(
-            entity_name, session_id=self.session_id
+            entity_id, session_id=self.session_id
         )
 
-    async def get_recent_activity(self, entity_name: str, hours: int = 24):
+    async def get_recent_activity(self, entity_id: int, hours: int = 24):
         return await self.knowledge_retrieval.get_recent_activity(
-            entity_name, session_id=self.session_id, hours=hours
+            entity_id, session_id=self.session_id, hours=hours
         )
 
-    async def episode_check(self, query: str, entity_name: Optional[str] = None):
+    async def episode_check(self, query: str, entity_id: Optional[int] = None):
         return await self.knowledge_retrieval.episode_check(
-            query, session_id=self.session_id, entity_name=entity_name
+            query, session_id=self.session_id, entity_id=entity_id
         )
 
     async def read_episode(self, episode_id: str):
@@ -529,9 +529,9 @@ class Tools(
             limit=limit,
         )
 
-    async def find_path(self, entity_a: str, entity_b: str):
+    async def find_path(self, entity_a_id: int, entity_b_id: int):
         return await self.knowledge_retrieval.find_path(
-            entity_a, entity_b, session_id=self.session_id
+            entity_a_id, entity_b_id, session_id=self.session_id
         )
 
     async def get_hot_topic_context(self, hot_topics, *, slim: bool = False):

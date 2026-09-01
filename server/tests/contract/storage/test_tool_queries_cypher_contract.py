@@ -16,8 +16,8 @@ async def test_find_path_rejects_untrusted_cypher_depth_before_querying(max_dept
 
     with pytest.raises(ValueError, match=_PATH_DEPTH_ERROR):
         await reader.find_path_filtered(
-            "Ada",
-            "Grace",
+            2,
+            3,
             visible_project_ids=["project-1"],
             max_depth=max_depth,
         )
@@ -33,8 +33,8 @@ async def test_internal_path_helper_enforces_the_same_cypher_depth_boundary():
 
     with pytest.raises(ValueError, match=_PATH_DEPTH_ERROR):
         await reader._find_shortest_path(
-            "Ada",
-            "Grace",
+            2,
+            3,
             visible_project_ids=["project-1"],
             max_depth="1]-(x)-[]-",
         )
@@ -49,8 +49,8 @@ async def test_find_path_uses_a_validated_fixed_depth_in_its_cypher_query():
     reader = GraphReader(client)
 
     assert await reader.find_path_filtered(
-        "Ada",
-        "Grace",
+        2,
+        3,
         visible_project_ids=["project-1"],
         max_depth=4,
     ) == ([], False)
@@ -66,6 +66,9 @@ async def test_related_entities_exposes_observed_evidence_metadata():
         fetch_all_results=[
             [
                 {
+                    "project_id": "project-1",
+                    "source_entity_id": 1,
+                    "target_entity_id": 2,
                     "source": "Ade",
                     "target": "Acme",
                     "relationship_id": "project-1:1:2:works_at",
@@ -99,13 +102,16 @@ async def test_related_entities_exposes_observed_evidence_metadata():
     )
     reader = EntityReader(client)
 
-    result = await reader.get_related_entities_by_name(
-        ["Ade"],
+    result = await reader.get_related_entities(
+        [1],
         visible_project_ids=["project-1"],
     )
 
     assert result == [
         {
+            "project_id": "project-1",
+            "source_entity_id": 1,
+            "target_entity_id": 2,
             "source": "Ade",
             "target": "Acme",
             "relationship_id": "project-1:1:2:works_at",

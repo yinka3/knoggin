@@ -75,8 +75,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_entity",
             "description": (
-                "Search entity profiles and immediate relationship context. "
-                "Use this to discover an entity or answer a current graph/connection question. "
+                "Discover entity identities, stable entity IDs, aliases, and project contexts. "
+                "Use the returned entity ID for connections, activity, paths, or an exact Episode follow-up. "
                 "For remembered history, decisions, or developments, use episode_check first."
             ),
             "parameters": {
@@ -108,12 +108,12 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_name": {
-                        "type": "string",
-                        "description": "The exact name of the central entity.",
-                    }
+                    "entity_id": {
+                        "type": "integer",
+                        "description": "Stable entity ID returned by search_entity.",
+                    },
                 },
-                "required": ["entity_name"],
+                "required": ["entity_id"],
             },
             "tags": ["graph:read", "core"],
         },
@@ -163,10 +163,10 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_a": {"type": "string", "description": "First entity name"},
-                    "entity_b": {"type": "string", "description": "Second entity name"},
+                    "entity_a_id": {"type": "integer", "description": "First stable entity ID"},
+                    "entity_b_id": {"type": "integer", "description": "Second stable entity ID"},
                 },
-                "required": ["entity_a", "entity_b"],
+                "required": ["entity_a_id", "entity_b_id"],
             },
             "tags": ["graph:read", "core"],
         },
@@ -210,16 +210,16 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_name": {
-                        "type": "string",
-                        "description": "Entity to check activity for",
+                    "entity_id": {
+                        "type": "integer",
+                        "description": "Stable entity ID returned by search_entity",
                     },
                     "hours": {
                         "type": "integer",
                         "description": "Hours to look back (e.g., 24 for daily, 168 for weekly).",
                     },
                 },
-                "required": ["entity_name"],
+                "required": ["entity_id"],
             },
             "tags": ["graph:read", "core"],
         },
@@ -258,9 +258,9 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_name": {
-                        "type": "string",
-                        "description": "Optional entity whose episodic memory to inspect.",
+                    "entity_id": {
+                        "type": "integer",
+                        "description": "Optional stable entity ID whose episodic memory to inspect.",
                     },
                     "query": {
                         "type": "string",

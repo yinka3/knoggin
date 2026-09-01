@@ -51,23 +51,24 @@ async def test_message_context_uses_durable_storage():
 
 
 @pytest.mark.no_network
-async def test_entity_search_hydrates_visible_relationship_evidence():
+async def test_entity_search_returns_stable_identity_and_project_contexts():
     class Store:
         async def search_entity(self, query, **kwargs):
             assert query == "Ada"
             assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
-            return [{"name": "Ada", "top_connections": [{"evidence_refs": [9]}]}]
-
-        async def get_messages_by_ids(self, message_ids, **kwargs):
-            assert message_ids == [9]
-            assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
             return [
                 {
-                    "id": 9,
-                    "user_name": "ada",
-                    "session_id": "session-1",
-                    "content": "Observed relationship",
-                    "timestamp": 1_700_000_000_000,
+                    "entity_id": 9,
+                    "canonical_name": "Ada Lovelace",
+                    "aliases": ["Ada"],
+                    "contexts": [
+                        {
+                            "project_id": "project-1",
+                            "entity_type": "person",
+                            "topic": "Identity",
+                            "last_mentioned_ms": 1_700_000_000_000,
+                        }
+                    ],
                 }
             ]
 
@@ -83,13 +84,19 @@ async def test_entity_search_hydrates_visible_relationship_evidence():
 
     results = await retrieval.search_entities("Ada", session_id="session-1")
 
-    assert results[0]["top_connections"][0]["evidence"] == [
+    assert results == [
         {
-            "id": "msg_9",
-            "user_name": "ada",
-            "session_id": "session-1",
-            "message": "Observed relationship",
-            "timestamp": "2023-11-14T22:13:20+00:00",
+            "entity_id": 9,
+            "canonical_name": "Ada Lovelace",
+            "aliases": ["Ada"],
+            "contexts": [
+                {
+                    "project_id": "project-1",
+                    "entity_type": "person",
+                    "topic": "Identity",
+                    "last_mentioned_ms": 1_700_000_000_000,
+                }
+            ],
         }
     ]
 
@@ -245,12 +252,9 @@ async def test_recent_episode_tool_passes_its_session_to_retrieval():
 @pytest.mark.no_network
 async def test_exact_entity_episode_lookup_uses_the_store_contract_without_session_id():
     class Entities:
-        async def get_id(self, name):
-            assert name == "Ada"
-            return 2
-
-        async def get_profile(self, _entity_id):
-            return None
+        async def get_profile(self, entity_id):
+            assert entity_id == 2
+            return SimpleNamespace(canonical_name="Ada Lovelace")
 
     class Store:
         def __init__(self):
@@ -288,10 +292,11 @@ async def test_exact_entity_episode_lookup_uses_the_store_contract_without_sessi
     )
 
     result = await retrieval.episode_check(
-        "What did Ada decide?", session_id="session-1", entity_name="Ada"
+        "What did Ada decide?", session_id="session-1", entity_id=2
     )
 
     assert result["resolution"] == "exact"
+    assert result["results"][0]["entity_id"] == 2
     assert store.calls == [
         {
             "entity_ids": [2],

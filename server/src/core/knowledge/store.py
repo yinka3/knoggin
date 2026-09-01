@@ -1549,29 +1549,27 @@ class KnowledgeStore:
 
     async def get_related_entities(
         self,
-        entity_names: List[str],
+        entity_ids: List[int],
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
-        return await self._entity_reader.get_related_entities_by_name(
-            entity_names,
+        return await self._entity_reader.get_related_entities(
+            entity_ids,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             limit=limit,
         )
 
     async def get_recent_activity(
         self,
-        entity_name: str,
+        entity_id: int,
         *,
         visible_project_ids: List[str],
         active_topics: List[str] = None,
         hours: int = 24,
     ) -> List[Dict]:
         return await self._knowledge_query_reader.get_recent_activity(
-            entity_name,
+            entity_id,
             visible_project_ids=visible_project_ids,
             active_topics=active_topics,
             hours=hours,
@@ -1579,16 +1577,16 @@ class KnowledgeStore:
 
     async def find_path_filtered(
         self,
-        start_name: str,
-        end_name: str,
+        start_entity_id: int,
+        end_entity_id: int,
         *,
         visible_project_ids: List[str],
         active_topics: List[str] = None,
         max_depth: int = 4,
     ) -> Tuple[List[Dict], bool]:
         return await self._graph_reader.find_path_filtered(
-            start_name,
-            end_name,
+            start_entity_id,
+            end_entity_id,
             visible_project_ids=visible_project_ids,
             active_topics=active_topics,
             max_depth=max_depth,

@@ -497,7 +497,7 @@ class EntityReader:
         connections_limit: int = 5,
         evidence_limit: int = 5,
     ) -> List[Dict]:
-        """Search entities and hydrate their observed graph connections."""
+        """Discover visible global identities and their project contexts."""
 
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
@@ -548,32 +548,17 @@ class EntityReader:
 
         try:
             entity_rows = await self.client.fetch_all(entity_query, params)
-            results: list[Dict] = []
-            for row in entity_rows:
-                entity_id = int(row["id"])
-                connections = await self.get_entity_relationships(
-                    entity_id,
-                    visible_project_ids=visible_project_ids,
-                )
-                results.append(
-                    {
-                        "id": entity_id,
-                        "canonical_name": row["canonical_name"],
-                        "aliases": row["aliases"] or [],
-                        "last_mentioned": row["last_mentioned"],
-                        "top_connections": [
-                            {
-                                "canonical_name": connection["neighbor_name"],
-                                "aliases": [],
-                                "weight": connection["evidence_count"],
-                                "evidence_refs": connection["message_refs"][:evidence_limit],
-                                "context": connection["context"],
-                            }
-                            for connection in connections[:connections_limit]
-                        ],
-                    }
-                )
-            return results
+            entity_ids = [int(row["id"]) for row in entity_rows]
+            contexts_map = await self._fetch_contexts(entity_ids, visible_project_ids)
+            return [
+                {
+                    "entity_id": int(row["id"]),
+                    "canonical_name": self._clean_string(row["canonical_name"]),
+                    "aliases": self._parse_aliases(row["aliases"]),
+                    "contexts": contexts_map.get(int(row["id"]), []),
+                }
+                for row in entity_rows
+            ]
         except Exception as exc:
             self._raise_storage_read("search_by_name", exc)
 
@@ -864,26 +849,35 @@ class EntityReader:
         except Exception as e:
             self._raise_storage_read("get_top_connected_entities", e)
 
-    async def get_related_entities_by_name(
+    async def get_related_entities(
         self,
-        entity_names: List[str],
+        entity_ids: List[int],
         *,
         visible_project_ids: List[str],
         active_topics: Optional[List[str]] = None,
         limit: int = 25,
     ) -> List[Dict]:
-        """Return relationship identities and their canonical observations."""
+        """Return relationships from their durable stored endpoints.
+
+        The queried IDs only select the incident relationships.  They do not
+        change endpoint order: for directional relationships ``source`` is
+        always ``relationships.entity_a_id`` and ``target`` is always
+        ``relationships.entity_b_id``.
+        """
 
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
-            "get_related_entities_by_name",
+            "get_related_entities",
         )
-        limit = self._validate_query_limit(limit, "get_related_entities_by_name")
-        if not entity_names:
+        limit = self._validate_query_limit(limit, "get_related_entities")
+        if not entity_ids:
             return []
 
         query = """
         SELECT
+            relationship.project_id,
+            relationship.entity_a_id AS source_entity_id,
+            relationship.entity_b_id AS target_entity_id,
             source.canonical_name AS source,
             target.canonical_name AS target,
             relationship.relationship_id,
@@ -894,6 +888,7 @@ class EntityReader:
             COALESCE(
                 jsonb_agg(
                     jsonb_build_object(
+                        'project_id', observation.project_id,
                         'user_name', observation.user_name,
                         'session_id', observation.session_id,
                         'message_id', observation.message_id
@@ -920,37 +915,34 @@ class EntityReader:
             ) AS observation_refs,
             MIN(observation.observed_at_ms) AS first_observed,
             MAX(observation.observed_at_ms) AS last_observed
-        FROM entities source
-        JOIN relationships relationship
-          ON relationship.entity_a_id = source.entity_id
-          OR relationship.entity_b_id = source.entity_id
+        FROM relationships relationship
+        JOIN entities source ON source.entity_id = relationship.entity_a_id
+        JOIN entities target ON target.entity_id = relationship.entity_b_id
         JOIN project_entity_contexts source_context
           ON source_context.entity_id = source.entity_id
          AND source_context.project_id = relationship.project_id
-        JOIN entities target
-          ON target.entity_id = CASE
-              WHEN relationship.entity_a_id = source.entity_id
-              THEN relationship.entity_b_id
-              ELSE relationship.entity_a_id
-          END
         JOIN project_entity_contexts target_context
           ON target_context.entity_id = target.entity_id
          AND target_context.project_id = relationship.project_id
         LEFT JOIN relationship_observations observation
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
-        WHERE source.canonical_name = ANY(%s)
+        WHERE (
+              relationship.entity_a_id = ANY(%s)
+              OR relationship.entity_b_id = ANY(%s)
+          )
           AND relationship.project_id = ANY(%s)
         """
         params: tuple = (
-            entity_names,
+            entity_ids,
+            entity_ids,
             visible_project_ids,
         )
-        if active_topics is not None:
-            query += " AND target_context.topic = ANY(%s)"
-            params = (*params, active_topics)
         query += """
         GROUP BY
+            relationship.project_id,
+            relationship.entity_a_id,
+            relationship.entity_b_id,
             source.canonical_name,
             target.canonical_name,
             relationship.relationship_id,
@@ -965,6 +957,9 @@ class EntityReader:
             rows = await self.client.fetch_all(query, params)
             return [
                 {
+                    "project_id": row["project_id"],
+                    "source_entity_id": int(row["source_entity_id"]),
+                    "target_entity_id": int(row["target_entity_id"]),
                     "source": row["source"],
                     "target": row["target"],
                     "relationship_id": row["relationship_id"],
@@ -984,7 +979,7 @@ class EntityReader:
                 for row in rows
             ]
         except Exception as exc:
-            self._raise_storage_read("get_related_entities_by_name", exc)
+            self._raise_storage_read("get_related_entities", exc)
 
     async def get_entity_relationships(
         self,

@@ -130,7 +130,7 @@ class KnowledgeRetrieval:
         session_id: str,
         limit: Optional[int] = None,
     ) -> List[Dict]:
-        """Search visible entities and hydrate their relationship evidence."""
+        """Discover visible entities before requesting a stable-ID follow-up."""
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
         results = await self.knowledge_store.search_entity(
             query,
@@ -138,64 +138,34 @@ class KnowledgeRetrieval:
             active_topics=self.active_topics,
             limit=limit,
         )
-        for entity in results or []:
-            for connection in entity.get("top_connections", []):
-                refs = connection.pop(
-                    "evidence_refs", connection.pop("evidence_ids", [])
-                )
-                connection["evidence"] = await self._hydrate_evidence(
-                    refs, session_id=session_id
-                )
         return results or []
 
     async def get_connections(
-        self, entity_name: str, *, session_id: str
+        self, entity_id: int, *, session_id: str
     ) -> List[Dict]:
-        canonical = await self._resolve_entity_name(entity_name)
-        if not canonical:
-            return [{"error": f"Entity not found: '{entity_name}'"}]
+        if await self.entities.get_profile(entity_id) is None:
+            return [{"error": f"Entity not found: '{entity_id}'"}]
 
         results = await self.knowledge_store.get_related_entities(
-            [canonical],
-            active_topics=self.active_topics,
+            [entity_id],
             limit=50,
             visible_project_ids=self.readable_project_ids,
         )
-        if results:
-            for result in results:
-                refs = result.pop(
-                    "evidence_refs", result.pop("evidence_ids", [])
-                )
-                result["evidence"] = await self._hydrate_evidence(
-                    refs, session_id=session_id
-                )
-            return results
-
-        hidden_results = await self.knowledge_store.get_related_entities(
-            [canonical], active_topics=None, visible_project_ids=self.readable_project_ids
-        )
-        if hidden_results:
-            return [
-                {
-                    "hidden": True,
-                    "count": len(hidden_results),
-                    "message": (
-                        f"{len(hidden_results)} connection(s) exist through "
-                        "inactive topics"
-                    ),
-                }
-            ]
-        return []
+        for result in results:
+            refs = result.pop("evidence_refs", result.pop("evidence_ids", []))
+            result["evidence"] = await self._hydrate_evidence(
+                refs, session_id=session_id
+            )
+        return results
 
     async def get_recent_activity(
-        self, entity_name: str, *, session_id: str, hours: int = 24
+        self, entity_id: int, *, session_id: str, hours: int = 24
     ) -> List[Dict]:
-        canonical = await self._resolve_entity_name(entity_name)
-        if not canonical:
-            return [{"error": f"Entity not found: '{entity_name}'"}]
+        if await self.entities.get_profile(entity_id) is None:
+            return [{"error": f"Entity not found: '{entity_id}'"}]
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
         results = await self.knowledge_store.get_recent_activity(
-            canonical,
+            entity_id,
             active_topics=self.active_topics,
             hours=hours,
             visible_project_ids=self.readable_project_ids,
@@ -212,15 +182,16 @@ class KnowledgeRetrieval:
         query: str,
         *,
         session_id: str,
-        entity_name: Optional[str] = None,
+        entity_id: Optional[int] = None,
     ) -> Dict:
         """Retrieve episodes, then fall back to raw durable messages."""
-        entity_name = (entity_name or "").strip()
         query = query.strip()
         started_at = perf_counter()
-        entity_id = await self.entities.get_id(entity_name) if entity_name else None
 
         if entity_id is not None:
+            profile = await self.entities.get_profile(entity_id)
+            if profile is None:
+                return {"resolution": "exact", "results": []}
             episodes = await self.knowledge_store.get_project_episodes_for_entities(
                 [entity_id],
                 user_name=self.user_name,
@@ -228,7 +199,6 @@ class KnowledgeRetrieval:
                 limit=self._episode_retrieval_limit(),
                 visible_project_ids=self.readable_project_ids,
             )
-            profile = await self.entities.get_profile(entity_id)
             metrics: Dict[str, int | float] = {}
             serialized = await self._serialize_episodes(
                 episodes, session_id=session_id, metrics=metrics
@@ -246,16 +216,17 @@ class KnowledgeRetrieval:
                 "results": [
                     {
                         "entity_name": (
-                            profile.canonical_name if profile else entity_name
+                            profile.canonical_name if profile else str(entity_id)
                         ),
+                        "entity_id": entity_id,
                         "similarity": 1.0,
                         "episodes": serialized,
                     }
                 ],
             }
 
-        if entity_name:
-            embedding = await self.embedding_service.encode_single(entity_name)
+        if query:
+            embedding = await self.embedding_service.encode_single(query)
             candidates = await self.knowledge_store.search_entities_by_embedding(
                 embedding,
                 limit=5,
@@ -282,6 +253,7 @@ class KnowledgeRetrieval:
                     )
                     results.append(
                         {
+                            "entity_id": entity_id,
                             "entity_name": (
                                 profile.canonical_name if profile else str(entity_id)
                             ),
@@ -437,20 +409,20 @@ class KnowledgeRetrieval:
         }
 
     async def find_path(
-        self, entity_a: str, entity_b: str, *, session_id: str
+        self, entity_a_id: int, entity_b_id: int, *, session_id: str
     ) -> List[Dict]:
-        canonical_a = await self._resolve_entity_name(entity_a)
-        canonical_b = await self._resolve_entity_name(entity_b)
-        if not canonical_a and not canonical_b:
-            return [{"error": f"Neither entity found: '{entity_a}' and '{entity_b}'"}]
-        if not canonical_a:
-            return [{"error": f"Entity not found: '{entity_a}'"}]
-        if not canonical_b:
-            return [{"error": f"Entity not found: '{entity_b}'"}]
+        entity_a = await self.entities.get_profile(entity_a_id)
+        entity_b = await self.entities.get_profile(entity_b_id)
+        if entity_a is None and entity_b is None:
+            return [{"error": f"Neither entity found: '{entity_a_id}' and '{entity_b_id}'"}]
+        if entity_a is None:
+            return [{"error": f"Entity not found: '{entity_a_id}'"}]
+        if entity_b is None:
+            return [{"error": f"Entity not found: '{entity_b_id}'"}]
 
         path, has_inactive_shortcut = await self.knowledge_store.find_path_filtered(
-            canonical_a,
-            canonical_b,
+            entity_a_id,
+            entity_b_id,
             active_topics=self.active_topics,
             max_depth=4,
             visible_project_ids=self.readable_project_ids,
@@ -467,8 +439,8 @@ class KnowledgeRetrieval:
         if not has_inactive_shortcut:
             return []
         full_path, _ = await self.knowledge_store.find_path_filtered(
-            canonical_a,
-            canonical_b,
+            entity_a_id,
+            entity_b_id,
             active_topics=None,
             max_depth=4,
             visible_project_ids=self.readable_project_ids,

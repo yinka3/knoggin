@@ -147,8 +147,8 @@ class GraphReader:
 
     async def _find_shortest_path(
         self,
-        start_name: str,
-        end_name: str,
+        start_entity_id: int,
+        end_entity_id: int,
         *,
         visible_project_ids: List[str],
         active_topics: Optional[List[str]] = None,
@@ -160,8 +160,8 @@ class GraphReader:
             "_find_shortest_path",
         )
         cypher = f"""
-        MATCH (start:Entity {{canonical_name: $start_name}})
-        MATCH (end:Entity {{canonical_name: $end_name}})
+        MATCH (start:Entity {{id: $start_entity_id}})
+        MATCH (end:Entity {{id: $end_entity_id}})
         MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
         WITH p, nodes(p) AS path_nodes, relationships(p) AS path_rels
         WHERE ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
@@ -183,8 +183,8 @@ class GraphReader:
                 (
                     json.dumps(
                         {
-                            "start_name": start_name,
-                            "end_name": end_name,
+                            "start_entity_id": start_entity_id,
+                            "end_entity_id": end_entity_id,
                             "filter_topics": active_topics is not None,
                             "active_topics": active_topics or [],
                             **self._path_scope_params(visible_project_ids),
@@ -209,8 +209,8 @@ class GraphReader:
 
     async def _find_active_only_path(
         self,
-        start_name: str,
-        end_name: str,
+        start_entity_id: int,
+        end_entity_id: int,
         *,
         visible_project_ids: List[str],
         active_topics: Optional[List[str]] = None,
@@ -222,8 +222,8 @@ class GraphReader:
             "_find_active_only_path",
         )
         cypher = f"""
-        MATCH (start:Entity {{canonical_name: $start_name}})
-        MATCH (end:Entity {{canonical_name: $end_name}})
+        MATCH (start:Entity {{id: $start_entity_id}})
+        MATCH (end:Entity {{id: $end_entity_id}})
         MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
         WITH p, nodes(p) AS path_nodes, relationships(p) AS path_rels
         WHERE ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
@@ -242,8 +242,8 @@ class GraphReader:
                 (
                     json.dumps(
                         {
-                            "start_name": start_name,
-                            "end_name": end_name,
+                            "start_entity_id": start_entity_id,
+                            "end_entity_id": end_entity_id,
                             "active_topics": active_topics or [],
                             **self._path_scope_params(visible_project_ids),
                         }
@@ -266,8 +266,8 @@ class GraphReader:
 
     async def find_path_filtered(
         self,
-        start_name: str,
-        end_name: str,
+        start_entity_id: int,
+        end_entity_id: int,
         *,
         visible_project_ids: List[str],
         active_topics: Optional[List[str]] = None,
@@ -278,11 +278,11 @@ class GraphReader:
             visible_project_ids,
             "find_path_filtered",
         )
-        if not start_name or not start_name.strip() or not end_name or not end_name.strip():
+        if not isinstance(start_entity_id, int) or not isinstance(end_entity_id, int):
             return [], False
         shortest = await self._find_shortest_path(
-            start_name,
-            end_name,
+            start_entity_id,
+            end_entity_id,
             visible_project_ids=visible_project_ids,
             active_topics=active_topics,
             max_depth=max_depth,
@@ -293,8 +293,8 @@ class GraphReader:
         if not has_inactive:
             return self._build_path_data(names, topics, evidence), False
         active_path = await self._find_active_only_path(
-            start_name,
-            end_name,
+            start_entity_id,
+            end_entity_id,
             visible_project_ids=visible_project_ids,
             active_topics=active_topics,
             max_depth=max_depth,

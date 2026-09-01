@@ -31,12 +31,12 @@ class DispatchTools:
             for topic in topics
         }
 
-    async def get_recent_activity(self, entity_name, hours=None):
-        self.calls.append(("get_recent_activity", entity_name, hours))
-        return [{"entity": entity_name}]
+    async def get_recent_activity(self, entity_id, hours=None):
+        self.calls.append(("get_recent_activity", entity_id, hours))
+        return [{"entity_id": entity_id}]
 
-    async def episode_check(self, query, entity_name=None):
-        self.calls.append(("episode_check", query, entity_name))
+    async def episode_check(self, query, entity_id=None):
+        self.calls.append(("episode_check", query, entity_id))
         return {"resolution": "exact"}
 
     async def read_episode(self, episode_id):
@@ -80,7 +80,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     activity = await execute_tool(
         tools,
         "get_recent_activity",
-        {"entity_name": "Knoggin", "hours": "48"},
+        {"entity_id": "7", "hours": "48"},
     )
     entity = await execute_tool(
         tools,
@@ -115,7 +115,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     episode = await execute_tool(
         tools,
         "episode_check",
-        {"query": "What changed?", "entity_name": 7},
+        {"query": "What changed?", "entity_id": "7"},
     )
     expanded_episode = await execute_tool(
         tools,
@@ -124,7 +124,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     )
 
     assert result == {"data": [{"id": "msg_1"}]}
-    assert activity == {"data": [{"entity": "Knoggin"}]}
+    assert activity == {"data": [{"entity_id": 7}]}
     assert entity == {"data": [{"id": 1, "query": "99"}]}
     assert topic_context == {
         "data": {
@@ -148,7 +148,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     assert expanded_episode == {"data": [{"id": "42"}]}
     assert tools.calls == [
         ("search_messages", "1234", 5),
-        ("get_recent_activity", "Knoggin", 48),
+        ("get_recent_activity", 7, 48),
         ("search_entity", "99", 2),
         ("load_topic_context", ["Work", "Finance"]),
         ("read_document", "file-1", None, 2, 4),
@@ -162,7 +162,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
             None,
         ),
         ("read_web_page", "https://example.test/report.pdf", None, 150, None, 2),
-        ("episode_check", "What changed?", "7"),
+        ("episode_check", "What changed?", 7),
         ("read_episode", "42"),
     ]
 
