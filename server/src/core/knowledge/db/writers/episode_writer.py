@@ -202,6 +202,14 @@ class EpisodeWriter:
             episode,
             timestamps,
         )
+        # Reconcile all derived membership rows from the final canonical
+        # source set.  Upserts alone would leave stale entity/relationship or
+        # source-message rows after a successful consolidation.
+        for table in ("episode_messages", "episode_entities", "episode_relationships"):
+            await cur.execute(
+                f"DELETE FROM {table} WHERE episode_id = %s AND project_id = %s",
+                (episode.episode_id, episode.project_id),
+            )
         await self._upsert_messages(cur, episode)
         await self._upsert_entities(cur, episode, entities, timestamps)
         await self._upsert_relationships(cur, episode, relationships)

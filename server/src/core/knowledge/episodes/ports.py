@@ -36,6 +36,14 @@ class EpisodeStore(Protocol):
         limit: int,
     ) -> list[Episode]: ...
 
+    async def get_project_episode_source_messages(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict[str, Any]]: ...
+
     async def get_project_episodes_for_entities(
         self, entity_ids: list[int], *, user_name: str, project_id: str, limit: int
     ) -> list[Episode]: ...
