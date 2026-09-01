@@ -60,8 +60,8 @@ class FakeTools:
     async def close(self):
         self.closed = True
 
-    async def get_hot_topic_context(self, hot_topics, slim=False):
-        self.hot_topic_calls.append((hot_topics, slim))
+    async def get_hot_topic_context(self, hot_topics):
+        self.hot_topic_calls.append(hot_topics)
         return {
             topic: {"entities": [{"name": f"{topic} entity"}], "messages": []}
             for topic in hot_topics
@@ -460,7 +460,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
             "messages": [],
         }
     }
-    assert tools.hot_topic_calls == [(["Identity"], True)]
+    assert tools.hot_topic_calls == [["Identity"]]
 
 
 @pytest.mark.runtime

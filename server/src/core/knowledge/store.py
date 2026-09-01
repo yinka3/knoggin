@@ -1502,12 +1502,12 @@ class KnowledgeStore:
         self,
         hot_topic_names: List[str],
         *,
-        visible_project_ids: List[str],
+        project_id: str,
         msg_limit: int = 5,
     ) -> Dict:
         return await self._knowledge_query_reader.get_hot_topic_context_with_messages(
             hot_topic_names,
-            visible_project_ids=visible_project_ids,
+            project_id=project_id,
             msg_limit=msg_limit,
         )
 
@@ -1533,7 +1533,6 @@ class KnowledgeStore:
         query: str,
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         limit: int = 5,
         connections_limit: int = 5,
         evidence_limit: int = 5,
@@ -1541,7 +1540,6 @@ class KnowledgeStore:
         return await self._entity_reader.search_by_name(
             query,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             limit=limit,
             connections_limit=connections_limit,
             evidence_limit=evidence_limit,
@@ -1565,29 +1563,25 @@ class KnowledgeStore:
         entity_id: int,
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         hours: int = 24,
     ) -> List[Dict]:
         return await self._knowledge_query_reader.get_recent_activity(
             entity_id,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             hours=hours,
         )
 
-    async def find_path_filtered(
+    async def find_path(
         self,
         start_entity_id: int,
         end_entity_id: int,
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         max_depth: int = 4,
-    ) -> Tuple[List[Dict], bool]:
-        return await self._graph_reader.find_path_filtered(
+    ) -> List[Dict]:
+        return await self._graph_reader.find_path(
             start_entity_id,
             end_entity_id,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             max_depth=max_depth,
         )

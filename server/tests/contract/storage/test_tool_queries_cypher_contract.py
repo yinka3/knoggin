@@ -2,6 +2,7 @@ import pytest
 
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.graph_reader import GraphReader
+from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
 _PATH_DEPTH_ERROR = "max_depth must be an integer between 1 and 4"
@@ -15,7 +16,7 @@ async def test_find_path_rejects_untrusted_cypher_depth_before_querying(max_dept
     reader = GraphReader(client)
 
     with pytest.raises(ValueError, match=_PATH_DEPTH_ERROR):
-        await reader.find_path_filtered(
+        await reader.find_path(
             2,
             3,
             visible_project_ids=["project-1"],
@@ -48,15 +49,162 @@ async def test_find_path_uses_a_validated_fixed_depth_in_its_cypher_query():
     client = RecordingPostgresClient(fetch_all_results=[[]])
     reader = GraphReader(client)
 
-    assert await reader.find_path_filtered(
+    assert await reader.find_path(
         2,
         3,
         visible_project_ids=["project-1"],
         max_depth=4,
-    ) == ([], False)
+    ) == []
 
     cypher_query = client.calls[0][1]
     assert "RELATED_TO*1..4" in cypher_query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_path_preserves_traversal_and_stored_relationship_direction():
+    relationship_id = "project-1:1:2:works_at"
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "entity_ids": [2, 1],
+                    "names": ["Acme", "Ade"],
+                    "relationship_ids": [relationship_id],
+                }
+            ],
+            [
+                {
+                    "relationship_id": relationship_id,
+                    "evidence_refs": [{"project_id": "project-1", "message_id": 101}],
+                }
+            ],
+            [
+                {
+                    "relationship_id": relationship_id,
+                    "project_id": "project-1",
+                    "source_entity_id": 1,
+                    "target_entity_id": 2,
+                    "source": "Ade",
+                    "target": "Acme",
+                    "relationship_type": "works_at",
+                    "symmetric": False,
+                }
+            ],
+        ]
+    )
+
+    path = await GraphReader(client).find_path(
+        2,
+        1,
+        visible_project_ids=["project-1"],
+    )
+
+    assert path == [
+        {
+            "step": 0,
+            "entity_a_id": 2,
+            "entity_b_id": 1,
+            "entity_a": "Acme",
+            "entity_b": "Ade",
+            "relationship_id": relationship_id,
+            "project_id": "project-1",
+            "source_entity_id": 1,
+            "target_entity_id": 2,
+            "source": "Ade",
+            "target": "Acme",
+            "relationship_type": "works_at",
+            "symmetric": False,
+            "relationship_semantics": "observed_evidence",
+            "evidence_refs": [{"project_id": "project-1", "message_id": 101}],
+        }
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_activity_uses_entity_message_refs_before_relationship_observations():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "entity_id": 2,
+                    "entity": "Ade",
+                    "project_id": "project-1",
+                    "time": 200,
+                    "evidence_refs": [{"message_id": 101}],
+                    "observation_refs": [],
+                }
+            ]
+        ]
+    )
+
+    result = await KnowledgeQueryReader(client).get_recent_activity(
+        2,
+        visible_project_ids=["project-1"],
+    )
+
+    assert result == [
+        {
+            "entity_id": 2,
+            "entity": "Ade",
+            "project_id": "project-1",
+            "time": 200,
+            "evidence_refs": [{"message_id": 101}],
+            "observation_refs": [],
+        }
+    ]
+    query = client.calls[0][1]
+    assert "FROM message_entity_refs mention" in query
+    assert "LEFT JOIN relationship_observations observation" in query
+    assert "WHERE mention.entity_id = %s" in query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_hot_topic_context_is_current_project_and_uses_entity_mentions():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "topic": "Identity",
+                    "name": "Ade",
+                    "aliases": ["Ada"],
+                    "message_refs": [
+                        {
+                            "project_id": "project-1",
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 101,
+                        }
+                    ],
+                }
+            ]
+        ]
+    )
+
+    result = await KnowledgeQueryReader(client).get_hot_topic_context_with_messages(
+        ["Identity"],
+        project_id="project-1",
+    )
+
+    assert result == {
+        "Identity": {
+            "entities": [{"name": "Ade", "aliases": ["Ada"]}],
+            "message_refs": [
+                {
+                    "project_id": "project-1",
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "message_id": 101,
+                }
+            ],
+        }
+    }
+    query, params = client.calls[0][1:]
+    assert "LEFT JOIN message_entity_refs mention" in query
+    assert "context.project_id = %s" in query
+    assert params == (["Identity"], "project-1")
 
 
 @pytest.mark.storage

@@ -40,7 +40,6 @@ class KnowledgeRetrieval:
         knowledge_store,
         postgres,
         search_config: Optional[Dict] = None,
-        active_topics: Optional[List[str]] = None,
     ) -> None:
         self.project_id = require_scope_value(
             project_id, "project_id", "KnowledgeRetrieval"
@@ -56,11 +55,6 @@ class KnowledgeRetrieval:
         self.knowledge_store = knowledge_store
         self.postgres = postgres
         self.search_cfg = search_config or {}
-        self.active_topics = list(active_topics) if active_topics else None
-
-    def set_active_topics(self, active_topics: List[str]) -> None:
-        """Install the current project's immutable domain topic snapshot."""
-        self.active_topics = list(active_topics)
 
     async def search_messages(
         self,
@@ -135,7 +129,6 @@ class KnowledgeRetrieval:
         results = await self.knowledge_store.search_entity(
             query,
             visible_project_ids=self.readable_project_ids,
-            active_topics=self.active_topics,
             limit=limit,
         )
         return results or []
@@ -166,7 +159,6 @@ class KnowledgeRetrieval:
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
         results = await self.knowledge_store.get_recent_activity(
             entity_id,
-            active_topics=self.active_topics,
             hours=hours,
             visible_project_ids=self.readable_project_ids,
         )
@@ -420,87 +412,36 @@ class KnowledgeRetrieval:
         if entity_b is None:
             return [{"error": f"Entity not found: '{entity_b_id}'"}]
 
-        path, has_inactive_shortcut = await self.knowledge_store.find_path_filtered(
+        path = await self.knowledge_store.find_path(
             entity_a_id,
             entity_b_id,
-            active_topics=self.active_topics,
             max_depth=4,
             visible_project_ids=self.readable_project_ids,
         )
-        if path:
-            for step in path:
-                step["evidence"] = await self._hydrate_evidence(
-                    step.pop("evidence_refs", []), session_id=session_id
-                )
-            if has_inactive_shortcut:
-                path.append({"note": "A shorter connection exists through inactive topics"})
-            return path
-
-        if not has_inactive_shortcut:
-            return []
-        full_path, _ = await self.knowledge_store.find_path_filtered(
-            entity_a_id,
-            entity_b_id,
-            active_topics=None,
-            max_depth=4,
-            visible_project_ids=self.readable_project_ids,
-        )
-        safe_path = []
-        for step in full_path:
-            topic_a, topic_b = step.get("topic_a", "General"), step.get("topic_b", "General")
-            both_active = (
-                self.active_topics is not None
-                and topic_a in self.active_topics
-                and topic_b in self.active_topics
+        for step in path:
+            step["evidence"] = await self._hydrate_evidence(
+                step.pop("evidence_refs", []), session_id=session_id
             )
-            if both_active:
-                step["evidence"] = await self._hydrate_evidence(
-                    step.pop("evidence_refs", []), session_id=session_id
-                )
-                safe_path.append(step)
-                continue
-            inactive = (
-                [topic for topic in (topic_a, topic_b) if topic not in self.active_topics]
-                if self.active_topics is not None
-                else [topic_a, topic_b]
-            )
-            safe_path.append(
-                {
-                    "step": step.get("step"),
-                    "entity_a": step.get("entity_a"),
-                    "entity_b": step.get("entity_b"),
-                    "topic_a": topic_a,
-                    "topic_b": topic_b,
-                    "status": "LOCKED",
-                    "locked_reason": f"Inactive topic(s): {', '.join(inactive)}",
-                    "evidence": [],
-                }
-            )
-        return safe_path
+        return path
 
     async def get_hot_topic_context(
-        self, hot_topics: List[str], *, session_id: str, slim: bool = False
+        self, hot_topics: List[str], *, session_id: str
     ) -> Dict[str, Dict]:
         if not hot_topics:
             return {}
         raw = await self.knowledge_store.get_hot_topic_context_with_messages(
             hot_topics,
             msg_limit=5,
-            visible_project_ids=self.readable_project_ids,
+            project_id=self.project_id,
         )
         for data in raw.values():
             refs = data.get("message_refs", data.get("message_ids", []))
-            data["messages"] = (
-                []
-                if slim
-                else await self._hydrate_evidence(refs, session_id=session_id)
+            data["messages"] = await self._hydrate_evidence(
+                refs, session_id=session_id
             )
             data.pop("message_refs", None)
             data.pop("message_ids", None)
         return raw
-
-    async def _resolve_entity_name(self, entity: str) -> Optional[str]:
-        return await self.entities.resolve_entity_name(entity)
 
     async def _search_messages(
         self, query: str, *, session_id: str, k: int

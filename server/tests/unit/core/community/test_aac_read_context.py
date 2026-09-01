@@ -30,7 +30,7 @@ async def test_aac_read_context_discovers_user_projects_and_uses_identity_scope(
     assert context.entities.project_id == IDENTITY_SCOPE
     assert context.entities.readable_project_ids == list(context.readable_project_ids)
     assert context.knowledge_retrieval.project_id == IDENTITY_SCOPE
-    assert context.knowledge_retrieval.active_topics is None
+    assert not hasattr(context.knowledge_retrieval, "active_topics")
     assert not hasattr(context.documents, "delete_document")
 
 

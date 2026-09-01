@@ -475,9 +475,6 @@ class Tools(
         self.compiled_domain = compiled_domain
         self.document_service = document_service
         self.document_focus = document_focus
-        self.active_topics = (
-            list(compiled_domain.active_topics) if compiled_domain else None
-        )
         self.search_cfg = search_config or {}
         self.agent_id = agent_id or "AGENT_IDENTITY"
         self.tool_authorization: Optional[ToolPermissions] = None
@@ -534,9 +531,9 @@ class Tools(
             entity_a_id, entity_b_id, session_id=self.session_id
         )
 
-    async def get_hot_topic_context(self, hot_topics, *, slim: bool = False):
+    async def get_hot_topic_context(self, hot_topics):
         return await self.knowledge_retrieval.get_hot_topic_context(
-            hot_topics, session_id=self.session_id, slim=slim
+            hot_topics, session_id=self.session_id
         )
 
     async def load_topic_context(self, topics: list[str]) -> dict:
@@ -563,7 +560,7 @@ class Tools(
                 "Unknown or inactive topic(s): " + ", ".join(invalid_topics),
             )
 
-        return await self.get_hot_topic_context(normalized_topics, slim=False)
+        return await self.get_hot_topic_context(normalized_topics)
 
     async def get_document_manifest(self):
         """Get indexed documents for prompt context."""

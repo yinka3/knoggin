@@ -492,10 +492,7 @@ class EntityReader:
         query: str,
         *,
         visible_project_ids: List[str],
-        active_topics: Optional[List[str]] = None,
         limit: int = 5,
-        connections_limit: int = 5,
-        evidence_limit: int = 5,
     ) -> List[Dict]:
         """Discover visible global identities and their project contexts."""
 
@@ -536,9 +533,6 @@ class EntityReader:
             f"%{clean_query}%",
             visible_project_ids,
         )
-        if active_topics:
-            entity_query += " AND context.topic = ANY(%s)"
-            params = (*params, active_topics)
         entity_query += """
         GROUP BY entity.entity_id
         ORDER BY max(context.last_mentioned_ms) DESC NULLS LAST
@@ -854,7 +848,6 @@ class EntityReader:
         entity_ids: List[int],
         *,
         visible_project_ids: List[str],
-        active_topics: Optional[List[str]] = None,
         limit: int = 25,
     ) -> List[Dict]:
         """Return relationships from their durable stored endpoints.

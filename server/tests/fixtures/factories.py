@@ -51,7 +51,7 @@ def make_project_state(
     postgres = postgres or FakePostgresClient()
     embedding = embedding or FakeEmbeddingService()
     entities = entities if entities is not None else object()
-    retrieval = SimpleNamespace(set_active_topics=lambda _: None)
+    retrieval = SimpleNamespace()
     reader = DocumentReader(postgres, project_id, [project_id])
     writer = DocumentWriter(postgres, project_id)
     document_service = DocumentService(

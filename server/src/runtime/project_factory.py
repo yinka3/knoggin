@@ -96,7 +96,6 @@ class ProjectRuntimeFactory:
                 **runtime_config.developer_settings.search.model_dump(),
                 **runtime_config.search.model_dump(),
             },
-            active_topics=list(compiled_domain.active_topics),
         )
 
         text_processor = await asyncio.get_running_loop().run_in_executor(

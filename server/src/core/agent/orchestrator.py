@@ -130,7 +130,6 @@ class AgentOrchestrator:
                 try:
                     hot_topic_context = await tools.get_hot_topic_context(
                         effective_hot_topics,
-                        slim=True,
                     )
                 except Exception as exc:
                     logger.warning(f"Failed to preload hot topic context: {exc}")
@@ -138,6 +137,7 @@ class AgentOrchestrator:
             run = AgentRun.open(
                 user_name=context.user_name,
                 project_id=context.project_id or "",
+                session_id=context.session_id,
                 user_query=user_query,
                 run_id=run_id,
                 agent=identity,
@@ -224,6 +224,7 @@ class AgentOrchestrator:
         tools = Tools(
             user_name=context.user_name,
             entities=context.project.entities,
+            session_id=context.session_id,
             compiled_domain=context.project.compiled_domain,
             search_config=search_cfg,
             document_service=context.document_service,
@@ -254,6 +255,7 @@ class AgentOrchestrator:
         candidates = (
             build_pasted_text_candidates(
                 project_id=context.project_id or "",
+                session_id=context.session_id,
                 source_message_id=user_message_id,
                 message_content=message_content,
                 agent_run_id=run_id,
@@ -283,6 +285,7 @@ class AgentOrchestrator:
         try:
             persisted = parse_document_focus(focus)
             target = await context.document_service.resolve_focus_target(
+                session_id=context.session_id,
                 document_id=(
                     persisted.document_id
                     if persisted.target_type == "document"

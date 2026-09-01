@@ -86,21 +86,35 @@ class GraphReader:
 
     @staticmethod
     def _build_path_data(
+        entity_ids: List[int],
         names: List[str],
-        topics: List[str],
+        relationship_ids: List[str],
+        relationship_details: Dict[str, Dict],
         evidence: List[List[Dict]],
     ) -> List[Dict]:
-        return [
-            {
-                "step": index,
-                "entity_a": names[index],
-                "entity_b": names[index + 1],
-                "topic_a": topics[index] if index < len(topics) else None,
-                "topic_b": topics[index + 1] if index + 1 < len(topics) else None,
-                "evidence_refs": evidence[index] if index < len(evidence) else [],
-            }
-            for index in range(len(evidence))
-        ]
+        steps: List[Dict] = []
+        for index, relationship_id in enumerate(relationship_ids):
+            detail = relationship_details.get(relationship_id, {})
+            steps.append(
+                {
+                    "step": index,
+                    "entity_a_id": entity_ids[index],
+                    "entity_b_id": entity_ids[index + 1],
+                    "entity_a": names[index],
+                    "entity_b": names[index + 1],
+                    "relationship_id": relationship_id,
+                    "project_id": detail.get("project_id"),
+                    "source_entity_id": detail.get("source_entity_id"),
+                    "target_entity_id": detail.get("target_entity_id"),
+                    "source": detail.get("source"),
+                    "target": detail.get("target"),
+                    "relationship_type": detail.get("relationship_type"),
+                    "symmetric": detail.get("symmetric", False),
+                    "relationship_semantics": "observed_evidence",
+                    "evidence_refs": evidence[index] if index < len(evidence) else [],
+                }
+            )
+        return steps
 
     async def _relationship_observation_refs(
         self,
@@ -138,6 +152,45 @@ class GraphReader:
             for relationship_id in relationship_ids
         ]
 
+    async def _relationship_details(
+        self,
+        relationship_ids: List[str],
+        visible_project_ids: List[str],
+    ) -> Dict[str, Dict]:
+        if not relationship_ids:
+            return {}
+        rows = await self.client.fetch_all(
+            """
+            SELECT
+                relationship.relationship_id,
+                relationship.project_id,
+                relationship.entity_a_id AS source_entity_id,
+                relationship.entity_b_id AS target_entity_id,
+                source.canonical_name AS source,
+                target.canonical_name AS target,
+                relationship.relationship_type,
+                relationship."symmetric" AS symmetric
+            FROM relationships relationship
+            JOIN entities source ON source.entity_id = relationship.entity_a_id
+            JOIN entities target ON target.entity_id = relationship.entity_b_id
+            WHERE relationship.relationship_id = ANY(%s)
+              AND relationship.project_id = ANY(%s)
+            """,
+            (relationship_ids, visible_project_ids),
+        )
+        return {
+            row["relationship_id"]: {
+                "project_id": row["project_id"],
+                "source_entity_id": int(row["source_entity_id"]),
+                "target_entity_id": int(row["target_entity_id"]),
+                "source": row["source"],
+                "target": row["target"],
+                "relationship_type": row["relationship_type"],
+                "symmetric": bool(row["symmetric"]),
+            }
+            for row in rows
+        }
+
     def _path_scope_params(self, visible_project_ids: List[str]) -> Dict:
         return {
             "filter_projects": True,
@@ -151,9 +204,8 @@ class GraphReader:
         end_entity_id: int,
         *,
         visible_project_ids: List[str],
-        active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
-    ) -> Optional[Tuple[List[str], List[str], List[List[Dict]], bool]]:
+    ) -> Optional[Tuple[List[int], List[str], List[str]]]:
         max_depth = self._validate_path_depth(max_depth, "_find_shortest_path")
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
@@ -167,15 +219,14 @@ class GraphReader:
         WHERE ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
         ORDER BY length(p) ASC LIMIT 1
         WITH path_nodes, path_rels,
-             [node IN path_nodes | 'General'] AS node_topics,
+             [node IN path_nodes | node.id] AS entity_ids,
              [node IN path_nodes | node.canonical_name] AS names,
              [relationship IN path_rels | relationship.relationship_id] AS relationship_ids
-        RETURN names, node_topics, relationship_ids,
-               ANY(topic IN node_topics WHERE NOT ($filter_topics = false OR topic IN $active_topics)) AS has_inactive
+        RETURN entity_ids, names, relationship_ids
         """
         query = self.client.build_cypher(
             cypher,
-            "names agtype, node_topics agtype, relationship_ids agtype, has_inactive agtype",
+            "entity_ids agtype, names agtype, relationship_ids agtype",
         )
         try:
             rows = await self.client.fetch_all(
@@ -185,8 +236,6 @@ class GraphReader:
                         {
                             "start_entity_id": start_entity_id,
                             "end_entity_id": end_entity_id,
-                            "filter_topics": active_topics is not None,
-                            "active_topics": active_topics or [],
                             **self._path_scope_params(visible_project_ids),
                         }
                     ),
@@ -196,117 +245,52 @@ class GraphReader:
                 return None
             row = rows[0]
             return (
+                [int(entity_id) for entity_id in row["entity_ids"]],
                 row["names"],
-                row["node_topics"],
-                await self._relationship_observation_refs(
-                    row["relationship_ids"],
-                    visible_project_ids,
-                ),
-                self._parse_boolean(row["has_inactive"]),
+                row["relationship_ids"],
             )
         except Exception as exc:
             self._raise_storage_read("find_shortest_path", exc)
 
-    async def _find_active_only_path(
+    async def find_path(
         self,
         start_entity_id: int,
         end_entity_id: int,
         *,
         visible_project_ids: List[str],
-        active_topics: Optional[List[str]] = None,
         max_depth: int = 4,
-    ) -> Optional[Tuple[List[str], List[str], List[List[Dict]]]]:
-        max_depth = self._validate_path_depth(max_depth, "_find_active_only_path")
+    ) -> List[Dict]:
+        max_depth = self._validate_path_depth(max_depth, "find_path")
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
-            "_find_active_only_path",
-        )
-        cypher = f"""
-        MATCH (start:Entity {{id: $start_entity_id}})
-        MATCH (end:Entity {{id: $end_entity_id}})
-        MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
-        WITH p, nodes(p) AS path_nodes, relationships(p) AS path_rels
-        WHERE ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
-        ORDER BY length(p) ASC LIMIT 1
-        RETURN [node IN path_nodes | node.canonical_name] AS names,
-               [node IN path_nodes | 'General'] AS node_topics,
-               [relationship IN path_rels | relationship.relationship_id] AS relationship_ids
-        """
-        query = self.client.build_cypher(
-            cypher,
-            "names agtype, node_topics agtype, relationship_ids agtype",
-        )
-        try:
-            rows = await self.client.fetch_all(
-                query,
-                (
-                    json.dumps(
-                        {
-                            "start_entity_id": start_entity_id,
-                            "end_entity_id": end_entity_id,
-                            "active_topics": active_topics or [],
-                            **self._path_scope_params(visible_project_ids),
-                        }
-                    ),
-                ),
-            )
-            if not rows:
-                return None
-            row = rows[0]
-            return (
-                row["names"],
-                row["node_topics"],
-                await self._relationship_observation_refs(
-                    row["relationship_ids"],
-                    visible_project_ids,
-                ),
-            )
-        except Exception as exc:
-            self._raise_storage_read("find_active_only_path", exc)
-
-    async def find_path_filtered(
-        self,
-        start_entity_id: int,
-        end_entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        active_topics: Optional[List[str]] = None,
-        max_depth: int = 4,
-    ) -> Tuple[List[Dict], bool]:
-        max_depth = self._validate_path_depth(max_depth, "find_path_filtered")
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "find_path_filtered",
+            "find_path",
         )
         if not isinstance(start_entity_id, int) or not isinstance(end_entity_id, int):
-            return [], False
+            return []
         shortest = await self._find_shortest_path(
             start_entity_id,
             end_entity_id,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             max_depth=max_depth,
         )
         if not shortest:
-            return [], False
-        names, topics, evidence, has_inactive = shortest
-        if not has_inactive:
-            return self._build_path_data(names, topics, evidence), False
-        active_path = await self._find_active_only_path(
-            start_entity_id,
-            end_entity_id,
-            visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
-            max_depth=max_depth,
+            return []
+        entity_ids, names, relationship_ids = shortest
+        evidence = await self._relationship_observation_refs(
+            relationship_ids,
+            visible_project_ids,
         )
-        if active_path:
-            active_names, active_topics_list, active_evidence = active_path
-            return self._build_path_data(
-                active_names,
-                active_topics_list,
-                active_evidence,
-            ), True
-        return [], True
+        details = await self._relationship_details(
+            relationship_ids,
+            visible_project_ids,
+        )
+        return self._build_path_data(
+            entity_ids,
+            names,
+            relationship_ids,
+            details,
+            evidence,
+        )
 
     async def get_message_text(
         self,

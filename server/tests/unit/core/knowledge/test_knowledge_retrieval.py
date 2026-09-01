@@ -102,7 +102,7 @@ async def test_entity_search_returns_stable_identity_and_project_contexts():
 
 
 @pytest.mark.no_network
-async def test_hot_topic_context_is_compact_or_hydrated_by_retrieval_mode():
+async def test_hot_topic_context_hydrates_current_project_entity_mentions():
     class Store:
         def __init__(self):
             self.calls = []
@@ -146,24 +146,16 @@ async def test_hot_topic_context_is_compact_or_hydrated_by_retrieval_mode():
         postgres=_Postgres(),
     )
 
-    compact = await retrieval.get_hot_topic_context(
-        ["Identity"], session_id="session-1", slim=True
-    )
     hydrated = await retrieval.get_hot_topic_context(
-        ["Identity"], session_id="session-1", slim=False
+        ["Identity"], session_id="session-1"
     )
 
     assert store.calls == [
         (
             ["Identity"],
-            {"msg_limit": 5, "visible_project_ids": ["project-1", "project-2"]},
-        ),
-        (
-            ["Identity"],
-            {"msg_limit": 5, "visible_project_ids": ["project-1", "project-2"]},
+            {"msg_limit": 5, "project_id": "project-1"},
         ),
     ]
-    assert compact == {"Identity": {"entities": [{"name": "Ada"}], "messages": []}}
     assert hydrated == {
         "Identity": {
             "entities": [{"name": "Ada"}],
@@ -348,8 +340,8 @@ async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
         def __init__(self):
             self.calls = []
 
-        async def get_hot_topic_context(self, topics, *, session_id, slim):
-            self.calls.append((topics, session_id, slim))
+        async def get_hot_topic_context(self, topics, *, session_id):
+            self.calls.append((topics, session_id))
             return {
                 topic: {"entities": [{"name": topic}], "messages": []}
                 for topic in topics
@@ -380,7 +372,7 @@ async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
     finally:
         await tools.close()
 
-    assert retrieval.calls == [(["Work", "Finance"], "session-1", False)]
+    assert retrieval.calls == [(["Work", "Finance"], "session-1")]
 
 
 @pytest.mark.no_network
