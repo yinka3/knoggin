@@ -15,6 +15,7 @@ from common.schema.ingestion.contracts import (
     GraphWriteSummary,
     IngestionCommit,
     MessageEntityRef,
+    MessageSourceTime,
     RelationshipWrite,
     relationship_identity,
 )
@@ -178,6 +179,7 @@ class GraphWriter:
         relationships: Sequence[RelationshipWrite],
         *,
         message_entity_refs: Sequence[MessageEntityRef] = (),
+        source_message_times: Sequence[MessageSourceTime] = (),
         eligible_messages: Sequence[EpisodeEligibility] = (),
         scope: ExecutionScope,
         cur=None,
@@ -190,6 +192,13 @@ class GraphWriter:
         session_id = require_scope_value(scope.session_id, "session_id", "graph write")
         project_id = self._require_project_id(scope.project_id, "graph write")
         now_ms = self._current_time_ms()
+        source_times_by_message_id = self._source_times_by_message_id(
+            source_message_times
+        )
+        entity_activity_by_id = self._entity_activity_by_id(
+            message_entity_refs,
+            source_times_by_message_id,
+        )
 
         async with self._cursor_context(cur) as cur:
             if entities:
@@ -281,7 +290,7 @@ class GraphWriter:
                             user_name,
                             entity.entity_type,
                             entity.topic,
-                            now_ms,
+                            entity_activity_by_id.get(entity.entity_id),
                         ),
                     )
 
@@ -303,6 +312,12 @@ class GraphWriter:
                 await self._write_message_entity_refs(
                     cur,
                     message_entity_refs,
+                    scope,
+                )
+                await self._touch_project_entity_contexts(
+                    cur,
+                    message_entity_refs,
+                    source_times_by_message_id,
                     scope,
                 )
 
@@ -478,7 +493,7 @@ class GraphWriter:
                             relationship.symmetric,
                             relationship.confidence,
                             relationship.context,
-                            now_ms,
+                            source_times_by_message_id[relationship.message_id],
                         ),
                     )
 
@@ -525,6 +540,7 @@ class GraphWriter:
                 commit.entity_writes,
                 commit.relationship_writes,
                 message_entity_refs=commit.message_entity_refs,
+                source_message_times=commit.source_message_times,
                 scope=scope,
                 cur=cur,
             )
@@ -557,6 +573,38 @@ class GraphWriter:
                 if alias not in aliases:
                     aliases.append(alias)
         return merged
+
+    @staticmethod
+    def _source_times_by_message_id(
+        source_message_times: Sequence[MessageSourceTime],
+    ) -> Dict[int, int | None]:
+        source_times_by_message_id: Dict[int, int | None] = {}
+        for source_time in source_message_times:
+            if not isinstance(source_time, MessageSourceTime):
+                raise TypeError("source_message_times must be MessageSourceTime instances")
+            if source_time.message_id in source_times_by_message_id:
+                raise ValueError("source_message_times must not duplicate message IDs")
+            source_times_by_message_id[source_time.message_id] = source_time.timestamp_ms
+        return source_times_by_message_id
+
+    @staticmethod
+    def _entity_activity_by_id(
+        references: Sequence[MessageEntityRef],
+        source_times_by_message_id: Dict[int, int | None],
+    ) -> Dict[int, int | None]:
+        activity_by_id: Dict[int, int | None] = {}
+        for reference in references:
+            if not isinstance(reference, MessageEntityRef):
+                raise TypeError("message_entity_refs must be MessageEntityRef instances")
+            if reference.message_id not in source_times_by_message_id:
+                raise ValueError("message_entity_refs require source message times")
+            timestamp_ms = source_times_by_message_id[reference.message_id]
+            prior = activity_by_id.get(reference.entity_id)
+            if timestamp_ms is not None and (prior is None or timestamp_ms > prior):
+                activity_by_id[reference.entity_id] = timestamp_ms
+            else:
+                activity_by_id.setdefault(reference.entity_id, prior)
+        return activity_by_id
 
     async def _verify_ingestion_claim(
         self,
@@ -696,6 +744,41 @@ class GraphWriter:
                 ON CONFLICT (message_id, entity_id) DO NOTHING
                 """,
                 (message_id, entity_id),
+            )
+
+    async def _touch_project_entity_contexts(
+        self,
+        cur,
+        references: Sequence[MessageEntityRef],
+        source_times_by_message_id: Dict[int, int | None],
+        scope: ExecutionScope,
+    ) -> None:
+        """Advance context activity only from canonical message source time."""
+
+        project_id = self._require_project_id(
+            scope.project_id, "project entity context activity"
+        )
+        activity_by_id = self._entity_activity_by_id(
+            references,
+            source_times_by_message_id,
+        )
+        for entity_id, timestamp_ms in activity_by_id.items():
+            if entity_id == IDENTITY_ENTITY_ID or timestamp_ms is None:
+                continue
+            await cur.execute(
+                """
+                UPDATE project_entity_contexts
+                SET last_mentioned_ms = CASE
+                    WHEN last_mentioned_ms IS NULL THEN %s
+                    ELSE GREATEST(last_mentioned_ms, %s)
+                END,
+                    updated_at_ms = floor(
+                        extract(epoch FROM clock_timestamp()) * 1000
+                    )::BIGINT
+                WHERE project_id = %s
+                  AND entity_id = %s
+                """,
+                (timestamp_ms, timestamp_ms, project_id, entity_id),
             )
 
     async def _mark_episode_eligible_messages(

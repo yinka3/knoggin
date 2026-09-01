@@ -55,7 +55,13 @@ def _completed_batch() -> IngestionBatch:
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
-        messages=[{"id": 7, "message": "Bobby joined the project."}],
+        messages=[
+            {
+                "id": 7,
+                "message": "Bobby joined the project.",
+                "timestamp": 1700000000000,
+            }
+        ],
         session_text="[USER]: Bobby joined the project.",
         policy=ingestion_policy(),
     )
@@ -85,6 +91,10 @@ async def test_graph_commit_builds_one_durable_change_set_then_refreshes_cache()
 
     commit = store.commits[0]
     assert commit.message_ids == (7,)
+    assert [
+        (source_time.message_id, source_time.timestamp_ms)
+        for source_time in commit.source_message_times
+    ] == [(7, 1700000000000)]
     assert [(ref.message_id, ref.entity_id) for ref in commit.message_entity_refs] == [
         (7, 101)
     ]

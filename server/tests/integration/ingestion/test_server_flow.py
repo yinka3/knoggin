@@ -16,7 +16,7 @@ from common.schema.episode.generation import (
     LLMEpisodeDecision,
     LLMEpisodeWindowDecision,
 )
-from common.schema.ingestion.contracts import IngestionCommit
+from common.schema.ingestion.contracts import IngestionCommit, MessageSourceTime
 from common.schema.primitives import Message
 from common.schema.public import StartRunRequest, validate_public_stream
 from common.schema.settings import (
@@ -301,6 +301,13 @@ def _prepared_graph_callback(store):
                 scope=batch.scope,
                 batch_id=batch.batch_id,
                 message_ids=tuple(int(message["id"]) for message in batch.messages),
+                source_message_times=tuple(
+                    MessageSourceTime(
+                        message_id=int(message["id"]),
+                        timestamp_ms=message.get("timestamp"),
+                    )
+                    for message in batch.messages
+                ),
             )
         )
 

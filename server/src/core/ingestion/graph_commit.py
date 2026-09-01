@@ -13,6 +13,7 @@ from common.schema.ingestion.contracts import (
     GraphWriteSummary,
     IngestionCommit,
     MessageEntityRef,
+    MessageSourceTime,
     RelationshipWrite,
     SkippedRelationship,
 )
@@ -178,6 +179,13 @@ async def build_ingestion_commit(
         scope=scope,
         batch_id=batch.batch_id,
         message_ids=tuple(int(message["id"]) for message in batch.messages),
+        source_message_times=tuple(
+            MessageSourceTime(
+                message_id=int(message["id"]),
+                timestamp_ms=message.get("timestamp"),
+            )
+            for message in batch.messages
+        ),
         entity_writes=tuple(entity_writes),
         alias_updates=alias_updates,
         message_entity_refs=message_entity_refs,

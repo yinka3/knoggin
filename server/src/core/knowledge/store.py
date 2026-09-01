@@ -502,6 +502,7 @@ class KnowledgeStore:
         relationships: List[RelationshipWrite],
         *,
         message_entity_refs: Optional[List[MessageEntityRef]] = None,
+        source_message_times=None,
         eligible_messages: Optional[List[EpisodeEligibility]] = None,
         scope: ExecutionScope,
     ) -> bool:
@@ -509,6 +510,7 @@ class KnowledgeStore:
             entities,
             relationships,
             message_entity_refs=message_entity_refs or (),
+            source_message_times=source_message_times or (),
             eligible_messages=eligible_messages or (),
             scope=scope,
         )

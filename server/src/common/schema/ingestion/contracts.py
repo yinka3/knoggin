@@ -318,6 +318,22 @@ class MessageEntityRef:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class MessageSourceTime:
+    """Canonical source time for one message claimed by an ingestion commit."""
+
+    message_id: int
+    timestamp_ms: int | None
+
+    def __post_init__(self) -> None:
+        _require_positive_id(self.message_id, "MessageSourceTime.message_id")
+        if self.timestamp_ms is not None and (
+            not isinstance(self.timestamp_ms, int)
+            or isinstance(self.timestamp_ms, bool)
+        ):
+            raise ValueError("MessageSourceTime.timestamp_ms must be an integer or None")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class EpisodeEligibility:
     """Episode-processing eligibility attached to a canonical message."""
 
@@ -364,6 +380,7 @@ class IngestionCommit:
     scope: ExecutionScope
     batch_id: str
     message_ids: tuple[int, ...]
+    source_message_times: tuple[MessageSourceTime, ...]
     entity_writes: tuple[EntityWrite, ...] = ()
     alias_updates: tuple[AliasUpdate, ...] = ()
     message_entity_refs: tuple[MessageEntityRef, ...] = ()
@@ -389,6 +406,22 @@ class IngestionCommit:
             raise ValueError("IngestionCommit requires unique claimed message IDs")
         object.__setattr__(self, "message_ids", tuple(sorted(message_ids)))
 
+        if not isinstance(self.source_message_times, tuple) or not all(
+            isinstance(source_time, MessageSourceTime)
+            for source_time in self.source_message_times
+        ):
+            raise TypeError(
+                "IngestionCommit.source_message_times must contain "
+                "MessageSourceTime instances"
+            )
+        source_ids = tuple(
+            source_time.message_id for source_time in self.source_message_times
+        )
+        if len(source_ids) != len(set(source_ids)) or set(source_ids) != set(message_ids):
+            raise ValueError(
+                "IngestionCommit source message times must cover each claimed message"
+            )
+
         for field_name, values, expected_type in (
             ("entity_writes", self.entity_writes, EntityWrite),
             ("alias_updates", self.alias_updates, AliasUpdate),
@@ -410,6 +443,17 @@ class IngestionCommit:
         if not evidence_ids.issubset(claimed_ids):
             raise ValueError(
                 "IngestionCommit evidence must belong to claimed messages"
+            )
+        timestamps_by_message_id = {
+            source_time.message_id: source_time.timestamp_ms
+            for source_time in self.source_message_times
+        }
+        if any(
+            timestamps_by_message_id[relationship.message_id] is None
+            for relationship in self.relationship_writes
+        ):
+            raise ValueError(
+                "IngestionCommit relationship evidence requires a source timestamp"
             )
 
 
