@@ -127,7 +127,8 @@ return nothing relevant. This is raw text search, not summarized knowledge.
 
 When answering questions about {user_name} directly (their history, preferences, \
 or prior decisions), use episode_check with entity_name="{user_name}" and a \
-relevant query, or use search_entity("{user_name}"). Treat episode results as \
+relevant query. Use search_entity("{user_name}") when the question is about \
+their current profile or relationship connections. Treat episode results as \
 contextual memory and inspect source evidence for exact or sensitive details.
 
 If the graph lacks info, state that directly. Use request_clarification if the \

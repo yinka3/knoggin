@@ -181,6 +181,14 @@ def test_read_web_page_registry_definition_matches_schema_and_default_limit():
 
 
 @pytest.mark.no_network
+def test_entity_search_schema_routes_memory_questions_to_episode_check_first():
+    description = TOOL_SCHEMAS_BY_NAME["search_entity"]["function"]["description"]
+
+    assert "episode_check first" in description
+    assert "starting point for almost every query" not in description
+
+
+@pytest.mark.no_network
 def test_read_web_page_is_available_by_default_and_allowlists_opt_in_explicitly():
     default_names = {
         schema["function"]["name"] for schema in get_filtered_schemas()

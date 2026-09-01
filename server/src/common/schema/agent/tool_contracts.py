@@ -75,9 +75,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_entity",
             "description": (
-                "The starting point for almost every query. "
-                "Provides the 'Snapshot' of an entity: their definition, what they are (Person, Project, etc.), and their most important immediate connections. "
-                "Use this first to ground your answer. Only reach for deeper tools if this summary is insufficient."
+                "Search entity profiles and immediate relationship context. "
+                "Use this to discover an entity or answer a current graph/connection question. "
+                "For remembered history, decisions, or developments, use episode_check first."
             ),
             "parameters": {
                 "type": "object",
