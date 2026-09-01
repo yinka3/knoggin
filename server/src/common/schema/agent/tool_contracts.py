@@ -101,9 +101,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "get_connections",
             "description": (
-                "The 'Deep Dive' into an entity's network. "
-                "Unlike 'search_entity' (which just gives a summary), this tool retrieves the FULL list of relationships and the specific evidence (chat logs) backing them. "
-                "Use this when the user wants to know 'everything' about who someone works with, or when 'search_entity' returned a result that felt incomplete."
+                "Retrieve the observed relationship network for an entity ID returned by search_entity, "
+                "including durable endpoint IDs, project attribution, observation metadata, and supporting messages. "
+                "Use it after discovery when relationship details are needed."
             ),
             "parameters": {
                 "type": "object",

@@ -2,10 +2,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-import core.agent.tools.graph as graph_module
+import core.knowledge.retrieval as retrieval_module
 from common.schema.episode.models import EntityEpisode, Episode, MessageEpisode
-from core.agent.tools.graph import GraphTools
 from core.knowledge.entity.profile import EntityProfile
+from core.knowledge.retrieval import KnowledgeRetrieval
 
 
 def episode(episode_id: str, entity_id: int = 2) -> Episode:
@@ -52,17 +52,20 @@ def source_message(message_id: int = 7) -> dict:
     }
 
 
-class EpisodeTool(GraphTools):
+class EpisodeTool(KnowledgeRetrieval):
     def __init__(self):
-        self.active_topics = ["General"]
-        self.readable_project_ids = ["project-1"]
-        self.search_cfg = {}
-        self.user_name = "ada"
-        self.project_id = "project-1"
-        self.session_id = "session-1"
+        super().__init__(
+            project_id="project-1",
+            readable_project_ids=["project-1"],
+            user_name="ada",
+            entities=object(),
+            embedding_service=None,
+            knowledge_store=object(),
+            postgres=object(),
+        )
         self.fallback_calls = []
 
-    async def search_messages(self, query):
+    async def search_messages(self, query, *, session_id, limit=None):
         self.fallback_calls.append(query)
         return [{"id": "msg_1", "message": "fallback hit"}]
 
@@ -98,7 +101,7 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
     tool.knowledge_store = knowledge_store
 
     result = await tool.episode_check(
-        "What did Ada decide?", entity_name="Ada"
+        "What did Ada decide?", session_id="session-1", entity_id=2
     )
 
     assert knowledge_store.entity_calls == [
@@ -107,8 +110,8 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
             {
                 "user_name": "ada",
                 "project_id": "project-1",
-                "session_id": "session-1",
                 "limit": 5,
+                "visible_project_ids": ["project-1"],
             },
         )
     ]
@@ -164,7 +167,9 @@ async def test_episode_serialization_includes_separate_sources_consulted():
     tool.entities = FakeEntities()
     tool.knowledge_store = FakeKnowledgeStore()
 
-    result = await tool.episode_check("What did Ada decide?", entity_name="Ada")
+    result = await tool.episode_check(
+        "What did Ada decide?", session_id="session-1", entity_id=2
+    )
 
     consulted = result["results"][0]["episodes"][0]["sources_consulted"]
     assert consulted == [
@@ -191,7 +196,7 @@ async def test_episode_check_emits_retrieval_and_expansion_metrics(monkeypatch):
     async def capture_emit(scope_id, component, event, data):
         events.append((scope_id, component, event, data))
 
-    monkeypatch.setattr(graph_module, "emit", capture_emit)
+    monkeypatch.setattr(retrieval_module, "emit", capture_emit)
 
     class FakeEntities:
         async def get_id(self, name):
@@ -211,7 +216,9 @@ async def test_episode_check_emits_retrieval_and_expansion_metrics(monkeypatch):
     tool.entities = FakeEntities()
     tool.knowledge_store = FakeKnowledgeStore()
 
-    await tool.episode_check("What did Ada decide?", entity_name="Ada")
+    await tool.episode_check(
+        "What did Ada decide?", session_id="session-1", entity_id=2
+    )
 
     scope_id, component, event, data = events[0]
     assert (scope_id, component, event) == (
@@ -245,13 +252,14 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
     tool = EpisodeTool()
     tool.knowledge_store = knowledge_store
 
-    result = await tool.read_recent_episodes()
+    result = await tool.read_recent_episodes(session_id="session-1")
 
     assert knowledge_store.recent_calls == [
         {
             "user_name": "ada",
             "project_id": "project-1",
             "limit": 2,
+            "visible_project_ids": ["project-1"],
         }
     ]
     assert result["resolution"] == "recent"
@@ -259,43 +267,6 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
         "episode-latest",
         "episode-prior",
     ]
-
-
-@pytest.mark.no_network
-async def test_episode_check_vector_candidates_return_episode_context():
-    class FakeEntities:
-        async def get_id(self, name):
-            return None
-
-        async def get_profile(self, entity_id):
-            return EntityProfile(canonical_name=f"Entity {entity_id}")
-
-    class FakeEmbeddingService:
-        async def encode_single(self, text):
-            assert text == "Unknown entity"
-            return [0.1, 0.2]
-
-    class FakeKnowledgeStore:
-        async def search_entities_by_embedding(self, *args, **kwargs):
-            assert kwargs["visible_project_ids"] == ["project-1"]
-            return [(3, 0.87)]
-
-        async def get_project_episodes_for_entities(self, entity_ids, **scope):
-            return [episode("episode-3", entity_ids[0])]
-
-        async def get_project_episode_source_messages(self, episode_id, **scope):
-            return [source_message()]
-
-    tool = EpisodeTool()
-    tool.entities = FakeEntities()
-    tool.embedding_service = FakeEmbeddingService()
-    tool.knowledge_store = FakeKnowledgeStore()
-
-    result = await tool.episode_check("what matters?", entity_name="Unknown entity")
-
-    assert result["resolution"] == "vector"
-    assert result["results"][0]["entity_name"] == "Entity 3"
-    assert result["results"][0]["episodes"][0]["episode_id"] == "episode-3"
 
 
 @pytest.mark.no_network
@@ -311,7 +282,9 @@ async def test_episode_check_searches_episodes_before_raw_message_fallback():
     tool = EpisodeTool()
     tool.knowledge_store = FakeKnowledgeStore()
 
-    result = await tool.episode_check("What changed in the memory design?")
+    result = await tool.episode_check(
+        "What changed in the memory design?", session_id="session-1"
+    )
 
     assert tool.fallback_calls == []
     assert result["resolution"] == "question"
@@ -340,7 +313,9 @@ async def test_episode_check_uses_semantic_episode_matches_before_lexical_search
     tool.embedding_service = FakeEmbeddingService()
     tool.knowledge_store = FakeKnowledgeStore()
 
-    result = await tool.episode_check("How will we find related memories?")
+    result = await tool.episode_check(
+        "How will we find related memories?", session_id="session-1"
+    )
 
     assert result["resolution"] == "semantic"
     semantic_episode = result["results"][0]["episodes"][0]
@@ -361,7 +336,7 @@ async def test_read_episode_returns_all_scoped_source_messages():
     tool = EpisodeTool()
     tool.knowledge_store = FakeKnowledgeStore()
 
-    result = await tool.read_episode("episode-1")
+    result = await tool.read_episode("episode-1", session_id="session-1")
 
     assert [message["id"] for message in result] == [7, 8]
     assert all(message["context"][0]["is_hit"] for message in result)

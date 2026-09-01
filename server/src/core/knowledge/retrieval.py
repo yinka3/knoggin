@@ -217,54 +217,6 @@ class KnowledgeRetrieval:
                 ],
             }
 
-        if query:
-            embedding = await self.embedding_service.encode_single(query)
-            candidates = await self.knowledge_store.search_entities_by_embedding(
-                embedding,
-                limit=5,
-                score_threshold=0.69,
-                visible_project_ids=self.readable_project_ids,
-            )
-            if candidates:
-                metrics: Dict[str, int | float] = {}
-                results = []
-                episode_count = 0
-                focus_episode_count = 0
-                for entity_id, similarity in candidates:
-                    profile = await self.entities.get_profile(entity_id)
-                    episodes = await self.knowledge_store.get_project_episodes_for_entities(
-                        [entity_id],
-                        user_name=self.user_name,
-                        project_id=self.project_id,
-                        limit=self._episode_retrieval_limit(),
-                        visible_project_ids=self.readable_project_ids,
-                    )
-                    episode_count += len(episodes)
-                    focus_episode_count += self._focus_episode_count(
-                        episodes, entity_id
-                    )
-                    results.append(
-                        {
-                            "entity_id": entity_id,
-                            "entity_name": (
-                                profile.canonical_name if profile else str(entity_id)
-                            ),
-                            "similarity": similarity,
-                            "episodes": await self._serialize_episodes(
-                                episodes, session_id=session_id, metrics=metrics
-                            ),
-                        }
-                    )
-                await self._emit_episode_retrieval(
-                    session_id=session_id,
-                    strategy="vector_entity",
-                    started_at=started_at,
-                    episode_count=episode_count,
-                    focus_episode_count=focus_episode_count,
-                    metrics=metrics,
-                )
-                return {"resolution": "vector", "results": results}
-
         if self.embedding_service is not None:
             embedding = await self.embedding_service.encode_single(query)
             semantic_matches = await self.knowledge_store.search_project_episodes_by_embedding(

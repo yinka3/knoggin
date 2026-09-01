@@ -199,9 +199,6 @@ def format_path_results(path: List[Dict]) -> str:
     if not path:
         return "No path found."
 
-    if len(path) == 1 and path[0].get("hidden"):
-        return path[0].get("message", "Connection exists through inactive topics.")
-
     entities = [path[0].get("entity_a", "?")]
     for step in path:
         entities.append(step.get("entity_b", "?"))
@@ -217,15 +214,10 @@ def format_path_results(path: List[Dict]) -> str:
 
         step_block = f"  [{step_num}] {ent_a} -> {ent_b}\n"
 
-        if step.get("status") == "LOCKED":
-            step_block += (
-                f"      [LOCKED: {step.get('locked_reason', 'Inactive topic')}]\n"
-            )
-        else:
-            for ev in step.get("evidence", []):
-                msg = ev.get("message", "")
-                ts = _format_timestamp(ev.get("timestamp"))
-                step_block += f'      "{msg}" [{ts}]\n'
+        for ev in step.get("evidence", []):
+            msg = ev.get("message", "")
+            ts = _format_timestamp(ev.get("timestamp"))
+            step_block += f'      "{msg}" [{ts}]\n'
 
         steps.append(step_block)
 

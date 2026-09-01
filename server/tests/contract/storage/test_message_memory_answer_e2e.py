@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
+import core.knowledge.retrieval as retrieval_module
 from common.schema.episode.generation import (
     LLMEpisodeDecision,
     LLMEpisodeWindowDecision,
@@ -21,10 +22,10 @@ from common.schema.settings import (
 )
 from common.schema.source.locators import PastedTextLocator
 from common.schema.source.references import SourceReferenceCandidate
-from core.agent.tools.graph import GraphTools
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.knowledge.episodes.job import EpisodeJob
+from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
 from infrastructure.postgres_client import PostgresClient
 from runtime.session_runtime import SessionRuntime as Session
@@ -117,20 +118,21 @@ class DeterministicEmbeddingService:
         return [[0.25] * 1024]
 
 
-class EpisodeRetrievalTool(GraphTools):
-    """Minimal tool wiring for the real KnowledgeStore retrieval boundary."""
+class EpisodeRetrievalTool(KnowledgeRetrieval):
+    """Minimal real-store wiring for the canonical retrieval boundary."""
 
     def __init__(self, knowledge_store):
-        self.knowledge_store = knowledge_store
-        self.entities = object()
-        self.user_name = "ada"
-        self.project_id = "project-1"
-        self.session_id = "session-1"
-        self.readable_project_ids = ["project-1"]
-        self.active_topics = ["General"]
-        self.search_cfg = {}
+        super().__init__(
+            project_id="project-1",
+            readable_project_ids=["project-1"],
+            user_name="ada",
+            entities=SimpleNamespace(),
+            embedding_service=None,
+            knowledge_store=knowledge_store,
+            postgres=SimpleNamespace(),
+        )
 
-    async def search_messages(self, query):
+    async def search_messages(self, query, *, session_id, limit=None):
         raise AssertionError(f"raw-message fallback was not expected for {query!r}")
 
 
@@ -222,13 +224,13 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
     async def no_op_emit(*args, **kwargs):
         return None
 
-    monkeypatch.setattr("core.agent.tools.graph.emit", no_op_emit)
+    monkeypatch.setattr(retrieval_module, "emit", no_op_emit)
     tool = EpisodeRetrievalTool(knowledge_store)
     tool.user_name = user_name
     tool.project_id = project_id
     tool.session_id = session_id
     tool.readable_project_ids = [project_id]
-    result = await tool.episode_check("episodic memory")
+    result = await tool.episode_check("episodic memory", session_id=session_id)
 
     assert result["resolution"] == "question"
     retrieved = result["results"][0]["episodes"]

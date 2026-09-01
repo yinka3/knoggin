@@ -13,7 +13,6 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
-from core.agent.tools.graph import GraphTools
 from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
@@ -437,7 +436,6 @@ def validate_registry_contract() -> None:
 
 class Tools(
     SearchTools,
-    GraphTools,
     MemoryTools,
     MaintenanceTools,
     HealthTools,
