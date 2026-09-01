@@ -631,6 +631,25 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
+    async def get_nearby_project_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_ids: List[str],
+        before_message_id: int,
+        before_timestamp_ms: int | None,
+        limit: int,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_nearby_project_episodes(
+            user_name=user_name,
+            project_id=project_id,
+            session_ids=session_ids,
+            before_message_id=before_message_id,
+            before_timestamp_ms=before_timestamp_ms,
+            limit=limit,
+        )
+
     async def search_project_episodes(
         self,
         query: str,

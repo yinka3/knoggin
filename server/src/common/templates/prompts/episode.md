@@ -39,7 +39,6 @@ For `create` and `consolidate`:
 - provide `summary` and exactly one `message_influences` item for every
   `message:N` assigned to that proposal, and no unassigned `message:N`
   references;
-- provide weights greater than or equal to zero;
 - omit `skip_reason`.
 
 For `create`:
@@ -72,4 +71,29 @@ Return exactly the structured response requested by the schema:
 
 - meet the character limit exactly; the server will reject another overage;
 - preserve the structured proposal shape and its existing references.
+</output_contract>
+
+## Consolidate Episode
+You are deciding whether one prior Episode remains coherent after new source
+evidence was added for {user_name}.
+
+<task>
+The supplied evidence catalog contains every canonical source message from the
+prior Episode and the new completed units. Regenerate the narrative from that
+complete evidence. Return `consolidate` only when all supplied evidence forms
+one coherent Episode; otherwise return `keep_separate`.
+</task>
+
+<grounding>
+- `message:N` references are local handles for the complete canonical packet.
+- A successful consolidation must reference every supplied message exactly
+  once. The server owns source ordering and memberships.
+- `keep_separate` preserves the prior Episode and lets the new units become a
+  separate Episode.
+</grounding>
+
+<output_contract>
+Return the structured response requested by the schema. For `consolidate`,
+provide the bounded narrative and every supplied `message:N` reference. For
+`keep_separate`, omit narrative fields and message references.
 </output_contract>

@@ -58,6 +58,8 @@ def test_episode_policy_only_snapshots_current_generation_controls():
     assert policy.metadata() == {
         "version": policy.version,
         "target_message_count": 12,
+        "max_episode_source_messages": 72,
+        "max_episode_source_tokens": 12000,
         "max_narrative_chars": 5000,
         "prompt_narrative_chars": 4500,
         "prior_episode_candidate_count": 3,

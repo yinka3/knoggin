@@ -25,6 +25,17 @@ class EpisodeStore(Protocol):
         self, *, user_name: str, project_id: str, limit: int
     ) -> list[Episode]: ...
 
+    async def get_nearby_project_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_ids: list[str],
+        before_message_id: int,
+        before_timestamp_ms: int | None,
+        limit: int,
+    ) -> list[Episode]: ...
+
     async def get_project_episodes_for_entities(
         self, entity_ids: list[int], *, user_name: str, project_id: str, limit: int
     ) -> list[Episode]: ...
@@ -37,17 +48,6 @@ class EpisodeStore(Protocol):
         user_name: str,
         project_id: str,
     ) -> bool: ...
-
-    async def get_entity_ids_for_messages(
-        self,
-        message_ids: list[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> dict[int, list[int]]: ...
-
-
 
 @runtime_checkable
 class StructuredGenerator(Protocol):

@@ -16,6 +16,8 @@ class EpisodeGenerationPolicy:
     version: str
     enabled: bool
     target_message_count: int
+    max_episode_source_messages: int
+    max_episode_source_tokens: int
     max_narrative_chars: int
     prior_episode_candidate_count: int
 
@@ -32,6 +34,8 @@ class EpisodeGenerationPolicy:
         values = {
             "enabled": settings.enabled,
             "target_message_count": episode_window_size,
+            "max_episode_source_messages": settings.max_episode_source_messages,
+            "max_episode_source_tokens": settings.max_episode_source_tokens,
             "max_narrative_chars": settings.max_narrative_chars,
             "prior_episode_candidate_count": settings.prior_episode_candidate_count,
         }
@@ -47,6 +51,8 @@ class EpisodeGenerationPolicy:
         return {
             "version": self.version,
             "target_message_count": self.target_message_count,
+            "max_episode_source_messages": self.max_episode_source_messages,
+            "max_episode_source_tokens": self.max_episode_source_tokens,
             "max_narrative_chars": self.max_narrative_chars,
             "prompt_narrative_chars": self.prompt_narrative_chars,
             "prior_episode_candidate_count": self.prior_episode_candidate_count,
@@ -57,3 +63,12 @@ class EpisodeGenerationPolicy:
         """Leave a deterministic 10% generation buffer below the hard cap."""
 
         return max(1, int(self.max_narrative_chars * 0.9))
+
+
+def estimate_source_tokens(messages: list[dict]) -> int:
+    """Conservatively estimate tokens from canonical source-message text."""
+
+    return sum(
+        max(1, (len(str(message.get("content") or "")) + 2) // 3)
+        for message in messages
+    )

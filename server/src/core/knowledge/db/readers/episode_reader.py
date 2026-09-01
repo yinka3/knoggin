@@ -843,6 +843,70 @@ class EpisodeReader:
         )
         return [await self._hydrate_episode(row) for row in rows]
 
+    async def get_nearby_project_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_ids: List[str],
+        before_message_id: int,
+        before_timestamp_ms: int | None,
+        limit: int,
+    ) -> List[Episode]:
+        """Load bounded prior Episodes from the incoming source neighborhood."""
+
+        if not session_ids or limit <= 0:
+            return []
+        if before_message_id <= 0:
+            raise ValueError("before_message_id must be positive")
+        rows = await self.client.fetch_all(
+            """
+            SELECT e.*
+            FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id
+            WHERE e.project_id = %s
+              AND p.user_name = %s
+              AND e.user_modified = FALSE
+              AND EXISTS (
+                  SELECT 1
+                  FROM episode_messages em
+                  JOIN messages m
+                    ON m.message_id = em.message_id
+                   AND m.project_id = em.project_id
+                   AND m.session_id = em.session_id
+                  WHERE em.episode_id = e.episode_id
+                    AND em.project_id = e.project_id
+                    AND m.session_id = ANY(%s)
+                    AND (
+                         (%s::BIGINT IS NOT NULL AND (
+                              m.timestamp_ms < %s
+                           OR (m.timestamp_ms = %s AND m.message_id < %s)
+                           OR m.timestamp_ms IS NULL
+                         ))
+                      OR (%s::BIGINT IS NULL AND (
+                              m.timestamp_ms IS NOT NULL
+                           OR (m.timestamp_ms IS NULL AND m.message_id < %s)
+                         ))
+                    )
+              )
+            ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC
+            LIMIT %s
+            """,
+            (
+                project_id,
+                user_name,
+                session_ids,
+                before_timestamp_ms,
+                before_timestamp_ms,
+                before_timestamp_ms,
+                before_message_id,
+                before_timestamp_ms,
+                before_message_id,
+                limit,
+            ),
+        )
+        return [await self._hydrate_episode(row) for row in rows]
+
     async def search_project_episodes(
         self,
         query: str,

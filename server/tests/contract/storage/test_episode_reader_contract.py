@@ -238,6 +238,43 @@ async def test_episode_reader_loads_the_immediately_previous_episode():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_episode_reader_selects_nearby_candidates_by_source_session_and_time():
+    client = RecordingPostgresClient(
+        fetch_all_results=[[episode_row()], *attachment_results()]
+    )
+    reader = EpisodeReader(client)
+
+    episodes = await reader.get_nearby_project_episodes(
+        user_name="ada",
+        project_id="project-1",
+        session_ids=["session-1"],
+        before_message_id=20,
+        before_timestamp_ms=1700000001000,
+        limit=3,
+    )
+
+    assert [episode.episode_id for episode in episodes] == ["episode-1"]
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "m.session_id = ANY(%s)" in query
+    assert "m.timestamp_ms < %s" in query
+    assert "e.user_modified = FALSE" in query
+    assert "entity_overlap" not in query
+    assert params == (
+        "project-1",
+        "ada",
+        ["session-1"],
+        1700000001000,
+        1700000001000,
+        1700000001000,
+        20,
+        1700000001000,
+        20,
+        3,
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_episode_reader_expands_source_messages_in_episode_order():
     client = RecordingPostgresClient(
         fetch_all_results=[

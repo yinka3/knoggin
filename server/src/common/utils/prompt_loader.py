@@ -42,6 +42,11 @@ PIPELINE_PROMPTS: Dict[str, PromptDefinition] = {
         "Repair Episode Narrative",
         frozenset({"user_name", "max_narrative_chars"}),
     ),
+    "consolidate_episode": PromptDefinition(
+        "prompts/episode.md",
+        "Consolidate Episode",
+        frozenset({"user_name"}),
+    ),
 }
 
 _prompt_cache: Dict[Path, tuple[int, Dict[str, str]]] = {}

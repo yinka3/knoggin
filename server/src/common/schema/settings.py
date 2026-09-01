@@ -67,6 +67,10 @@ class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
     enabled: bool = Field(True)
+    # Generation batches and the maximum source evidence an Episode may own
+    # are intentionally separate controls.
+    max_episode_source_messages: int = Field(72, ge=1, le=10_000)
+    max_episode_source_tokens: int = Field(12_000, ge=1, le=1_000_000)
     # A server-owned hard cap across every persisted narrative field.  The
     # prompt uses 90% of this value; persistence validates the full limit.
     max_narrative_chars: int = Field(4000, ge=500, le=20000)

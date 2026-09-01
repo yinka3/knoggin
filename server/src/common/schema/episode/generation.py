@@ -138,17 +138,18 @@ class LLMEpisodeWindowDecision(StructuredLLMOutput):
 
 
 class LLMEpisodeConsolidation(EpisodeNarrative):
-    """Model-facing episode regeneration output with local references."""
+    """Model-facing full-evidence consolidation decision."""
 
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(..., min_length=1)
-    message_influences: List[str] = Field(..., min_length=1)
+    action: Literal["consolidate", "keep_separate"]
+    summary: Optional[str] = Field(None, min_length=1)
+    message_influences: List[str] = Field(default_factory=list)
 
     @field_validator("summary")
     @classmethod
-    def validate_summary(cls, value: str) -> str:
-        return normalize_required_text(value, field_name="summary")
+    def validate_summary(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_optional_text(value, field_name="summary")
 
     @field_validator("new_developments", "updates", "unresolved")
     @classmethod
@@ -157,3 +158,36 @@ class LLMEpisodeConsolidation(EpisodeNarrative):
             normalize_required_text(value, field_name=info.field_name)
             for value in values
         ]
+
+    @field_validator("message_influences")
+    @classmethod
+    def validate_message_references(cls, values: List[str]) -> List[str]:
+        if any(
+            not isinstance(value, str)
+            or not value.startswith("message:")
+            or not value.removeprefix("message:").isdigit()
+            or value == "message:0"
+            for value in values
+        ):
+            raise ValueError("message_influences must contain message:N references")
+        if len(values) != len(set(values)):
+            raise ValueError("message_influences must not contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def validate_action_shape(self) -> "LLMEpisodeConsolidation":
+        has_narrative = bool(
+            self.summary
+            or self.new_developments
+            or self.updates
+            or self.unresolved
+        )
+        if self.action == "consolidate":
+            if not self.summary or not self.message_influences:
+                raise ValueError(
+                    "consolidate results require narrative and message references"
+                )
+            return self
+        if has_narrative or self.message_influences:
+            raise ValueError("keep_separate results must not include episode content")
+        return self
