@@ -21,7 +21,7 @@ from common.schema.episode.models import (
     MessageEpisode,
     RelationshipEpisode,
 )
-from common.utils.local_references import build_local_id_maps, resolve_local_id
+from common.utils.local_references import resolve_local_id
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 
 
@@ -52,21 +52,51 @@ class ProjectEpisodeBuild:
         return [int(message["message_id"]) for message in self.messages]
 
     def prepare_local_references(self) -> None:
+        self.messages.sort(
+            key=lambda message: (
+                message.get("timestamp_ms") is None,
+                message.get("timestamp_ms") or 0,
+                int(message["message_id"]),
+            )
+        )
         ids = self.message_ids
         if len(ids) != len(set(ids)):
             raise ValueError("project episode window contains duplicate messages")
         if not all(message.get("session_id") for message in self.messages):
             raise ValueError("project episode messages require source session IDs")
-        self.local_message_ids, self.message_ids_by_local = build_local_id_maps(ids, "m")
+        self.local_message_ids, self.message_ids_by_local = self._catalog_references(
+            ids, "message", preserve_order=True
+        )
         entity_ids = sorted({item for values in self.entity_ids_by_message.values() for item in values})
         relationship_ids = sorted({item for values in self.relationship_ids_by_message.values() for item in values})
-        self.local_entity_ids, self.entity_ids_by_local = build_local_id_maps(entity_ids, "e")
-        self.local_relationship_ids, self.relationship_ids_by_local = build_local_id_maps(relationship_ids, "r")
+        self.local_entity_ids, self.entity_ids_by_local = self._catalog_references(
+            entity_ids, "entity"
+        )
+        self.local_relationship_ids, self.relationship_ids_by_local = self._catalog_references(
+            relationship_ids, "relationship"
+        )
         candidates = [episode for episode in self.prior_episodes if not episode.user_modified]
         self.prior_episodes = candidates
-        self.local_episode_ids, self.episode_ids_by_local = build_local_id_maps(
-            (episode.episode_id for episode in candidates), "ep"
+        self.local_episode_ids, self.episode_ids_by_local = self._catalog_references(
+            (episode.episode_id for episode in candidates), "episode"
         )
+
+    @staticmethod
+    def _catalog_references(
+        identifiers, kind: str, *, preserve_order: bool = False
+    ) -> tuple[dict[Any, str], dict[str, Any]]:
+        values = list(identifiers)
+        if not preserve_order:
+            values = sorted(set(values), key=lambda value: (isinstance(value, str), value))
+        else:
+            values = list(dict.fromkeys(values))
+        actual_to_local = {
+            value: f"{kind}:{position}"
+            for position, value in enumerate(values, start=1)
+        }
+        return actual_to_local, {
+            local: value for value, local in actual_to_local.items()
+        }
 
     def evidence_brief(self) -> str:
         """Render readable evidence rather than a serialized persistence payload."""
@@ -74,9 +104,11 @@ class ProjectEpisodeBuild:
         if not self.local_message_ids:
             raise ValueError("episode local references have not been prepared")
         lines = [
-            "PROJECT EPISODE WINDOW",
-            "Use only the local references below. Group only genuinely coherent material.",
+            "PROJECT EPISODE EVIDENCE CATALOG",
+            "Use only catalog handles that appear below. Group only genuinely coherent material.",
             "A paired user/assistant turn is one conversational unit.",
+            "",
+            "SOURCE MESSAGES:",
         ]
         last_session: str | None = None
         for message in self.messages:
@@ -88,7 +120,8 @@ class ProjectEpisodeBuild:
             local = self.local_message_ids[message_id]
             role = str(message.get("role") or "message").upper()
             content = " ".join(str(message.get("content") or "").split())
-            lines.append(f"[{local}] {role}: {content}")
+            position = self.message_ids.index(message_id) + 1
+            lines.append(f"[{local}] source-position={position} {role}: {content}")
             hints = []
             if message.get("user_msg_id"):
                 paired_local = self.local_message_ids.get(int(message["user_msg_id"]))
@@ -101,7 +134,40 @@ class ProjectEpisodeBuild:
             if relationships:
                 hints.append("relationships " + ", ".join(relationships))
             if hints:
-                lines.append("  hints: " + "; ".join(hints))
+                lines.append("  evidence: " + "; ".join(hints))
+        lines.extend(("", "ENTITIES:"))
+        catalog_by_entity_id = {
+            int(item["entity_id"]): item for item in self.entity_catalog
+        }
+        for entity_id, local in self.local_entity_ids.items():
+            entity = catalog_by_entity_id.get(entity_id, {})
+            supporting_messages = [
+                self.local_message_ids[message_id]
+                for message_id, ids in self.entity_ids_by_message.items()
+                if entity_id in ids and message_id in self.local_message_ids
+            ]
+            label = entity.get("canonical_name") or entity.get("name") or "unnamed"
+            entity_type = entity.get("type") or entity.get("entity_type") or "unknown"
+            lines.append(
+                f"[{local}] {label} ({entity_type}); evidence: "
+                + (", ".join(supporting_messages) or "none")
+            )
+        lines.extend(("", "RELATIONSHIPS:"))
+        catalog_by_relationship_id = {
+            str(item["relationship_id"]): item for item in self.relationship_catalog
+        }
+        for relationship_id, local in self.local_relationship_ids.items():
+            relationship = catalog_by_relationship_id.get(relationship_id, {})
+            supporting_messages = [
+                self.local_message_ids[message_id]
+                for message_id, ids in self.relationship_ids_by_message.items()
+                if relationship_id in ids and message_id in self.local_message_ids
+            ]
+            label = relationship.get("relationship_type") or "relationship"
+            lines.append(
+                f"[{local}] {label}; evidence: "
+                + (", ".join(supporting_messages) or "none")
+            )
         if self.prior_episodes:
             lines.extend(("", "Prior project episodes available for revision:"))
             for episode in self.prior_episodes:
@@ -143,6 +209,32 @@ class ProjectEpisodeBuild:
             selected = {item.message_id for item in decision.message_influences}
             if not selected.issubset(set(self.message_ids)):
                 raise ValueError("episode proposal references a message outside the window")
+            allowed_entity_ids = {
+                entity_id
+                for message_id in selected
+                for entity_id in self.entity_ids_by_message.get(message_id, [])
+            }
+            if any(
+                item.entity_id not in allowed_entity_ids
+                for item in decision.focus_entities
+            ):
+                raise ValueError(
+                    "episode proposal references an entity outside its selected evidence"
+                )
+            allowed_relationship_ids = {
+                relationship_id
+                for message_id in selected
+                for relationship_id in self.relationship_ids_by_message.get(
+                    message_id, []
+                )
+            }
+            if any(
+                item.relationship_id not in allowed_relationship_ids
+                for item in decision.central_relationships
+            ):
+                raise ValueError(
+                    "episode proposal references a relationship outside its selected evidence"
+                )
             if selected.intersection(used_sources):
                 raise ValueError("episode proposals cannot share source messages")
             if decision.action == "consolidate":
@@ -182,17 +274,23 @@ class ProjectEpisodeBuild:
         message_by_id = {int(message["message_id"]): message for message in self.messages}
         episodes: list[Episode] = []
         for decision in self.decisions:
+            selected_in_source_order = [
+                message_id
+                for message_id in self.message_ids
+                if message_id in {item.message_id for item in decision.message_influences}
+            ]
+            influence_by_message_id = {
+                item.message_id: item for item in decision.message_influences
+            }
             current = [
                 MessageEpisode(
                     message_id=message_id,
                     session_id=str(message_by_id[message_id]["session_id"]),
-                    influence_weight=influence.influence_weight,
-                    influence_reason=influence.influence_reason,
+                    influence_weight=influence_by_message_id[message_id].influence_weight,
+                    influence_reason=influence_by_message_id[message_id].influence_reason,
                     message_position=index,
                 )
-                for index, (message_id, influence) in enumerate(
-                    (item.message_id, item) for item in decision.message_influences
-                )
+                for index, message_id in enumerate(selected_in_source_order)
             ]
             target = next((item for item in self.prior_episodes if item.episode_id == decision.target_episode_id), None)
             effective_action = decision.action

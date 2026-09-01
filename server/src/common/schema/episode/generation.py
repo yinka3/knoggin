@@ -99,7 +99,7 @@ class EpisodeConsolidation(EpisodeNarrative):
 class LLMEpisodeMessageInfluence(StructuredLLMOutput):
     """One model-selected influence with a local message reference."""
 
-    message_id: str = Field(..., pattern=r"^m[1-9]\d*$")
+    message_id: str = Field(..., pattern=r"^message:[1-9]\d*$")
     influence_weight: float = Field(..., ge=0.0)
     influence_reason: Optional[str] = None
 
@@ -107,7 +107,7 @@ class LLMEpisodeMessageInfluence(StructuredLLMOutput):
 class LLMEpisodeFocusEntitySelection(StructuredLLMOutput):
     """One model-selected focus entity with a local entity reference."""
 
-    entity_id: str = Field(..., pattern=r"^e[1-9]\d*$")
+    entity_id: str = Field(..., pattern=r"^entity:[1-9]\d*$")
     prominence_weight: float = Field(..., ge=0.0)
     role: Optional[str] = None
 
@@ -115,7 +115,7 @@ class LLMEpisodeFocusEntitySelection(StructuredLLMOutput):
 class LLMEpisodeCentralRelationshipSelection(StructuredLLMOutput):
     """One model-selected relationship with a local relationship reference."""
 
-    relationship_id: str = Field(..., pattern=r"^r[1-9]\d*$")
+    relationship_id: str = Field(..., pattern=r"^relationship:[1-9]\d*$")
     prominence_weight: float = Field(..., ge=0.0)
 
 
@@ -125,7 +125,7 @@ class LLMEpisodeDecision(EpisodeNarrative):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["create", "consolidate", "skip"]
-    target_episode_id: Optional[str] = Field(None, pattern=r"^ep[1-9]\d*$")
+    target_episode_id: Optional[str] = Field(None, pattern=r"^episode:[1-9]\d*$")
     message_influences: List[LLMEpisodeMessageInfluence] = Field(default_factory=list)
     focus_entities: List[LLMEpisodeFocusEntitySelection] = Field(default_factory=list)
     central_relationships: List[LLMEpisodeCentralRelationshipSelection] = Field(

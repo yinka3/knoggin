@@ -11,14 +11,15 @@ Keep the combined narrative text in every proposal at or below
 </task>
 
 <grounding>
-- The evidence brief is readable conversation input, organized by its source
-  session. `mN`, `eN`, `rN`, and `epN` are stable local references only.
+- The evidence brief is a server-defined catalog. `message:N`, `entity:N`,
+  `relationship:N`, and `episode:N` are the only valid references; they are
+  local to this response and never database IDs.
 - Session boundaries and the supplied pairing/topic hints are evidence aids,
   not mandatory groups. Decide coherence yourself.
 - You may select at most two focus entities and only from the supplied entity
   memberships. You may select central relationships only from the supplied
   relationship memberships.
-- A revision target must be one of the supplied `epN` prior episodes.
+- A revision target must be one of the supplied `episode:N` prior episodes.
 </grounding>
 
 <decision_rules>
@@ -27,7 +28,7 @@ Keep the combined narrative text in every proposal at or below
 - Choose `create` for a meaningful new topic, decision, development, or
   unresolved thread.
 - Do not create a proposal for acknowledgements, filler, or low-signal material.
-- Proposals may not share any current-window `mN` source. Each consolidation
+- Proposals may not share any current-window `message:N` source. Each consolidation
   target may occur at most once. Do not merge two existing episodes.
 - Do not phrase the summary as permanent atomic claims. Write a concise,
   contextual account grounded in the window.
@@ -38,8 +39,9 @@ Return exactly the structured response requested by the schema: an array named
 `proposals`, containing at most three create/consolidate proposals.
 
 For `create` and `consolidate`:
-- provide `summary` and exactly one `message_influences` item for every `mN`
-  assigned to that proposal, and no unassigned `mN` references;
+- provide `summary` and exactly one `message_influences` item for every
+  `message:N` assigned to that proposal, and no unassigned `message:N`
+  references;
 - provide weights greater than or equal to zero;
 - omit `skip_reason`.
 
@@ -47,7 +49,7 @@ For `create`:
 - omit `target_episode_id`.
 
 For `consolidate`:
-- provide `target_episode_id` from the supplied local `epN` prior-episode
+- provide `target_episode_id` from the supplied local `episode:N` prior-episode
   references.
 
 Do not emit individual `skip` proposals.

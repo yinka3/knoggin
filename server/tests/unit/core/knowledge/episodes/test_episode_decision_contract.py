@@ -49,16 +49,16 @@ def test_episode_repair_prompt_and_contract_require_all_influences():
 def test_llm_episode_decision_requires_typed_local_references():
     decision = LLMEpisodeDecision(
         action="consolidate",
-        target_episode_id="ep1",
+        target_episode_id="episode:1",
         summary="The conversation continued an existing thread.",
-        message_influences=[{"message_id": "m1", "influence_weight": 0.9}],
-        focus_entities=[{"entity_id": "e1", "prominence_weight": 0.8}],
+        message_influences=[{"message_id": "message:1", "influence_weight": 0.9}],
+        focus_entities=[{"entity_id": "entity:1", "prominence_weight": 0.8}],
         central_relationships=[
-            {"relationship_id": "r1", "prominence_weight": 0.7}
+            {"relationship_id": "relationship:1", "prominence_weight": 0.7}
         ],
     )
 
-    assert decision.target_episode_id == "ep1"
+    assert decision.target_episode_id == "episode:1"
 
     with pytest.raises(ValidationError):
         LLMEpisodeDecision(

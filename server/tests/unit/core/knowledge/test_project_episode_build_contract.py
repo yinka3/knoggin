@@ -36,15 +36,17 @@ def test_brief_is_readable_and_preserves_source_sessions():
     brief = build.evidence_brief()
 
     assert "Session session-a:" in brief
-    assert "[m1] USER: Plan launch" in brief
-    assert "paired-with m1" in brief
+    assert "[message:1] source-position=1 USER: Plan launch" in brief
+    assert "paired-with message:1" in brief
+    assert "ENTITIES:" in brief
+    assert "RELATIONSHIPS:" in brief
     assert '"message_id"' not in brief
 
 
 def test_window_rejects_overlapping_proposals():
     proposal = LLMEpisodeDecision(
         action="create", summary="Launch planning", message_influences=[
-            LLMEpisodeMessageInfluence(message_id="m1", influence_weight=1.0)
+            LLMEpisodeMessageInfluence(message_id="message:1", influence_weight=1.0)
         ],
     )
     try:
@@ -66,8 +68,8 @@ def test_user_modified_prior_episode_is_not_an_automation_target():
     # User-modified episodes are deliberately omitted from the model-visible
     # revision candidates, so their local target cannot be resolved.
     output = LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
-        action="consolidate", target_episode_id="ep1", summary="Changed",
-        message_influences=[LLMEpisodeMessageInfluence(message_id="m1", influence_weight=1.0)],
+        action="consolidate", target_episode_id="episode:1", summary="Changed",
+        message_influences=[LLMEpisodeMessageInfluence(message_id="message:1", influence_weight=1.0)],
     )])
     try:
         build.apply_llm_output(output)
@@ -84,7 +86,7 @@ def test_server_rejects_a_narrative_over_the_hard_character_limit():
         action="create",
         summary="x" * 4001,
         message_influences=[
-            LLMEpisodeMessageInfluence(message_id="m1", influence_weight=1.0)
+            LLMEpisodeMessageInfluence(message_id="message:1", influence_weight=1.0)
         ],
     )])
 
@@ -94,3 +96,52 @@ def test_server_rejects_a_narrative_over_the_hard_character_limit():
         assert "limit is 4000" in str(exc)
     else:
         raise AssertionError("over-limit episode narrative must be rejected")
+
+
+def test_server_rejects_catalog_items_outside_selected_message_evidence():
+    build = _build()
+    build.entity_ids_by_message = {10: [2], 11: [3]}
+    build.relationship_ids_by_message = {10: ["project-1:2:3"]}
+    build.entity_catalog = [
+        {"entity_id": 2, "canonical_name": "Ada", "type": "person"},
+        {"entity_id": 3, "canonical_name": "Knoggin", "type": "product"},
+    ]
+    build.relationship_catalog = [
+        {"relationship_id": "project-1:2:3", "relationship_type": "uses"}
+    ]
+    build.prepare_local_references()
+
+    output = LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
+        action="create",
+        summary="Ada described the plan.",
+        message_influences=[{"message_id": "message:1", "influence_weight": 1.0}],
+        focus_entities=[{"entity_id": "entity:2", "prominence_weight": 1.0}],
+    )])
+
+    try:
+        build.apply_llm_output(output)
+    except ValueError as exc:
+        assert "outside its selected evidence" in str(exc)
+    else:
+        raise AssertionError("catalog evidence must come from selected messages")
+
+
+def test_server_assigns_source_positions_instead_of_using_llm_order():
+    build = _build()
+    build.prepare_local_references()
+    output = LLMEpisodeWindowDecision(proposals=[LLMEpisodeDecision(
+        action="create",
+        summary="The plan and approval are one coherent thread.",
+        message_influences=[
+            {"message_id": "message:3", "influence_weight": 0.4},
+            {"message_id": "message:1", "influence_weight": 0.9},
+        ],
+    )])
+
+    build.apply_llm_output(output)
+    episode = build.create_episodes()[0]
+
+    assert [(message.message_id, message.message_position) for message in episode.messages] == [
+        (10, 0),
+        (12, 1),
+    ]
