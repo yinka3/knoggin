@@ -400,20 +400,14 @@ class MergeAuditWriter:
                         message_id,
                         source_entity_id,
                         target_entity_id,
-                        source_type,
-                        target_type,
                         observed_relationship_label,
-                        canonical_relationship_type,
-                        domain_status,
-                        domain_version,
-                        "symmetric",
-                        confidence,
+                        interpretation_source,
                         context,
                         observed_at_ms
                     )
                     VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s
+                        %s
                     )
                     ON CONFLICT (
                         project_id,
@@ -425,11 +419,7 @@ class MergeAuditWriter:
                         observed_relationship_label
                     ) DO UPDATE SET
                         relationship_id = EXCLUDED.relationship_id,
-                        canonical_relationship_type = EXCLUDED.canonical_relationship_type,
-                        domain_status = EXCLUDED.domain_status,
-                        domain_version = EXCLUDED.domain_version,
-                        "symmetric" = EXCLUDED."symmetric",
-                        confidence = EXCLUDED.confidence,
+                        interpretation_source = EXCLUDED.interpretation_source,
                         context = EXCLUDED.context,
                         observed_at_ms = EXCLUDED.observed_at_ms
                     """,
@@ -441,14 +431,8 @@ class MergeAuditWriter:
                         int(observation["message_id"]),
                         int(observation["source_entity_id"]),
                         int(observation["target_entity_id"]),
-                        observation.get("source_type"),
-                        observation.get("target_type"),
                         observation["observed_relationship_label"],
-                        observation.get("canonical_relationship_type"),
-                        observation.get("domain_status") or "unrecognized",
-                        int(observation.get("domain_version") or 0),
-                        bool(observation.get("symmetric", False)),
-                        float(observation.get("confidence") or 1.0),
+                        observation.get("interpretation_source") or "observed",
                         observation.get("context"),
                         int(observation["observed_at_ms"]),
                     ),

@@ -48,18 +48,22 @@ class RelationshipObservationReader:
                 message_id,
                 source_entity_id,
                 target_entity_id,
-                source_type,
-                target_type,
                 observed_relationship_label,
-                canonical_relationship_type,
-                domain_status,
-                confidence,
+                interpretation_source,
+                source_context.entity_type AS source_type,
+                target_context.entity_type AS target_type,
                 context,
                 observed_at_ms
             FROM relationship_observations
-            WHERE user_name = %s
-              AND project_id = %s
-              AND domain_status = 'unrecognized'
+            LEFT JOIN project_entity_contexts source_context
+              ON source_context.project_id = relationship_observations.project_id
+             AND source_context.entity_id = relationship_observations.source_entity_id
+            LEFT JOIN project_entity_contexts target_context
+              ON target_context.project_id = relationship_observations.project_id
+             AND target_context.entity_id = relationship_observations.target_entity_id
+            WHERE relationship_observations.user_name = %s
+              AND relationship_observations.project_id = %s
+              AND relationship_observations.interpretation_source = 'observed'
             ORDER BY observed_at_ms, observation_id
             """,
             (user_name, project_id),

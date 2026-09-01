@@ -896,9 +896,8 @@ class EntityReader:
                     jsonb_build_object(
                         'observation_id', observation.observation_id,
                         'observed_relationship_label', observation.observed_relationship_label,
-                        'canonical_relationship_type', observation.canonical_relationship_type,
+                        'relationship_type', relationship.relationship_type,
                         'observed_at_ms', observation.observed_at_ms,
-                        'confidence', observation.confidence,
                         'context', left(COALESCE(observation.context, ''), 600)
                     )
                     ORDER BY observation.observed_at_ms DESC,
@@ -1005,7 +1004,7 @@ class EntityReader:
             ) AS message_refs,
             (array_agg(ref.context ORDER BY ref.observed_at_ms DESC)
                 FILTER (WHERE ref.context IS NOT NULL))[1] AS context,
-            MAX(ref.confidence) AS confidence
+            COUNT(ref.observation_id) AS observation_count
         FROM relationships r
         JOIN entities neighbor
           ON neighbor.entity_id = CASE
@@ -1041,7 +1040,7 @@ class EntityReader:
                     "evidence_count": int(r["evidence_count"] or 0),
                     "message_refs": r["message_refs"] or [],
                     "context": self._clean_string(r["context"]),
-                    "confidence": float(r["confidence"] or 1.0),
+                    "observation_count": int(r["observation_count"] or 0),
                 }
                 for r in res
             ]

@@ -430,19 +430,13 @@ class GraphWriter:
                             message_id,
                             source_entity_id,
                             target_entity_id,
-                            source_type,
-                            target_type,
                             observed_relationship_label,
-                            canonical_relationship_type,
-                            domain_status,
-                            domain_version,
-                            "symmetric",
+                            interpretation_source,
                             context,
                             observed_at_ms
                         )
                         VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
                         ON CONFLICT (
                             project_id,
@@ -453,13 +447,7 @@ class GraphWriter:
                             target_entity_id,
                             observed_relationship_label
                         ) DO UPDATE SET
-                            canonical_relationship_type = COALESCE(
-                                EXCLUDED.canonical_relationship_type,
-                                relationship_observations.canonical_relationship_type
-                            ),
-                            domain_status = EXCLUDED.domain_status,
-                            domain_version = EXCLUDED.domain_version,
-                            "symmetric" = EXCLUDED."symmetric",
+                            interpretation_source = EXCLUDED.interpretation_source,
                             context = COALESCE(
                                 EXCLUDED.context,
                                 relationship_observations.context
@@ -477,13 +465,9 @@ class GraphWriter:
                             evidence_ref["message_id"],
                             relationship.source_entity_id,
                             relationship.target_entity_id,
-                            relationship.source_type,
-                            relationship.target_type,
                             relationship.observed_label,
-                            relationship.canonical_type,
-                            relationship.domain_status,
-                            relationship.domain_version,
-                            relationship.symmetric,
+                            relationship.interpretation_source
+                            or ("domain" if relationship.canonical_type else "observed"),
                             relationship.context,
                             source_times_by_message_id[relationship.message_id],
                         ),

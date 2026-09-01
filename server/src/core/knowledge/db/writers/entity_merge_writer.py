@@ -475,14 +475,8 @@ class EntityMergeWriter:
                                     WHEN target_entity_id = %s THEN %s
                                     ELSE target_entity_id
                                 END AS rewritten_target_id,
-                                source_type,
-                                target_type,
                                 observed_relationship_label,
-                                canonical_relationship_type,
-                                domain_status,
-                                domain_version,
-                                "symmetric",
-                                confidence,
+                                interpretation_source,
                                 context,
                                 observed_at_ms
                             FROM relationship_observations
@@ -497,14 +491,8 @@ class EntityMergeWriter:
                             message_id,
                             source_entity_id,
                             target_entity_id,
-                            source_type,
-                            target_type,
                             observed_relationship_label,
-                            canonical_relationship_type,
-                            domain_status,
-                            domain_version,
-                            "symmetric",
-                            confidence,
+                            interpretation_source,
                             context,
                             observed_at_ms
                         )
@@ -522,14 +510,8 @@ class EntityMergeWriter:
                                 THEN GREATEST(rewritten_source_id, rewritten_target_id)
                                 ELSE rewritten_target_id
                             END,
-                            source_type,
-                            target_type,
                             observed_relationship_label,
-                            canonical_relationship_type,
-                            domain_status,
-                            domain_version,
-                            "symmetric",
-                            confidence,
+                            interpretation_source,
                             context,
                             observed_at_ms
                         FROM rewritten
@@ -543,17 +525,7 @@ class EntityMergeWriter:
                             observed_relationship_label
                         ) DO UPDATE SET
                             relationship_id = EXCLUDED.relationship_id,
-                            canonical_relationship_type = COALESCE(
-                                EXCLUDED.canonical_relationship_type,
-                                relationship_observations.canonical_relationship_type
-                            ),
-                            domain_status = EXCLUDED.domain_status,
-                            domain_version = EXCLUDED.domain_version,
-                            "symmetric" = EXCLUDED."symmetric",
-                            confidence = GREATEST(
-                                relationship_observations.confidence,
-                                EXCLUDED.confidence
-                            ),
+                            interpretation_source = EXCLUDED.interpretation_source,
                             context = COALESCE(
                                 EXCLUDED.context,
                                 relationship_observations.context
@@ -571,7 +543,6 @@ class EntityMergeWriter:
                             old_relationship_id,
                             project_id,
                             new_relationship_id,
-                            bool(rel.get("symmetric", False)),
                             bool(rel.get("symmetric", False)),
                         ),
                     )

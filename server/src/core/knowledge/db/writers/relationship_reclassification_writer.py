@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import uuid
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Iterable
@@ -12,6 +14,8 @@ from psycopg import Error as PsycopgError
 from common.conf.domain_config import CompiledDomain
 from common.exceptions import StorageWriteError
 from common.scoping import require_scope_value
+from core.knowledge.db.projection_rebuilder import GraphBuilder
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.relationship_reclassification import (
     RelationshipReclassification,
     RelationshipReclassificationPlan,
@@ -74,6 +78,8 @@ class RelationshipReclassificationWriter:
 
     def __init__(self, client):
         self.client = client
+        self.reviews = MaintenanceReviewWriter(client)
+        self.projection = GraphBuilder(client)
 
     @staticmethod
     def _raise_storage_write(operation: str, exc: Exception) -> None:
@@ -129,20 +135,23 @@ class RelationshipReclassificationWriter:
                 observation.source_entity_id AS entity_a_id,
                 observation.target_entity_id AS entity_b_id,
                 relationship.relationship_type,
-                observation.canonical_relationship_type,
-                observation.domain_status,
-                observation.domain_version,
-                observation."symmetric" AS symmetric,
                 observation.observed_relationship_label,
-                observation.source_type,
-                observation.target_type
+                observation.interpretation_source,
+                source_context.entity_type AS source_type,
+                target_context.entity_type AS target_type
             FROM public.relationship_observations observation
             JOIN public.relationships relationship
               ON relationship.relationship_id = observation.relationship_id
              AND relationship.project_id = observation.project_id
+            LEFT JOIN public.project_entity_contexts source_context
+              ON source_context.project_id = observation.project_id
+             AND source_context.entity_id = observation.source_entity_id
+            LEFT JOIN public.project_entity_contexts target_context
+              ON target_context.project_id = observation.project_id
+             AND target_context.entity_id = observation.target_entity_id
             WHERE observation.user_name = %s
               AND observation.project_id = %s
-              AND observation.domain_status = 'unrecognized'
+              AND observation.interpretation_source = 'observed'
               AND observation.observation_id > %s
             ORDER BY observation.observation_id
         """
@@ -212,106 +221,22 @@ class RelationshipReclassificationWriter:
         change: RelationshipReclassification,
         domain_version: int,
     ) -> None:
-        """Move one evidence row and retain its semantics on unique-key merge."""
+        """Change interpretation in place so the evidence identity survives."""
 
         await cur.execute(
             """
-            WITH moved AS (
-                DELETE FROM public.relationship_observations
-                WHERE observation_id = %s
-                  AND relationship_id = %s
-                  AND project_id = %s
-                RETURNING
-                    project_id,
-                    user_name,
-                    session_id,
-                    message_id,
-                    source_entity_id,
-                    target_entity_id,
-                    source_type,
-                    target_type,
-                    observed_relationship_label,
-                    confidence,
-                    context,
-                    observed_at_ms
-            )
-            INSERT INTO public.relationship_observations (
-                relationship_id,
-                project_id,
-                user_name,
-                session_id,
-                message_id,
-                source_entity_id,
-                target_entity_id,
-                source_type,
-                target_type,
-                observed_relationship_label,
-                canonical_relationship_type,
-                domain_status,
-                domain_version,
-                "symmetric",
-                confidence,
-                context,
-                observed_at_ms
-            )
-            SELECT
-                %s,
-                project_id,
-                user_name,
-                session_id,
-                message_id,
-                CASE WHEN %s THEN LEAST(source_entity_id, target_entity_id)
-                     ELSE source_entity_id END,
-                CASE WHEN %s THEN GREATEST(source_entity_id, target_entity_id)
-                     ELSE target_entity_id END,
-                source_type,
-                target_type,
-                observed_relationship_label,
-                %s,
-                'recognized',
-                %s,
-                %s,
-                confidence,
-                context,
-                observed_at_ms
-            FROM moved
-            ON CONFLICT (
-                project_id,
-                user_name,
-                session_id,
-                message_id,
-                source_entity_id,
-                target_entity_id,
-                observed_relationship_label
-            ) DO UPDATE SET
-                relationship_id = EXCLUDED.relationship_id,
-                canonical_relationship_type = EXCLUDED.canonical_relationship_type,
-                domain_status = EXCLUDED.domain_status,
-                domain_version = EXCLUDED.domain_version,
-                "symmetric" = EXCLUDED."symmetric",
-                confidence = GREATEST(
-                    public.relationship_observations.confidence,
-                    EXCLUDED.confidence
-                ),
-                context = COALESCE(
-                    EXCLUDED.context,
-                    public.relationship_observations.context
-                ),
-                observed_at_ms = GREATEST(
-                    public.relationship_observations.observed_at_ms,
-                    EXCLUDED.observed_at_ms
-                )
+            UPDATE public.relationship_observations
+            SET relationship_id = %s,
+                interpretation_source = 'domain'
+            WHERE observation_id = %s
+              AND relationship_id = %s
+              AND project_id = %s
             """,
             (
+                change.new_relationship_id,
                 change.observation_id,
                 change.relationship_id,
                 change.project_id,
-                change.new_relationship_id,
-                change.new_symmetric,
-                change.new_symmetric,
-                change.new_canonical_relationship_type,
-                domain_version,
-                change.new_symmetric,
             ),
         )
     @staticmethod
@@ -319,10 +244,32 @@ class RelationshipReclassificationWriter:
         cur,
         *,
         project_id: str,
-        relationship_ids: list[str],
+        observation_ids: list[int],
     ) -> None:
-        if not relationship_ids:
+        if not observation_ids:
             return
+        await cur.execute(
+            """
+            CREATE TEMP TABLE affected_episodes ON COMMIT DROP AS
+            SELECT DISTINCT episode_message.episode_id
+            FROM public.episode_messages episode_message
+            JOIN public.relationship_observations observation
+              ON observation.project_id = episode_message.project_id
+             AND observation.session_id = episode_message.session_id
+             AND observation.message_id = episode_message.message_id
+            WHERE episode_message.project_id = %s
+              AND observation.observation_id = ANY(%s)
+            """,
+            (project_id, observation_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM public.episode_relationships
+            WHERE project_id = %s
+              AND episode_id IN (SELECT episode_id FROM affected_episodes)
+            """,
+            (project_id,),
+        )
         await cur.execute(
             """
             INSERT INTO public.episode_relationships (
@@ -342,7 +289,10 @@ class RelationshipReclassificationWriter:
              AND observation.session_id = episode_message.session_id
              AND observation.message_id = episode_message.message_id
             WHERE episode_message.project_id = %s
-              AND observation.relationship_id = ANY(%s)
+              AND episode_message.episode_id IN (
+                  SELECT episode_id FROM affected_episodes
+              )
+              AND observation.relationship_id IS NOT NULL
             GROUP BY
                 episode_message.episode_id,
                 episode_message.project_id,
@@ -353,7 +303,7 @@ class RelationshipReclassificationWriter:
                     EXCLUDED.source_message_count
                 )
             """,
-            (project_id, relationship_ids),
+            (project_id,),
         )
 
     @staticmethod
@@ -427,17 +377,20 @@ class RelationshipReclassificationWriter:
                     observation.source_entity_id AS entity_a_id,
                     observation.target_entity_id AS entity_b_id,
                     relationship.relationship_type,
-                    observation.canonical_relationship_type,
-                    observation.domain_status,
-                    observation.domain_version,
-                    observation."symmetric" AS symmetric,
                     observation.observed_relationship_label,
-                    observation.source_type,
-                    observation.target_type
+                    observation.interpretation_source,
+                    source_context.entity_type AS source_type,
+                    target_context.entity_type AS target_type
                 FROM public.relationship_observations observation
                 JOIN public.relationships relationship
                   ON relationship.relationship_id = observation.relationship_id
                  AND relationship.project_id = observation.project_id
+                LEFT JOIN public.project_entity_contexts source_context
+                  ON source_context.project_id = observation.project_id
+                 AND source_context.entity_id = observation.source_entity_id
+                LEFT JOIN public.project_entity_contexts target_context
+                  ON target_context.project_id = observation.project_id
+                 AND target_context.entity_id = observation.target_entity_id
                 WHERE observation.user_name = %s
                   AND observation.project_id = %s
                   AND observation.observation_id = ANY(%s)
@@ -484,13 +437,49 @@ class RelationshipReclassificationWriter:
             await self._reconcile_episode_relationships(
                 cur,
                 project_id=project_id,
-                relationship_ids=sorted(affected_relationship_ids),
+                observation_ids=sorted(
+                    change.observation_id
+                    for change in planned
+                    if change.observation_id in current_rows
+                ),
             )
             await self._remove_orphaned_relationships(
                 cur,
                 project_id=project_id,
                 relationship_ids=sorted(old_relationship_ids),
             )
+            if updated:
+                changed_observations = [
+                    change.to_dict()
+                    for change in planned
+                    if change.observation_id in current_rows
+                ]
+                await self.reviews.mark_stale_for_observations(
+                    user_name=user_name,
+                    project_id=project_id,
+                    observation_ids=[item["observation_id"] for item in changed_observations],
+                    reason="Relationship interpretation changed",
+                    cur=cur,
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO public.maintenance_reinterpretation_audits
+                        (audit_id, user_name, project_id, observation_ids, changes)
+                    VALUES (%s, %s, %s, %s::jsonb, %s::jsonb)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        user_name,
+                        project_id,
+                        json.dumps([item["observation_id"] for item in changed_observations]),
+                        json.dumps(changed_observations, sort_keys=True, default=str),
+                    ),
+                )
+                await self.projection.rebuild_project_projection(
+                    project_id,
+                    user_name,
+                    cur=cur,
+                )
 
         return RelationshipReclassificationBatchResult(
             scanned=len(planned), updated=updated, conflicts=conflicts

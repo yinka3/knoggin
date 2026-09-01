@@ -71,6 +71,9 @@ from core.knowledge.db.writers.message_writer import MessageWriter
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
 )
+from core.knowledge.db.writers.relationship_interpretation_writer import (
+    RelationshipInterpretationWriter,
+)
 from core.knowledge.db.writers.relationship_reclassification_writer import (
     HistoricalRelationshipReclassificationResult,
     RelationshipReclassificationWriter,
@@ -108,6 +111,9 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._relationship_reclassification_writer = RelationshipReclassificationWriter(
+            self._postgres_client
+        )
+        self._relationship_interpretation_writer = RelationshipInterpretationWriter(
             self._postgres_client
         )
         self._episode_writer = EpisodeWriter(self._postgres_client)
@@ -976,6 +982,27 @@ class KnowledgeStore:
             domain=domain,
             batch_size=batch_size,
             max_relationships=max_relationships,
+        )
+
+    async def apply_relationship_interpretation_plan(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        plan,
+        domain: CompiledDomain | None = None,
+        review_id: str | None = None,
+        actor: str | None = None,
+    ):
+        """Apply one typed relationship review through deterministic reconciliation."""
+
+        return await self._relationship_interpretation_writer.apply_plan(
+            user_name=user_name,
+            project_id=project_id,
+            plan=plan,
+            domain=domain,
+            review_id=review_id,
+            actor=actor,
         )
 
     async def preview_project_entity_cleanup(

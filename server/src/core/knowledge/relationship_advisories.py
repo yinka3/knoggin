@@ -243,6 +243,8 @@ def build_relationship_advisories(
     thresholds = thresholds or AdvisoryThresholds()
     groups: dict[str, dict[str, Any]] = {}
     for row in observations:
+        if row.get("interpretation_source", "observed") != "observed":
+            continue
         if row.get("domain_status", "unrecognized") != "unrecognized":
             continue
         raw_label = (

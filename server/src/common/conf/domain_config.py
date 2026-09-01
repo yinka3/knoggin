@@ -75,6 +75,7 @@ class RelationshipDefinition:
     source_types: tuple[str, ...]
     target_types: tuple[str, ...]
     symmetric: bool = False
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +227,8 @@ class DomainConfig:
                 "source_types",
                 "target_types",
                 "symmetric",
+                "labels",
+                "aliases",
             }
             if unknown_fields:
                 raise DomainConfigError(
@@ -268,12 +271,27 @@ class DomainConfig:
                     f"Symmetric relationship {name!r} must use the same source "
                     "and target entity types"
                 )
+            labels = _unique_texts(
+                raw_value.get("labels", raw_value.get("aliases", [])),
+                f"Relationship {name!r}.labels",
+            )
+            aliases = _unique_texts(
+                raw_value.get("aliases", []),
+                f"Relationship {name!r}.aliases",
+            )
+            labels = tuple(
+                dict.fromkeys(
+                    " ".join(item.split()).casefold()
+                    for item in (*labels, *aliases)
+                )
+            )
             relationships.append(
                 RelationshipDefinition(
                     name=name,
                     source_types=source_types,
                     target_types=target_types,
                     symmetric=symmetric,
+                    labels=labels,
                 )
             )
 
@@ -317,6 +335,7 @@ class DomainConfig:
                     "source_types": list(relationship.source_types),
                     "target_types": list(relationship.target_types),
                     "symmetric": relationship.symmetric,
+                    "labels": list(relationship.labels),
                 }
                 for relationship in self.relationships
             },
@@ -349,6 +368,16 @@ class DomainConfig:
             label_to_entity_type=_frozen_mapping(label_to_type),
             entity_type_to_topic=_frozen_mapping(entity_to_topic),
             relationships=_frozen_mapping(relationship_map),
+            relationship_labels=_frozen_mapping(
+                {
+                    key: relationship
+                    for relationship in self.relationships
+                    for key in {
+                        relationship.name.casefold(),
+                        *relationship.labels,
+                    }
+                }
+            ),
             topic_aliases=_frozen_mapping(
                 {topic.name.casefold(): topic.name for topic in self.topics}
             ),
@@ -375,6 +404,9 @@ class CompiledDomain:
     relationships: Mapping[str, RelationshipDefinition]
     topic_aliases: Mapping[str, str]
     descriptions: Mapping[str, str]
+    relationship_labels: Mapping[str, RelationshipDefinition] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     topic_descriptions: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -392,6 +424,7 @@ class CompiledDomain:
             label_to_entity_type=_frozen_mapping({}),
             entity_type_to_topic=_frozen_mapping({}),
             relationships=_frozen_mapping({}),
+            relationship_labels=_frozen_mapping({}),
             topic_aliases=_frozen_mapping({}),
             descriptions=_frozen_mapping({}),
             topic_descriptions=_frozen_mapping({}),
@@ -412,6 +445,7 @@ class CompiledDomain:
                     "source_types": list(value.source_types),
                     "target_types": list(value.target_types),
                     "symmetric": value.symmetric,
+                    "labels": list(value.labels),
                 }
                 for key, value in self.relationships.items()
             },
@@ -441,6 +475,7 @@ class CompiledDomain:
                     source_types=tuple(value["source_types"]),
                     target_types=tuple(value["target_types"]),
                     symmetric=value.get("symmetric", False),
+                    labels=tuple(value.get("labels", value.get("aliases", []))),
                 )
                 for key, value in payload["relationships"].items()
             }
@@ -456,6 +491,16 @@ class CompiledDomain:
             label_to_entity_type=_frozen_mapping(label_to_entity_type),
             entity_type_to_topic=_frozen_mapping(entity_type_to_topic),
             relationships=_frozen_mapping(relationships),
+            relationship_labels=_frozen_mapping(
+                {
+                    key: relationship
+                    for relationship in relationships.values()
+                    for key in {
+                        relationship.name.casefold(),
+                        *relationship.labels,
+                    }
+                }
+            ),
             topic_aliases=_frozen_mapping(topic_aliases),
             descriptions=_frozen_mapping(descriptions),
             topic_descriptions=_frozen_mapping(topic_descriptions),
@@ -515,13 +560,19 @@ class CompiledDomain:
         if not isinstance(name, str):
             return None
         key = name.strip().casefold()
-        direct = self.relationships.get(key)
+        direct = self.relationship_labels.get(key)
         if direct is not None:
             return direct
         normalized = key.replace("-", "_").replace(" ", "_")
+        direct = self.relationship_labels.get(normalized)
+        if direct is not None:
+            return direct
         for relationship in self.relationships.values():
             configured = relationship.name.casefold()
-            if configured == normalized:
+            if configured == normalized or any(
+                label.replace("-", "_").replace(" ", "_") == normalized
+                for label in relationship.labels
+            ):
                 return relationship
         return None
 
@@ -591,6 +642,8 @@ class CompiledDomain:
                 f"{', '.join(relationship.source_types)}{direction}"
                 f"{', '.join(relationship.target_types)}"
             )
+            if relationship.labels:
+                lines.append(f"  Labels: {', '.join(relationship.labels)}")
         return "\n".join(lines)
 
     @property

@@ -153,17 +153,21 @@ class ConflictDiscoveryReader:
                 source.canonical_name AS source_entity_name,
                 observation.target_entity_id,
                 target.canonical_name AS target_entity_name,
-                observation.source_type,
-                observation.target_type,
+                source_context.entity_type AS source_type,
+                target_context.entity_type AS target_type,
                 observation.observed_relationship_label,
-                observation.canonical_relationship_type,
-                observation.domain_status,
-                observation.confidence,
+                observation.interpretation_source,
                 observation.context,
                 observation.observed_at_ms
             FROM public.relationship_observations observation
             JOIN public.entities source ON source.entity_id = observation.source_entity_id
             JOIN public.entities target ON target.entity_id = observation.target_entity_id
+            LEFT JOIN public.project_entity_contexts source_context
+              ON source_context.project_id = observation.project_id
+             AND source_context.entity_id = observation.source_entity_id
+            LEFT JOIN public.project_entity_contexts target_context
+              ON target_context.project_id = observation.project_id
+             AND target_context.entity_id = observation.target_entity_id
             WHERE observation.user_name = %s
               AND observation.project_id = %s
             {suffix}

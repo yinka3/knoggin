@@ -523,7 +523,7 @@ ON public.relationships(entity_b_id);
 -- authority. This is the only canonical relationship-evidence record.
 CREATE TABLE IF NOT EXISTS public.relationship_observations (
     observation_id BIGSERIAL PRIMARY KEY,
-    relationship_id TEXT NOT NULL,
+    relationship_id TEXT,
     project_id TEXT NOT NULL,
     user_name TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -532,17 +532,10 @@ CREATE TABLE IF NOT EXISTS public.relationship_observations (
         ON DELETE CASCADE,
     target_entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
         ON DELETE CASCADE,
-    source_type TEXT,
-    target_type TEXT,
     observed_relationship_label TEXT NOT NULL
         CHECK (btrim(observed_relationship_label) <> ''),
-    canonical_relationship_type TEXT,
-    domain_status TEXT NOT NULL DEFAULT 'unrecognized'
-        CHECK (domain_status IN ('recognized', 'unrecognized')),
-    domain_version INTEGER NOT NULL DEFAULT 0 CHECK (domain_version >= 0),
-    "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0
-        CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    interpretation_source TEXT NOT NULL DEFAULT 'observed'
+        CHECK (interpretation_source IN ('observed', 'domain', 'review')),
     context TEXT,
     observed_at_ms BIGINT NOT NULL,
     CONSTRAINT relationship_observations_distinct_entities
@@ -550,16 +543,11 @@ CREATE TABLE IF NOT EXISTS public.relationship_observations (
     CONSTRAINT relationship_observations_relationship_fk
         FOREIGN KEY (relationship_id, project_id)
         REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE,
+        ON DELETE RESTRICT,
     CONSTRAINT relationship_observations_message_fk
         FOREIGN KEY (user_name, session_id, message_id, project_id)
         REFERENCES public.messages(user_name, session_id, message_id, project_id)
         ON DELETE CASCADE,
-    CONSTRAINT relationship_observations_domain_status_consistent
-        CHECK (
-            (domain_status = 'recognized')
-            = (canonical_relationship_type IS NOT NULL)
-        ),
     CONSTRAINT relationship_observations_unique_evidence
         UNIQUE (
             project_id,
@@ -576,10 +564,8 @@ CREATE INDEX IF NOT EXISTS relationship_observations_pattern_idx
 ON public.relationship_observations(
     project_id,
     user_name,
-    domain_status,
-    observed_relationship_label,
-    source_type,
-    target_type
+    interpretation_source,
+    observed_relationship_label
 );
 
 CREATE INDEX IF NOT EXISTS relationship_observations_relationship_idx
@@ -588,12 +574,6 @@ ON public.relationship_observations(relationship_id, project_id);
 CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
 ON public.relationship_observations(project_id, user_name, session_id, message_id);
 
-ALTER TABLE public.relationship_observations
-    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_check,
-    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_range_check;
-ALTER TABLE public.relationship_observations
-    ADD CONSTRAINT relationship_observations_confidence_range_check
-        CHECK (confidence >= 0.0 AND confidence <= 1.0);
 
 -- Durable advisory disposition. Evidence remains in relationship_observations;
 -- this table stores only the current user decision for each pattern.
@@ -736,6 +716,19 @@ CREATE TABLE IF NOT EXISTS public.maintenance_review_events (
 
 CREATE INDEX IF NOT EXISTS maintenance_review_events_review_idx
 ON public.maintenance_review_events(review_id, created_at, event_id);
+
+CREATE TABLE IF NOT EXISTS public.maintenance_reinterpretation_audits (
+    audit_id UUID PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    observation_ids JSONB NOT NULL CHECK (jsonb_typeof(observation_ids) = 'array'),
+    changes JSONB NOT NULL CHECK (jsonb_typeof(changes) = 'array'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS maintenance_reinterpretation_audits_project_idx
+ON public.maintenance_reinterpretation_audits(project_id, created_at DESC);
 
 -- Cursor for the bounded background evidence scan.  It is maintenance
 -- progress, not a conflict-group workflow state machine.
@@ -2610,6 +2603,55 @@ END $$;
 -- marker to databases created before that field was introduced.
 ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS user_modified BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Normalize pre-Batch-8 relationship evidence in place.  The observed phrase
+-- and source coordinates are immutable evidence; only the current
+-- interpretation is mutable.  A NULL relationship_id is an intentional
+-- reviewed exclusion from current topology.
+ALTER TABLE public.relationship_observations
+    ALTER COLUMN relationship_id DROP NOT NULL,
+    ADD COLUMN IF NOT EXISTS interpretation_source TEXT NOT NULL DEFAULT 'observed';
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'relationship_observations'
+          AND column_name = 'domain_status'
+    ) THEN
+        UPDATE public.relationship_observations
+        SET interpretation_source = CASE
+            WHEN domain_status = 'recognized' THEN 'domain'
+            ELSE 'observed'
+        END
+        WHERE interpretation_source = 'observed'
+          AND domain_status IS NOT NULL;
+    END IF;
+END $$;
+ALTER TABLE public.relationship_observations
+    DROP CONSTRAINT IF EXISTS relationship_observations_domain_status_consistent,
+    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_check,
+    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_range_check;
+ALTER TABLE public.relationship_observations
+    DROP COLUMN IF EXISTS source_type,
+    DROP COLUMN IF EXISTS target_type,
+    DROP COLUMN IF EXISTS canonical_relationship_type,
+    DROP COLUMN IF EXISTS domain_status,
+    DROP COLUMN IF EXISTS domain_version,
+    DROP COLUMN IF EXISTS "symmetric",
+    DROP COLUMN IF EXISTS confidence;
+ALTER TABLE public.relationship_observations
+    DROP CONSTRAINT IF EXISTS relationship_observations_interpretation_source_check;
+ALTER TABLE public.relationship_observations
+    DROP CONSTRAINT IF EXISTS relationship_observations_relationship_fk;
+ALTER TABLE public.relationship_observations
+    ADD CONSTRAINT relationship_observations_relationship_fk
+        FOREIGN KEY (relationship_id, project_id)
+        REFERENCES public.relationships(relationship_id, project_id)
+        ON DELETE RESTRICT;
+ALTER TABLE public.relationship_observations
+    ADD CONSTRAINT relationship_observations_interpretation_source_check
+        CHECK (interpretation_source IN ('observed', 'domain', 'review'));
 
 -- The typed review envelope supersedes the former pointer, advisory, and
 -- conflict workflow tables in this unreleased schema.  Evidence itself stays

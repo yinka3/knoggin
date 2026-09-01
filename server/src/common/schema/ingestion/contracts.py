@@ -70,6 +70,7 @@ class RelationshipObservation(BaseModel):
     relationship_type: str = Field(..., min_length=1)
     observed_label: Optional[str] = None
     canonical_type: Optional[str] = None
+    interpretation_source: Literal["observed", "domain", "review"] | None = None
     domain_status: Literal["recognized", "unrecognized"] = "unrecognized"
     source_type: Optional[str] = None
     target_type: Optional[str] = None
@@ -91,6 +92,10 @@ class RelationshipObservation(BaseModel):
         self.relationship_type = self.canonical_type or observed
         self.domain_status = (
             "recognized" if self.canonical_type is not None else "unrecognized"
+        )
+        self.interpretation_source = (
+            self.interpretation_source
+            or ("domain" if self.canonical_type is not None else "observed")
         )
         return self
 
@@ -235,6 +240,7 @@ class RelationshipWrite:
     context: Optional[str] = None
     observed_label: Optional[str] = None
     canonical_type: Optional[str] = None
+    interpretation_source: Literal["observed", "domain", "review"] | None = None
     domain_status: Literal["recognized", "unrecognized"] = "unrecognized"
     source_type: Optional[str] = None
     target_type: Optional[str] = None
@@ -269,6 +275,12 @@ class RelationshipWrite:
             object.__setattr__(self, "domain_status", "recognized")
         else:
             object.__setattr__(self, "domain_status", "unrecognized")
+        object.__setattr__(
+            self,
+            "interpretation_source",
+            self.interpretation_source
+            or ("domain" if self.canonical_type is not None else "observed"),
+        )
         if not isinstance(self.domain_version, int) or isinstance(self.domain_version, bool) or self.domain_version < 0:
             raise ValueError("RelationshipWrite.domain_version must be a non-negative integer")
         if self.context is not None:
