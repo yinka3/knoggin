@@ -73,7 +73,6 @@ def relationship(
         entity_a=entity_a,
         entity_b=entity_b,
         relationship=name,
-        confidence=0.91,
         context=f"{entity_a} {name} {entity_b}.",
     )
 
@@ -83,7 +82,6 @@ def user_relationship(*, msg_id="m1", entity_name="Knoggin", name="works_on"):
         msg_id=msg_id,
         entity_name=entity_name,
         relationship=name,
-        confidence=0.88,
         context=f"ada {name} {entity_name}.",
     )
 
@@ -218,7 +216,6 @@ async def test_extract_connections_happy_path_returns_graph_write_observations()
 
     assert observations[0].message_id == 1
     assert observations[0].relationship_type == "works_with"
-    assert observations[0].confidence == 0.91
     assert observations[0].identity_rooted is False
     assert observations[1].message_id == 1
     assert observations[1].relationship_type == "works_on"

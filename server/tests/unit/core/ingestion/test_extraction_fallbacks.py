@@ -54,7 +54,6 @@ async def test_connections_result_accepts_source_message_ids():
                     "entity_a": "Alice",
                     "entity_b": "Bob",
                     "relationship": "met",
-                    "confidence": 0.9,
                     "context": "Alice met Bob.",
                 }
             ]
@@ -76,7 +75,6 @@ def test_connections_result_requires_a_local_message_reference():
                         "entity_a": "Alice",
                         "entity_b": "Bob",
                         "relationship": "met",
-                        "confidence": 0.9,
                         "context": "Alice met Bob.",
                     }
                 ]
@@ -115,7 +113,6 @@ async def test_connection_extraction_keeps_valid_connections():
                     entity_a="Alice",
                     entity_b="Bob",
                     relationship="met",
-                    confidence=0.9,
                     context="Alice met Bob.",
                 )
             ]
@@ -145,7 +142,6 @@ async def test_connection_extraction_keeps_valid_connections():
             domain_status="unrecognized",
             source_type="Identity",
             target_type="Identity",
-            confidence=0.9,
             context="Alice met Bob.",
         )
     ]

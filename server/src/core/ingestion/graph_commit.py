@@ -60,7 +60,7 @@ async def build_ingestion_commit(
     if existing_candidates:
         validation_result = await knowledge_store.validate_existing_ids(
             existing_candidates,
-            visible_project_ids=[scope.project_id],
+            visible_project_ids=entities.readable_project_ids,
         )
         valid_existing_ids = validation_result
         missing_existing_ids = set(existing_candidates) - valid_existing_ids
@@ -158,7 +158,6 @@ async def build_ingestion_commit(
                 entity_b_id=int(target["id"]),
                 relationship_type=observation.relationship_type,
                 message_id=observation.message_id,
-                confidence=observation.confidence,
                 context=observation.context,
                 observed_label=observation.observed_label,
                 canonical_type=observation.canonical_type,

@@ -6,7 +6,6 @@ You receive upstream results from:
 - **Domain Schema**: Valid extraction labels, canonical entity types, and topics
 - **Known Entities**: Already in the graph. Authoritative, skip these.
 - **GLiNER Extractions**: Zero-shot NER output. Good but imperfect—you may override if context contradicts.
-- **Ambiguous**: GLiNER found these but the evidence needs contextual review.
 </role>
 
 <valid_types>
@@ -19,7 +18,7 @@ from the selected canonical entity type.
 Return exactly this top-level shape:
 {
   "mentions": [
-    {"msg_id": "m1", "name": str, "type": str, "confidence": float}
+    {"msg_id": "m1", "name": str, "type": str}
   ]
 }
 Do not add fields outside this schema.
@@ -33,17 +32,15 @@ Never extract {user_name} as an entity—they are the implicit root node.
 </speaker_context>
 
 <tasks>
-1. **Ambiguous Resolution**: For each ambiguous extraction, select the correct canonical entity type based on message context.
+1. **GLiNER Override**: If a GLiNER extraction is clearly wrong (wrong label, generic noun as entity), correct or omit it.
 
-2. **GLiNER Override**: If a GLiNER extraction is clearly wrong (wrong label, generic noun as entity), correct or omit it.
-
-3. **Discovery**: Find proper nouns and named things that Known Entities and GLiNER both missed.
+2. **Discovery**: Find proper nouns and named things that Known Entities and GLiNER both missed.
    - Extract the **full proper name** as it appears ("The Museum of Modern Art", not "Museum")
    - Do NOT extract generic nouns, pronouns, or long descriptive phrases.
    - Do NOT return Known Entities already listed as authoritative.
    - Do NOT return mentions already covered by GLiNER unless you are correcting an ambiguous or wrong extraction.
 
-4. **Ubiquity Filter**:
+3. **Ubiquity Filter**:
    - Do NOT extract mass-market brands, platforms, or locations (e.g., "iPhone", "Zoom", "Starbucks") if they are mentioned merely as a tool, setting, or background context.
    - **Exception**: Extract them ONLY if the user describes a specific, non-consumer relationship (e.g., "I work at Apple", "I invested in Starbucks").
 </tasks>
@@ -58,22 +55,20 @@ nouns, lean toward extraction—duplicates are resolved later.
 Input: [USER] "I'm heading to the Louvre with my friend Alice."
 Output: {
   "mentions": [
-    {"msg_id": "m1", "name": "Louvre", "type": "Landmark", "confidence": 0.98},
-    {"msg_id": "m1", "name": "Alice", "type": "Person", "confidence": 0.95}
+    {"msg_id": "m1", "name": "Louvre", "type": "Landmark"},
+    {"msg_id": "m1", "name": "Alice", "type": "Person"}
   ]
 }
 </example>
 
 <output_format>
 Return your response as a JSON object matching the requested schema.
-Use top-level key "mentions". Every mention MUST include msg_id, name, type, and confidence.
+Use top-level key "mentions". Every mention MUST include msg_id, name, and type.
 msg_id MUST be one of the local `mN` message references shown as [MSG <id>] in the
 input. These are local to this extraction call; never infer or return a system
 message ID.
 type MUST exactly match a canonical entity type from the Domain Schema.
 Include only entities that qualify based on the tasks and ubiquity filters.
-Confidence scores: 0.9+ for unambiguous matches, 0.8-0.9 for likely correct ones.
-If confidence would be below 0.8, omit the mention.
 If there are no qualifying mentions, return {"mentions": []}.
 </output_format>
 
@@ -88,10 +83,10 @@ Find connections between candidate entities based on what's stated in the messag
 Return exactly this top-level shape:
 {
   "connections": [
-    {"msg_id": "m1", "entity_a": str, "entity_b": str, "relationship": str, "confidence": float, "context": str}
+    {"msg_id": "m1", "entity_a": str, "entity_b": str, "relationship": str, "context": str}
   ],
   "user_connections": [
-    {"msg_id": "m1", "entity_name": str, "relationship": str, "confidence": float, "context": str}
+    {"msg_id": "m1", "entity_name": str, "relationship": str, "context": str}
   ]
 }
 Do not add fields outside this schema.
@@ -138,7 +133,7 @@ You receive:
 Input: [USER] "Alice and Bob were there."
 Output: {
   "connections": [
-    {"msg_id": "m1", "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "confidence": 0.85, "context": "Mentioned together as being in the same place."}
+    {"msg_id": "m1", "entity_a": "Alice", "entity_b": "Bob", "relationship": "social_interaction", "context": "Mentioned together as being in the same place."}
   ],
   "user_connections": []
 }
@@ -147,11 +142,10 @@ Output: {
 <output_format>
 Return your response as a JSON object matching the requested schema.
 Use top-level keys "connections" and "user_connections". Every list may be empty.
-Every connection MUST include msg_id, entity_a, entity_b, relationship, confidence, and context.
-Every user_connection MUST include msg_id, entity_name, relationship, confidence, and context.
+Every connection MUST include msg_id, entity_a, entity_b, relationship, and context.
+Every user_connection MUST include msg_id, entity_name, relationship, and context.
 Include only relationships that are explicitly stated or physically implied.
 Prefer empty lists over weak, inferred, or co-mention-only edges.
 relationship should be a short evidence-grounded label such as "works_with", "family_relationship", "attended_event_together", or "social_interaction".
 context should quote or closely paraphrase the message evidence.
-Confidence: 0.8+ for explicit, 0.5-0.8 for strong implication.
 </output_format>

@@ -134,7 +134,6 @@ class IngestionPipeline:
         return IngestionPolicy.capture(
             text_processor=TextProcessorSettings(
                 gliner_threshold=self.processor.gliner_threshold,
-                vp01_min_confidence=self.processor.vp01_min_confidence,
                 llm_ner=self.processor.llm_ner,
             ),
             entity_resolution=EntityResolutionSettings(
@@ -268,7 +267,6 @@ class IngestionPipeline:
                         {
                             "a": item.entity_a_name,
                             "b": item.entity_b_name,
-                            "confidence": item.confidence,
                         }
                         for item in observations
                         if not item.identity_rooted
@@ -276,7 +274,6 @@ class IngestionPipeline:
                     "user_pairs": [
                         {
                             "entity": item.entity_b_name,
-                            "confidence": item.confidence,
                         }
                         for item in observations
                         if item.identity_rooted

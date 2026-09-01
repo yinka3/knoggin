@@ -37,7 +37,7 @@ class TextProcessor:
     TextProcessor combines deterministic known-alias matching, GLiNER label-based
     extraction, and optional VP-01 LLM extraction. It is responsible for producing
     candidate mentions in the shape `(msg_id, name, type, topic)`, while filtering
-    invalid, duplicate, inactive-topic, ambiguous, and low-confidence mentions.
+    invalid, duplicate, and inactive-topic mentions.
 
     This class does not create or resolve graph entities. Its job is to identify
     mention candidates with a canonical domain entity type and derived topic so
@@ -73,7 +73,6 @@ class TextProcessor:
     def update_settings(self, config: TextProcessorSettings):
         """Update settings dynamically while running."""
         self.gliner_threshold = config.gliner_threshold
-        self.vp01_min_confidence = config.vp01_min_confidence
         self.llm_ner = config.llm_ner
 
     async def _run_model_work(
@@ -351,7 +350,6 @@ class TextProcessor:
 
         covered_texts: Dict[int, set] = {m["id"]: set() for m in messages}
         resolved: List[Tuple[int, str, str, str]] = []
-        ambiguous: List[Tuple[int, str, str, List[str]]] = []
 
         # process known entities first (highest priority)
         tracked_known_matches = set()
@@ -388,8 +386,12 @@ class TextProcessor:
                 )
             )
 
+        known_covered_texts = {
+            msg_id: set(texts) for msg_id, texts in covered_texts.items()
+        }
         gliner_filtered = set()
         gliner_accepted_count = 0
+        gliner_output_positions: Dict[tuple[int, str], int] = {}
 
         for msg_id, span_text, label in gliner_ents:
             if is_covered(span_text, covered_texts[msg_id]):
@@ -413,6 +415,7 @@ class TextProcessor:
             covered_texts[msg_id].add(span_text.casefold())
             gliner_accepted_count += 1
             resolved.append((msg_id, span_text, entity_type, topic))
+            gliner_output_positions[(msg_id, span_text.casefold())] = len(resolved) - 1
 
         trace.gliner_accepted_mentions = gliner_accepted_count
 
@@ -448,10 +451,10 @@ class TextProcessor:
             messages,
             known_ents,
             gliner_ents,
-            ambiguous,
             covered_texts,
             policy.domain.label_block,
             message_local_ids,
+            identity_context=user_name,
         )
 
         system_prompt = ner_prompt(user_name)
@@ -521,24 +524,6 @@ class TextProcessor:
                     )
                     continue
 
-                if entity.confidence < policy.vp01_min_confidence:
-                    trace.llm_mentions_rejected += 1
-                    record_issue(
-                        code="low_confidence",
-                        message=(
-                            f"VP-01 entity '{entity.name}' below confidence "
-                            f"threshold {policy.vp01_min_confidence}"
-                        ),
-                        severity="info",
-                        item_ref=entity.name,
-                        metadata={
-                            "confidence": entity.confidence,
-                            "threshold": policy.vp01_min_confidence,
-                            "msg_id": entity.msg_id,
-                        },
-                    )
-                    continue
-
                 canonical_type = policy.domain.canonical_entity_type(entity.type)
                 derived_topic = policy.domain.topic_for_entity_type(
                     canonical_type or ""
@@ -548,7 +533,11 @@ class TextProcessor:
                     canonical_type,
                     policy,
                 ):
-                    if is_covered(entity.name, covered_texts.get(actual_msg_id, set())):
+                    mention_key = entity.name.casefold()
+                    gliner_position = gliner_output_positions.get(
+                        (actual_msg_id, mention_key)
+                    )
+                    if mention_key in known_covered_texts.get(actual_msg_id, set()):
                         trace.llm_mentions_rejected += 1
                         record_issue(
                             code="duplicate_mention",
@@ -560,10 +549,31 @@ class TextProcessor:
                             metadata={"msg_id": actual_msg_id},
                         )
                         continue
-                    covered_texts[actual_msg_id].add(entity.name.casefold())
-                    output.append(
-                        (actual_msg_id, entity.name, canonical_type, derived_topic)
+                    corrected_mention = (
+                        actual_msg_id,
+                        entity.name,
+                        canonical_type,
+                        derived_topic,
                     )
+                    if gliner_position is not None:
+                        output[gliner_position] = corrected_mention
+                    elif is_covered(
+                        entity.name, covered_texts.get(actual_msg_id, set())
+                    ):
+                        trace.llm_mentions_rejected += 1
+                        record_issue(
+                            code="duplicate_mention",
+                            message=(
+                                f"VP-01 entity '{entity.name}' was already covered"
+                            ),
+                            severity="info",
+                            item_ref=entity.name,
+                            metadata={"msg_id": actual_msg_id},
+                        )
+                        continue
+                    else:
+                        covered_texts[actual_msg_id].add(mention_key)
+                        output.append(corrected_mention)
                     vp01_count += 1
                     trace.llm_mentions_accepted += 1
                 else:

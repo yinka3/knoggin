@@ -19,7 +19,6 @@ class EntityMention(BaseModel):
     msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
     name: str
     type: str
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
 
     @field_validator("name", "type")
     @classmethod
@@ -42,7 +41,6 @@ class RelationshipMention(StructuredLLMOutput):
     entity_a: str = Field(..., description="Name of the first entity")
     entity_b: str = Field(..., description="Name of the second entity")
     relationship: str = Field(..., description="Evidence-grounded relationship label")
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
     context: Optional[str] = Field(
         None, description="Short excerpt or paraphrase grounding the relationship"
     )
@@ -64,7 +62,6 @@ class IdentityRelationshipMention(StructuredLLMOutput):
 
     entity_name: str
     relationship: str
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
     context: Optional[str] = None
     msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
 

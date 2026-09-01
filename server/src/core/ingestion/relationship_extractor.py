@@ -176,6 +176,7 @@ class RelationshipExtractor:
             user_name=self.user_name,
             message_local_ids=message_local_ids,
             relationship_block=batch.policy.domain.relationship_block,
+            identity_context=self.user_name,
         )
 
         await emit(
@@ -373,7 +374,6 @@ class RelationshipExtractor:
                     source_type=normalization.source_type,
                     target_type=normalization.target_type,
                     symmetric=normalization.symmetric,
-                    confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                 )
             )
@@ -523,7 +523,6 @@ class RelationshipExtractor:
                     source_type=normalization.source_type,
                     target_type=normalization.target_type,
                     symmetric=normalization.symmetric,
-                    confidence=conn.confidence,
                     context=conn.context or conn.relationship,
                     identity_rooted=True,
                 )

@@ -112,7 +112,6 @@ def test_observation_and_write_preserve_observed_and_canonical_labels():
         entity_b_id=3,
         relationship_type=observation.relationship_type,
         message_id=1,
-        confidence=0.8,
         observed_label=observation.observed_label,
         canonical_type=observation.canonical_type,
         domain_status=observation.domain_status,
@@ -161,7 +160,6 @@ def test_relationship_identity_is_directional_unless_symmetric_is_explicit():
         entity_b_id=2,
         relationship_type="uses",
         message_id=1,
-        confidence=1.0,
         symmetric=False,
     )
     symmetric = RelationshipWrite(
@@ -169,7 +167,6 @@ def test_relationship_identity_is_directional_unless_symmetric_is_explicit():
         entity_b_id=2,
         relationship_type="collaborates_with",
         message_id=1,
-        confidence=1.0,
         symmetric=True,
     )
     assert (directional.entity_a_id, directional.entity_b_id) == (3, 2)

@@ -75,7 +75,6 @@ class RelationshipObservation(BaseModel):
     target_type: Optional[str] = None
     symmetric: bool = False
     domain_version: int = Field(0, ge=0)
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
     context: Optional[str] = None
     identity_rooted: bool = False
 
@@ -133,19 +132,6 @@ def _require_nonblank_text(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not (normalized := value.strip()):
         raise ValueError(f"{field_name} must be a non-blank string")
     return normalized
-
-
-def _require_confidence(value: object, field_name: str = "confidence") -> float:
-    """Validate a finite, bounded graph confidence score."""
-
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-        or not 0.0 <= value <= 1.0
-    ):
-        raise ValueError(f"{field_name} must be a finite number between 0 and 1")
-    return float(value)
 
 
 def relationship_identity(
@@ -246,7 +232,6 @@ class RelationshipWrite:
     entity_b_id: int
     relationship_type: str
     message_id: int
-    confidence: float
     context: Optional[str] = None
     observed_label: Optional[str] = None
     canonical_type: Optional[str] = None
@@ -284,7 +269,6 @@ class RelationshipWrite:
             object.__setattr__(self, "domain_status", "recognized")
         else:
             object.__setattr__(self, "domain_status", "unrecognized")
-        object.__setattr__(self, "confidence", _require_confidence(self.confidence))
         if not isinstance(self.domain_version, int) or isinstance(self.domain_version, bool) or self.domain_version < 0:
             raise ValueError("RelationshipWrite.domain_version must be a non-negative integer")
         if self.context is not None:

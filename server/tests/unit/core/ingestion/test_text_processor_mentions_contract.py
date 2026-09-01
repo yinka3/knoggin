@@ -128,13 +128,11 @@ def make_entity(
     *,
     msg_id="m1",
     typ="Tools",
-    confidence=0.95,
 ):
     return EntityMention(
         msg_id=msg_id,
         name=name,
         type=typ,
-        confidence=confidence,
     )
 
 
@@ -515,7 +513,6 @@ def test_ner_result_requires_a_local_message_reference():
                         "msg_id": 1,
                         "name": "Linear",
                         "type": "Tools",
-                        "confidence": 0.95,
                     }
                 ]
             }
@@ -534,7 +531,6 @@ def test_ner_result_rejects_model_supplied_topic():
                         "name": "Linear",
                         "type": "Tools",
                         "topic": "Wrong Topic",
-                        "confidence": 0.95,
                     }
                 ]
             }
@@ -561,22 +557,20 @@ async def test_extract_mentions_rejects_invalid_llm_msg_id():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_extract_mentions_rejects_low_confidence_llm_mentions():
-    processor, _ = make_processor(
-        llm_response=EntityExtraction(
-            mentions=[make_entity("Linear", msg_id="m2", confidence=0.5)]
-        ),
-        llm_ner=True,
-    )
-    trace = ExtractionTrace()
-    issues = []
-
-    result = await extract(processor, trace=trace, issues=issues)
-
-    assert result == []
-    assert trace.llm_mentions_rejected == 1
-    assert issues[0].code == "low_confidence"
-    assert issues[0].severity == "info"
+def test_ner_result_rejects_model_supplied_confidence():
+    with pytest.raises(ValidationError):
+        EntityExtraction.model_validate(
+            {
+                "mentions": [
+                    {
+                        "msg_id": "m1",
+                        "name": "Linear",
+                        "type": "Tools",
+                        "confidence": 0.5,
+                    }
+                ]
+            }
+        )
 
 
 @pytest.mark.ingestion
@@ -599,6 +593,23 @@ async def test_extract_mentions_rejects_duplicate_llm_mentions_already_covered()
     assert result == [(1, "Alice", "Identity", "Identity")]
     assert trace.llm_mentions_rejected == 1
     assert [issue.code for issue in issues] == ["duplicate_mention"]
+
+
+@pytest.mark.ingestion
+@pytest.mark.no_network
+async def test_extract_mentions_allows_llm_to_correct_a_gliner_span():
+    processor, _ = make_processor(
+        gliner_matches={MESSAGES[0]["message"]: [("Linear", "tool")]},
+        llm_response=EntityExtraction(
+            mentions=[make_entity("Linear", msg_id="m1", typ="Identity")]
+        ),
+        llm_ner=True,
+    )
+
+    result = await extract(processor, trace=ExtractionTrace(), issues=[])
+
+    assert result.count((1, "Linear", "Identity", "Identity")) == 1
+    assert (1, "Linear", "Tools", "Tools") not in result
 
 
 @pytest.mark.ingestion

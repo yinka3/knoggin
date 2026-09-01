@@ -439,13 +439,12 @@ class GraphWriter:
                             domain_status,
                             domain_version,
                             "symmetric",
-                            confidence,
                             context,
                             observed_at_ms
                         )
                         VALUES (
                             %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s
                         )
                         ON CONFLICT (
                             project_id,
@@ -463,10 +462,6 @@ class GraphWriter:
                             domain_status = EXCLUDED.domain_status,
                             domain_version = EXCLUDED.domain_version,
                             "symmetric" = EXCLUDED."symmetric",
-                            confidence = GREATEST(
-                                relationship_observations.confidence,
-                                EXCLUDED.confidence
-                            ),
                             context = COALESCE(
                                 EXCLUDED.context,
                                 relationship_observations.context
@@ -491,7 +486,6 @@ class GraphWriter:
                             relationship.domain_status,
                             relationship.domain_version,
                             relationship.symmetric,
-                            relationship.confidence,
                             relationship.context,
                             source_times_by_message_id[relationship.message_id],
                         ),
@@ -653,8 +647,7 @@ class GraphWriter:
                 ingestion_last_failure_stage = NULL,
                 ingestion_last_failure_code = NULL,
                 ingestion_last_failure_at_ms = NULL,
-                ingestion_last_error_summary = NULL,
-                episode_eligible = TRUE
+                ingestion_last_error_summary = NULL
             WHERE user_name = %s
               AND project_id = %s
               AND session_id = %s

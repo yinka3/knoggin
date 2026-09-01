@@ -16,7 +16,6 @@ class IngestionPolicy:
     """Runtime rules that remain stable for one in-memory ingestion batch."""
 
     gliner_threshold: float
-    vp01_min_confidence: float
     llm_ner: bool
     candidate_fuzzy_threshold: int
     candidate_vector_threshold: float
@@ -37,7 +36,6 @@ class IngestionPolicy:
             raise TypeError("IngestionPolicy requires an active CompiledDomain")
         return cls(
             gliner_threshold=text_processor.gliner_threshold,
-            vp01_min_confidence=text_processor.vp01_min_confidence,
             llm_ner=text_processor.llm_ner,
             candidate_fuzzy_threshold=entity_resolution.candidate_fuzzy_threshold,
             candidate_vector_threshold=entity_resolution.candidate_vector_threshold,

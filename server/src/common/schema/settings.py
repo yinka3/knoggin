@@ -114,7 +114,6 @@ class JobSettings(ConfigModel):
 
 class TextProcessorSettings(ConfigModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
-    vp01_min_confidence: float = Field(0.8, ge=0.0, le=1.0)
     llm_ner: bool = Field(False)
 
 
