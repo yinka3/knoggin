@@ -169,6 +169,33 @@ async def test_saved_web_link_summary_can_evolve_without_replacing_bookmark():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_saved_web_link_partial_update_preserves_omitted_fields():
+    store = BookmarkStore()
+    service = make_service(store)
+    saved = await service.save_web_link(
+        url="https://example.com/article",
+        title="Original title",
+    )
+
+    updated = await service.update_saved_web_link(
+        link_id=saved["link_id"],
+        summary="A concise evolving note.",
+    )
+
+    assert updated["title"] == "Original title"
+    assert updated["summary"] == "A concise evolving note."
+    cleared = await service.update_saved_web_link(
+        link_id=saved["link_id"],
+        title=None,
+    )
+    assert cleared["title"] is None
+    assert cleared["summary"] == "A concise evolving note."
+    with pytest.raises(ValueError, match="provide title or summary"):
+        await service.update_saved_web_link(link_id=saved["link_id"])
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_saved_web_link_rejects_non_http_and_cross_project_mutation():
     store = BookmarkStore()
     project_one = make_service(store, "project-1")

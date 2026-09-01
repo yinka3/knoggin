@@ -62,6 +62,13 @@ BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
 
 
+class _UnsetSavedWebLinkField:
+    """Distinguish an omitted bookmark update field from an explicit null."""
+
+
+_UNSET_SAVED_WEB_LINK_FIELD = _UnsetSavedWebLinkField()
+
+
 async def _run_in_worker(
     function: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
@@ -1238,22 +1245,27 @@ class DocumentService:
         self,
         *,
         link_id: str,
-        title: str | None = None,
-        summary: str | None = None,
+        title: str | None | _UnsetSavedWebLinkField = _UNSET_SAVED_WEB_LINK_FIELD,
+        summary: str | None | _UnsetSavedWebLinkField = _UNSET_SAVED_WEB_LINK_FIELD,
     ) -> Dict:
-        """Update the human-maintained bookmark title or summary."""
+        """Update supplied bookmark presentation fields without replacing others."""
+        if (
+            title is _UNSET_SAVED_WEB_LINK_FIELD
+            and summary is _UNSET_SAVED_WEB_LINK_FIELD
+        ):
+            raise ValueError("provide title or summary to update a saved web link")
         normalized_link_id = self._require_saved_web_link_id(link_id)
         existing = await self._reader.fetch_saved_web_link(link_id=normalized_link_id)
         if existing is None:
             raise FileNotFoundError("Saved web link not found")
         updated_at = get_now_iso()
+        candidate_data = {**existing, "updated_at": updated_at}
+        if title is not _UNSET_SAVED_WEB_LINK_FIELD:
+            candidate_data["title"] = title
+        if summary is not _UNSET_SAVED_WEB_LINK_FIELD:
+            candidate_data["summary"] = summary
         candidate = SavedWebLink(
-            **{
-                **existing,
-                "title": title,
-                "summary": summary,
-                "updated_at": updated_at,
-            }
+            **candidate_data,
         )
         row = await self._writer.update_saved_web_link(
             link_id=normalized_link_id,

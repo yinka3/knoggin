@@ -165,6 +165,7 @@ class SessionManager:
                 project_leased = True
                 context = await self._session_runtime_factory().create(
                     project_state,
+                    session_id=session_id,
                     model=model,
                     agent_id=agent_id,
                     enabled_tools=enabled_tools,
@@ -254,6 +255,7 @@ class SessionManager:
             project_leased = True
             context = await self._session_runtime_factory().create(
                 project_state,
+                session_id=session_id,
                 model=model,
                 agent_id=agent_id,
                 enabled_tools=enabled_tools,
@@ -376,6 +378,7 @@ class SessionManager:
             await self._deactivate_runtime_session_locked(session_id)
             await self._session_deletion_writer.delete_session(
                 user_name=user,
+                session_id=session_id,
             )
             logger.info("Deleted durable session state for {}", session_id)
 
