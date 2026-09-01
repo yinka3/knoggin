@@ -10,7 +10,6 @@ from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
     AliasUpdate,
     EntityWrite,
-    EpisodeEligibility,
     ExecutionScope,
     GraphWriteSummary,
     IngestionCommit,
@@ -180,7 +179,6 @@ class GraphWriter:
         *,
         message_entity_refs: Sequence[MessageEntityRef] = (),
         source_message_times: Sequence[MessageSourceTime] = (),
-        eligible_messages: Sequence[EpisodeEligibility] = (),
         scope: ExecutionScope,
         cur=None,
     ) -> bool:
@@ -772,83 +770,6 @@ class GraphWriter:
                   AND entity_id = %s
                 """,
                 (timestamp_ms, timestamp_ms, project_id, entity_id),
-            )
-
-    async def _mark_episode_eligible_messages(
-        self,
-        cur,
-        eligible_messages: Sequence[EpisodeEligibility],
-        scope: ExecutionScope,
-    ) -> None:
-        user_name = require_scope_value(
-            scope.user_name, "user_name", "episode eligibility write"
-        )
-        session_id = require_scope_value(
-            scope.session_id, "session_id", "episode eligibility write"
-        )
-        project_id = self._require_project_id(
-            scope.project_id, "episode eligibility write"
-        )
-        eligibility_by_message_id: Dict[int, EpisodeEligibility] = {}
-        for eligibility in eligible_messages:
-            if not isinstance(eligibility, EpisodeEligibility):
-                raise TypeError(
-                    "eligible_messages must be EpisodeEligibility instances"
-                )
-            message_id = int(eligibility.message_id)
-            prior = eligibility_by_message_id.get(message_id)
-            if (
-                prior
-                and prior.episode_type
-                and eligibility.episode_type
-                and prior.episode_type != eligibility.episode_type
-            ):
-                raise ValueError(
-                    "Episode eligibility has conflicting types for one message"
-                )
-            eligibility_by_message_id[message_id] = EpisodeEligibility(
-                message_id=message_id,
-                episode_type=eligibility.episode_type
-                or (prior.episode_type if prior else None),
-            )
-        normalized_message_ids = sorted(eligibility_by_message_id)
-        if any(message_id <= 0 for message_id in normalized_message_ids):
-            raise ValueError("Episode-eligible messages require positive IDs")
-
-        await cur.execute(
-            """
-            SELECT message_id
-            FROM messages
-            WHERE message_id = ANY(%s)
-              AND user_name = %s
-              AND session_id = %s
-              AND project_id = %s
-            """,
-            (normalized_message_ids, user_name, session_id, project_id),
-        )
-        scoped_message_ids = {int(row["message_id"]) for row in await cur.fetchall()}
-        if scoped_message_ids != set(normalized_message_ids):
-            raise ValueError("Episode-eligible messages include messages outside scope")
-
-        for message_id in normalized_message_ids:
-            eligibility = eligibility_by_message_id[message_id]
-            await cur.execute(
-                """
-                UPDATE messages
-                SET episode_eligible = TRUE,
-                    episode_type = COALESCE(%s, episode_type)
-                WHERE message_id = %s
-                  AND user_name = %s
-                  AND session_id = %s
-                  AND project_id = %s
-                """,
-                (
-                    eligibility.episode_type,
-                    message_id,
-                    user_name,
-                    session_id,
-                    project_id,
-                ),
             )
 
     @_storage_write("update_entity_canonical_name")

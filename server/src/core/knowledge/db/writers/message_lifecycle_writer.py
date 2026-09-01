@@ -54,7 +54,6 @@ class MessageLifecycleWriter:
             "selected_revision": 1,
             "ingestion_state": "waiting_for_seal",
             "ingestion_not_before_ms": None,
-            "episode_eligible": False,
         }
         async with self.client.transaction() as cur:
             await cur.execute(
@@ -255,8 +254,7 @@ class MessageLifecycleWriter:
                     sealed_at_ms = %s,
                     editable_until_ms = NULL,
                     ingestion_state = 'ready',
-                    ingestion_not_before_ms = %s,
-                    episode_eligible = FALSE
+                    ingestion_not_before_ms = %s
                 WHERE user_name = %s
                   AND project_id = %s
                   AND session_id = %s

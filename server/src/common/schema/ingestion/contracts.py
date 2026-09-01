@@ -318,25 +318,6 @@ class MessageSourceTime:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class EpisodeEligibility:
-    """Episode-processing eligibility attached to a canonical message."""
-
-    message_id: int
-    episode_type: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        _require_positive_id(self.message_id, "EpisodeEligibility.message_id")
-        if self.episode_type is not None:
-            object.__setattr__(
-                self,
-                "episode_type",
-                _require_nonblank_text(
-                    self.episode_type, "EpisodeEligibility.episode_type"
-                ),
-            )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
 class AliasUpdate:
     """Aliases to persist for a canonical entity."""
 

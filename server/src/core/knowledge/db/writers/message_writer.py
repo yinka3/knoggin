@@ -93,10 +93,10 @@ class MessageWriter:
                         editable_until_ms, sealed_at_ms, selected_revision,
                         replaces_message_id, superseded_at_ms, ingestion_state,
                         ingestion_not_before_ms, ingestion_claim_id,
-                        ingestion_claimed_at_ms, episode_eligible, episode_type
+                        ingestion_claimed_at_ms
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (user_name, session_id, message_id)
                     DO UPDATE SET message_id = EXCLUDED.message_id,
@@ -123,8 +123,6 @@ class MessageWriter:
                         message.get("ingestion_not_before_ms"),
                         message.get("ingestion_claim_id"),
                         message.get("ingestion_claimed_at_ms"),
-                        bool(message.get("episode_eligible", False)),
-                        message.get("episode_type"),
                     ),
                 )
                 if not await cursor.fetchone():
@@ -161,10 +159,10 @@ class MessageWriter:
                 editable_until_ms, sealed_at_ms, selected_revision,
                 replaces_message_id, superseded_at_ms, ingestion_state,
                 ingestion_not_before_ms, ingestion_claim_id,
-                ingestion_claimed_at_ms, episode_eligible, episode_type
+                ingestion_claimed_at_ms
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (user_name, session_id, acceptance_key)
             WHERE acceptance_key IS NOT NULL
@@ -184,8 +182,6 @@ class MessageWriter:
                 message.get("ingestion_not_before_ms"),
                 message.get("ingestion_claim_id"),
                 message.get("ingestion_claimed_at_ms"),
-                bool(message.get("episode_eligible", False)),
-                message.get("episode_type"),
             ),
         )
         inserted = await cur.fetchone()

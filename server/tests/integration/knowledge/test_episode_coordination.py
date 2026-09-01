@@ -127,23 +127,34 @@ async def _insert_eligible_window(postgres, *, user_name, project_id, session_id
         "Second durable coordination message.",
         *[f"Supporting coordination context {index}." for index in range(3, 9)],
     ]
-    for index, (message_id, content) in enumerate(zip(message_ids, contents)):
+    for index in range(0, len(message_ids), 2):
+        user_message_id = message_ids[index]
+        assistant_message_id = message_ids[index + 1]
         await postgres.execute(
             """
             INSERT INTO messages (
                 user_name, session_id, message_id, project_id, role, content,
-                timestamp_ms, episode_eligible, ingestion_state
+                timestamp_ms, user_msg_id, lifecycle_state, ingestion_state
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, 'processed')
+            VALUES
+                (%s, %s, %s, %s, 'user', %s, %s, %s, 'sealed', 'processed'),
+                (%s, %s, %s, %s, 'assistant', %s, %s, %s, 'sealed', 'excluded')
             """,
             (
                 user_name,
                 session_id,
-                message_id,
+                user_message_id,
                 project_id,
-                "user",
-                content,
+                contents[index],
                 1700000000000 + index * 1000,
+                user_message_id,
+                user_name,
+                session_id,
+                assistant_message_id,
+                project_id,
+                contents[index + 1],
+                1700000000000 + (index + 1) * 1000,
+                user_message_id,
             ),
         )
     return message_ids

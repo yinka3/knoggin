@@ -389,14 +389,13 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
         await worker.flush()
 
         message = await postgres.fetch_one(
-            "SELECT role, content, episode_eligible, ingestion_state FROM messages "
+            "SELECT role, content, ingestion_state FROM messages "
             "WHERE message_id = %s",
             (accepted.id,),
         )
         assert message == {
             "role": "user",
             "content": "The complete server path must remain grounded.",
-            "episode_eligible": True,
             "ingestion_state": "processed",
         }
 

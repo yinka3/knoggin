@@ -204,9 +204,9 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             """
             INSERT INTO messages (
                 user_name, session_id, message_id, project_id, role, content,
-                timestamp_ms, episode_eligible
+                timestamp_ms
             ) VALUES
-                ('ada', 'session-1', 101, 'project-1', 'user', 'Delete project one', 1000, TRUE),
+                ('ada', 'session-1', 101, 'project-1', 'user', 'Delete project one', 1000),
                 ('ada', 'session-2', 201, 'project-2', 'user', 'Keep project two', 2000, TRUE)
             """
         )

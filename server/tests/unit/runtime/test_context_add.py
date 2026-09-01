@@ -149,7 +149,6 @@ async def test_open_run_persists_editable_turn_and_signals_worker(context):
                 ),
                 "lifecycle_state": "editable",
                 "ingestion_state": "waiting_for_seal",
-                "episode_eligible": False,
                 "edit_window_seconds": 600,
             }
         ]
@@ -236,7 +235,6 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
                     "ingestion_state": "excluded",
-                    "episode_eligible": False,
                 }
         ]
     ]
@@ -277,7 +275,6 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
                     "ingestion_state": "excluded",
-                    "episode_eligible": False,
             },
             [candidate],
             ["project-1"],

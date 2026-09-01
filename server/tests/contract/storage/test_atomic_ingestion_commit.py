@@ -133,7 +133,7 @@ async def test_atomic_ingestion_commit_marks_exact_claim_processed(
     ) == [{"alias": "Ada Lovelace"}]
     assert await real_postgres_client.fetch_one(
         """
-        SELECT ingestion_state, ingestion_claim_id, episode_eligible,
+        SELECT ingestion_state, ingestion_claim_id,
                ingestion_attempt_count, ingestion_last_failure_code
         FROM public.messages
         WHERE message_id = 101
@@ -141,7 +141,6 @@ async def test_atomic_ingestion_commit_marks_exact_claim_processed(
     ) == {
         "ingestion_state": "processed",
         "ingestion_claim_id": None,
-        "episode_eligible": False,
         "ingestion_attempt_count": 2,
         "ingestion_last_failure_code": None,
     }

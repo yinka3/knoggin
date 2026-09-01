@@ -165,54 +165,101 @@ class EpisodeWriter:
         cur, messages: List[Dict], *, checkpoint: EpisodeCheckpoint,
         user_name: str, project_id: str, session_id: str,
     ) -> EpisodeCheckpoint:
-        """Reject a stale or non-contiguous source stream before any writes."""
+        """Reject a stale or partial completed-turn range before any writes."""
 
+        if len(messages) % 2:
+            raise ValueError("Project episode windows require complete turns")
         await cur.execute(
             """
-            SELECT m.message_id, m.timestamp_ms, m.role, m.lifecycle_state,
-                   m.ingestion_state, m.episode_eligible, m.user_msg_id,
+            SELECT user_message.message_id AS user_message_id,
+                   user_message.timestamp_ms AS user_timestamp_ms,
+                   user_message.lifecycle_state AS user_lifecycle_state,
+                   user_message.ingestion_state AS user_ingestion_state,
+                   assistant_message.message_id AS assistant_message_id,
+                   assistant_message.timestamp_ms AS assistant_timestamp_ms,
+                   assistant_message.lifecycle_state AS assistant_lifecycle_state,
+                   assistant_message.ingestion_state AS assistant_ingestion_state,
                    s.episode_participation_enabled,
-                   s.episode_participation_after_message_id,
-                   parent.lifecycle_state AS parent_lifecycle_state,
-                   parent.ingestion_state AS parent_ingestion_state
-            FROM messages m
-            JOIN sessions s
-              ON s.session_id = m.session_id AND s.project_id = m.project_id
-            LEFT JOIN messages parent
-              ON parent.message_id = m.user_msg_id
-             AND parent.project_id = m.project_id AND parent.session_id = m.session_id
-            WHERE m.user_name = %s AND m.project_id = %s AND m.session_id = %s
+                   s.episode_participation_after_message_id
+            FROM messages AS user_message
+            JOIN sessions AS s
+              ON s.session_id = user_message.session_id
+             AND s.project_id = user_message.project_id
+            LEFT JOIN messages AS assistant_message
+              ON assistant_message.user_name = user_message.user_name
+             AND assistant_message.project_id = user_message.project_id
+             AND assistant_message.session_id = user_message.session_id
+             AND assistant_message.user_msg_id = user_message.message_id
+             AND assistant_message.role = 'assistant'
+            WHERE user_message.user_name = %s
+              AND user_message.project_id = %s
+              AND user_message.session_id = %s
+              AND user_message.role = 'user'
               AND s.status <> 'deleted'
               AND ((%s = 0 AND %s::BIGINT IS NULL)
-                OR (%s::BIGINT IS NOT NULL AND (m.timestamp_ms > %s
-                    OR (m.timestamp_ms = %s AND m.message_id > %s) OR m.timestamp_ms IS NULL))
-                OR (%s::BIGINT IS NULL AND %s > 0 AND m.timestamp_ms IS NULL
-                    AND m.message_id > %s))
-            ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id
+                OR (%s::BIGINT IS NOT NULL AND (user_message.timestamp_ms > %s
+                    OR (user_message.timestamp_ms = %s
+                        AND user_message.message_id > %s)
+                    OR user_message.timestamp_ms IS NULL))
+                OR (%s::BIGINT IS NULL AND %s > 0
+                    AND user_message.timestamp_ms IS NULL
+                    AND user_message.message_id > %s))
+            ORDER BY user_message.timestamp_ms ASC NULLS LAST,
+                     user_message.message_id,
+                     assistant_message.timestamp_ms ASC NULLS LAST,
+                     assistant_message.message_id
             LIMIT %s
             """,
-            (user_name, project_id, session_id, checkpoint.last_evaluated_message_id,
-             checkpoint.last_evaluated_timestamp_ms, checkpoint.last_evaluated_timestamp_ms,
-             checkpoint.last_evaluated_timestamp_ms, checkpoint.last_evaluated_timestamp_ms,
-             checkpoint.last_evaluated_message_id, checkpoint.last_evaluated_timestamp_ms,
-             checkpoint.last_evaluated_message_id, checkpoint.last_evaluated_message_id, len(messages)),
+            (
+                user_name,
+                project_id,
+                session_id,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_timestamp_ms,
+                checkpoint.last_evaluated_message_id,
+                checkpoint.last_evaluated_message_id,
+                len(messages) // 2,
+            ),
         )
         rows = await cur.fetchall()
         expected_ids = [int(item["message_id"]) for item in messages]
-        if [int(row["message_id"]) for row in rows] != expected_ids:
+        actual_ids = [
+            message_id
+            for row in rows
+            for message_id in (
+                int(row["user_message_id"]),
+                int(row["assistant_message_id"])
+                if row["assistant_message_id"] is not None else -1,
+            )
+        ]
+        if actual_ids != expected_ids:
             raise ValueError("Project episode window is stale or not a next session range")
         for row in rows:
             if (
                 not row["episode_participation_enabled"]
-                or int(row["message_id"])
+                or int(row["user_message_id"])
                 <= int(row["episode_participation_after_message_id"])
             ):
                 raise ValueError("Project episode window includes an excluded session message")
-            ready = (row["role"] == "user" and row["lifecycle_state"] == "sealed" and row["ingestion_state"] == "processed" and row["episode_eligible"]) or (row["role"] == "assistant" and row["parent_lifecycle_state"] == "sealed" and row["parent_ingestion_state"] == "processed")
+            ready = (
+                row["user_lifecycle_state"] == "sealed"
+                and row["user_ingestion_state"] == "processed"
+                and row["assistant_message_id"] is not None
+                and row["assistant_lifecycle_state"] == "sealed"
+                and row["assistant_ingestion_state"] == "excluded"
+            )
             if not ready:
                 raise ValueError("Project episode window includes a non-ready message")
         last = rows[-1]
-        return EpisodeCheckpoint(last_evaluated_message_id=int(last["message_id"]), last_evaluated_timestamp_ms=last["timestamp_ms"])
+        return EpisodeCheckpoint(
+            last_evaluated_message_id=int(last["assistant_message_id"]),
+            last_evaluated_timestamp_ms=last["assistant_timestamp_ms"],
+        )
 
     @staticmethod
     async def _load_project_relationships(cur, message_ids: List[int], *, project_id: str) -> Dict[int, Set[str]]:

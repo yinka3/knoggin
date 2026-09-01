@@ -23,20 +23,16 @@ async def test_project_episode_checkpoint_does_not_skip_backdated_message_ids(
     await real_postgres_client.execute(
         """
         INSERT INTO messages (
-            user_name, session_id, message_id, project_id, role, content, timestamp_ms
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, user_msg_id, lifecycle_state, ingestion_state
         )
         VALUES
-            ('ada', 'session-1', 101, 'project-1', 'user', 'Late ID.', 3000),
-            ('ada', 'session-1', 102, 'project-1', 'user', 'First.', 1000),
-            ('ada', 'session-1', 103, 'project-1', 'user', 'Second.', 2000)
-        """
-    )
-    await real_postgres_client.execute(
-        """
-        UPDATE messages
-        SET episode_eligible = TRUE,
-            ingestion_state = 'processed'
-        WHERE message_id = ANY(ARRAY[101, 102, 103])
+            ('ada', 'session-1', 101, 'project-1', 'user', 'Late ID.', 3000, 101, 'sealed', 'processed'),
+            ('ada', 'session-1', 104, 'project-1', 'assistant', 'Late response.', 3001, 101, 'sealed', 'excluded'),
+            ('ada', 'session-1', 102, 'project-1', 'user', 'First.', 1000, 102, 'sealed', 'processed'),
+            ('ada', 'session-1', 105, 'project-1', 'assistant', 'First response.', 1001, 102, 'sealed', 'excluded'),
+            ('ada', 'session-1', 103, 'project-1', 'user', 'Second.', 2000, 103, 'sealed', 'processed'),
+            ('ada', 'session-1', 106, 'project-1', 'assistant', 'Second response.', 2001, 103, 'sealed', 'excluded')
         """
     )
 
@@ -53,9 +49,9 @@ async def test_project_episode_checkpoint_does_not_skip_backdated_message_ids(
     first_window = await reader.get_next_project_episode_window(
         user_name=scope["user_name"],
         project_id=scope["project_id"],
-        message_count=2,
+        message_count=4,
     )
-    assert [message["message_id"] for message in first_window] == [102, 103]
+    assert [message["message_id"] for message in first_window] == [102, 105, 103, 106]
 
     assert await writer.write_project_episode_window(
         [],
@@ -65,16 +61,16 @@ async def test_project_episode_checkpoint_does_not_skip_backdated_message_ids(
     )
     second_checkpoint = await reader.get_episode_checkpoint(**scope)
     assert second_checkpoint == EpisodeCheckpoint(
-        last_evaluated_message_id=103,
-        last_evaluated_timestamp_ms=2000,
+        last_evaluated_message_id=106,
+        last_evaluated_timestamp_ms=2001,
     )
 
     second_window = await reader.get_next_project_episode_window(
         user_name=scope["user_name"],
         project_id=scope["project_id"],
-        message_count=1,
+        message_count=2,
     )
-    assert [message["message_id"] for message in second_window] == [101]
+    assert [message["message_id"] for message in second_window] == [101, 104]
 
 
 @pytest.mark.storage
@@ -98,18 +94,17 @@ async def test_project_episode_window_advances_each_source_session_cursor(
         """
         INSERT INTO messages (
             user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, user_msg_id, lifecycle_state, ingestion_state,
-            episode_eligible
+            timestamp_ms, user_msg_id, lifecycle_state, ingestion_state
         )
         VALUES
             ('ada', 'session-project-a', 201, 'project-1', 'user',
-             'Project session A user turn.', 1000, NULL, 'sealed', 'processed', TRUE),
+             'Project session A user turn.', 1000, 201, 'sealed', 'processed'),
             ('ada', 'session-project-a', 202, 'project-1', 'assistant',
-             'Project session A assistant turn.', 1001, 201, 'sealed', 'processed', FALSE),
+             'Project session A assistant turn.', 1001, 201, 'sealed', 'excluded'),
             ('ada', 'session-project-b', 203, 'project-1', 'user',
-             'Project session B user turn.', 2000, NULL, 'sealed', 'processed', TRUE),
+             'Project session B user turn.', 2000, 203, 'sealed', 'processed'),
             ('ada', 'session-project-b', 204, 'project-1', 'assistant',
-             'Project session B assistant turn.', 2001, 203, 'sealed', 'processed', FALSE)
+             'Project session B assistant turn.', 2001, 203, 'sealed', 'excluded')
         """
     )
 

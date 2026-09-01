@@ -477,7 +477,6 @@ class SessionRuntime:
                         "lifecycle_state": "sealed",
                         "sealed_at_ms": int(timestamp.timestamp() * 1000),
                         "ingestion_state": "excluded",
-                        "episode_eligible": False,
                     }
                 ]
 

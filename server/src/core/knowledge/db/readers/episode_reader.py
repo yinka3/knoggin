@@ -582,7 +582,7 @@ class EpisodeReader:
         checkpoint: EpisodeCheckpoint,
         message_count: int,
     ) -> List[Dict]:
-        """Load the next fully ingested window in chronological message order."""
+        """Load complete user/assistant turns in canonical source chronology."""
 
         if message_count <= 0:
             raise ValueError("message_count must be positive")
@@ -595,34 +595,49 @@ class EpisodeReader:
         rows = await self.client.fetch_all(
             """
             SELECT
-                m.message_id,
-                m.role,
-                m.content,
-                m.timestamp_ms,
-                m.episode_type,
-                m.episode_eligible AS is_episode_eligible
-            FROM messages m
-            WHERE m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
+                user_message.message_id AS user_message_id,
+                user_message.content AS user_content,
+                user_message.timestamp_ms AS user_timestamp_ms,
+                assistant_message.message_id AS assistant_message_id,
+                assistant_message.content AS assistant_content,
+                assistant_message.timestamp_ms AS assistant_timestamp_ms
+            FROM messages AS user_message
+            JOIN messages AS assistant_message
+              ON assistant_message.user_name = user_message.user_name
+             AND assistant_message.project_id = user_message.project_id
+             AND assistant_message.session_id = user_message.session_id
+             AND assistant_message.user_msg_id = user_message.message_id
+             AND assistant_message.role = 'assistant'
+             AND assistant_message.lifecycle_state = 'sealed'
+             AND assistant_message.ingestion_state = 'excluded'
+            WHERE user_message.user_name = %s
+              AND user_message.project_id = %s
+              AND user_message.session_id = %s
+              AND user_message.role = 'user'
+              AND user_message.lifecycle_state = 'sealed'
+              AND user_message.ingestion_state = 'processed'
               AND (
                     (%s = 0 AND %s::BIGINT IS NULL)
                  OR (
                         %s::BIGINT IS NOT NULL
                     AND (
-                           m.timestamp_ms > %s
-                        OR (m.timestamp_ms = %s AND m.message_id > %s)
-                        OR m.timestamp_ms IS NULL
+                           user_message.timestamp_ms > %s
+                        OR (user_message.timestamp_ms = %s
+                            AND user_message.message_id > %s)
+                        OR user_message.timestamp_ms IS NULL
                     )
                  )
                  OR (
                         %s::BIGINT IS NULL
                     AND %s > 0
-                    AND m.timestamp_ms IS NULL
-                    AND m.message_id > %s
+                    AND user_message.timestamp_ms IS NULL
+                    AND user_message.message_id > %s
                  )
               )
-            ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id
+            ORDER BY user_message.timestamp_ms ASC NULLS LAST,
+                     user_message.message_id,
+                     assistant_message.timestamp_ms ASC NULLS LAST,
+                     assistant_message.message_id
             LIMIT %s
             """,
             (
@@ -636,17 +651,31 @@ class EpisodeReader:
                 checkpoint.last_evaluated_timestamp_ms,
                 checkpoint.last_evaluated_message_id,
                 checkpoint.last_evaluated_message_id,
-                message_count,
+                (message_count + 1) // 2,
             ),
         )
-        if len(rows) < message_count or any(
-            not row["is_episode_eligible"] for row in rows
-        ):
-            return []
-        return [
-            {key: value for key, value in row.items() if key != "is_episode_eligible"}
+        messages = [
+            message
             for row in rows
+            for message in (
+                {
+                    "message_id": int(row["user_message_id"]),
+                    "role": "user",
+                    "content": row["user_content"],
+                    "timestamp_ms": row["user_timestamp_ms"],
+                },
+                {
+                    "message_id": int(row["assistant_message_id"]),
+                    "role": "assistant",
+                    "content": row["assistant_content"],
+                    "timestamp_ms": row["assistant_timestamp_ms"],
+                    "user_msg_id": int(row["user_message_id"]),
+                },
+            )
         ]
+        if len(messages) < message_count:
+            return []
+        return messages
 
     async def get_next_project_episode_window(
         self,
@@ -667,59 +696,71 @@ class EpisodeReader:
         rows = await self.client.fetch_all(
             """
             SELECT
-                m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
-                m.user_msg_id, m.lifecycle_state, m.ingestion_state,
-                m.episode_eligible,
+                user_message.message_id AS user_message_id,
+                user_message.session_id,
+                user_message.content AS user_content,
+                user_message.timestamp_ms AS user_timestamp_ms,
+                user_message.lifecycle_state AS user_lifecycle_state,
+                user_message.ingestion_state AS user_ingestion_state,
+                assistant_message.message_id AS assistant_message_id,
+                assistant_message.content AS assistant_content,
+                assistant_message.timestamp_ms AS assistant_timestamp_ms,
+                assistant_message.lifecycle_state AS assistant_lifecycle_state,
+                assistant_message.ingestion_state AS assistant_ingestion_state,
                 s.episode_participation_enabled,
                 s.episode_participation_after_message_id,
-                parent.ingestion_state AS parent_ingestion_state,
-                parent.lifecycle_state AS parent_lifecycle_state,
                 COALESCE(ec.last_evaluated_message_id, 0) AS checkpoint_message_id,
                 ec.last_evaluated_timestamp_ms AS checkpoint_timestamp_ms
-            FROM messages m
+            FROM messages AS user_message
             JOIN sessions s
-              ON s.session_id = m.session_id AND s.project_id = m.project_id
+              ON s.session_id = user_message.session_id
+             AND s.project_id = user_message.project_id
             LEFT JOIN episode_processing_checkpoints ec
-              ON ec.project_id = m.project_id AND ec.session_id = m.session_id
-            LEFT JOIN messages parent
-              ON parent.message_id = m.user_msg_id
-             AND parent.project_id = m.project_id
-             AND parent.session_id = m.session_id
-            WHERE m.user_name = %s
-              AND m.project_id = %s
+              ON ec.project_id = user_message.project_id
+             AND ec.session_id = user_message.session_id
+            LEFT JOIN messages AS assistant_message
+              ON assistant_message.user_name = user_message.user_name
+             AND assistant_message.project_id = user_message.project_id
+             AND assistant_message.session_id = user_message.session_id
+             AND assistant_message.user_msg_id = user_message.message_id
+             AND assistant_message.role = 'assistant'
+            WHERE user_message.user_name = %s
+              AND user_message.project_id = %s
+              AND user_message.role = 'user'
               AND s.status <> 'deleted'
               AND s.episode_participation_enabled = TRUE
-              AND m.message_id > s.episode_participation_after_message_id
+              AND user_message.message_id > s.episode_participation_after_message_id
               AND (
                     (COALESCE(ec.last_evaluated_message_id, 0) = 0
                      AND ec.last_evaluated_timestamp_ms IS NULL)
                  OR (
                     ec.last_evaluated_timestamp_ms IS NOT NULL AND (
-                        m.timestamp_ms > ec.last_evaluated_timestamp_ms
-                        OR (m.timestamp_ms = ec.last_evaluated_timestamp_ms
-                            AND m.message_id > ec.last_evaluated_message_id)
-                        OR m.timestamp_ms IS NULL
+                        user_message.timestamp_ms > ec.last_evaluated_timestamp_ms
+                        OR (user_message.timestamp_ms = ec.last_evaluated_timestamp_ms
+                            AND user_message.message_id > ec.last_evaluated_message_id)
+                        OR user_message.timestamp_ms IS NULL
                     ))
                  OR (ec.last_evaluated_timestamp_ms IS NULL
                      AND COALESCE(ec.last_evaluated_message_id, 0) > 0
-                     AND m.timestamp_ms IS NULL
-                     AND m.message_id > ec.last_evaluated_message_id)
+                    AND user_message.timestamp_ms IS NULL
+                    AND user_message.message_id > ec.last_evaluated_message_id)
               )
-            ORDER BY m.session_id, m.timestamp_ms ASC NULLS LAST, m.message_id
+            ORDER BY user_message.session_id,
+                     user_message.timestamp_ms ASC NULLS LAST,
+                     user_message.message_id,
+                     assistant_message.timestamp_ms ASC NULLS LAST,
+                     assistant_message.message_id
             """,
             (user_name, project_id),
         )
         streams: Dict[str, List[Dict]] = {}
         for row in rows:
             ready = (
-                row["role"] == "user"
-                and row["lifecycle_state"] == "sealed"
-                and row["ingestion_state"] == "processed"
-                and row["episode_eligible"]
-            ) or (
-                row["role"] == "assistant"
-                and row["parent_lifecycle_state"] == "sealed"
-                and row["parent_ingestion_state"] == "processed"
+                row["user_lifecycle_state"] == "sealed"
+                and row["user_ingestion_state"] == "processed"
+                and row["assistant_message_id"] is not None
+                and row["assistant_lifecycle_state"] == "sealed"
+                and row["assistant_ingestion_state"] == "excluded"
             )
             session_id = str(row["session_id"])
             if not ready:
@@ -735,18 +776,25 @@ class EpisodeReader:
         for stream in streams.values():
             index = 0
             while index < len(stream) and not stream[index].get("_blocked"):
-                bundle = [stream[index]]
-                user_id = int(stream[index]["message_id"])
+                turn = stream[index]
                 index += 1
-                while (
-                    index < len(stream)
-                    and not stream[index].get("_blocked")
-                    and stream[index].get("role") == "assistant"
-                    and stream[index].get("user_msg_id") == user_id
-                ):
-                    bundle.append(stream[index])
-                    index += 1
-                bundles.append(bundle)
+                bundles.append([
+                    {
+                        "message_id": int(turn["user_message_id"]),
+                        "session_id": str(turn["session_id"]),
+                        "role": "user",
+                        "content": turn["user_content"],
+                        "timestamp_ms": turn["user_timestamp_ms"],
+                    },
+                    {
+                        "message_id": int(turn["assistant_message_id"]),
+                        "session_id": str(turn["session_id"]),
+                        "role": "assistant",
+                        "content": turn["assistant_content"],
+                        "timestamp_ms": turn["assistant_timestamp_ms"],
+                        "user_msg_id": int(turn["user_message_id"]),
+                    },
+                ])
         bundles.sort(
             key=lambda bundle: (
                 bundle[0].get("timestamp_ms") is None,
@@ -761,14 +809,7 @@ class EpisodeReader:
             selected.extend(bundle)
         if len(selected) < message_count:
             return []
-        return [
-            {
-                key: value
-                for key, value in row.items()
-                if key not in {"lifecycle_state", "ingestion_state", "episode_eligible", "parent_ingestion_state", "parent_lifecycle_state", "checkpoint_message_id", "checkpoint_timestamp_ms", "episode_participation_enabled", "episode_participation_after_message_id"}
-            }
-            for row in selected
-        ]
+        return selected
 
     async def has_ready_project_episode_window(
         self,
@@ -777,96 +818,16 @@ class EpisodeReader:
         project_id: str,
         message_count: int,
     ) -> bool:
-        """Return whether a project has one full unblocked episode window.
-
-        This intentionally reads no message bodies.  It mirrors the
-        project-window readiness rules while stopping after enough durable
-        evidence has been counted.
-        """
+        """Return whether a project has one full completed-turn window."""
 
         if message_count <= 0:
             raise ValueError("message_count must be positive")
-        row = await self.client.fetch_one(
-            """
-            WITH candidate_messages AS (
-                SELECT
-                    m.message_id,
-                    m.session_id,
-                    m.role,
-                    m.timestamp_ms,
-                    m.user_msg_id,
-                    m.lifecycle_state,
-                    m.ingestion_state,
-                    m.episode_eligible,
-                    parent.ingestion_state AS parent_ingestion_state,
-                    parent.lifecycle_state AS parent_lifecycle_state,
-                    COALESCE(ec.last_evaluated_message_id, 0) AS checkpoint_message_id,
-                    ec.last_evaluated_timestamp_ms AS checkpoint_timestamp_ms
-                FROM messages m
-                JOIN sessions s
-                  ON s.session_id = m.session_id AND s.project_id = m.project_id
-                LEFT JOIN episode_processing_checkpoints ec
-                  ON ec.project_id = m.project_id AND ec.session_id = m.session_id
-                LEFT JOIN messages parent
-                  ON parent.message_id = m.user_msg_id
-                 AND parent.project_id = m.project_id
-                 AND parent.session_id = m.session_id
-                WHERE m.user_name = %s
-                  AND m.project_id = %s
-                  AND s.status <> 'deleted'
-                  AND s.episode_participation_enabled = TRUE
-                  AND m.message_id > s.episode_participation_after_message_id
-                  AND (
-                        (COALESCE(ec.last_evaluated_message_id, 0) = 0
-                         AND ec.last_evaluated_timestamp_ms IS NULL)
-                     OR (
-                        ec.last_evaluated_timestamp_ms IS NOT NULL AND (
-                            m.timestamp_ms > ec.last_evaluated_timestamp_ms
-                            OR (m.timestamp_ms = ec.last_evaluated_timestamp_ms
-                                AND m.message_id > ec.last_evaluated_message_id)
-                            OR m.timestamp_ms IS NULL
-                        )
-                     )
-                     OR (ec.last_evaluated_timestamp_ms IS NULL
-                         AND COALESCE(ec.last_evaluated_message_id, 0) > 0
-                         AND m.timestamp_ms IS NULL
-                         AND m.message_id > ec.last_evaluated_message_id)
-                  )
-            ),
-            readiness AS (
-                SELECT
-                    *,
-                    (
-                        (role = 'user'
-                         AND lifecycle_state = 'sealed'
-                         AND ingestion_state = 'processed'
-                         AND episode_eligible)
-                        OR (role = 'assistant'
-                            AND parent_lifecycle_state = 'sealed'
-                            AND parent_ingestion_state = 'processed')
-                    ) AS is_ready
-                FROM candidate_messages
-            ),
-            ordered_streams AS (
-                SELECT
-                    *,
-                    SUM(CASE WHEN is_ready THEN 0 ELSE 1 END) OVER (
-                        PARTITION BY session_id
-                        ORDER BY timestamp_ms ASC NULLS LAST, message_id
-                    ) AS blocked_count
-                FROM readiness
-            )
-            SELECT count(*) AS ready_count
-            FROM (
-                SELECT 1
-                FROM ordered_streams
-                WHERE is_ready AND blocked_count = 0
-                LIMIT %s
-            ) AS bounded_ready
-            """,
-            (user_name, project_id, message_count),
+        messages = await self.get_next_project_episode_window(
+            user_name=user_name,
+            project_id=project_id,
+            message_count=message_count,
         )
-        return int(row["ready_count"] if row else 0) >= message_count
+        return len(messages) >= message_count
 
     async def get_project_episode(
         self,

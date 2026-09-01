@@ -284,8 +284,6 @@ CREATE TABLE IF NOT EXISTS public.messages (
     ingestion_last_failure_code TEXT,
     ingestion_last_failure_at_ms BIGINT,
     ingestion_last_error_summary TEXT,
-    episode_eligible BOOLEAN NOT NULL DEFAULT FALSE,
-    episode_type TEXT,
     PRIMARY KEY (user_name, session_id, message_id),
     CONSTRAINT messages_scope_project_key
         UNIQUE (user_name, session_id, message_id, project_id),
@@ -311,6 +309,10 @@ ALTER TABLE public.messages
     ADD COLUMN IF NOT EXISTS ingestion_last_failure_code TEXT,
     ADD COLUMN IF NOT EXISTS ingestion_last_failure_at_ms BIGINT,
     ADD COLUMN IF NOT EXISTS ingestion_last_error_summary TEXT;
+
+ALTER TABLE public.messages
+    DROP COLUMN IF EXISTS episode_eligible,
+    DROP COLUMN IF EXISTS episode_type;
 
 CREATE INDEX IF NOT EXISTS messages_project_idx
 ON public.messages(user_name, project_id, message_id);

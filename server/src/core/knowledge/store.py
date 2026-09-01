@@ -9,7 +9,6 @@ from common.schema.artifacts import ArtifactDraft, ArtifactReference, ArtifactRe
 from common.schema.episode.models import Episode, EpisodeCheckpoint
 from common.schema.ingestion.contracts import (
     EntityWrite,
-    EpisodeEligibility,
     ExecutionScope,
     GraphWriteSummary,
     IngestionCommit,
@@ -503,7 +502,6 @@ class KnowledgeStore:
         *,
         message_entity_refs: Optional[List[MessageEntityRef]] = None,
         source_message_times=None,
-        eligible_messages: Optional[List[EpisodeEligibility]] = None,
         scope: ExecutionScope,
     ) -> bool:
         return await self._graph_writer.write_batch(
@@ -511,7 +509,6 @@ class KnowledgeStore:
             relationships,
             message_entity_refs=message_entity_refs or (),
             source_message_times=source_message_times or (),
-            eligible_messages=eligible_messages or (),
             scope=scope,
         )
 

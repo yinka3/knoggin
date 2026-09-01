@@ -165,9 +165,9 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
             """
             INSERT INTO messages (
                 user_name, session_id, message_id, project_id, role, content,
-                timestamp_ms, episode_eligible, ingestion_state
+                timestamp_ms, ingestion_state
             )
-            VALUES (%s, %s, %s, %s, 'user', %s, %s, TRUE, 'processed')
+            VALUES (%s, %s, %s, %s, 'user', %s, %s, 'processed')
             """,
             (
                 user_name,

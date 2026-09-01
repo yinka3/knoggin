@@ -391,18 +391,12 @@ async def test_episode_reader_requires_a_complete_eligible_window():
         fetch_all_results=[
             [
                 {
-                    "message_id": 11,
-                    "role": "user",
-                    "content": "First complete message.",
-                    "timestamp_ms": 1700000000000,
-                    "is_episode_eligible": True,
-                },
-                {
-                    "message_id": 12,
-                    "role": "assistant",
-                    "content": "Second complete message.",
-                    "timestamp_ms": 1700000001000,
-                    "is_episode_eligible": True,
+                    "user_message_id": 11,
+                    "user_content": "First complete message.",
+                    "user_timestamp_ms": 1700000000000,
+                    "assistant_message_id": 12,
+                    "assistant_content": "Second complete message.",
+                    "assistant_timestamp_ms": 1700000001000,
                 },
             ]
         ]
@@ -421,13 +415,14 @@ async def test_episode_reader_requires_a_complete_eligible_window():
     )
 
     assert [message["message_id"] for message in messages] == [11, 12]
-    assert all("is_episode_eligible" not in message for message in messages)
+    assert messages[1]["user_msg_id"] == 11
     query, params = client.calls[0][1], client.calls[0][2]
-    assert "m.episode_eligible AS is_episode_eligible" in query
-    assert "m.episode_type" in query
-    assert "episode_eligible_messages" not in query
-    assert "ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id" in query
-    assert "m.timestamp_ms > %s" in query
+    assert "JOIN messages AS assistant_message" in query
+    assert "user_message.ingestion_state = 'processed'" in query
+    assert "assistant_message.ingestion_state = 'excluded'" in query
+    assert "episode_eligible" not in query
+    assert "ORDER BY user_message.timestamp_ms ASC NULLS LAST" in query
+    assert "user_message.timestamp_ms > %s" in query
     assert params == (
         "ada",
         "project-1",
@@ -441,7 +436,7 @@ async def test_episode_reader_requires_a_complete_eligible_window():
         1700000000000,
         10,
         10,
-        2,
+        1,
     )
 
 
@@ -449,24 +444,7 @@ async def test_episode_reader_requires_a_complete_eligible_window():
 @pytest.mark.no_network
 async def test_episode_reader_rejects_window_with_ineligible_message():
     client = RecordingPostgresClient(
-        fetch_all_results=[
-            [
-                {
-                    "message_id": 11,
-                    "role": "user",
-                    "content": "Processed.",
-                    "timestamp_ms": 1700000000000,
-                    "is_episode_eligible": True,
-                },
-                {
-                    "message_id": 12,
-                    "role": "assistant",
-                    "content": "Still processing.",
-                    "timestamp_ms": 1700000001000,
-                    "is_episode_eligible": False,
-                },
-            ]
-        ]
+        fetch_all_results=[[]]
     )
     reader = EpisodeReader(client)
 
@@ -546,11 +524,11 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
 
         INSERT INTO messages (
             user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, episode_eligible
+            timestamp_ms
         ) VALUES
-            ('ada', 'session-1', 101, 'project-1', 'user', 'Project one source', 1000, TRUE),
-            ('ada', 'session-2', 102, 'project-2', 'user', 'Project two source', 2000, TRUE),
-            ('bob', 'session-3', 103, 'project-3', 'user', 'Bob project source', 3000, TRUE);
+            ('ada', 'session-1', 101, 'project-1', 'user', 'Project one source', 1000),
+            ('ada', 'session-2', 102, 'project-2', 'user', 'Project two source', 2000),
+            ('bob', 'session-3', 103, 'project-3', 'user', 'Bob project source', 3000);
 
         INSERT INTO episodes (
             episode_id, project_id, summary, source_message_count,

@@ -469,7 +469,6 @@ class FakeKnowledgeStore:
             **message,
             "lifecycle_state": "editable",
             "ingestion_state": "waiting_for_seal",
-            "episode_eligible": False,
             "edit_window_seconds": edit_window_seconds,
         }
         self.saved_message_logs.append([row])
@@ -845,7 +844,6 @@ class FakePostgresClient:
                     and row.get("ingestion_state") != "processed"
                 ):
                     row["ingestion_state"] = "excluded"
-                    row["episode_eligible"] = False
             return
 
         if "delete from public.messages" in normalized:
