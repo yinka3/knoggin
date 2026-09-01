@@ -348,7 +348,7 @@ class KnowledgeRetrieval:
             "resolution": "recent",
             "results": [
                 {
-                    "query": f"{effective_limit} most recently updated episodes",
+                    "query": f"{effective_limit} most recent episodes by source chronology",
                     "episodes": serialized,
                 }
             ],
@@ -599,21 +599,7 @@ class KnowledgeRetrieval:
         metrics: Optional[Dict[str, int | float]] = None,
     ) -> List[Dict]:
         serialized = []
-        expansion_latency_ms = 0.0
-        expanded_count = 0
-        returned_count = 0
         for episode in episodes or []:
-            started_at = perf_counter()
-            sources = await self.knowledge_store.get_project_episode_source_messages(
-                episode.episode_id,
-                user_name=self.user_name,
-                project_id=self.project_id,
-                visible_project_ids=self.readable_project_ids,
-            )
-            expansion_latency_ms += (perf_counter() - started_at) * 1000
-            expanded_count += len(sources)
-            evidence = [self._as_message_evidence(source) for source in sources]
-            returned_count += len(evidence)
             source_reader = getattr(
                 self.knowledge_store, "get_project_episode_source_refs", None
             )
@@ -655,7 +641,9 @@ class KnowledgeRetrieval:
                     }
                     for relationship in episode.relationships
                 ],
-                "evidence": evidence,
+                # Source messages are intentionally omitted from discovery;
+                # read_episode is the explicit hydration follow-up.
+                "evidence": [],
                 "sources_consulted": [
                     source.model_dump(mode="json") if hasattr(source, "model_dump") else source
                     for source in sources_consulted
@@ -665,17 +653,9 @@ class KnowledgeRetrieval:
                 item["similarity"] = similarity_by_episode[episode.episode_id]
             serialized.append(item)
         if metrics is not None:
-            metrics["source_message_expansion_latency_ms"] = round(
-                float(metrics.get("source_message_expansion_latency_ms", 0))
-                + expansion_latency_ms,
-                3,
-            )
-            metrics["expanded_source_message_count"] = int(
-                metrics.get("expanded_source_message_count", 0)
-            ) + expanded_count
-            metrics["returned_evidence_count"] = int(
-                metrics.get("returned_evidence_count", 0)
-            ) + returned_count
+            metrics["source_message_expansion_skipped_count"] = int(
+                metrics.get("source_message_expansion_skipped_count", 0)
+            ) + len(serialized)
         return serialized
 
     async def _emit_episode_retrieval(

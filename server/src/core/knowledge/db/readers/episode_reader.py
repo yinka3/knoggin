@@ -6,6 +6,7 @@ from common.schema.episode.models import (
     EPISODE_EMBEDDING_DIMENSION,
     EntityEpisode,
     Episode,
+    EpisodeCard,
     EpisodeCheckpoint,
     MessageEpisode,
     RelationshipEpisode,
@@ -48,7 +49,7 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         """Return all matching episodes in source chronology."""
 
         if entity_id <= 0:
@@ -67,11 +68,11 @@ class EpisodeReader:
                 "JOIN episode_entities ee ON ee.episode_id = e.episode_id "
                 "AND ee.project_id = e.project_id"
             ),
-            ordering="e.last_message_at DESC NULLS LAST, e.updated_at DESC",
+            ordering="e.last_message_at DESC NULLS LAST, e.episode_id DESC",
             limit=True,
         )
         rows = await self.client.fetch_all(query, (entity_id, *scope, limit))
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_episodes_for_entities(
         self,
@@ -81,7 +82,7 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         """Return prior episodes ranked by overlap with a source entity set."""
 
         normalized_entity_ids = sorted({int(entity_id) for entity_id in entity_ids})
@@ -108,6 +109,7 @@ class EpisodeReader:
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
+                e.user_modified,
                 e.created_at,
                 e.updated_at,
                 COUNT(DISTINCT ee.entity_id) AS entity_overlap
@@ -127,12 +129,13 @@ class EpisodeReader:
                     AND em.session_id = %s
               )
             GROUP BY e.episode_id
-            ORDER BY entity_overlap DESC, e.updated_at DESC
+            ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
+                     e.episode_id DESC
             LIMIT %s
             """,
             (normalized_entity_ids, *scope, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_merge_evidence_for_entities(
         self,
@@ -212,7 +215,7 @@ class EpisodeReader:
                     e.summary,
                     ROW_NUMBER() OVER (
                         PARTITION BY ee.entity_id
-                        ORDER BY e.last_message_at DESC NULLS LAST, e.updated_at DESC
+                        ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC
                     ) AS evidence_rank
                 FROM episode_entities ee
                 JOIN episodes e
@@ -303,7 +306,7 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         """Search scoped episode summaries and structured narrative fields."""
 
         normalized_query = query.strip()
@@ -331,6 +334,7 @@ class EpisodeReader:
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
+                e.user_modified,
                 e.created_at,
                 e.updated_at
             FROM episodes e
@@ -345,12 +349,12 @@ class EpisodeReader:
             ORDER BY
                 ts_rank_cd(e.search_tsvector, q.terms) DESC,
                 e.last_message_at DESC NULLS LAST,
-                e.updated_at DESC
+                e.episode_id DESC
             LIMIT %s
             """,
             (normalized_query, *scope, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def search_episodes_by_embedding(
         self,
@@ -361,7 +365,7 @@ class EpisodeReader:
         session_id: str,
         limit: int = 10,
         score_threshold: float = 0.35,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         """Return scoped episodes ranked by cosine similarity to a query vector."""
 
         if limit <= 0:
@@ -390,6 +394,7 @@ class EpisodeReader:
                 e.last_message_at,
                 e.embedding,
                 e.generator_metadata,
+                e.user_modified,
                 e.created_at,
                 e.updated_at,
                 1 - (e.embedding <=> %s::vector) AS similarity
@@ -408,7 +413,8 @@ class EpisodeReader:
             (vector, *scope, vector, score_threshold, vector, limit),
         )
         return [
-            (await self._hydrate_episode(row), float(row["similarity"])) for row in rows
+            (await self._hydrate_episode_card(row), float(row["similarity"]))
+            for row in rows
         ]
 
     async def get_recent_episodes(
@@ -418,7 +424,7 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 1,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         """Return the most recent source episodes in one conversation."""
 
         if limit <= 0:
@@ -431,11 +437,11 @@ class EpisodeReader:
         )
         rows = await self.client.fetch_all(
             self._episode_query(
-                "TRUE", ordering="e.last_message_at DESC NULLS LAST, e.updated_at DESC", limit=True
+                "TRUE", ordering="e.last_message_at DESC NULLS LAST, e.episode_id DESC", limit=True
             ),
             (*scope, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_episode_source_messages(
         self,
@@ -832,16 +838,16 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         rows = await self.client.fetch_all(
             """
             SELECT e.* FROM episodes e JOIN projects p ON p.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
-            ORDER BY e.last_message_at DESC NULLS LAST, e.updated_at DESC LIMIT %s
+            ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
             """,
             (visible_project_ids or [project_id], user_name, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_nearby_project_episodes(
         self,
@@ -881,7 +887,6 @@ class EpisodeReader:
                          (%s::BIGINT IS NOT NULL AND (
                               m.timestamp_ms < %s
                            OR (m.timestamp_ms = %s AND m.message_id < %s)
-                           OR m.timestamp_ms IS NULL
                          ))
                       OR (%s::BIGINT IS NULL AND (
                               m.timestamp_ms IS NOT NULL
@@ -915,7 +920,7 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         rows = await self.client.fetch_all(
             """
             WITH terms AS (SELECT websearch_to_tsquery('simple', %s) AS query)
@@ -924,11 +929,11 @@ class EpisodeReader:
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
               AND e.search_tsvector @@ terms.query
             ORDER BY ts_rank_cd(e.search_tsvector, terms.query) DESC,
-                     e.last_message_at DESC NULLS LAST, e.updated_at DESC LIMIT %s
+                     e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
             """,
             (query, visible_project_ids or [project_id], user_name, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def search_project_episodes_by_embedding(
         self,
@@ -939,7 +944,7 @@ class EpisodeReader:
         limit: int,
         score_threshold: float = 0.35,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         vector = json.dumps(self._normalize_embedding(embedding))
         rows = await self.client.fetch_all(
             """
@@ -959,7 +964,10 @@ class EpisodeReader:
                 limit,
             ),
         )
-        return [(await self._hydrate_episode(row), float(row["similarity"])) for row in rows]
+        return [
+            (await self._hydrate_episode_card(row), float(row["similarity"]))
+            for row in rows
+        ]
 
     async def get_project_episodes_for_entities(
         self,
@@ -969,7 +977,7 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         if not entity_ids:
             return []
         rows = await self.client.fetch_all(
@@ -981,11 +989,11 @@ class EpisodeReader:
             WHERE e.project_id = ANY(%s) AND p.user_name = %s AND ee.entity_id = ANY(%s)
             GROUP BY e.episode_id
             ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
-                     e.updated_at DESC LIMIT %s
+                     e.episode_id DESC LIMIT %s
             """,
             (visible_project_ids or [project_id], user_name, entity_ids, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_project_episode_source_messages(
         self,
@@ -1029,7 +1037,7 @@ class EpisodeReader:
         predicate: str,
         *,
         joins: str = "",
-        ordering: str = "e.updated_at DESC",
+        ordering: str = "e.last_message_at DESC NULLS LAST, e.episode_id DESC",
         limit: bool = False,
     ) -> str:
         query = f"""
@@ -1045,6 +1053,7 @@ class EpisodeReader:
             e.last_message_at,
             e.embedding,
             e.generator_metadata,
+            e.user_modified,
             e.created_at,
             e.updated_at
         FROM episodes e
@@ -1087,6 +1096,28 @@ class EpisodeReader:
             messages=messages,
             entities=entities,
             relationships=relationships,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            generator_metadata=self._json_dict(row.get("generator_metadata")),
+            user_modified=bool(row.get("user_modified", False)),
+        )
+
+    async def _hydrate_episode_card(self, row: Dict) -> EpisodeCard:
+        """Hydrate discovery metadata without loading source-message rows."""
+
+        episode_id = str(row["episode_id"])
+        return EpisodeCard(
+            episode_id=episode_id,
+            project_id=str(row["project_id"]),
+            summary=str(row["summary"]),
+            new_developments=self._json_list(row.get("new_developments")),
+            updates=self._json_list(row.get("updates")),
+            unresolved=self._json_list(row.get("unresolved")),
+            source_message_count=int(row.get("source_message_count") or 0),
+            first_message_at=row.get("first_message_at"),
+            last_message_at=row.get("last_message_at"),
+            entities=await self._load_entities(episode_id),
+            relationships=await self._load_relationships(episode_id),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             generator_metadata=self._json_dict(row.get("generator_metadata")),

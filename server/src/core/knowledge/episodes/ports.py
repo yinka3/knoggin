@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
-from common.schema.episode.models import Episode
+from common.schema.episode.models import Episode, EpisodeCard
 
 ResponseT = TypeVar("ResponseT")
 
@@ -23,7 +23,7 @@ class EpisodeStore(Protocol):
 
     async def get_recent_project_episodes(
         self, *, user_name: str, project_id: str, limit: int
-    ) -> list[Episode]: ...
+    ) -> list[EpisodeCard]: ...
 
     async def get_nearby_project_episodes(
         self,
@@ -46,7 +46,7 @@ class EpisodeStore(Protocol):
 
     async def get_project_episodes_for_entities(
         self, entity_ids: list[int], *, user_name: str, project_id: str, limit: int
-    ) -> list[Episode]: ...
+    ) -> list[EpisodeCard]: ...
 
     async def write_project_episode_window(
         self,

@@ -6,7 +6,7 @@ from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
 from common.schema.artifacts import ArtifactDraft, ArtifactReference, ArtifactRevision
-from common.schema.episode.models import Episode, EpisodeCheckpoint
+from common.schema.episode.models import Episode, EpisodeCard, EpisodeCheckpoint
 from common.schema.ingestion.contracts import (
     EntityWrite,
     ExecutionScope,
@@ -623,7 +623,7 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_recent_project_episodes(
             user_name=user_name,
             project_id=project_id,
@@ -658,7 +658,7 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.search_project_episodes(
             query,
             user_name=user_name,
@@ -676,7 +676,7 @@ class KnowledgeStore:
         limit: int = 10,
         score_threshold: float = 0.35,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         return await self._episode_reader.search_project_episodes_by_embedding(
             embedding,
             user_name=user_name,
@@ -709,7 +709,7 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_project_episodes_for_entities(
             entity_ids,
             user_name=user_name,
@@ -741,7 +741,7 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_episodes_for_entity(
             entity_id,
             user_name=user_name,
@@ -758,7 +758,7 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_episodes_for_entities(
             entity_ids,
             user_name=user_name,
@@ -790,7 +790,7 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.search_episodes(
             query,
             user_name=user_name,
@@ -808,7 +808,7 @@ class KnowledgeStore:
         session_id: str,
         limit: int = 10,
         score_threshold: float = 0.35,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         return await self._episode_reader.search_episodes_by_embedding(
             embedding,
             user_name=user_name,
@@ -825,7 +825,7 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 1,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_recent_episodes(
             user_name=user_name,
             project_id=project_id,

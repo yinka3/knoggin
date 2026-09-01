@@ -327,7 +327,7 @@ def format_document_focus_context(
 
 
 def format_episode_results(results: List[Dict]) -> str:
-    """Format episode_check results with source-message provenance."""
+    """Format compact episode-check cards and any explicitly supplied evidence."""
     if not results:
         return "No episodes found."
 

@@ -82,6 +82,71 @@ class _ConsolidationEmbedding:
         return [[0.1] * 1024 for _ in texts]
 
 
+class _WindowStore:
+    def __init__(self):
+        self.written = None
+
+    async def get_next_project_episode_window(self, **_kwargs):
+        return [
+            {
+                "message_id": 10,
+                "session_id": "session-a",
+                "role": "user",
+                "content": "Continue launch",
+                "timestamp_ms": 3,
+            },
+            {
+                "message_id": 11,
+                "session_id": "session-a",
+                "role": "assistant",
+                "content": "Launch continues",
+                "timestamp_ms": 4,
+                "user_msg_id": 10,
+            },
+        ]
+
+    async def get_nearby_project_episodes(self, **_kwargs):
+        return []
+
+    async def write_project_episode_window(self, episodes, messages, **_kwargs):
+        self.written = (episodes, messages)
+        return True
+
+
+class _EmptyWindowLLM:
+    async def generate_structured(self, *, response_model, **_kwargs):
+        assert response_model is LLMEpisodeWindowDecision
+        return LLMEpisodeWindowDecision()
+
+
+class _ConcurrentPolicyLLM:
+    def __init__(self):
+        self.job = None
+        self.system_prompts = []
+
+    async def generate_structured(self, *, response_model, system, **_kwargs):
+        assert response_model is LLMEpisodeWindowDecision
+        self.system_prompts.append(system)
+        assert self.job is not None
+        # Simulate a settings reload while the provider await is in progress.
+        self.job.update_settings(
+            EpisodeSettings(
+                max_narrative_chars=500,
+                max_episode_source_messages=1,
+            ),
+            episode_window_size=8,
+        )
+        return LLMEpisodeWindowDecision(
+            proposals=[
+                LLMEpisodeDecision(
+                    action="create",
+                    summary="The launch continued.",
+                    message_influences=["message:1"],
+                )
+            ]
+        )
+
+
 @pytest.mark.no_network
 async def test_episode_should_run_uses_project_readiness_without_loading_messages():
     async def project_window_size() -> int:
@@ -159,3 +224,47 @@ async def test_consolidation_regenerates_from_complete_source_evidence():
     assert window[0]["message_id"] == 10
     assert episodes[0].episode_id == "prior"
     assert [message.message_id for message in episodes[0].messages] == [1, 2, 10, 11]
+
+
+@pytest.mark.no_network
+async def test_empty_window_proposal_still_persists_source_checkpoint_input():
+    store = _WindowStore()
+    job = EpisodeJob(
+        knowledge_store=store,
+        settings=EpisodeSettings(),
+        episode_window_size=8,
+        llm=_EmptyWindowLLM(),
+        embedding_service=_ConsolidationEmbedding(),
+    )
+
+    build = await job.process_next_window(user_name="ada", project_id="project-1")
+
+    assert build is not None
+    assert build.final_episodes == []
+    assert store.written is not None
+    assert store.written[0] == []
+    assert [message["message_id"] for message in store.written[1]] == [10, 11]
+
+
+@pytest.mark.no_network
+async def test_episode_job_uses_one_policy_snapshot_during_provider_await():
+    store = _WindowStore()
+    llm = _ConcurrentPolicyLLM()
+    job = EpisodeJob(
+        knowledge_store=store,
+        settings=EpisodeSettings(),
+        episode_window_size=8,
+        llm=llm,
+        embedding_service=_ConsolidationEmbedding(),
+    )
+    llm.job = job
+
+    build = await job.process_next_window(user_name="ada", project_id="project-1")
+
+    assert build is not None
+    assert "3600" in llm.system_prompts[0]
+    assert build.policy.max_narrative_chars == 4000
+    assert build.policy.max_episode_source_messages == 72
+    assert build.final_episodes[0].generator_metadata["episode_policy"] == build.policy.metadata()
+    assert job.policy.max_narrative_chars == 500
+    assert job.policy.max_episode_source_messages == 1

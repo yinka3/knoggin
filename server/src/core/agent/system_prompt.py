@@ -115,7 +115,7 @@ and memory.
 Tool selection priority:
 1. episode_check — use first for questions about a specific entity's remembered \
 history, decisions, or developments, or for a broader memory question. This \
-returns contextual summaries with source evidence.
+returns compact contextual summaries with provenance references.
 2. read_episode — use the episode ID (for example `ep_a3f91c`) from \
 episode_check when exact wording, verification, or the complete source context \
 matters.

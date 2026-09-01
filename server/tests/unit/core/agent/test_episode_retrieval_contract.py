@@ -3,7 +3,12 @@ from datetime import datetime, timezone
 import pytest
 
 import core.knowledge.retrieval as retrieval_module
-from common.schema.episode.models import EntityEpisode, Episode, MessageEpisode
+from common.schema.episode.models import (
+    EntityEpisode,
+    Episode,
+    EpisodeCard,
+    MessageEpisode,
+)
 from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.retrieval import KnowledgeRetrieval
 
@@ -46,6 +51,20 @@ def source_message(message_id: int = 7) -> dict:
     }
 
 
+def episode_card(episode_id: str, entity_id: int = 2) -> EpisodeCard:
+    full = episode(episode_id, entity_id)
+    return EpisodeCard(
+        episode_id=full.episode_id,
+        project_id=full.project_id,
+        summary=full.summary,
+        new_developments=full.new_developments,
+        source_message_count=full.source_message_count,
+        first_message_at=full.first_message_at,
+        last_message_at=full.last_message_at,
+        entities=full.entities,
+    )
+
+
 class EpisodeTool(KnowledgeRetrieval):
     def __init__(self):
         super().__init__(
@@ -65,7 +84,7 @@ class EpisodeTool(KnowledgeRetrieval):
 
 
 @pytest.mark.no_network
-async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
+async def test_episode_check_exact_entity_returns_scoped_episode_card():
     class FakeEntities:
         async def get_id(self, name):
             assert name == "Ada"
@@ -78,13 +97,14 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
     class FakeKnowledgeStore:
         def __init__(self):
             self.entity_calls = []
+            self.source_message_calls = 0
 
         async def get_project_episodes_for_entities(self, entity_ids, **scope):
             self.entity_calls.append((entity_ids, scope))
-            return [episode("episode-1", entity_ids[0])]
+            return [episode_card("episode-1", entity_ids[0])]
 
         async def get_project_episode_source_messages(self, episode_id, **scope):
-            assert episode_id == "episode-1"
+            self.source_message_calls += 1
             return [source_message(), source_message(8)]
 
     knowledge_store = FakeKnowledgeStore()
@@ -112,20 +132,15 @@ async def test_episode_check_exact_entity_returns_scoped_episode_evidence():
     assert match["entity_name"] == "Ada Lovelace"
     assert match["episodes"][0]["episode_id"] == "episode-1"
     assert match["episodes"][0]["source_message_count"] == 1
-    assert match["episodes"][0]["evidence"][0]["attached_at"] == (
-        "2025-01-01T00:00:00+00:00"
-    )
-    assert match["episodes"][0]["evidence"][0]["message"] == (
-        "Let's use episodic memory."
-    )
-    assert len(match["episodes"][0]["evidence"]) == 2
+    assert match["episodes"][0]["evidence"] == []
+    assert knowledge_store.source_message_calls == 0
 
 
 @pytest.mark.no_network
 async def test_episode_serialization_includes_separate_sources_consulted():
     class FakeKnowledgeStore:
         async def get_project_episodes_for_entities(self, entity_ids, **scope):
-            return [episode("episode-1", entity_ids[0])]
+            return [episode_card("episode-1", entity_ids[0])]
 
         async def get_project_episode_source_messages(self, episode_id, **scope):
             return [source_message()]
@@ -182,7 +197,7 @@ async def test_episode_serialization_includes_separate_sources_consulted():
 
 
 @pytest.mark.no_network
-async def test_episode_check_emits_retrieval_and_expansion_metrics(monkeypatch):
+async def test_episode_check_emits_retrieval_without_source_expansion(monkeypatch):
     events = []
 
     async def capture_emit(scope_id, component, event, data):
@@ -199,7 +214,7 @@ async def test_episode_check_emits_retrieval_and_expansion_metrics(monkeypatch):
 
     class FakeKnowledgeStore:
         async def get_project_episodes_for_entities(self, entity_ids, **scope):
-            return [episode("episode-1", entity_ids[0])]
+            return [episode_card("episode-1", entity_ids[0])]
 
         async def get_project_episode_source_messages(self, episode_id, **scope):
             return [source_message()]
@@ -221,10 +236,10 @@ async def test_episode_check_emits_retrieval_and_expansion_metrics(monkeypatch):
     assert data["strategy"] == "exact_entity"
     assert data["episode_count"] == 1
     assert data["matched_entity_episode_count"] == 1
-    assert data["expanded_source_message_count"] == 1
-    assert data["returned_evidence_count"] == 1
+    assert data["source_message_expansion_skipped_count"] == 1
+    assert "expanded_source_message_count" not in data
+    assert "returned_evidence_count" not in data
     assert data["retrieval_latency_ms"] >= 0
-    assert data["source_message_expansion_latency_ms"] >= 0
 
 
 @pytest.mark.no_network
@@ -232,12 +247,14 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
     class FakeKnowledgeStore:
         def __init__(self):
             self.recent_calls = []
+            self.source_message_calls = 0
 
         async def get_recent_project_episodes(self, **scope):
             self.recent_calls.append(scope)
-            return [episode("episode-latest"), episode("episode-prior")]
+            return [episode_card("episode-latest"), episode_card("episode-prior")]
 
         async def get_project_episode_source_messages(self, episode_id, **scope):
+            self.source_message_calls += 1
             return [source_message()]
 
     knowledge_store = FakeKnowledgeStore()
@@ -259,6 +276,7 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
         "episode-latest",
         "episode-prior",
     ]
+    assert knowledge_store.source_message_calls == 0
 
 
 @pytest.mark.no_network
@@ -266,7 +284,7 @@ async def test_episode_check_searches_episodes_before_raw_message_fallback():
     class FakeKnowledgeStore:
         async def search_project_episodes(self, query, **scope):
             assert query == "What changed in the memory design?"
-            return [episode("episode-question")]
+            return [episode_card("episode-question")]
 
         async def get_project_episode_source_messages(self, episode_id, **scope):
             return [source_message()]
@@ -293,7 +311,7 @@ async def test_episode_check_uses_semantic_episode_matches_before_lexical_search
     class FakeKnowledgeStore:
         async def search_project_episodes_by_embedding(self, embedding, **scope):
             assert embedding == [0.1] * 1024
-            return [(episode("episode-semantic"), 0.91)]
+            return [(episode_card("episode-semantic"), 0.91)]
 
         async def search_project_episodes(self, query, **scope):
             raise AssertionError("lexical search should not run after a semantic hit")

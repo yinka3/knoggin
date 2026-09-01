@@ -54,6 +54,25 @@ def attachment_results(*, focus=False):
     ]
 
 
+def card_attachment_results():
+    return [
+        [
+            {
+                "entity_id": 2,
+                "source_message_count": 1,
+                "first_seen_at": datetime.now(timezone.utc),
+                "last_seen_at": datetime.now(timezone.utc),
+            }
+        ],
+        [
+            {
+                "relationship_id": "project-1:2:3",
+                "source_message_count": 1,
+            }
+        ],
+    ]
+
+
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_merge_evidence_selects_episode_session_before_serializing_it():
@@ -120,7 +139,7 @@ async def test_episode_reader_hydrates_one_complete_episode_aggregate():
 @pytest.mark.no_network
 async def test_episode_reader_entity_lookup_includes_non_focus_memberships():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results(focus=False)],
+        fetch_all_results=[[episode_row()], *card_attachment_results()],
     )
     reader = EpisodeReader(client)
 
@@ -132,6 +151,9 @@ async def test_episode_reader_entity_lookup_includes_non_focus_memberships():
     )
 
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
+    assert not hasattr(episodes[0], "messages")
+    assert len(client.calls) == 3
+    assert all("FROM messages" not in call[1] for call in client.calls)
     query, params = client.calls[0][1], client.calls[0][2]
     assert "e.last_message_at DESC" in query
     assert params == (2, "ada", "project-1", "session-1", 10)
@@ -143,7 +165,7 @@ async def test_episode_reader_returns_scoped_semantic_matches():
     client = RecordingPostgresClient(
         fetch_all_results=[
             [{**episode_row(), "similarity": 0.86}],
-            *attachment_results(),
+            *card_attachment_results(),
         ]
     )
     reader = EpisodeReader(client)
@@ -173,7 +195,7 @@ async def test_episode_reader_returns_scoped_semantic_matches():
 @pytest.mark.no_network
 async def test_episode_reader_uses_the_stored_lexical_search_vector():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results()]
+        fetch_all_results=[[episode_row()], *card_attachment_results()]
     )
     reader = EpisodeReader(client)
 
@@ -197,7 +219,7 @@ async def test_episode_reader_uses_the_stored_lexical_search_vector():
 @pytest.mark.no_network
 async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results()]
+        fetch_all_results=[[episode_row()], *card_attachment_results()]
     )
     reader = EpisodeReader(client)
 
@@ -212,7 +234,7 @@ async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
     query, params = client.calls[0][1], client.calls[0][2]
     assert "COUNT(DISTINCT ee.entity_id) AS entity_overlap" in query
-    assert "ORDER BY entity_overlap DESC, e.updated_at DESC" in query
+    assert "ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST" in query
     assert params == ([2, 3], "ada", "project-1", "session-1", 3)
 
 
@@ -220,7 +242,7 @@ async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
 @pytest.mark.no_network
 async def test_episode_reader_loads_the_immediately_previous_episode():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results()]
+        fetch_all_results=[[episode_row()], *card_attachment_results()]
     )
     reader = EpisodeReader(client)
 
@@ -232,7 +254,7 @@ async def test_episode_reader_loads_the_immediately_previous_episode():
 
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
     query, params = client.calls[0][1], client.calls[0][2]
-    assert "ORDER BY e.last_message_at DESC NULLS LAST, e.updated_at DESC" in query
+    assert "ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC" in query
     assert params == ("ada", "project-1", "session-1", 1)
 
 

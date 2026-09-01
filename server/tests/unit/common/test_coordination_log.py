@@ -111,6 +111,7 @@ def test_policy_persists_episode_metrics_without_episode_content():
             "strategy": "semantic",
             "episode_count": 3,
             "matched_entity_episode_count": 1,
+            "source_message_expansion_skipped_count": 3,
             "retrieval_latency_ms": 12.5,
             "used_raw_message_fallback": False,
             "summary": "episode summary must not be logged",
@@ -122,6 +123,7 @@ def test_policy_persists_episode_metrics_without_episode_content():
     assert record["event"] == "agent.episode_retrieval_completed"
     assert record["strategy"] == "semantic"
     assert record["episode_count"] == 3
+    assert record["source_message_expansion_skipped_count"] == 3
     assert record["retrieval_latency_ms"] == 12.5
     assert record["used_raw_message_fallback"] is False
     assert "summary" not in record

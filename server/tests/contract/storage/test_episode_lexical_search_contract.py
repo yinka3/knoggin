@@ -10,16 +10,9 @@ async def test_episode_lexical_search_vector_is_stored_and_gin_indexed(
 ):
     await real_postgres_client.execute(
         """
-        INSERT INTO sessions (session_id, user_name, project_id)
-        VALUES ('session-lexical', 'ada', 'project-1')
-        """
-    )
-    await real_postgres_client.execute(
-        """
         INSERT INTO episodes (
             episode_id,
             project_id,
-            session_id,
             summary,
             new_developments,
             updates,
@@ -27,7 +20,6 @@ async def test_episode_lexical_search_vector_is_stored_and_gin_indexed(
         ) VALUES (
             'episode-lexical',
             'project-1',
-            'session-lexical',
             'The team selected episodic memory.',
             '["Episode retrieval supports lexical matching."]'::jsonb,
             '[]'::jsonb,

@@ -174,3 +174,42 @@ class Episode(EpisodeNarrative):
                 "relationships must not contain duplicate relationship IDs"
             )
         return relationships
+
+
+class EpisodeCard(EpisodeNarrative):
+    """Compact Episode discovery result without expanded source messages."""
+
+    episode_id: str = Field(..., min_length=1)
+    project_id: str = Field(..., min_length=1)
+    summary: str = Field(..., min_length=1)
+    source_message_count: int = Field(0, ge=0)
+    first_message_at: Optional[datetime] = None
+    last_message_at: Optional[datetime] = None
+    entities: List[EntityEpisode] = Field(default_factory=list)
+    relationships: List[RelationshipEpisode] = Field(default_factory=list)
+    user_modified: bool = False
+    created_at: datetime = Field(default_factory=get_now)
+    updated_at: datetime = Field(default_factory=get_now)
+    generator_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("entities")
+    @classmethod
+    def validate_entities(cls, entities: List[EntityEpisode]) -> List[EntityEpisode]:
+        entity_ids = [entity.entity_id for entity in entities]
+        if len(set(entity_ids)) != len(entity_ids):
+            raise ValueError("entities must not contain duplicate entity IDs")
+        return entities
+
+    @field_validator("relationships")
+    @classmethod
+    def validate_relationships(
+        cls, relationships: List[RelationshipEpisode]
+    ) -> List[RelationshipEpisode]:
+        relationship_ids = [
+            relationship.relationship_id for relationship in relationships
+        ]
+        if len(set(relationship_ids)) != len(relationship_ids):
+            raise ValueError(
+                "relationships must not contain duplicate relationship IDs"
+            )
+        return relationships

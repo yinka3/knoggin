@@ -252,8 +252,9 @@ TOOL_SCHEMAS = [
             "name": "episode_check",
             "description": (
                 "Retrieve contextual episodic memory about a specific entity, including "
-                "summaries and source-message evidence. Use this for remembered decisions, "
-                "developments, and history. Results are contextual memory, not atomic claims."
+                "compact summaries and provenance references. Use read_episode when the "
+                "original source messages are needed. Results are contextual memory, not "
+                "atomic claims."
             ),
             "parameters": {
                 "type": "object",
@@ -301,7 +302,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_recent_episodes",
             "description": (
-                "Return the most recently updated episode summaries in the current "
+                "Return the most recent episode summaries by source chronology in the current "
                 "conversation without searching or requiring an episode ID. Use for "
                 "requests such as 'what was the last episode?' or 'show the last few memories'."
             ),
