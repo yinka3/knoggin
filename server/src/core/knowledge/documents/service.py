@@ -13,6 +13,7 @@ from common.schema.document import (
     FolderPreview,
     FolderScanSettings,
     FolderUploadEntry,
+    SavedWebLink,
 )
 from common.schema.health import sanitize_health_details
 from common.schema.source.locators import (
@@ -1194,6 +1195,93 @@ class DocumentService:
             "target_type": "subtree",
             "path_prefix": normalized_prefix,
         }
+
+    async def save_web_link(
+        self,
+        *,
+        url: str,
+        title: str | None = None,
+        summary: str | None = None,
+    ) -> Dict:
+        """Save one intentional project bookmark without indexing its content."""
+        saved_at = get_now_iso()
+        candidate = SavedWebLink(
+            link_id=str(uuid.uuid4()),
+            project_id=self.project_id,
+            url=url,
+            title=title,
+            summary=summary,
+            created_at=saved_at,
+            updated_at=saved_at,
+        )
+        row = await self._writer.insert_saved_web_link(
+            link_id=candidate.link_id,
+            url=candidate.url,
+            title=candidate.title,
+            summary=candidate.summary,
+            created_at=saved_at,
+        )
+        return self._public_saved_web_link(row)
+
+    async def list_saved_web_links(self, *, limit: int = 50) -> List[Dict]:
+        """List this project's durable bookmarks, newest update first."""
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 1000
+        ):
+            raise ValueError("limit must be between 1 and 1000")
+        rows = await self._reader.list_saved_web_links(limit=limit)
+        return [self._public_saved_web_link(row) for row in rows]
+
+    async def update_saved_web_link(
+        self,
+        *,
+        link_id: str,
+        title: str | None = None,
+        summary: str | None = None,
+    ) -> Dict:
+        """Update the human-maintained bookmark title or summary."""
+        normalized_link_id = self._require_saved_web_link_id(link_id)
+        existing = await self._reader.fetch_saved_web_link(link_id=normalized_link_id)
+        if existing is None:
+            raise FileNotFoundError("Saved web link not found")
+        updated_at = get_now_iso()
+        candidate = SavedWebLink(
+            **{
+                **existing,
+                "title": title,
+                "summary": summary,
+                "updated_at": updated_at,
+            }
+        )
+        row = await self._writer.update_saved_web_link(
+            link_id=normalized_link_id,
+            title=candidate.title,
+            summary=candidate.summary,
+            updated_at=updated_at,
+        )
+        if row is None:
+            raise FileNotFoundError("Saved web link not found")
+        return self._public_saved_web_link(row)
+
+    async def delete_saved_web_link(self, *, link_id: str) -> Dict:
+        """Delete a bookmark without changing prior source references."""
+        normalized_link_id = self._require_saved_web_link_id(link_id)
+        if not await self._writer.delete_saved_web_link(link_id=normalized_link_id):
+            raise FileNotFoundError("Saved web link not found")
+        return {"link_id": normalized_link_id, "deleted": True}
+
+    @staticmethod
+    def _require_saved_web_link_id(link_id: str) -> str:
+        if not isinstance(link_id, str) or not (normalized := link_id.strip()):
+            raise ValueError("link_id must not be empty")
+        return normalized
+
+    @staticmethod
+    def _public_saved_web_link(row: Dict) -> Dict:
+        """Normalize one database bookmark into the public service shape."""
+        return SavedWebLink.model_validate(row).model_dump(mode="json")
 
     async def list_documents(
         self,

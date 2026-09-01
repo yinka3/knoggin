@@ -493,3 +493,97 @@ class DocumentWriter:
             """,
             (self._project_id,),
         )
+
+    async def insert_saved_web_link(
+        self,
+        *,
+        link_id: str,
+        url: str,
+        title: str | None,
+        summary: str | None,
+        created_at: str,
+    ) -> Dict:
+        """Persist one project-owned bookmark without document derivation."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                INSERT INTO public.saved_web_links (
+                    link_id,
+                    project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING
+                    link_id,
+                    project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    updated_at
+                """,
+                (
+                    link_id,
+                    self._project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    created_at,
+                ),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise RuntimeError("Saved web link insert did not return a row")
+        return dict(row)
+
+    async def update_saved_web_link(
+        self,
+        *,
+        link_id: str,
+        title: str | None,
+        summary: str | None,
+        updated_at: str,
+    ) -> Optional[Dict]:
+        """Replace bookmark presentation fields within the active project."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE public.saved_web_links
+                SET
+                    title = %s,
+                    summary = %s,
+                    updated_at = %s
+                WHERE link_id = %s
+                  AND project_id = %s
+                RETURNING
+                    link_id,
+                    project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    updated_at
+                """,
+                (title, summary, updated_at, link_id, self._project_id),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row is not None else None
+
+    async def delete_saved_web_link(self, *, link_id: str) -> bool:
+        """Remove a project bookmark without touching source provenance."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                DELETE FROM public.saved_web_links
+                WHERE link_id = %s
+                  AND project_id = %s
+                RETURNING link_id
+                """,
+                (link_id, self._project_id),
+            )
+            return await cur.fetchone() is not None

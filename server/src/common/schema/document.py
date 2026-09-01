@@ -3,6 +3,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Dict, List, Literal, Optional, Set, Union
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -14,6 +15,43 @@ from pydantic import (
 )
 
 from common.schema.source.locators import DocumentLocator
+
+
+class SavedWebLink(BaseModel):
+    """One project-owned bookmark, deliberately separate from documents."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    link_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("link_id", "project_id")
+    @classmethod
+    def _require_non_blank_identifier(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("saved web link identifiers must not be blank")
+        return normalized
+
+    @field_validator("url")
+    @classmethod
+    def _require_http_url(cls, value: str) -> str:
+        normalized = value.strip()
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("saved web link url must be an absolute HTTP(S) URL")
+        return normalized
+
+    @field_validator("title", "summary")
+    @classmethod
+    def _normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
 
 
 class FolderUploadEntry(BaseModel):

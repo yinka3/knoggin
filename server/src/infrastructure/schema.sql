@@ -1427,6 +1427,28 @@ CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Lightweight project-library bookmarks. They intentionally have no document
+-- content, extraction, chunk, embedding, or indexing lifecycle.
+CREATE TABLE IF NOT EXISTS public.saved_web_links (
+    link_id UUID PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    url TEXT NOT NULL,
+    title TEXT,
+    summary TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT saved_web_links_url_check CHECK (
+        url ~* '^https?://[^[:space:]]+$'
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS saved_web_links_project_url_idx
+ON public.saved_web_links(project_id, url);
+
+CREATE INDEX IF NOT EXISTS saved_web_links_project_updated_idx
+ON public.saved_web_links(project_id, updated_at DESC, link_id DESC);
+
 -- Project-owned source documents and their derived retrieval chunks.
 CREATE TABLE IF NOT EXISTS public.project_documents (
     document_id UUID PRIMARY KEY,

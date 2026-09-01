@@ -55,6 +55,46 @@ class DocumentReader:
         )
         return rows[0] if rows else None
 
+    async def list_saved_web_links(self, *, limit: int) -> List[Dict]:
+        """List the active project's lightweight saved web links."""
+        return await self._client.fetch_all(
+            """
+            SELECT
+                link_id,
+                project_id,
+                url,
+                title,
+                summary,
+                created_at,
+                updated_at
+            FROM public.saved_web_links
+            WHERE project_id = %s
+            ORDER BY updated_at DESC, link_id DESC
+            LIMIT %s
+            """,
+            (self._project_id, limit),
+        )
+
+    async def fetch_saved_web_link(self, *, link_id: str) -> Optional[Dict]:
+        """Return one bookmark only when it belongs to the active project."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                link_id,
+                project_id,
+                url,
+                title,
+                summary,
+                created_at,
+                updated_at
+            FROM public.saved_web_links
+            WHERE link_id = %s
+              AND project_id = %s
+            """,
+            (link_id, self._project_id),
+        )
+        return rows[0] if rows else None
+
     async def fetch_documents_by_reference(
         self,
         *,
