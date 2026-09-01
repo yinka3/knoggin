@@ -148,18 +148,11 @@ class EntityResolver:
         mention_type: str,
         topic: str,
         policy: IngestionPolicy,
-    ) -> Tuple[str, str, str]:
-        """Return the policy-aware identity of a mention decision."""
+    ) -> str:
+        """Return the conservative in-batch identity key for one mention."""
 
-        normalized_topic = policy.domain.normalize_topic(topic)
-        canonical_type = policy.domain.canonical_entity_type(mention_type) or (
-            policy.domain.resolve_entity_type(mention_type)
-        )
-        return (
-            name.strip().casefold(),
-            (canonical_type or mention_type or "").strip().casefold(),
-            (normalized_topic or "").casefold(),
-        )
+        del mention_type, topic, policy
+        return name.strip().casefold()
 
     async def candidate_entries_for_mentions(
         self,

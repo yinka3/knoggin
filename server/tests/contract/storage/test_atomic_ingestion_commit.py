@@ -100,7 +100,6 @@ async def test_atomic_ingestion_commit_marks_exact_claim_processed(
                     entity_b_id=202,
                     relationship_type="met",
                     message_id=101,
-                    confidence=1.0,
                     context="Ada met Grace.",
                 ),
             ),
@@ -142,7 +141,7 @@ async def test_atomic_ingestion_commit_marks_exact_claim_processed(
     ) == {
         "ingestion_state": "processed",
         "ingestion_claim_id": None,
-        "episode_eligible": True,
+        "episode_eligible": False,
         "ingestion_attempt_count": 2,
         "ingestion_last_failure_code": None,
     }

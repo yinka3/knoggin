@@ -12,6 +12,7 @@ class _Resolver:
     def __init__(self):
         self.applied = []
         self.committed_aliases = []
+        self.readable_project_ids = ["project-1"]
 
     def get_cached_profile(self, entity_id):
         assert entity_id == 101
@@ -39,8 +40,10 @@ class _Store:
     def __init__(self, *, fail=False):
         self.fail = fail
         self.commits = []
+        self.validation_scope = None
 
-    async def validate_existing_ids(self, ids, **_kwargs):
+    async def validate_existing_ids(self, ids, **kwargs):
+        self.validation_scope = kwargs["visible_project_ids"]
         return set(ids)
 
     async def commit_ingestion(self, commit):
@@ -102,6 +105,7 @@ async def test_graph_commit_builds_one_durable_change_set_then_refreshes_cache()
         (101, ("Bobby",))
     ]
     assert resolver.committed_aliases == [(101, ["Bobby"])]
+    assert store.validation_scope == ["project-1"]
     assert summary.aliases_updated == 1
 
 
