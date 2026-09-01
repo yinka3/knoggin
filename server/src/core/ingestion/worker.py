@@ -1,7 +1,7 @@
 """PostgreSQL queue worker with application-local worker signaling."""
 
 import asyncio
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, NamedTuple, Optional
 
 from loguru import logger
 
@@ -20,6 +20,15 @@ from core.ingestion.batch import IngestionBatch
 from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.ports import IngestionPersistence
 from infrastructure.work_record import WorkStatus
+
+
+class FailureDisposition(NamedTuple):
+    """Whether a failed claim can be retried without operator intervention."""
+
+    retryable: bool
+    stage: str
+    code: str
+    pause_worker: bool = False
 
 
 class IngestionWorker:
@@ -53,6 +62,8 @@ class IngestionWorker:
         self._health_last_success_at = None
         self._health_last_failure_category = self._health_last_failure_at = None
         self._health_consecutive_failures = 0
+        self._health_pause_reason = None
+        self._paused_claim_id = None
         self.update_settings(settings)
 
     def update_settings(self, config: IngestionSettings) -> None:
@@ -87,6 +98,23 @@ class IngestionWorker:
             self._health_state = "stopped"
         await emit(self.session_id, "pipeline", "consumer_stopped", {})
 
+    async def resume(self) -> bool:
+        """Release a paused claim only after its subsystem cause is repaired."""
+
+        if self._health_state != "paused" or self._paused_claim_id is None:
+            return False
+        await self.knowledge_store.release_ingestion_claim(
+            user_name=self.user_name,
+            project_id=self.processor.project_id,
+            session_id=self.session_id,
+            batch_id=self._paused_claim_id,
+        )
+        self._paused_claim_id = None
+        self._health_pause_reason = None
+        self._health_state = "running"
+        self.signal()
+        return True
+
     def signal(self) -> None:
         self._wake_event.set()
 
@@ -117,6 +145,7 @@ class IngestionWorker:
             "last_failure_category": self._health_last_failure_category,
             "last_failure_at": iso(self._health_last_failure_at),
             "consecutive_failures": self._health_consecutive_failures,
+            "pause_reason": self._health_pause_reason,
             "batch_size": self.batch_size,
             "batch_timeout_seconds": self.batch_timeout,
         }
@@ -129,13 +158,12 @@ class IngestionWorker:
         self._health_consecutive_failures += 1
 
     @staticmethod
-    def _classify_failure(exc: Exception) -> tuple[bool, str, str]:
+    def _classify_failure(exc: Exception) -> FailureDisposition:
         code = str(getattr(exc, "code", "") or type(exc).__name__)
-        if isinstance(
-            exc,
-            ConfigurationError | LLMResponseError | ValueError | TypeError,
-        ):
-            return False, "pipeline", code
+        if isinstance(exc, LLMResponseError):
+            return FailureDisposition(True, "model", code)
+        if isinstance(exc, ConfigurationError | ValueError | TypeError):
+            return FailureDisposition(False, "subsystem", code, pause_worker=True)
         if isinstance(
             exc,
             StorageError
@@ -145,8 +173,8 @@ class IngestionWorker:
             | TimeoutError
             | OSError,
         ):
-            return True, "runtime", code
-        return True, "runtime", code
+            return FailureDisposition(True, "runtime", code)
+        return FailureDisposition(True, "runtime", code)
 
     @staticmethod
     def _format_session_text(turns: List[Dict]) -> str:
@@ -172,6 +200,8 @@ class IngestionWorker:
                 self._flush_future = None
 
     async def _drain_durable_queue(self) -> None:
+        if self._health_state == "paused":
+            return
         store, project = self.knowledge_store, self.processor.project_id
         await store.seal_due_user_messages(
             user_name=self.user_name,
@@ -236,16 +266,27 @@ class IngestionWorker:
                 break
             except Exception as exc:
                 self._record_failure("durable_batch")
-                retryable, stage, code = self._classify_failure(exc)
+                disposition = self._classify_failure(exc)
+                if disposition.pause_worker:
+                    self._health_state = "paused"
+                    self._health_pause_reason = (
+                        f"{disposition.stage}:{disposition.code}"
+                    )
+                    self._paused_claim_id = claim.batch_id
+                    logger.error(
+                        "Ingestion worker paused for {} until the claim is resumed",
+                        self._health_pause_reason,
+                    )
+                    break
                 await store.fail_ingestion_claim(
                     user_name=self.user_name,
                     project_id=project,
                     session_id=self.session_id,
                     batch_id=claim.batch_id,
-                    failure_stage=stage,
-                    failure_code=code,
+                    failure_stage=disposition.stage,
+                    failure_code=disposition.code,
                     error_summary=str(exc),
-                    retryable=retryable,
+                    retryable=disposition.retryable,
                     max_attempts=self.ingestion_max_attempts,
                 )
                 break

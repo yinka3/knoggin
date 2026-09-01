@@ -264,6 +264,44 @@ async def test_ingestion_health_reports_durable_queue_delay():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_ingestion_health_reports_paused_worker_and_failed_work():
+    class Store:
+        async def get_ingestion_queue_health(self, **_kwargs):
+            return {
+                "pending_count": 0,
+                "claimed_count": 1,
+                "failed_count": 2,
+                "oldest_pending_ms": None,
+                "last_processed_ms": None,
+            }
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(active_projects={}),
+        sessions=SessionRuntimeReader(
+            {
+                "session-a": SimpleNamespace(
+                    project_id="project-a", ingestion_worker=FakeWorker("paused")
+                )
+            }
+        ),
+    )
+
+    payload = (
+        await service.get_ingestion_health(
+            user_name="ada", project_id="project-a", session_id="session-a"
+        )
+    ).model_dump(mode="json")
+
+    assert payload["status"] == "degraded"
+    assert payload["details"]["queue"]["failed_count"] == 2
+    assert payload["details"]["progress"]["message_state"] == "failed"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
     class FailingStore:
         async def get_ingestion_queue_health(self, **_kwargs):

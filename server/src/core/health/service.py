@@ -247,7 +247,7 @@ class RuntimeHealthService:
             worker_snapshot.get("current_batch_started_at")
         )
         worker_state = worker_snapshot.get("state")
-        if worker_state == "failed":
+        if worker_state in {"failed", "paused"}:
             delay_state = "stalled"
         elif (
             self._nonnegative_int(worker_snapshot.get("current_batch_size"))
@@ -279,6 +279,8 @@ class RuntimeHealthService:
             warnings.append("ingestion worker is not running")
         elif worker_state == "failed":
             warnings.append("ingestion worker has failed")
+        elif worker_state == "paused":
+            warnings.append("ingestion worker is paused pending repair and resume")
 
         if worker_state == "failed":
             status = HealthStatus.FAILED
