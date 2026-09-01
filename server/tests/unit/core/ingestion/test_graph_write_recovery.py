@@ -60,7 +60,6 @@ def _completed_batch() -> IngestionBatch:
         policy=ingestion_policy(),
     )
     batch.validate_input()
-    batch.mark_extracted()
     batch.set_resolution(
         entity_ids=[101],
         new_entity_ids=set(),
@@ -69,7 +68,6 @@ def _completed_batch() -> IngestionBatch:
         alias_updates={101: ["Bobby"]},
     )
     batch.set_relationship_observations([])
-    batch.complete()
     return batch
 
 
@@ -114,4 +112,4 @@ async def test_graph_commit_leaves_resolver_unchanged_when_durable_write_fails()
 
     assert resolver.applied == []
     assert resolver.committed_aliases == []
-    assert batch.work_unit.status is WorkStatus.CANCELLED
+    assert batch.work_unit.status is WorkStatus.RUNNING

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import asdict
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from loguru import logger
 
@@ -19,9 +18,11 @@ from common.schema.ingestion.contracts import (
 )
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.diagnostic_context import diagnostic_scope
-from core.ingestion.batch import IngestionBatch, IngestionStage
-from core.ingestion.ports import IngestionGraphPersistence
+from core.ingestion.batch import IngestionBatch
 from core.knowledge.entity.resolver import EntityResolver
+
+if TYPE_CHECKING:
+    from core.knowledge.store import KnowledgeStore
 
 
 def _normalize_embedding(value) -> Optional[list[float]]:
@@ -34,20 +35,24 @@ def _normalize_embedding(value) -> Optional[list[float]]:
 
 async def build_ingestion_commit(
     batch: IngestionBatch,
-    knowledge_store: IngestionGraphPersistence,
+    knowledge_store: KnowledgeStore,
     entities: EntityResolver,
 ) -> tuple[IngestionCommit, tuple[EntityWrite, ...], tuple[AliasUpdate, ...], int]:
-    """Translate completed in-memory learning results into one durable change set."""
+    """Translate one active in-memory learning result into a durable change set."""
 
     if not isinstance(batch, IngestionBatch):
         raise TypeError("build_ingestion_commit requires an IngestionBatch")
-    if batch.stage is not IngestionStage.COMPLETED:
-        raise ValueError("Ingestion commit requires a completed IngestionBatch")
+    if batch.released:
+        raise ValueError("Ingestion commit requires an active IngestionBatch")
 
     scope = batch.scope
     new_entity_ids = set(batch.new_entity_ids)
     existing_candidates = list(
-        (set(batch.entity_ids) | set(batch.alias_updated_ids) | set(batch.alias_updates))
+        (
+            set(batch.entity_ids)
+            | set(batch.alias_updated_ids)
+            | set(batch.alias_updates)
+        )
         - new_entity_ids
     )
     valid_existing_ids: set[int] = set()
@@ -183,10 +188,10 @@ async def build_ingestion_commit(
 
 async def write_ingestion_batch_to_graph(
     batch: IngestionBatch,
-    knowledge_store: IngestionGraphPersistence,
+    knowledge_store: KnowledgeStore,
     entities: EntityResolver,
 ) -> GraphWriteSummary:
-    """Commit a completed batch and refresh resolver state after success only."""
+    """Commit an active batch and refresh resolver state after success only."""
 
     with diagnostic_scope(
         user_name=batch.scope.user_name,
@@ -195,17 +200,10 @@ async def write_ingestion_batch_to_graph(
         ingestion_batch_id=batch.batch_id,
         work_id=batch.work_unit.id,
     ):
-        try:
-            commit, entity_writes, alias_updates, skipped_relationships = (
-                await build_ingestion_commit(batch, knowledge_store, entities)
-            )
-            summary = await knowledge_store.commit_ingestion(commit)
-        except asyncio.CancelledError:
-            batch.cancel_work("Ingestion commit was cancelled")
-            raise
-        except Exception:
-            batch.cancel_work("Ingestion commit did not complete")
-            raise
+        commit, entity_writes, alias_updates, skipped_relationships = (
+            await build_ingestion_commit(batch, knowledge_store, entities)
+        )
+        summary = await knowledge_store.commit_ingestion(commit)
 
         summary.relationships_skipped = skipped_relationships
         batch.work_unit.metadata["graph_write"] = asdict(summary)

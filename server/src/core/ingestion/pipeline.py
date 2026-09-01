@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
@@ -172,7 +171,7 @@ class IngestionPipeline:
         )
 
     async def process(self, batch: IngestionBatch) -> None:
-        """Mutate one workflow-owned ingestion batch through pipeline stages."""
+        """Populate one worker-owned in-memory batch for durable commit."""
         if not isinstance(batch, IngestionBatch):
             raise TypeError("IngestionPipeline.process requires an IngestionBatch")
         if batch.scope.user_name != self.user_name:
@@ -194,19 +193,10 @@ class IngestionPipeline:
                 component="IngestionPipeline",
             ),
         ):
-            batch.work_unit.mark_running()
-            try:
-                batch.validate_input()
-            except Exception as exc:
-                logger.error(f"Batch input validation failed: {exc}")
-                batch.fail(exc)
-                batch.work_unit.issues = list(batch.issues)
-                batch.work_unit.mark_failed(batch.error)
-                return
+            batch.validate_input()
 
             if not batch.messages:
-                batch.work_unit.mark_skipped("No messages")
-                batch.complete()
+                batch.work_unit.metadata["semantic_summary"] = "No messages"
                 return
 
             batch.trace.batch_size = len(batch.messages)
@@ -218,152 +208,132 @@ class IngestionPipeline:
                 {"size": len(batch.messages), "msg_ids": batch.trace.message_ids},
             )
 
-            try:
-                mentions = await self._extract_mentions(batch)
-                batch.mark_extracted()
-                await emit(
-                    batch.scope.session_id,
-                    "pipeline",
-                    "mentions_extracted",
-                    {
-                        "count": len(mentions),
-                        "mentions": [
-                            (msg_id, text, typ) for msg_id, text, typ, _ in mentions
-                        ],
-                    },
-                    verbose_only=True,
-                )
+            mentions = await self._extract_mentions(batch)
+            await emit(
+                batch.scope.session_id,
+                "pipeline",
+                "mentions_extracted",
+                {
+                    "count": len(mentions),
+                    "mentions": [
+                        (msg_id, text, typ) for msg_id, text, typ, _ in mentions
+                    ],
+                },
+                verbose_only=True,
+            )
 
-                mentions = [mention for mention in mentions if mention[1]]
-                if not mentions:
-                    batch.work_unit.issues = list(batch.issues)
-                    batch.work_unit.metadata["semantic_summary"] = "No mentions found"
-                    batch.complete()
-                    return
+            mentions = [mention for mention in mentions if mention[1]]
+            if not mentions:
+                batch.work_unit.issues = list(batch.issues)
+                batch.work_unit.metadata["semantic_summary"] = "No mentions found"
+                return
 
-                await self._resolve_mentions(batch, mentions)
-                await emit(
-                    batch.scope.session_id,
-                    "pipeline",
-                    "resolution_complete",
-                    {
-                        "new": len(batch.new_entity_ids),
-                        "existing": len(batch.entity_ids) - len(batch.new_entity_ids),
-                        "aliases_added": len(batch.alias_updated_ids),
-                    },
-                )
+            await self._resolve_mentions(batch, mentions)
+            await emit(
+                batch.scope.session_id,
+                "pipeline",
+                "resolution_complete",
+                {
+                    "new": len(batch.new_entity_ids),
+                    "existing": len(batch.entity_ids) - len(batch.new_entity_ids),
+                    "aliases_added": len(batch.alias_updated_ids),
+                },
+            )
 
-                observations = await self.relationships.extract(batch)
-                total_pairs = sum(not item.identity_rooted for item in observations)
-                total_user_pairs = sum(item.identity_rooted for item in observations)
-                await emit(
-                    batch.scope.session_id,
-                    "pipeline",
-                    "connections_extracted",
-                    {
-                        "messages_with_connections": len(
-                            {
-                                item.message_id
-                                for item in observations
-                                if not item.identity_rooted
-                            }
-                        ),
-                        "messages_with_user_connections": len(
-                            {
-                                item.message_id
-                                for item in observations
-                                if item.identity_rooted
-                            }
-                        ),
-                        "total_pairs": total_pairs,
-                        "total_user_pairs": total_user_pairs,
-                        "pairs": [
-                            {
-                                "a": item.entity_a_name,
-                                "b": item.entity_b_name,
-                                "confidence": item.confidence,
-                            }
+            observations = await self.relationships.extract(batch)
+            total_pairs = sum(not item.identity_rooted for item in observations)
+            total_user_pairs = sum(item.identity_rooted for item in observations)
+            await emit(
+                batch.scope.session_id,
+                "pipeline",
+                "connections_extracted",
+                {
+                    "messages_with_connections": len(
+                        {
+                            item.message_id
                             for item in observations
                             if not item.identity_rooted
-                        ],
-                        "user_pairs": [
-                            {
-                                "entity": item.entity_b_name,
-                                "confidence": item.confidence,
-                            }
+                        }
+                    ),
+                    "messages_with_user_connections": len(
+                        {
+                            item.message_id
                             for item in observations
                             if item.identity_rooted
-                        ],
-                    },
-                    verbose_only=True,
-                )
+                        }
+                    ),
+                    "total_pairs": total_pairs,
+                    "total_user_pairs": total_user_pairs,
+                    "pairs": [
+                        {
+                            "a": item.entity_a_name,
+                            "b": item.entity_b_name,
+                            "confidence": item.confidence,
+                        }
+                        for item in observations
+                        if not item.identity_rooted
+                    ],
+                    "user_pairs": [
+                        {
+                            "entity": item.entity_b_name,
+                            "confidence": item.confidence,
+                        }
+                        for item in observations
+                        if item.identity_rooted
+                    ],
+                },
+                verbose_only=True,
+            )
 
-                batch.set_relationship_observations(
-                    [
-                        observation.model_copy(
-                            update={"domain_version": batch.policy.domain.version}
-                        )
-                        for observation in observations
-                    ]
-                )
-                batch.work_unit.issues = list(batch.issues)
+            batch.set_relationship_observations(
+                [
+                    observation.model_copy(
+                        update={"domain_version": batch.policy.domain.version}
+                    )
+                    for observation in observations
+                ]
+            )
+            batch.work_unit.issues = list(batch.issues)
 
-                await emit(
-                    batch.scope.session_id,
-                    "pipeline",
-                    "batch_complete",
-                    {
-                        "entities": len(batch.entity_ids),
-                        "new_entities": len(batch.new_entity_ids),
-                        "success": batch.success,
-                        "trace": {
-                            "llm_mentions_seen": batch.trace.llm_mentions_seen,
-                            "llm_mentions_accepted": (
-                                batch.trace.llm_mentions_accepted
-                            ),
-                            "llm_mentions_rejected": (
-                                batch.trace.llm_mentions_rejected
-                            ),
-                            "relationships_seen": batch.trace.relationships_seen,
-                            "relationships_accepted": (
-                                batch.trace.relationships_accepted
-                            ),
-                            "relationships_rejected": (
-                                batch.trace.relationships_rejected
-                            ),
-                            "relationships_recognized": (
-                                batch.trace.relationships_recognized
-                            ),
-                            "relationships_unrecognized": (
-                                batch.trace.relationships_unrecognized
-                            ),
-                            "user_relationships_seen": (
-                                batch.trace.user_relationships_seen
-                            ),
-                            "user_relationships_accepted": (
-                                batch.trace.user_relationships_accepted
-                            ),
-                            "user_relationships_rejected": (
-                                batch.trace.user_relationships_rejected
-                            ),
-                            "fallbacks": batch.trace.fallbacks,
-                            "issues": len(batch.issues),
-                        },
+            await emit(
+                batch.scope.session_id,
+                "pipeline",
+                "batch_complete",
+                {
+                    "entities": len(batch.entity_ids),
+                    "new_entities": len(batch.new_entity_ids),
+                    "success": True,
+                    "trace": {
+                        "llm_mentions_seen": batch.trace.llm_mentions_seen,
+                        "llm_mentions_accepted": (batch.trace.llm_mentions_accepted),
+                        "llm_mentions_rejected": (batch.trace.llm_mentions_rejected),
+                        "relationships_seen": batch.trace.relationships_seen,
+                        "relationships_accepted": (batch.trace.relationships_accepted),
+                        "relationships_rejected": (batch.trace.relationships_rejected),
+                        "relationships_recognized": (
+                            batch.trace.relationships_recognized
+                        ),
+                        "relationships_unrecognized": (
+                            batch.trace.relationships_unrecognized
+                        ),
+                        "user_relationships_seen": (
+                            batch.trace.user_relationships_seen
+                        ),
+                        "user_relationships_accepted": (
+                            batch.trace.user_relationships_accepted
+                        ),
+                        "user_relationships_rejected": (
+                            batch.trace.user_relationships_rejected
+                        ),
+                        "fallbacks": batch.trace.fallbacks,
+                        "issues": len(batch.issues),
                     },
-                )
-                batch.work_unit.metadata["semantic_summary"] = (
-                    f"{len(batch.entity_ids)} entities, "
-                    f"{total_pairs + total_user_pairs} relationships"
-                )
-                batch.complete()
-            except asyncio.CancelledError:
-                batch.cancel_work("Ingestion processing cancelled")
-                raise
-            except Exception as exc:
-                logger.error(f"Batch processing failed: {exc}")
-                batch.fail(exc)
-                batch.work_unit.issues = list(batch.issues)
-                batch.work_unit.mark_failed(batch.error)
+                },
+            )
+            batch.work_unit.metadata["semantic_summary"] = (
+                f"{len(batch.entity_ids)} entities, "
+                f"{total_pairs + total_user_pairs} relationships"
+            )
 
     async def _extract_mentions(
         self,

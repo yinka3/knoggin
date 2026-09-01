@@ -5,11 +5,10 @@ import pytest
 
 from common.schema.ingestion.contracts import EntityWrite
 from core.ingestion import pipeline as pipeline_service
-from core.ingestion.batch import IngestionBatch, IngestionStage
+from core.ingestion.batch import IngestionBatch
 from core.ingestion.pipeline import IngestionPipeline
 from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.entity.resolver import EntityCandidate
-from infrastructure.work_record import WorkStatus
 from tests.fixtures.ingestion import ingestion_policy
 
 
@@ -29,7 +28,6 @@ def open_batch(**overrides) -> IngestionBatch:
 
 def resolve_empty(batch: IngestionBatch) -> None:
     batch.validate_input()
-    batch.mark_extracted()
     batch.set_resolution(
         entity_ids=[],
         new_entity_ids=set(),
@@ -46,9 +44,7 @@ def test_ingestion_batch_owns_only_in_memory_learning_state():
 
     resolve_empty(batch)
     batch.set_relationship_observations([])
-    batch.complete()
 
-    assert batch.stage is IngestionStage.COMPLETED
     assert batch.batch_id == "batch-1"
     assert batch.entity_message_map == {}
     assert not hasattr(batch, "milestones")
@@ -58,11 +54,8 @@ def test_ingestion_batch_owns_only_in_memory_learning_state():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-def test_ingestion_batch_rejects_invalid_transitions_and_released_mutation():
+def test_ingestion_batch_rejects_released_mutation():
     batch = open_batch()
-
-    with pytest.raises(ValueError, match="Illegal ingestion transition"):
-        batch.advance_to(IngestionStage.RESOLVED)
 
     batch.release()
     with pytest.raises(RuntimeError, match="released"):
@@ -71,17 +64,12 @@ def test_ingestion_batch_rejects_invalid_transitions_and_released_mutation():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-def test_ingestion_batch_records_failure_from_any_active_stage():
+def test_ingestion_batch_rejects_invalid_canonical_input():
     batch = open_batch()
-    batch.validate_input()
+    batch.session_text = None
 
-    failure = ValueError("invalid entity type")
-    batch.fail(failure)
-
-    assert batch.stage is IngestionStage.FAILED
-    assert batch.success is False
-    assert batch.error == "invalid entity type"
-    assert batch.failure is failure
+    with pytest.raises(ValueError, match="session_text"):
+        batch.validate_input()
 
 
 @pytest.mark.ingestion
@@ -117,16 +105,15 @@ async def test_pipeline_process_mutates_the_supplied_ingestion_batch(monkeypatch
 
     await pipeline.process(batch)
 
-    assert batch.stage is IngestionStage.COMPLETED
     assert batch.entity_ids == [2]
     assert batch.new_entity_ids == {2}
     assert batch.entity_message_map == {2: [7]}
-    assert batch.work_unit.status is WorkStatus.RUNNING
+    assert batch.work_unit.status.value == "pending"
 
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_pipeline_cancellation_marks_parent_work_and_propagates(monkeypatch):
+async def test_pipeline_cancellation_propagates_to_worker_owner(monkeypatch):
     pipeline = object.__new__(IngestionPipeline)
     pipeline.user_name = "ada"
     pipeline.project_id = "project-1"
@@ -144,8 +131,7 @@ async def test_pipeline_cancellation_marks_parent_work_and_propagates(monkeypatc
     with pytest.raises(asyncio.CancelledError):
         await pipeline.process(batch)
 
-    assert batch.work_unit.status is WorkStatus.CANCELLED
-    assert batch.work_unit.summary == "Ingestion processing cancelled"
+    assert batch.work_unit.status.value == "pending"
 
 
 @pytest.mark.ingestion
@@ -197,7 +183,6 @@ async def test_resolution_handoff_keeps_new_entities_batch_local():
     pipeline._get_next_ent_id = next_entity_id
     batch = open_batch()
     batch.validate_input()
-    batch.mark_extracted()
 
     await pipeline._resolve_mentions(batch, [(7, "Ada", "person", "People")])
 
@@ -272,7 +257,6 @@ async def test_resolution_stages_existing_alias_until_durable_commit():
     pipeline._get_next_ent_id = next_entity_id
     batch = open_batch()
     batch.validate_input()
-    batch.mark_extracted()
 
     await pipeline._resolve_mentions(batch, [(7, "Bobby", "person", "People")])
 

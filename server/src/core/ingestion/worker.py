@@ -1,7 +1,9 @@
 """PostgreSQL queue worker with application-local worker signaling."""
 
+from __future__ import annotations
+
 import asyncio
-from typing import Awaitable, Callable, Dict, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Dict, List, NamedTuple, Optional
 
 from loguru import logger
 
@@ -18,8 +20,10 @@ from common.utils.events import emit, emit_sync
 from common.utils.time_utils import get_now
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.ports import IngestionPersistence
 from infrastructure.work_record import WorkStatus
+
+if TYPE_CHECKING:
+    from core.knowledge.store import KnowledgeStore
 
 
 class FailureDisposition(NamedTuple):
@@ -38,7 +42,7 @@ class IngestionWorker:
         self,
         user_name: str,
         session_id: str,
-        knowledge_store: IngestionPersistence,
+        knowledge_store: KnowledgeStore,
         processor: IngestionPipeline,
         get_session_context: Callable[[int, Optional[int]], Awaitable[List[Dict]]],
         write_to_graph: Callable[[IngestionBatch], Awaitable[object]],
@@ -235,20 +239,18 @@ class IngestionWorker:
                     policy=self.processor.capture_policy(),
                     batch_id=claim.batch_id,
                 )
-                await self.processor.process(batch)
-                if not batch.success:
-                    raise batch.failure or RuntimeError(
-                        batch.error or "ingestion processing failed"
-                    )
-                await self.write_to_graph(batch)
                 if batch.work_unit.status is WorkStatus.PENDING:
                     batch.work_unit.mark_running()
+                await self.processor.process(batch)
+                await self.write_to_graph(batch)
                 if batch.work_unit.status is WorkStatus.RUNNING:
                     batch.work_unit.mark_succeeded("Durable ingestion commit completed")
                 processed += 1
                 self._health_last_success_at = get_now()
                 self._health_consecutive_failures = 0
             except asyncio.CancelledError:
+                if batch is not None and batch.work_unit.status is WorkStatus.RUNNING:
+                    batch.work_unit.mark_cancelled("Ingestion processing cancelled")
                 await store.release_ingestion_claim(
                     user_name=self.user_name,
                     project_id=project,
@@ -257,6 +259,8 @@ class IngestionWorker:
                 )
                 raise
             except LLMBudgetExceededError:
+                if batch is not None and batch.work_unit.status is WorkStatus.RUNNING:
+                    batch.work_unit.defer("Ingestion budget exhausted")
                 await store.release_ingestion_claim(
                     user_name=self.user_name,
                     project_id=project,
@@ -268,6 +272,13 @@ class IngestionWorker:
                 self._record_failure("durable_batch")
                 disposition = self._classify_failure(exc)
                 if disposition.pause_worker:
+                    if (
+                        batch is not None
+                        and batch.work_unit.status is WorkStatus.RUNNING
+                    ):
+                        batch.work_unit.defer(
+                            f"Paused pending {disposition.stage}:{disposition.code}"
+                        )
                     self._health_state = "paused"
                     self._health_pause_reason = (
                         f"{disposition.stage}:{disposition.code}"
@@ -278,6 +289,8 @@ class IngestionWorker:
                         self._health_pause_reason,
                     )
                     break
+                if batch is not None and batch.work_unit.status is WorkStatus.RUNNING:
+                    batch.work_unit.mark_failed(str(exc))
                 await store.fail_ingestion_claim(
                     user_name=self.user_name,
                     project_id=project,

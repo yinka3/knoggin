@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Dict, Iterable, List, NotRequired, Optional, Set, TypedDict
 from uuid import uuid4
 
@@ -15,7 +14,7 @@ from common.schema.ingestion.contracts import (
     ValidationIssue,
 )
 from core.ingestion.policy import IngestionPolicy
-from infrastructure.work_record import WorkRecord, WorkStatus
+from infrastructure.work_record import WorkRecord
 
 
 class IngestionMessage(TypedDict):
@@ -23,44 +22,8 @@ class IngestionMessage(TypedDict):
 
     id: int
     message: str
-    timestamp: NotRequired[str]
+    timestamp: NotRequired[int | None]
     role: NotRequired[str]
-
-
-class IngestionStage(StrEnum):
-    """Pipeline-local stages before the one durable commit."""
-
-    RAW = "raw"
-    INPUT_VALIDATED = "input_validated"
-    EXTRACTED = "extracted"
-    RESOLVED = "resolved"
-    RELATIONSHIPS_EXTRACTED = "relationships_extracted"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-_ALLOWED_TRANSITIONS = {
-    IngestionStage.RAW: {IngestionStage.INPUT_VALIDATED, IngestionStage.FAILED},
-    IngestionStage.INPUT_VALIDATED: {
-        IngestionStage.EXTRACTED,
-        IngestionStage.FAILED,
-    },
-    IngestionStage.EXTRACTED: {
-        IngestionStage.RESOLVED,
-        IngestionStage.COMPLETED,
-        IngestionStage.FAILED,
-    },
-    IngestionStage.RESOLVED: {
-        IngestionStage.RELATIONSHIPS_EXTRACTED,
-        IngestionStage.FAILED,
-    },
-    IngestionStage.RELATIONSHIPS_EXTRACTED: {
-        IngestionStage.COMPLETED,
-        IngestionStage.FAILED,
-    },
-    IngestionStage.COMPLETED: {IngestionStage.FAILED},
-    IngestionStage.FAILED: set(),
-}
 
 
 @dataclass(slots=True)
@@ -73,7 +36,6 @@ class IngestionBatch:
     session_text: str
     work_unit: WorkRecord
     policy: IngestionPolicy
-    stage: IngestionStage = IngestionStage.RAW
     trace: ExtractionTrace = field(default_factory=ExtractionTrace)
     issues: List[ValidationIssue] = field(default_factory=list)
     entity_ids: List[int] = field(default_factory=list)
@@ -86,9 +48,6 @@ class IngestionBatch:
         default_factory=list
     )
     released: bool = False
-    success: bool = True
-    error: Optional[str] = None
-    failure: Optional[Exception] = None
 
     @classmethod
     def open(
@@ -131,22 +90,10 @@ class IngestionBatch:
         if self.released:
             raise RuntimeError("IngestionBatch has been released")
 
-    def advance_to(self, stage: IngestionStage) -> None:
-        """Advance through one legal in-memory pipeline transition."""
-
-        self._require_active()
-        if stage not in _ALLOWED_TRANSITIONS[self.stage]:
-            raise ValueError(
-                f"Illegal ingestion transition: {self.stage.value} -> {stage.value}"
-            )
-        self.stage = stage
-
     def validate_input(self) -> None:
         """Validate the canonical input the pipeline already depends on."""
 
         self._require_active()
-        if self.stage is not IngestionStage.RAW:
-            raise ValueError("Input can only be validated from the raw stage")
         if not isinstance(self.session_text, str):
             raise ValueError("IngestionBatch.session_text must be a string")
         for message in self.messages:
@@ -156,10 +103,6 @@ class IngestionBatch:
                 raise ValueError(
                     "IngestionBatch messages require both 'id' and 'message'"
                 )
-        self.advance_to(IngestionStage.INPUT_VALIDATED)
-
-    def mark_extracted(self) -> None:
-        self.advance_to(IngestionStage.EXTRACTED)
 
     def set_resolution(
         self,
@@ -174,8 +117,6 @@ class IngestionBatch:
         """Apply the entity-resolution decisions for this batch exactly once."""
 
         self._require_active()
-        if self.stage is not IngestionStage.EXTRACTED:
-            raise ValueError("Resolution can only be applied after extraction")
         self.entity_ids = list(entity_ids)
         self.new_entity_ids = set(new_entity_ids)
         self.alias_updated_ids = set(alias_updated_ids)
@@ -187,7 +128,6 @@ class IngestionBatch:
             entity_id: list(aliases) for entity_id, aliases in alias_updates.items()
         }
         self.pending_entity_writes = dict(pending_entity_writes or {})
-        self.advance_to(IngestionStage.RESOLVED)
 
     def set_relationship_observations(
         self, observations: Iterable[RelationshipObservation]
@@ -195,44 +135,7 @@ class IngestionBatch:
         """Attach relationship observations produced for resolved entities."""
 
         self._require_active()
-        if self.stage is not IngestionStage.RESOLVED:
-            raise ValueError(
-                "Relationship observations can only be set after resolution"
-            )
         self.relationship_observations = list(observations)
-        self.advance_to(IngestionStage.RELATIONSHIPS_EXTRACTED)
-
-    def complete(self) -> None:
-        """Mark successful in-memory learning completion before durable commit."""
-
-        self._require_active()
-        if self.stage not in {
-            IngestionStage.INPUT_VALIDATED,
-            IngestionStage.EXTRACTED,
-            IngestionStage.RELATIONSHIPS_EXTRACTED,
-        }:
-            raise ValueError("IngestionBatch cannot complete from the current stage")
-        self.advance_to(IngestionStage.COMPLETED)
-
-    def fail(self, error: Exception | str) -> None:
-        """Record a pipeline failure without discarding diagnostics."""
-
-        self._require_active()
-        self.success = False
-        self.error = str(error)
-        self.failure = (
-            error if isinstance(error, Exception) else RuntimeError(str(error))
-        )
-        if self.stage is not IngestionStage.FAILED:
-            self.stage = IngestionStage.FAILED
-
-    def cancel_work(self, summary: str = "Ingestion cancelled") -> None:
-        """Record cancellation on the operation's telemetry record."""
-
-        if self.released:
-            raise RuntimeError("IngestionBatch has been released")
-        if self.work_unit.status in {WorkStatus.PENDING, WorkStatus.RUNNING}:
-            self.work_unit.mark_cancelled(summary)
 
     def release(self) -> None:
         """Discard raw workflow-only input once the operation is finished."""

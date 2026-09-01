@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from common.exceptions import LLMResponseError
 from common.schema.ingestion.contracts import (
     RelationshipObservation,
 )
@@ -85,7 +86,7 @@ def test_connections_result_requires_a_local_message_reference():
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
+async def test_connection_extraction_surfaces_invalid_model_response_for_retry():
     processor = make_processor(None)
 
     batch = IngestionBatch.open(
@@ -99,9 +100,8 @@ async def test_connection_extraction_falls_back_to_empty_on_llm_failure():
     batch.entity_ids = [1, 2]
     batch.entity_message_map = {1: [7], 2: [7]}
 
-    result = await processor.extract(batch)
-
-    assert result == []
+    with pytest.raises(LLMResponseError, match="returned no result"):
+        await processor.extract(batch)
 
 
 @pytest.mark.ingestion

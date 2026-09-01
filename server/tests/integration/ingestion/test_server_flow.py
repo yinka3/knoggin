@@ -208,7 +208,6 @@ class _NoEntityProcessor:
 
     async def process(self, batch: IngestionBatch):
         batch.validate_input()
-        batch.mark_extracted()
         batch.set_resolution(
             entity_ids=[],
             new_entity_ids=[],
@@ -217,7 +216,6 @@ class _NoEntityProcessor:
             alias_updates={},
         )
         batch.set_relationship_observations([])
-        batch.complete()
 
 
 class _SignalCounter:
@@ -376,7 +374,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
                     Message(
                         content=content,
                         timestamp=datetime(2026, 8, 1, 12, index, tzinfo=timezone.utc),
-                    )
+                    ),
                 )
             )
         await asyncio.sleep(1.05)
@@ -635,9 +633,7 @@ async def test_real_document_request_persists_document_source_provenance(
         and event.succeeded
         for event in public_events
     )
-    source_events = [
-        event for event in public_events if event.type == "source.added"
-    ]
+    source_events = [event for event in public_events if event.type == "source.added"]
     assert len(source_events) == 1
     assert source_events[0].source.document_id == document["document_id"]
 
@@ -1001,7 +997,7 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
             Message(
                 content="Retry this message-log boundary.",
                 timestamp=datetime(2026, 8, 1, 14, 0, tzinfo=timezone.utc),
-            )
+            ),
         )
         await asyncio.sleep(1.05)
         await worker.flush()

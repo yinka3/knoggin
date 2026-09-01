@@ -50,12 +50,12 @@ class _Processor:
         )
 
     async def process(self, batch):
-        batch.success = True
+        return None
 
 
 class _InvalidProcessor(_Processor):
     async def process(self, batch):
-        batch.fail(ValueError("invalid extraction"))
+        raise ValueError("invalid extraction")
 
 
 class _FailureProcessor(_Processor):
@@ -63,7 +63,7 @@ class _FailureProcessor(_Processor):
         self.failure = failure
 
     async def process(self, batch):
-        batch.fail(self.failure)
+        raise self.failure
 
 
 async def _context(*_args):
@@ -162,7 +162,9 @@ async def test_durable_worker_pauses_for_configuration_repair():
         (LLMResponseError("invalid structured response"), True, "model"),
     ],
 )
-async def test_durable_worker_retries_transient_model_failures(failure, retryable, stage):
+async def test_durable_worker_retries_transient_model_failures(
+    failure, retryable, stage
+):
     store = _Store()
     worker = _worker(store, _FailureProcessor(failure), lambda _batch: None)
 
