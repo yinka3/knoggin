@@ -52,6 +52,7 @@ class RelationshipAdvisory:
     message_ids: tuple[int, ...]
     first_observed_ms: int | None
     last_observed_ms: int | None
+    observation_ids: tuple[int, ...] = ()
     disposition: str = "pending"
     proposed_relationship_type: str | None = None
     decision_note: str | None = None
@@ -73,6 +74,7 @@ class RelationshipAdvisory:
             "distinct_target_entities": self.distinct_target_entities,
             "distinct_entities": self.distinct_entities,
             "message_ids": list(self.message_ids),
+            "observation_ids": list(self.observation_ids),
             "first_observed_ms": self.first_observed_ms,
             "last_observed_ms": self.last_observed_ms,
             "disposition": self.disposition,
@@ -269,6 +271,7 @@ def build_relationship_advisories(
                 "target_type": target_type,
                 "occurrences": 0,
                 "message_ids": set(),
+                "observation_ids": set(),
                 "source_entities": set(),
                 "target_entities": set(),
                 "first_observed_ms": None,
@@ -277,6 +280,9 @@ def build_relationship_advisories(
         )
         group["occurrences"] += 1
         group["message_ids"].add(int(row["message_id"]))
+        observation_id = row.get("observation_id")
+        if observation_id is not None:
+            group["observation_ids"].add(int(observation_id))
         source_id = row.get("source_entity_id") or row.get("entity_a_id")
         target_id = row.get("target_entity_id") or row.get("entity_b_id")
         if source_id is not None:
@@ -315,6 +321,7 @@ def build_relationship_advisories(
                 distinct_source_entities=len(group["source_entities"]),
                 distinct_target_entities=len(group["target_entities"]),
                 message_ids=tuple(sorted(group["message_ids"])),
+                observation_ids=tuple(sorted(group["observation_ids"])),
                 first_observed_ms=group["first_observed_ms"],
                 last_observed_ms=group["last_observed_ms"],
             )

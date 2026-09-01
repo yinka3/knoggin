@@ -60,6 +60,23 @@ class RelationshipInterpretationPlan(BaseModel):
     kind: Literal["relationship_interpretation"] = "relationship_interpretation"
     changes: list[RelationshipInterpretationChange] = Field(max_length=512)
 
+    @field_validator("changes")
+    @classmethod
+    def validate_exclusions(cls, values):
+        observation_ids: set[int] = set()
+        for change in values:
+            if change.observation_id in observation_ids:
+                raise ValueError("relationship interpretation observation IDs must be unique")
+            observation_ids.add(change.observation_id)
+            if (
+                change.target_relationship_type is None
+                and change.interpretation_source != "review"
+            ):
+                raise ValueError(
+                    "detaching an observation requires interpretation_source='review'"
+                )
+        return values
+
 
 class RelationshipDomainChangePlan(BaseModel):
     """A reusable relationship-definition change, separate from evidence repair."""

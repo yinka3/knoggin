@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 HumanReviewStatus = Literal["open", "resolved"]
 HumanReviewPriority = Literal["low", "normal", "high"]
 

@@ -83,10 +83,12 @@ class ProjectMaintenanceService:
         knowledge_store = self.resources.knowledge_store
         if knowledge_store is None:
             raise RuntimeError("Knowledge storage is unavailable")
+        domain = await DomainConfigStore(self.pg).load(self.user_name, project_id)
         return await knowledge_store.get_relationship_advisories(
             user_name=self.user_name,
             project_id=project_id,
             thresholds=thresholds,
+            domain_version=domain.version,
         )
 
     async def get_open_human_reviews(self, project_id: str):
@@ -99,6 +101,43 @@ class ProjectMaintenanceService:
         return await knowledge_store.get_open_human_reviews(
             user_name=self.user_name,
             project_id=project_id,
+        )
+
+    async def list_maintenance_reviews(self, project_id: str):
+        """Return durable typed review history for this project."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        knowledge_store = self.resources.knowledge_store
+        if knowledge_store is None:
+            raise RuntimeError("Knowledge storage is unavailable")
+        return await knowledge_store.list_maintenance_reviews(
+            user_name=self.user_name,
+            project_id=project_id,
+        )
+
+    async def transition_maintenance_review(
+        self,
+        project_id: str,
+        review_id: str,
+        *,
+        status: str,
+        expected_state: dict | None = None,
+        reason: str | None = None,
+    ):
+        """Apply a review decision after the caller has inspected its plan."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        knowledge_store = self.resources.knowledge_store
+        if knowledge_store is None:
+            raise RuntimeError("Knowledge storage is unavailable")
+        return await knowledge_store.transition_maintenance_review(
+            review_id=review_id,
+            user_name=self.user_name,
+            project_id=project_id,
+            status=status,
+            expected_state=expected_state,
+            actor=self.user_name,
+            reason=reason,
         )
 
     async def get_conflict_group(self, project_id: str, conflict_id: str) -> dict:

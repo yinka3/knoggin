@@ -47,6 +47,7 @@ class MaintenanceReviewWriter:
         dedupe_key: str | None,
         evidence_refs: Iterable[EvidenceRef],
         plan: MaintenancePlan,
+        expected_state: dict[str, Any] | None = None,
     ) -> str:
         payload = {
             "user_name": user_name,
@@ -56,6 +57,7 @@ class MaintenanceReviewWriter:
             "dedupe_key": dedupe_key,
             "evidence_refs": [ref.model_dump(mode="json") for ref in evidence_refs],
             "plan": plan.model_dump(mode="json"),
+            "expected_state": expected_state or {},
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -103,6 +105,7 @@ class MaintenanceReviewWriter:
             dedupe_key=dedupe_key,
             evidence_refs=refs,
             plan=plan,
+            expected_state=expected_state,
         )
         review_id = str(uuid.uuid5(self._NAMESPACE, signature))
         review = MaintenanceReview(
@@ -190,16 +193,24 @@ class MaintenanceReviewWriter:
                         ),
                     ),
                 )
-            await self._event(
-                active_cur,
-                review_id=hydrated.review_id,
-                status="open",
-                actor=user_name,
-                reason="review created or reaffirmed",
-            )
+            if hydrated.status == "open":
+                await self._event(
+                    active_cur,
+                    review_id=hydrated.review_id,
+                    status="open",
+                    actor=user_name,
+                    reason="review created or reaffirmed",
+                )
             return hydrated
 
-    async def get(self, review_id: str, *, user_name: str, project_id: str | None = None):
+    async def get(
+        self,
+        review_id: str,
+        *,
+        user_name: str,
+        project_id: str | None = None,
+        cur=None,
+    ):
         review_id = require_scope_value(review_id, "review_id", "get_maintenance_review")
         user_name = require_scope_value(user_name, "user_name", "get_maintenance_review")
         query = """
@@ -213,12 +224,19 @@ class MaintenanceReviewWriter:
         if project_id is not None:
             query += " AND project_id = %s"
             params += (project_id,)
-        return self._hydrate(await self.client.fetch_one(query, params))
+        return self._hydrate(await self._fetchone(cur, query, params))
 
     async def get_by_key(
-        self, *, user_name: str, project_id: str | None, kind: str, dedupe_key: str
+        self,
+        *,
+        user_name: str,
+        project_id: str | None,
+        kind: str,
+        dedupe_key: str,
+        cur=None,
     ) -> MaintenanceReview | None:
-        row = await self.client.fetch_one(
+        row = await self._fetchone(
+            cur,
             """
             SELECT review_id, user_name, scope, project_id, kind, dedupe_key,
                    evidence_refs, evidence_snapshot, reasoning, proposed_plan,
@@ -287,33 +305,55 @@ class MaintenanceReviewWriter:
             raise ValueError("transition status must be applied, dismissed, or stale")
         review_id = require_scope_value(review_id, "review_id", "transition_maintenance_review")
         user_name = require_scope_value(user_name, "user_name", "transition_maintenance_review")
-        if expected_state is not None:
-            current = await self.get(review_id, user_name=user_name, project_id=project_id)
-            if current is None:
-                raise ValueError("Unknown maintenance review")
-            if current.expected_state != expected_state:
-                raise ValueError("Maintenance review expected state no longer matches")
-        query = """
-            UPDATE public.maintenance_reviews
-            SET status = %s, resolved_at = COALESCE(resolved_at, now()), updated_at = now()
-            WHERE review_id = %s AND user_name = %s AND status = 'open'
+        select_query = """
+            SELECT review_id, user_name, scope, project_id, kind, dedupe_key,
+                   evidence_refs, evidence_snapshot, reasoning, proposed_plan,
+                   expected_state, status, created_at, resolved_at
+            FROM public.maintenance_reviews
+            WHERE review_id = %s AND user_name = %s
         """
-        params = (status, review_id, user_name)
+        select_params: tuple[Any, ...] = (review_id, user_name)
         if project_id is not None:
-            query += " AND project_id = %s"
-            params += (project_id,)
-        await self._execute(cur, query, params)
-        await self._event(
-            cur,
-            review_id=review_id,
-            status=status,
-            actor=actor or user_name,
-            reason=reason,
-        )
-        result = await self.get(review_id, user_name=user_name, project_id=project_id)
-        if result is None:
-            raise ValueError("Unknown or already-resolved maintenance review")
-        return result
+            select_query += " AND project_id = %s"
+            select_params += (project_id,)
+
+        # Keep the compare, state transition, event, and returned snapshot in
+        # one transaction.  In particular, callers that already hold a
+        # transaction cursor must not compare through a second pooled
+        # connection.
+        async with self._cursor_context(cur) as active_cur:
+            current_row = await self._fetchone(active_cur, select_query, select_params)
+            current = self._hydrate(current_row)
+            if current is None or current.status != "open":
+                raise ValueError("Unknown or already-resolved maintenance review")
+            if expected_state is not None and current.expected_state != expected_state:
+                raise ValueError("Maintenance review expected state no longer matches")
+
+            query = """
+                UPDATE public.maintenance_reviews
+                SET status = %s, resolved_at = COALESCE(resolved_at, now()), updated_at = now()
+                WHERE review_id = %s AND user_name = %s AND status = 'open'
+            """
+            params = (status, review_id, user_name)
+            if project_id is not None:
+                query += " AND project_id = %s"
+                params += (project_id,)
+            await self._execute(active_cur, query, params)
+            if getattr(active_cur, "rowcount", 1) == 0:
+                raise ValueError("Unknown or already-resolved maintenance review")
+            await self._event(
+                active_cur,
+                review_id=review_id,
+                status=status,
+                actor=actor or user_name,
+                reason=reason,
+            )
+            result = self._hydrate(
+                await self._fetchone(active_cur, select_query, select_params)
+            )
+            if result is None:
+                raise ValueError("Unknown or already-resolved maintenance review")
+            return result
 
     async def mark_stale_for_observations(
         self,
@@ -322,6 +362,7 @@ class MaintenanceReviewWriter:
         project_id: str,
         observation_ids: Iterable[int],
         reason: str = "Referenced observation interpretation changed",
+        exclude_review_id: str | None = None,
         cur=None,
     ) -> int:
         ids = sorted({int(value) for value in observation_ids if int(value) > 0})
@@ -332,6 +373,7 @@ class MaintenanceReviewWriter:
             SET status = 'stale', resolved_at = COALESCE(resolved_at, now()), updated_at = now()
             WHERE review.user_name = %s AND review.project_id = %s
               AND review.status = 'open'
+              AND (%s IS NULL OR review.review_id <> %s)
               AND EXISTS (
                   SELECT 1 FROM public.maintenance_review_evidence evidence
                   WHERE evidence.review_id = review.review_id
@@ -339,16 +381,62 @@ class MaintenanceReviewWriter:
               )
             RETURNING review.review_id
         """
-        rows = await self._fetchall(cur, query, (user_name, project_id, ids))
-        for row in rows:
-            await self._event(
-                cur,
-                review_id=row["review_id"],
-                status="stale",
-                actor=user_name,
-                reason=reason,
+        async with self._cursor_context(cur) as active_cur:
+            rows = await self._fetchall(
+                active_cur,
+                query,
+                (user_name, project_id, exclude_review_id, exclude_review_id, ids),
             )
-        return len(rows)
+            for row in rows:
+                await self._event(
+                    active_cur,
+                    review_id=row["review_id"],
+                    status="stale",
+                    actor=user_name,
+                    reason=reason,
+                )
+            return len(rows)
+
+    async def mark_stale_for_definition(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        definition_version: int,
+        reason: str = "Relationship definition version changed",
+        cur=None,
+    ) -> int:
+        """Invalidate open relationship reviews built against an older definition."""
+
+        if definition_version < 0:
+            raise ValueError("definition_version must be non-negative")
+        query = """
+            UPDATE public.maintenance_reviews
+            SET status = 'stale', resolved_at = COALESCE(resolved_at, now()), updated_at = now()
+            WHERE user_name = %s AND project_id = %s
+              AND status = 'open'
+              AND kind IN ('relationship_advisory', 'relationship_interpretation',
+                           'relationship_domain_change')
+              AND NULLIF(expected_state ->> 'domain_version', '') IS NOT NULL
+              AND (expected_state ->> 'domain_version') ~ '^[0-9]+$'
+              AND (expected_state ->> 'domain_version')::BIGINT < %s
+            RETURNING review_id
+        """
+        async with self._cursor_context(cur) as active_cur:
+            rows = await self._fetchall(
+                active_cur,
+                query,
+                (user_name, project_id, definition_version),
+            )
+            for row in rows:
+                await self._event(
+                    active_cur,
+                    review_id=row["review_id"],
+                    status="stale",
+                    actor=user_name,
+                    reason=reason,
+                )
+            return len(rows)
 
     @staticmethod
     def _hydrate(row):

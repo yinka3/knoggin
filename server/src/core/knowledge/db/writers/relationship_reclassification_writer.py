@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import uuid
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any, Iterable
@@ -14,8 +12,13 @@ from psycopg import Error as PsycopgError
 from common.conf.domain_config import CompiledDomain
 from common.exceptions import StorageWriteError
 from common.scoping import require_scope_value
-from core.knowledge.db.projection_rebuilder import GraphBuilder
-from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
+from core.knowledge.db.writers.relationship_interpretation_writer import (
+    RelationshipInterpretationWriter,
+)
+from core.knowledge.maintenance_reviews import (
+    RelationshipInterpretationChange,
+    RelationshipInterpretationPlan,
+)
 from core.knowledge.relationship_reclassification import (
     RelationshipReclassification,
     RelationshipReclassificationPlan,
@@ -74,12 +77,11 @@ class HistoricalRelationshipReclassificationResult:
 
 
 class RelationshipReclassificationWriter:
-    """Reinterpret canonical observations, then reconcile graph identities."""
+    """Plan historical normalization and delegate mutation to the typed primitive."""
 
     def __init__(self, client):
         self.client = client
-        self.reviews = MaintenanceReviewWriter(client)
-        self.projection = GraphBuilder(client)
+        self.interpretation = RelationshipInterpretationWriter(client)
 
     @staticmethod
     def _raise_storage_write(operation: str, exc: Exception) -> None:
@@ -179,171 +181,6 @@ class RelationshipReclassificationWriter:
         )
         return plan_relationship_reclassification(rows, domain)
 
-    @staticmethod
-    async def _ensure_relationship_identity(
-        cur,
-        *,
-        change: RelationshipReclassification,
-        user_name: str,
-    ) -> None:
-        entity_a_id, entity_b_id = change.entity_a_id, change.entity_b_id
-        if change.new_symmetric:
-            entity_a_id, entity_b_id = sorted((entity_a_id, entity_b_id))
-        await cur.execute(
-            """
-            INSERT INTO public.relationships (
-                relationship_id,
-                user_name,
-                project_id,
-                entity_a_id,
-                entity_b_id,
-                relationship_type,
-                "symmetric"
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (relationship_id) DO NOTHING
-            """,
-            (
-                change.new_relationship_id,
-                user_name,
-                change.project_id,
-                entity_a_id,
-                entity_b_id,
-                change.new_relationship_type,
-                change.new_symmetric,
-            ),
-        )
-
-    @staticmethod
-    async def _rewrite_observation(
-        cur,
-        *,
-        change: RelationshipReclassification,
-        domain_version: int,
-    ) -> None:
-        """Change interpretation in place so the evidence identity survives."""
-
-        await cur.execute(
-            """
-            UPDATE public.relationship_observations
-            SET relationship_id = %s,
-                interpretation_source = 'domain'
-            WHERE observation_id = %s
-              AND relationship_id = %s
-              AND project_id = %s
-            """,
-            (
-                change.new_relationship_id,
-                change.observation_id,
-                change.relationship_id,
-                change.project_id,
-            ),
-        )
-    @staticmethod
-    async def _reconcile_episode_relationships(
-        cur,
-        *,
-        project_id: str,
-        observation_ids: list[int],
-    ) -> None:
-        if not observation_ids:
-            return
-        await cur.execute(
-            """
-            CREATE TEMP TABLE affected_episodes ON COMMIT DROP AS
-            SELECT DISTINCT episode_message.episode_id
-            FROM public.episode_messages episode_message
-            JOIN public.relationship_observations observation
-              ON observation.project_id = episode_message.project_id
-             AND observation.session_id = episode_message.session_id
-             AND observation.message_id = episode_message.message_id
-            WHERE episode_message.project_id = %s
-              AND observation.observation_id = ANY(%s)
-            """,
-            (project_id, observation_ids),
-        )
-        await cur.execute(
-            """
-            DELETE FROM public.episode_relationships
-            WHERE project_id = %s
-              AND episode_id IN (SELECT episode_id FROM affected_episodes)
-            """,
-            (project_id,),
-        )
-        await cur.execute(
-            """
-            INSERT INTO public.episode_relationships (
-                episode_id,
-                project_id,
-                relationship_id,
-                source_message_count
-            )
-            SELECT
-                episode_message.episode_id,
-                episode_message.project_id,
-                observation.relationship_id,
-                COUNT(DISTINCT episode_message.message_id)
-            FROM public.episode_messages episode_message
-            JOIN public.relationship_observations observation
-              ON observation.project_id = episode_message.project_id
-             AND observation.session_id = episode_message.session_id
-             AND observation.message_id = episode_message.message_id
-            WHERE episode_message.project_id = %s
-              AND episode_message.episode_id IN (
-                  SELECT episode_id FROM affected_episodes
-              )
-              AND observation.relationship_id IS NOT NULL
-            GROUP BY
-                episode_message.episode_id,
-                episode_message.project_id,
-                observation.relationship_id
-            ON CONFLICT (episode_id, relationship_id) DO UPDATE SET
-                source_message_count = GREATEST(
-                    public.episode_relationships.source_message_count,
-                    EXCLUDED.source_message_count
-                )
-            """,
-            (project_id,),
-        )
-
-    @staticmethod
-    async def _remove_orphaned_relationships(
-        cur,
-        *,
-        project_id: str,
-        relationship_ids: list[str],
-    ) -> None:
-        if not relationship_ids:
-            return
-        await cur.execute(
-            """
-            DELETE FROM public.episode_relationships episode_relationship
-            WHERE episode_relationship.project_id = %s
-              AND episode_relationship.relationship_id = ANY(%s)
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM public.relationship_observations observation
-                  WHERE observation.project_id = episode_relationship.project_id
-                    AND observation.relationship_id = episode_relationship.relationship_id
-              )
-            """,
-            (project_id, relationship_ids),
-        )
-        await cur.execute(
-            """
-            DELETE FROM public.relationships relationship
-            WHERE relationship.project_id = %s
-              AND relationship.relationship_id = ANY(%s)
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM public.relationship_observations observation
-                  WHERE observation.project_id = relationship.project_id
-                    AND observation.relationship_id = relationship.relationship_id
-              )
-            """,
-            (project_id, relationship_ids),
-        )
-
     @_storage_write("apply_relationship_reclassification")
     async def apply(
         self,
@@ -363,126 +200,31 @@ class RelationshipReclassificationWriter:
         planned = tuple(changes)
         if not planned:
             return RelationshipReclassificationBatchResult(0, 0, 0)
-        observation_ids = [change.observation_id for change in planned]
-        if len(set(observation_ids)) != len(observation_ids):
+        if len({change.observation_id for change in planned}) != len(planned):
             raise ValueError("Relationship observation IDs must be unique")
-
-        async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                SELECT
-                    observation.observation_id,
-                    observation.relationship_id,
-                    observation.project_id,
-                    observation.source_entity_id AS entity_a_id,
-                    observation.target_entity_id AS entity_b_id,
-                    relationship.relationship_type,
-                    observation.observed_relationship_label,
-                    observation.interpretation_source,
-                    source_context.entity_type AS source_type,
-                    target_context.entity_type AS target_type
-                FROM public.relationship_observations observation
-                JOIN public.relationships relationship
-                  ON relationship.relationship_id = observation.relationship_id
-                 AND relationship.project_id = observation.project_id
-                LEFT JOIN public.project_entity_contexts source_context
-                  ON source_context.project_id = observation.project_id
-                 AND source_context.entity_id = observation.source_entity_id
-                LEFT JOIN public.project_entity_contexts target_context
-                  ON target_context.project_id = observation.project_id
-                 AND target_context.entity_id = observation.target_entity_id
-                WHERE observation.user_name = %s
-                  AND observation.project_id = %s
-                  AND observation.observation_id = ANY(%s)
-                FOR UPDATE OF observation
-                """,
-                (user_name, project_id, observation_ids),
+        typed_changes = [
+            RelationshipInterpretationChange(
+                observation_id=change.observation_id,
+                expected_relationship_id=change.relationship_id,
+                target_relationship_type=change.new_relationship_type,
+                interpretation_source="domain",
             )
-            current_rows = {
-                int(row["observation_id"]): row for row in await cur.fetchall()
-            }
-            conflicts = 0
-            updated = 0
-            old_relationship_ids: set[str] = set()
-            affected_relationship_ids: set[str] = set()
-            for change in planned:
-                current = current_rows.get(change.observation_id)
-                if current is None:
-                    conflicts += 1
-                    continue
-                current_plan = plan_relationship_reclassification((current,), domain)
-                if not current_plan.changes:
-                    conflicts += 1
-                    continue
-                target = current_plan.changes[0]
-                if target != change:
-                    conflicts += 1
-                    continue
-
-                await self._ensure_relationship_identity(
-                    cur,
-                    change=target,
-                    user_name=user_name,
-                )
-                await self._rewrite_observation(
-                    cur,
-                    change=target,
-                    domain_version=domain.version,
-                )
-                old_relationship_ids.add(target.relationship_id)
-                affected_relationship_ids.add(target.relationship_id)
-                affected_relationship_ids.add(target.new_relationship_id)
-                updated += 1
-
-            await self._reconcile_episode_relationships(
-                cur,
-                project_id=project_id,
-                observation_ids=sorted(
-                    change.observation_id
-                    for change in planned
-                    if change.observation_id in current_rows
-                ),
-            )
-            await self._remove_orphaned_relationships(
-                cur,
-                project_id=project_id,
-                relationship_ids=sorted(old_relationship_ids),
-            )
-            if updated:
-                changed_observations = [
-                    change.to_dict()
-                    for change in planned
-                    if change.observation_id in current_rows
-                ]
-                await self.reviews.mark_stale_for_observations(
-                    user_name=user_name,
-                    project_id=project_id,
-                    observation_ids=[item["observation_id"] for item in changed_observations],
-                    reason="Relationship interpretation changed",
-                    cur=cur,
-                )
-                await cur.execute(
-                    """
-                    INSERT INTO public.maintenance_reinterpretation_audits
-                        (audit_id, user_name, project_id, observation_ids, changes)
-                    VALUES (%s, %s, %s, %s::jsonb, %s::jsonb)
-                    """,
-                    (
-                        str(uuid.uuid4()),
-                        user_name,
-                        project_id,
-                        json.dumps([item["observation_id"] for item in changed_observations]),
-                        json.dumps(changed_observations, sort_keys=True, default=str),
-                    ),
-                )
-                await self.projection.rebuild_project_projection(
-                    project_id,
-                    user_name,
-                    cur=cur,
-                )
-
+            for change in planned
+            if change.project_id == project_id
+        ]
+        result = await self.interpretation.apply_plan(
+            user_name=user_name,
+            project_id=project_id,
+            plan=RelationshipInterpretationPlan(changes=typed_changes),
+            domain=domain,
+        )
+        conflicts = result.conflicts + sum(
+            change.project_id != project_id for change in planned
+        )
         return RelationshipReclassificationBatchResult(
-            scanned=len(planned), updated=updated, conflicts=conflicts
+            scanned=len(planned),
+            updated=result.updated,
+            conflicts=conflicts,
         )
 
     @_storage_write("reclassify_relationships")

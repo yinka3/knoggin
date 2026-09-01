@@ -22,9 +22,7 @@ def _observation(observation_id: int) -> dict:
         "target_entity_id": 3,
         "target_entity_name": "Knoggin",
         "observed_relationship_label": "knows",
-        "canonical_relationship_type": None,
-        "domain_status": "unrecognized",
-        "confidence": 0.9,
+        "interpretation_source": "observed",
         "context": "Ada knows Knoggin.",
         "observed_at_ms": 100,
     }
@@ -34,21 +32,26 @@ def _observation(observation_id: int) -> dict:
 @pytest.mark.no_network
 async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_transaction():
     evidence = [_observation(10), _observation(11)]
-    group = {
-        "conflict_id": "conflict-1",
+    review = {
+        "review_id": "review-1",
         "user_name": "ada",
+        "scope": "project",
         "project_id": "project-1",
+        "kind": "relationship_conflict",
+        "dedupe_key": "unused",
+        "evidence_refs": [{"kind": "observation", "id": "10"}],
+        "evidence_snapshot": {},
+        "reasoning": "The evidence may describe incompatible states.",
+        "proposed_plan": {
+            "kind": "conflict_resolution",
+            "conflict_kind": "possible_contradiction",
+        },
+        "expected_state": {},
         "status": "open",
-        "origin": "background_discovery",
-        "kind": "possible_contradiction",
-        "rationale": "The evidence may describe incompatible states.",
-        "confidence": 0.8,
-        "evidence_signature": "signature",
-        "metadata": {},
     }
     client = RecordingPostgresClient(
-        fetch_all_results=[evidence, []],
-        fetch_one_results=[group],
+        fetch_all_results=[evidence],
+        fetch_one_results=[None, review],
     )
     store = KnowledgeStore(client, embedding_service=object())
     store._conflict_service.notify_detection = AsyncMock()
@@ -70,11 +73,11 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
 
     assert written == 1
     assert client.transaction_enters == 1
-    assert any("INSERT INTO public.conflict_groups" in call[1] for call in client.calls)
+    assert any("INSERT INTO public.maintenance_reviews" in call[1] for call in client.calls)
     cursor_call = next(
         call
         for call in client.calls
-        if "UPDATE public.conflict_discovery_checkpoints" in call[1]
+        if "UPDATE public.maintenance_review_checkpoints" in call[1]
     )
     assert cursor_call[2] == (11, "ada", "project-1")
     store._conflict_service.notify_detection.assert_awaited_once()

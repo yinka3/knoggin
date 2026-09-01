@@ -47,13 +47,42 @@ class ConflictWriter:
         if confidence is not None and not 0.0 <= confidence <= 1.0:
             raise ValueError("Conflict confidence must be between zero and one")
         signature = self._evidence_signature(ids)
-        existing = await self.reviews.get_by_key(
-            user_name=user_name,
-            project_id=project_id,
-            kind="relationship_conflict",
-            dedupe_key=signature,
-        )
-        await self._validate_evidence(
+        if existing_conflict_id is not None:
+            existing = await self.reviews.get(
+                existing_conflict_id,
+                user_name=user_name,
+                project_id=project_id,
+                cur=cur,
+            )
+            if existing is None or existing.kind != "relationship_conflict":
+                raise ValueError("Unknown conflict review in this project")
+            if existing.dedupe_key != signature:
+                raise ValueError(
+                    "Conflict review evidence is immutable; record a new review"
+                )
+        else:
+            existing = await self.reviews.get_by_key(
+                user_name=user_name,
+                project_id=project_id,
+                kind="relationship_conflict",
+                dedupe_key=signature,
+                cur=cur,
+            )
+            if (
+                existing is not None
+                and existing.status == "open"
+                and existing.dedupe_key != signature
+            ):
+                await self.reviews.transition(
+                    existing.review_id,
+                    user_name=user_name,
+                    project_id=project_id,
+                    status="stale",
+                    actor=user_name,
+                    reason="New conflict evidence superseded this review",
+                    cur=cur,
+                )
+        evidence = await self._load_evidence(
             user_name=user_name,
             project_id=project_id,
             evidence_ids=ids,
@@ -71,6 +100,7 @@ class ConflictWriter:
                 "kind": kind,
                 "confidence": confidence,
                 "metadata": metadata or {},
+                "observations": evidence,
                 "evidence_ids": ids,
             },
             reasoning=rationale,
@@ -78,6 +108,8 @@ class ConflictWriter:
             cur=cur,
         )
         created = existing is None
+        existing_evidence = set(existing.evidence_ids("observation")) if existing else set()
+        evidence_added = len(set(ids) - existing_evidence)
         group = ConflictGroup(
             conflict_id=review.review_id,
             user_name=user_name,
@@ -90,7 +122,11 @@ class ConflictWriter:
             evidence_signature=signature,
             metadata=metadata or {},
         )
-        return ConflictWriteResult(group=group, created=created, evidence_added=len(ids))
+        return ConflictWriteResult(
+            group=group,
+            created=created,
+            evidence_added=evidence_added,
+        )
 
     async def resolve(
         self,
@@ -139,24 +175,27 @@ class ConflictWriter:
         joined = ",".join(str(value) for value in sorted(set(evidence_ids)))
         return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
-    async def _validate_evidence(
+    async def _load_evidence(
         self,
         *,
         user_name: str,
         project_id: str,
         evidence_ids: list[int],
         cur=None,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         query = """
-            SELECT count(*) AS count
+            SELECT observation_id, message_id, session_id, source_entity_id,
+                   target_entity_id, observed_relationship_label,
+                   relationship_id, interpretation_source, context, observed_at_ms
             FROM public.relationship_observations
             WHERE user_name = %s AND project_id = %s
               AND observation_id = ANY(%s)
         """
         if cur is not None:
             await cur.execute(query, (user_name, project_id, evidence_ids))
-            row = await cur.fetchone()
+            rows = await cur.fetchall()
         else:
-            row = await self.client.fetch_one(query, (user_name, project_id, evidence_ids))
-        if row is None or int(row["count"]) != len(evidence_ids):
+            rows = await self.client.fetch_all(query, (user_name, project_id, evidence_ids))
+        if len(rows) != len(evidence_ids):
             raise ValueError("Conflict evidence must be relationship observations in this project")
+        return [dict(row) for row in rows]

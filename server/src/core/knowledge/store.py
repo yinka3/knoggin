@@ -57,7 +57,6 @@ from core.knowledge.db.writers.entity_reclassification_writer import (
 )
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
-from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
 from core.knowledge.db.writers.maintenance_review_writer import (
     MaintenanceReviewWriter,
 )
@@ -122,7 +121,6 @@ class KnowledgeStore:
         self._message_lifecycle_writer = MessageLifecycleWriter(
             self._postgres_client, self._message_writer
         )
-        self._human_review_writer = HumanReviewWriter(self._postgres_client)
         self._maintenance_review_writer = MaintenanceReviewWriter(
             self._postgres_client
         )
@@ -1153,6 +1151,7 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
         thresholds: AdvisoryThresholds | None = None,
+        domain_version: int | None = None,
     ) -> list[RelationshipAdvisory]:
         """Derive actionable unknown-relationship suggestions from evidence."""
 
@@ -1166,6 +1165,7 @@ class KnowledgeStore:
                 user_name=user_name,
                 project_id=project_id,
                 advisory=advisory,
+                domain_version=domain_version,
             )
         return advisories
 
@@ -1175,6 +1175,48 @@ class KnowledgeStore:
         return await self._maintenance_review_writer.list_open(
             user_name=user_name,
             project_id=project_id,
+        )
+
+    async def list_maintenance_reviews(
+        self, *, user_name: str, project_id: str | None = None
+    ) -> list[MaintenanceReview]:
+        return await self._maintenance_review_writer.list(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_maintenance_review(
+        self,
+        *,
+        review_id: str,
+        user_name: str,
+        project_id: str | None = None,
+    ) -> MaintenanceReview | None:
+        return await self._maintenance_review_writer.get(
+            review_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def transition_maintenance_review(
+        self,
+        *,
+        review_id: str,
+        user_name: str,
+        status,
+        project_id: str | None = None,
+        expected_state: Dict | None = None,
+        actor: str | None = None,
+        reason: str | None = None,
+    ) -> MaintenanceReview:
+        return await self._maintenance_review_writer.transition(
+            review_id,
+            user_name=user_name,
+            status=status,
+            project_id=project_id,
+            expected_state=expected_state,
+            actor=actor,
+            reason=reason,
         )
 
     async def build_conflict_discovery_package(

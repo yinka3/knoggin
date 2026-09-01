@@ -211,6 +211,7 @@ class DomainConfig:
         entity_names = {entity.name.casefold(): entity.name for entity in entity_types}
         relationships: list[RelationshipDefinition] = []
         relationship_keys: set[str] = set()
+        relationship_label_owners: dict[str, str] = {}
         for raw_name, raw_value in relationships_payload.items():
             name = _name(
                 raw_name,
@@ -285,6 +286,15 @@ class DomainConfig:
                     for item in (*labels, *aliases)
                 )
             )
+            for label in labels:
+                label_key = label.replace("-", "_").replace(" ", "_")
+                owner = relationship_label_owners.get(label_key)
+                if owner is not None and owner.casefold() != name.casefold():
+                    raise DomainConfigError(
+                        f"Relationship label {label!r} is claimed by both "
+                        f"{owner!r} and {name!r}"
+                    )
+                relationship_label_owners[label_key] = name
             relationships.append(
                 RelationshipDefinition(
                     name=name,

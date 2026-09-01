@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -32,6 +33,14 @@ class RelationshipInterpretationWriter:
         self.reviews = MaintenanceReviewWriter(client)
         self.projection = GraphBuilder(client)
 
+    @asynccontextmanager
+    async def _cursor_context(self, cur=None):
+        if cur is not None:
+            yield cur
+            return
+        async with self.client.transaction() as transaction_cursor:
+            yield transaction_cursor
+
     async def apply_plan(
         self,
         *,
@@ -41,6 +50,7 @@ class RelationshipInterpretationWriter:
         domain: CompiledDomain | None = None,
         review_id: str | None = None,
         actor: str | None = None,
+        cur=None,
     ) -> RelationshipInterpretationResult:
         user_name = require_scope_value(user_name, "user_name", "reinterpret_relationships")
         project_id = require_scope_value(project_id, "project_id", "reinterpret_relationships")
@@ -55,9 +65,9 @@ class RelationshipInterpretationWriter:
         changed_ids: list[int] = []
         changes_for_audit: list[dict] = []
         old_relationship_ids: set[str] = set()
-        async with self.client.transaction() as cur:
+        async with self._cursor_context(cur) as active_cur:
             ids = [change.observation_id for change in plan.changes]
-            await cur.execute(
+            await active_cur.execute(
                 """
                 SELECT observation.observation_id, observation.relationship_id,
                        observation.project_id, observation.source_entity_id,
@@ -83,7 +93,10 @@ class RelationshipInterpretationWriter:
                 """,
                 (user_name, project_id, ids),
             )
-            rows = {int(row["observation_id"]): row for row in await cur.fetchall()}
+            rows = {
+                int(row["observation_id"]): row
+                for row in await active_cur.fetchall()
+            }
             for change in plan.changes:
                 row = rows.get(change.observation_id)
                 if row is None or row.get("relationship_id") != change.expected_relationship_id:
@@ -116,7 +129,7 @@ class RelationshipInterpretationWriter:
                     a_id, b_id = int(row["source_entity_id"]), int(row["target_entity_id"])
                     if symmetric:
                         a_id, b_id = sorted((a_id, b_id))
-                    await cur.execute(
+                    await active_cur.execute(
                         """
                         INSERT INTO public.relationships
                             (relationship_id, user_name, project_id, entity_a_id,
@@ -126,7 +139,7 @@ class RelationshipInterpretationWriter:
                         """,
                         (new_id, user_name, project_id, a_id, b_id, relationship_type, symmetric),
                     )
-                await cur.execute(
+                await active_cur.execute(
                     """
                     UPDATE public.relationship_observations
                     SET relationship_id = %s,
@@ -155,17 +168,18 @@ class RelationshipInterpretationWriter:
                     detached += 1
 
             if changed_ids:
-                await self._reconcile_episodes(cur, project_id, changed_ids)
-                await self._remove_orphans(cur, project_id, sorted(old_relationship_ids))
+                await self._reconcile_episodes(active_cur, project_id, changed_ids)
+                await self._remove_orphans(active_cur, project_id, sorted(old_relationship_ids))
                 stale_reviews = await self.reviews.mark_stale_for_observations(
                     user_name=user_name,
                     project_id=project_id,
                     observation_ids=changed_ids,
                     reason="Relationship interpretation changed",
-                    cur=cur,
+                    exclude_review_id=review_id,
+                    cur=active_cur,
                 )
                 audit_id = str(uuid.uuid4())
-                await cur.execute(
+                await active_cur.execute(
                     """
                     INSERT INTO public.maintenance_reinterpretation_audits
                         (audit_id, user_name, project_id, observation_ids, changes)
@@ -180,9 +194,9 @@ class RelationshipInterpretationWriter:
                     ),
                 )
                 await self.projection.rebuild_project_projection(
-                    project_id, user_name, cur=cur
+                    project_id, user_name, cur=active_cur
                 )
-                if review_id is not None:
+                if review_id is not None and conflicts == 0:
                     await self.reviews.transition(
                         review_id,
                         user_name=user_name,
@@ -190,7 +204,7 @@ class RelationshipInterpretationWriter:
                         status="applied",
                         actor=actor or user_name,
                         reason="Typed relationship interpretation applied",
-                        cur=cur,
+                        cur=active_cur,
                     )
             else:
                 stale_reviews = 0
@@ -203,8 +217,14 @@ class RelationshipInterpretationWriter:
             audit_id=audit_id,
         )
 
+    # ``reinterpret`` is the semantic name used by maintenance callers; keep
+    # the explicit ``apply_plan`` spelling for code that emphasizes the typed
+    # input contract.
+    reinterpret = apply_plan
+
     @staticmethod
     async def _reconcile_episodes(cur, project_id: str, observation_ids: Iterable[int]):
+        await cur.execute("DROP TABLE IF EXISTS affected_maintenance_episodes")
         await cur.execute(
             """
             CREATE TEMP TABLE affected_maintenance_episodes ON COMMIT DROP AS

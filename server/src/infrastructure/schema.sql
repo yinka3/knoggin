@@ -573,87 +573,6 @@ ON public.relationship_observations(relationship_id, project_id);
 
 CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
 ON public.relationship_observations(project_id, user_name, session_id, message_id);
-
-
--- Durable advisory disposition. Evidence remains in relationship_observations;
--- this table stores only the current user decision for each pattern.
-CREATE TABLE IF NOT EXISTS public.relationship_advisories (
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    pattern_key TEXT NOT NULL,
-    disposition TEXT NOT NULL DEFAULT 'pending'
-        CHECK (disposition IN ('pending', 'accepted', 'dismissed', 'suppressed')),
-    proposed_relationship_type TEXT,
-    last_action TEXT
-        CHECK (last_action IS NULL OR last_action IN (
-            'accept', 'edit', 'dismiss', 'reopen', 'suppress', 'merge'
-        )),
-    decision_note TEXT,
-    decided_by TEXT,
-    decision_at TIMESTAMPTZ,
-    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_name, project_id, pattern_key),
-    CONSTRAINT relationship_advisories_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS public.relationship_advisory_decisions (
-    decision_id BIGSERIAL PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    pattern_key TEXT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN (
-        'accept', 'edit', 'dismiss', 'reopen', 'suppress', 'merge'
-    )),
-    proposed_relationship_type TEXT,
-    decision_note TEXT,
-    decided_by TEXT,
-    revision BIGINT NOT NULL CHECK (revision >= 1),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT relationship_advisory_decisions_state_fk
-        FOREIGN KEY (user_name, project_id, pattern_key)
-        REFERENCES public.relationship_advisories(
-            user_name, project_id, pattern_key
-        ) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS relationship_advisories_disposition_idx
-ON public.relationship_advisories(user_name, project_id, disposition);
-
-CREATE INDEX IF NOT EXISTS relationship_advisory_decisions_pattern_idx
-ON public.relationship_advisory_decisions(
-    user_name, project_id, pattern_key, created_at
-);
-
--- A unified inbox points to workflow-owned subjects. It deliberately has no
--- resolution payload: the subject workflow owns its state and mutations.
-CREATE TABLE IF NOT EXISTS public.human_reviews (
-    review_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    subject_type TEXT NOT NULL,
-    subject_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'resolved')),
-    priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK (priority IN ('low', 'normal', 'high')),
-    title TEXT NOT NULL,
-    summary TEXT,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at TIMESTAMPTZ,
-    UNIQUE (user_name, project_id, kind, subject_id)
-);
-
-CREATE INDEX IF NOT EXISTS human_reviews_open_inbox_idx
-ON public.human_reviews(user_name, project_id, status, priority, created_at DESC);
-
 -- One typed envelope for project and user-global semantic maintenance.  The
 -- proposal and evidence snapshot are immutable while a review is open; a
 -- transition records only its outcome in the event log below.
@@ -743,72 +662,6 @@ CREATE TABLE IF NOT EXISTS public.maintenance_review_checkpoints (
     PRIMARY KEY (user_name, project_id)
 );
 
--- Conflict groups never replace or rewrite relationship evidence. The group is
--- a user-visible interpretation workflow over immutable observation snapshots.
-CREATE TABLE IF NOT EXISTS public.conflict_groups (
-    conflict_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'resolved')),
-    origin TEXT NOT NULL
-        CHECK (origin IN (
-            'background_discovery', 'agent_discovery', 'user_created'
-        )),
-    kind TEXT NOT NULL
-        CHECK (kind IN (
-            'possible_contradiction', 'temporal_ambiguity',
-            'possible_state_change', 'identity_or_entity_ambiguity'
-        )),
-    rationale TEXT NOT NULL,
-    confidence DOUBLE PRECISION,
-    evidence_signature TEXT NOT NULL,
-    resolution_kind TEXT
-        CHECK (resolution_kind IS NULL OR resolution_kind IN (
-            'confirmed_conflict', 'normal_temporal_change', 'not_a_conflict',
-            'insufficient_evidence', 'custom'
-        )),
-    resolution_note TEXT,
-    resolved_by TEXT,
-    resolved_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (user_name, project_id, evidence_signature)
-);
-
-CREATE INDEX IF NOT EXISTS conflict_groups_open_idx
-ON public.conflict_groups(user_name, project_id, status, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS public.conflict_evidence_refs (
-    evidence_ref_id BIGSERIAL PRIMARY KEY,
-    conflict_id TEXT NOT NULL REFERENCES public.conflict_groups(conflict_id)
-        ON DELETE CASCADE,
-    observation_id BIGINT REFERENCES public.relationship_observations(observation_id)
-        ON DELETE SET NULL,
-    observation_snapshot JSONB NOT NULL,
-    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (conflict_id, observation_id)
-);
-
-CREATE INDEX IF NOT EXISTS conflict_evidence_refs_observation_idx
-ON public.conflict_evidence_refs(observation_id)
-WHERE observation_id IS NOT NULL;
-
--- The cursor is durable and determines which relationship observations have
--- already been examined.
-CREATE TABLE IF NOT EXISTS public.conflict_discovery_checkpoints (
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0,
-    last_completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_name, project_id)
-);
-
 -- Global provider-budget state survives process restarts. Reservations protect
 -- concurrent requests until provider usage is recorded or their lease expires.
 CREATE TABLE IF NOT EXISTS public.llm_budget_windows (
@@ -833,33 +686,6 @@ CREATE INDEX IF NOT EXISTS llm_budget_reservations_expiry_idx
 ON public.llm_budget_reservations(reset_key, expires_at)
 WHERE status = 'active';
 
-ALTER TABLE public.conflict_discovery_checkpoints
-ADD COLUMN IF NOT EXISTS last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0;
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'conflict_discovery_checkpoints'
-          AND column_name = 'cursor_observation_id'
-    ) THEN
-        UPDATE public.conflict_discovery_checkpoints
-        SET last_reviewed_observation_id = GREATEST(
-            last_reviewed_observation_id,
-            cursor_observation_id
-        );
-    END IF;
-END $$;
-
-ALTER TABLE public.conflict_discovery_checkpoints
-    DROP COLUMN IF EXISTS cursor_observed_at_ms,
-    DROP COLUMN IF EXISTS cursor_observation_id,
-    DROP COLUMN IF EXISTS continuation,
-    DROP COLUMN IF EXISTS lease_token,
-    DROP COLUMN IF EXISTS lease_expires_at;
-
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -883,10 +709,6 @@ BEGIN
     END IF;
 
 END $$;
-
-ALTER TABLE public.relationship_observations
-    ADD COLUMN IF NOT EXISTS domain_version INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS "symmetric" BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS public.episodes (
     episode_id TEXT PRIMARY KEY,
@@ -2653,9 +2475,7 @@ ALTER TABLE public.relationship_observations
     ADD CONSTRAINT relationship_observations_interpretation_source_check
         CHECK (interpretation_source IN ('observed', 'domain', 'review'));
 
--- The typed review envelope supersedes the former pointer, advisory, and
--- conflict workflow tables in this unreleased schema.  Evidence itself stays
--- in relationship_observations and is never deleted with a review.
+-- Remove the superseded workflow tables from existing unreleased databases.
 DROP TABLE IF EXISTS public.relationship_advisory_decisions;
 DROP TABLE IF EXISTS public.relationship_advisories;
 DROP TABLE IF EXISTS public.human_reviews;

@@ -139,7 +139,7 @@ class ConflictPacketBuilder:
                     row["source_entity_id"],
                     row["target_entity_id"],
                     row["observed_relationship_label"],
-                    row.get("canonical_relationship_type"),
+                    row.get("relationship_id"),
                 )
             ].append(row)
         collapsed = []
@@ -159,9 +159,8 @@ class ConflictPacketBuilder:
                     "observed_relationship_label": first[
                         "observed_relationship_label"
                     ],
-                    "canonical_relationship_type": first.get(
-                        "canonical_relationship_type"
-                    ),
+                    "relationship_id": first.get("relationship_id"),
+                    "interpretation_source": first.get("interpretation_source"),
                     "observation_count": len(rows),
                     "first_observed_at_ms": first["observed_at_ms"],
                     "observed_at_ms": last["observed_at_ms"],

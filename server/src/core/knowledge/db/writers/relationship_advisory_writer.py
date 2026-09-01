@@ -27,22 +27,48 @@ class RelationshipAdvisoryWriter:
         user_name: str,
         project_id: str,
         advisory: RelationshipAdvisory,
+        domain_version: int | None = None,
     ) -> None:
         if advisory.disposition != "pending":
             return
+        evidence_refs = (
+            [{"kind": "observation", "id": str(item)} for item in advisory.observation_ids]
+            if advisory.observation_ids
+            else [{"kind": "message", "id": str(item)} for item in advisory.message_ids]
+        )
+        existing = await self.reviews.get_by_key(
+            user_name=user_name,
+            project_id=project_id,
+            kind="relationship_advisory",
+            dedupe_key=advisory.pattern_key,
+        )
+        if existing is not None and existing.status == "open":
+            existing_refs = {
+                (ref.kind, ref.id) for ref in existing.evidence_refs
+            }
+            if existing_refs != {(ref["kind"], ref["id"]) for ref in evidence_refs}:
+                await self.reviews.transition(
+                    existing.review_id,
+                    user_name=user_name,
+                    project_id=project_id,
+                    status="stale",
+                    actor=user_name,
+                    reason="New relationship evidence superseded this advisory",
+                )
         await self.reviews.open(
             user_name=user_name,
             scope="project",
             project_id=project_id,
             kind="relationship_advisory",
             dedupe_key=advisory.pattern_key,
-            evidence_refs=[str(item) for item in advisory.message_ids],
+            evidence_refs=evidence_refs,
             evidence_snapshot={
                 "observed_label": advisory.observed_label,
                 "source_type": advisory.source_type,
                 "target_type": advisory.target_type,
                 "occurrence_count": advisory.occurrence_count,
                 "message_ids": list(advisory.message_ids),
+                "observation_ids": list(advisory.observation_ids),
             },
             reasoning=(
                 f"{advisory.occurrence_count} observations between "
@@ -52,6 +78,11 @@ class RelationshipAdvisoryWriter:
             proposed_plan=RelationshipAdvisoryPlan(
                 pattern_key=advisory.pattern_key,
                 observed_label=advisory.observed_label,
+            ),
+            expected_state=(
+                {"domain_version": domain_version}
+                if domain_version is not None
+                else {}
             ),
         )
     async def apply_action(
@@ -86,6 +117,15 @@ class RelationshipAdvisoryWriter:
         status = "open" if decision.disposition == "pending" else (
             "dismissed" if decision.disposition in {"dismissed", "suppressed"} else "applied"
         )
+        if current_review is not None and current_review.status == "open":
+            await self.reviews.transition(
+                current_review.review_id,
+                user_name=user_name,
+                project_id=project_id,
+                status="stale",
+                actor=decided_by or user_name,
+                reason="A new advisory decision superseded this proposal",
+            )
         review = await self.reviews.open(
             user_name=user_name,
             scope="project",
@@ -106,6 +146,7 @@ class RelationshipAdvisoryWriter:
                 action=decision.last_action,
                 note=decision.decision_note,
             ),
+            expected_state={"revision": decision.revision},
         )
         if status != "open":
             await self.reviews.transition(
@@ -136,5 +177,5 @@ class RelationshipAdvisoryWriter:
             proposed_relationship_type=proposed,
             last_action=action,
             decision_note=getattr(plan, "note", None),
-            revision=1,
+            revision=int(review.expected_state.get("revision", 0)),
         )

@@ -447,7 +447,11 @@ class GraphWriter:
                             target_entity_id,
                             observed_relationship_label
                         ) DO UPDATE SET
-                            interpretation_source = EXCLUDED.interpretation_source,
+                            interpretation_source = CASE
+                                WHEN relationship_observations.interpretation_source = 'review'
+                                    THEN 'review'
+                                ELSE EXCLUDED.interpretation_source
+                            END,
                             context = COALESCE(
                                 EXCLUDED.context,
                                 relationship_observations.context
