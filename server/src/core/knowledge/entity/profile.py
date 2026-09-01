@@ -4,6 +4,31 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 
+@dataclass(frozen=True, slots=True)
+class EntityIdentity:
+    """User-global entity identity, independent of any project classification."""
+
+    entity_id: int
+    user_name: str
+    canonical_name: str
+    aliases: tuple[str, ...] = ()
+    embedding: Optional[list[float]] = None
+    status: str = "active"
+    redirect_entity_id: Optional[int] = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectEntityContext:
+    """One project's domain classification and activity for a global identity."""
+
+    project_id: str
+    entity_id: int
+    user_name: str
+    entity_type: str
+    topic: str = "General"
+    last_mentioned_ms: Optional[int] = None
+
+
 @dataclass
 class EntityProfile:
     canonical_name: str

@@ -355,22 +355,28 @@ ALTER COLUMN session_id SET NOT NULL;
 CREATE TABLE IF NOT EXISTS public.entities (
     entity_id BIGINT PRIMARY KEY,
     user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
     canonical_name TEXT NOT NULL,
-    type TEXT,
-    topic TEXT NOT NULL DEFAULT 'General',
-    last_mentioned_ms BIGINT,
     embedding vector(1024),
-    CONSTRAINT entities_id_project_key UNIQUE (entity_id, project_id),
-    CONSTRAINT entities_id_user_project_key
-        UNIQUE (entity_id, user_name, project_id)
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'redirected', 'retired')),
+    redirect_entity_id BIGINT,
+    created_at_ms BIGINT NOT NULL DEFAULT (
+        floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+    ),
+    updated_at_ms BIGINT NOT NULL DEFAULT (
+        floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+    ),
+    CONSTRAINT entities_id_user_key UNIQUE (entity_id, user_name),
+    CONSTRAINT entities_redirect_entity_fk
+        FOREIGN KEY (redirect_entity_id) REFERENCES public.entities(entity_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT entities_redirect_status_check CHECK (
+        (status = 'redirected') = (redirect_entity_id IS NOT NULL)
+    )
 );
 
-CREATE INDEX IF NOT EXISTS entities_project_idx
-ON public.entities(user_name, project_id);
-
-CREATE INDEX IF NOT EXISTS entities_topic_idx
-ON public.entities(project_id, topic);
+CREATE INDEX IF NOT EXISTS entities_user_name_idx
+ON public.entities(user_name, canonical_name);
 
 ALTER TABLE public.entities
     DROP COLUMN IF EXISTS session_id,
@@ -379,9 +385,67 @@ ALTER TABLE public.entities
     DROP COLUMN IF EXISTS last_profiled_msg_id;
 ALTER TABLE public.entities
     ADD COLUMN IF NOT EXISTS embedding vector(1024);
+ALTER TABLE public.entities
+    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active',
+    ADD COLUMN IF NOT EXISTS redirect_entity_id BIGINT,
+    ADD COLUMN IF NOT EXISTS created_at_ms BIGINT NOT NULL DEFAULT (
+        floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+    ),
+    ADD COLUMN IF NOT EXISTS updated_at_ms BIGINT NOT NULL DEFAULT (
+        floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+    );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_id_user_key'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_id_user_key UNIQUE (entity_id, user_name);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS entities_embedding_idx
 ON public.entities USING hnsw (embedding vector_cosine_ops);
+
+-- Entity identity is user-global. Project/domain classification and activity
+-- are intentionally represented here rather than duplicated on `entities`.
+CREATE TABLE IF NOT EXISTS public.project_entity_contexts (
+    project_id TEXT NOT NULL,
+    entity_id BIGINT NOT NULL,
+    user_name TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    topic TEXT NOT NULL DEFAULT 'General',
+    last_mentioned_ms BIGINT,
+    created_at_ms BIGINT NOT NULL DEFAULT (
+        floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+    ),
+    updated_at_ms BIGINT NOT NULL DEFAULT (
+        floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+    ),
+    PRIMARY KEY (project_id, entity_id),
+    FOREIGN KEY (user_name, project_id)
+        REFERENCES public.projects(user_name, project_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (entity_id, user_name)
+        REFERENCES public.entities(entity_id, user_name)
+        ON DELETE CASCADE,
+    CONSTRAINT project_entity_contexts_type_nonblank_check
+        CHECK (btrim(entity_type) <> ''),
+    CONSTRAINT project_entity_contexts_topic_nonblank_check
+        CHECK (btrim(topic) <> '')
+);
+
+CREATE INDEX IF NOT EXISTS project_entity_contexts_entity_idx
+ON public.project_entity_contexts(user_name, entity_id);
+
+CREATE INDEX IF NOT EXISTS project_entity_contexts_topic_idx
+ON public.project_entity_contexts(project_id, topic);
+
+CREATE INDEX IF NOT EXISTS project_entity_contexts_activity_idx
+ON public.project_entity_contexts(project_id, last_mentioned_ms DESC NULLS LAST);
 
 CREATE TABLE IF NOT EXISTS public.entity_aliases (
     entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
@@ -908,16 +972,6 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_id_project_key'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_id_project_key
-        UNIQUE (entity_id, project_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
         WHERE conname = 'episode_messages_episode_scope_fk'
           AND conrelid = 'public.episode_messages'::regclass
     ) THEN
@@ -960,9 +1014,9 @@ CREATE TABLE IF NOT EXISTS public.episode_entities (
         FOREIGN KEY (episode_id, project_id)
         REFERENCES public.episodes(episode_id, project_id)
         ON DELETE CASCADE,
-    CONSTRAINT episode_entities_entity_project_fk
-        FOREIGN KEY (entity_id, project_id)
-        REFERENCES public.entities(entity_id, project_id)
+    CONSTRAINT episode_entities_entity_fk
+        FOREIGN KEY (entity_id)
+        REFERENCES public.entities(entity_id)
         ON DELETE CASCADE
 );
 
@@ -990,7 +1044,8 @@ ALTER COLUMN project_id SET NOT NULL;
 
 ALTER TABLE public.episode_entities
 DROP CONSTRAINT IF EXISTS episode_entities_episode_id_fkey,
-DROP CONSTRAINT IF EXISTS episode_entities_entity_id_fkey;
+DROP CONSTRAINT IF EXISTS episode_entities_entity_id_fkey,
+DROP CONSTRAINT IF EXISTS episode_entities_entity_project_fk;
 
 DO $$
 BEGIN
@@ -1008,16 +1063,130 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_entities_entity_project_fk'
-          AND conrelid = 'public.episode_entities'::regclass
+        WHERE conname = 'episode_entities_entity_fk'
+        AND conrelid = 'public.episode_entities'::regclass
     ) THEN
         ALTER TABLE public.episode_entities
-        ADD CONSTRAINT episode_entities_entity_project_fk
-        FOREIGN KEY (entity_id, project_id)
-        REFERENCES public.entities(entity_id, project_id)
+        ADD CONSTRAINT episode_entities_entity_fk
+        FOREIGN KEY (entity_id)
+        REFERENCES public.entities(entity_id)
         ON DELETE CASCADE;
     END IF;
 END $$;
+
+-- Unreleased schema cut: promote each legacy project-owned row into a context,
+-- then remove the old ownership columns. Existing deployments can retain their
+-- source rows through this one-way conversion; fresh installs start directly
+-- on the global form above. AGE projections must be rebuilt after this cut.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'entities'
+          AND column_name = 'project_id'
+    ) THEN
+        INSERT INTO public.project_entity_contexts (
+            project_id,
+            entity_id,
+            user_name,
+            entity_type,
+            topic,
+            last_mentioned_ms
+        )
+        SELECT
+            entity.project_id,
+            entity.entity_id,
+            entity.user_name,
+            COALESCE(NULLIF(btrim(entity.type), ''), 'unknown'),
+            COALESCE(NULLIF(btrim(entity.topic), ''), 'General'),
+            entity.last_mentioned_ms
+        FROM public.entities AS entity
+        WHERE entity.project_id <> '__identity__'
+        ON CONFLICT (project_id, entity_id) DO UPDATE
+        SET
+            entity_type = EXCLUDED.entity_type,
+            topic = EXCLUDED.topic,
+            last_mentioned_ms = GREATEST(
+                public.project_entity_contexts.last_mentioned_ms,
+                EXCLUDED.last_mentioned_ms
+            ),
+            updated_at_ms = floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
+
+        DROP INDEX IF EXISTS public.entities_project_idx;
+        DROP INDEX IF EXISTS public.entities_topic_idx;
+        ALTER TABLE public.entities
+            DROP CONSTRAINT IF EXISTS entities_id_project_key,
+            DROP CONSTRAINT IF EXISTS entities_id_user_project_key,
+            DROP COLUMN project_id,
+            DROP COLUMN type,
+            DROP COLUMN topic,
+            DROP COLUMN last_mentioned_ms;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_id_user_key'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_id_user_key UNIQUE (entity_id, user_name);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_redirect_entity_fk'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_redirect_entity_fk
+        FOREIGN KEY (redirect_entity_id) REFERENCES public.entities(entity_id)
+        ON DELETE RESTRICT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_status_check'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_status_check
+        CHECK (status IN ('active', 'redirected', 'retired'));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'entities_redirect_status_check'
+          AND conrelid = 'public.entities'::regclass
+    ) THEN
+        ALTER TABLE public.entities
+        ADD CONSTRAINT entities_redirect_status_check
+        CHECK ((status = 'redirected') = (redirect_entity_id IS NOT NULL));
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.reject_entity_identity_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.user_name IS DISTINCT FROM OLD.user_name THEN
+        RAISE EXCEPTION 'Entity user ownership is immutable';
+    END IF;
+    IF NEW.canonical_name IS DISTINCT FROM OLD.canonical_name THEN
+        RAISE EXCEPTION 'Entity canonical_name is immutable';
+    END IF;
+    NEW.updated_at_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS entities_identity_immutable_trigger ON public.entities;
+CREATE TRIGGER entities_identity_immutable_trigger
+BEFORE UPDATE ON public.entities
+FOR EACH ROW
+EXECUTE FUNCTION public.reject_entity_identity_mutation();
 
 CREATE TABLE IF NOT EXISTS public.episode_relationships (
     episode_id TEXT NOT NULL,
@@ -1396,20 +1565,6 @@ DROP TABLE IF EXISTS public.hierarchy_edges;
 DROP TABLE IF EXISTS public.ingestion_candidate_suggestions;
 DROP TABLE IF EXISTS public.parked_dlq_items;
 DROP FUNCTION IF EXISTS public.enforce_hierarchy_edge_invariants();
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_id_user_project_key'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_id_user_project_key
-        UNIQUE (entity_id, user_name, project_id);
-    END IF;
-
-END $$;
 
 DROP TRIGGER IF EXISTS entities_search_revision_trigger ON public.entities;
 DROP TRIGGER IF EXISTS messages_search_revision_trigger ON public.messages;

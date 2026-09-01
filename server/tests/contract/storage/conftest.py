@@ -66,6 +66,7 @@ async def _reset_storage_db(client: PostgresClient):
             conflict_discovery_checkpoints,
             relationship_observations,
             message_entity_refs,
+            project_entity_contexts,
             relationships,
             entity_aliases,
             entities,

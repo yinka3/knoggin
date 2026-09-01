@@ -25,6 +25,13 @@ def test_schema_drops_obsolete_ingestion_tables():
     assert "DROP TABLE IF EXISTS public.parked_dlq_items;" in SCHEMA_SQL
 
 
+def test_schema_separates_global_entity_identity_from_project_context():
+    assert "CREATE TABLE IF NOT EXISTS public.project_entity_contexts" in SCHEMA_SQL
+    assert "FOREIGN KEY (entity_id, user_name)" in SCHEMA_SQL
+    assert "REFERENCES public.entities(entity_id, user_name)" in SCHEMA_SQL
+    assert "CREATE OR REPLACE FUNCTION public.reject_entity_identity_mutation()" in SCHEMA_SQL
+
+
 def test_schema_keeps_aac_state_user_owned_and_insights_retention_independent():
     assert "CREATE TABLE IF NOT EXISTS public.aac_discussions" in SCHEMA_SQL
     assert "CREATE TABLE IF NOT EXISTS public.aac_timeline" in SCHEMA_SQL
