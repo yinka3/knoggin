@@ -79,14 +79,14 @@ class EmbeddingRebuilder:
         if not identity:
             raise RuntimeError("Canonical identity entity is missing")
 
+        # An entity embedding describes its user-global identity.  Project
+        # classification belongs to project_entity_contexts and must not cause
+        # the same identity to receive different vectors in different projects.
         entity_inputs = [
-            build_entity_embedding_text(entity["canonical_name"], entity.get("type"))
+            build_entity_embedding_text(entity["canonical_name"], None)
             for entity in entities
         ]
-        identity_input = build_entity_embedding_text(
-            identity["canonical_name"],
-            identity.get("type"),
-        )
+        identity_input = build_entity_embedding_text(identity["canonical_name"], None)
         entity_vectors = self._validate_embeddings(
             await self.embedding_service.encode(entity_inputs + [identity_input]),
             len(entity_inputs) + 1,
@@ -149,16 +149,6 @@ class EmbeddingRebuilder:
         episode_vectors: List[List[float]],
     ) -> None:
         async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                UPDATE entities
-                SET embedding = NULL
-                WHERE project_id = %s
-                  AND user_name = %s
-                  AND entity_id <> %s
-                """,
-                (project_id, user_name, IDENTITY_ENTITY_ID),
-            )
             for entity, embedding in zip(entities, entity_vectors):
                 await cur.execute(
                     """
@@ -166,13 +156,11 @@ class EmbeddingRebuilder:
                     SET embedding = %s::vector
                     WHERE entity_id = %s
                       AND user_name = %s
-                      AND project_id = %s
                     """,
                     (
                         json.dumps(embedding),
                         entity["entity_id"],
                         entity["user_name"],
-                        entity["project_id"],
                     ),
                 )
             await cur.execute(
@@ -181,13 +169,11 @@ class EmbeddingRebuilder:
                 SET embedding = %s::vector
                 WHERE entity_id = %s
                   AND user_name = %s
-                  AND project_id = %s
                 """,
                 (
                     json.dumps(identity_vector),
                     identity["entity_id"],
                     identity["user_name"],
-                    identity["project_id"],
                 ),
             )
             await cur.execute(
@@ -213,14 +199,15 @@ class EmbeddingRebuilder:
     async def _fetch_entities(cur, project_id: str, user_name: str) -> List[Dict]:
         await cur.execute(
             """
-            SELECT entity_id, canonical_name, type, user_name, project_id
-            FROM entities
-            WHERE project_id = %s
-              AND user_name = %s
-              AND entity_id <> %s
-            ORDER BY entity_id
+            SELECT e.entity_id, e.canonical_name, e.user_name
+            FROM entities e
+            JOIN project_entity_contexts context
+              ON context.entity_id = e.entity_id
+            WHERE context.project_id = %s
+              AND e.user_name = %s
+            ORDER BY e.entity_id
             """,
-            (project_id, user_name, IDENTITY_ENTITY_ID),
+            (project_id, user_name),
         )
         return list(await cur.fetchall())
 
@@ -248,7 +235,7 @@ class EmbeddingRebuilder:
     async def _fetch_identity(cur, user_name: str) -> Dict:
         await cur.execute(
             """
-            SELECT entity_id, canonical_name, type, user_name, project_id
+            SELECT entity_id, canonical_name, user_name
             FROM entities
             WHERE entity_id = %s
               AND user_name = %s

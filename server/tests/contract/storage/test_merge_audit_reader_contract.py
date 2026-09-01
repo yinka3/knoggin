@@ -86,12 +86,13 @@ async def test_merge_snapshot_excludes_a_commit_after_its_first_query(
 ):
     await real_postgres_client.execute(
         """
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, topic
-        )
-        VALUES
-            (2, 'ada', 'project-1', 'Primary', 'People'),
-            (3, 'ada', 'project-1', 'Duplicate', 'People')
+        INSERT INTO entities (entity_id, user_name, canonical_name)
+        VALUES (2, 'ada', 'Primary'), (3, 'ada', 'Duplicate');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 2, 'ada', 'person', 'People'),
+            ('project-1', 3, 'ada', 'person', 'People')
         """
     )
     reader = MutatingMergeAuditReader(real_postgres_client)

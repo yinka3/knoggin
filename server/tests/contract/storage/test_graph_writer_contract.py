@@ -297,7 +297,7 @@ async def test_graph_writer_merge_entities_returns_false_when_validation_misses(
     assert call[0] == "execute"
     assert "FROM entities p" in call[1]
     assert "JOIN entities s" in call[1]
-    assert call[2] == (3, "project-1", 2, "project-1")
+    assert call[2] == (3, "project-1", "project-1", 2)
 
 
 @pytest.mark.storage
@@ -377,12 +377,12 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
 
     validation_call = client.calls[1]
     assert "FROM entities p" in validation_call[1]
-    assert validation_call[2] == (3, "project-1", 2, "project-1")
+    assert validation_call[2] == (3, "project-1", "project-1", 2)
 
     update_primary_call = next(
         call
         for call in client.calls
-        if call[0] == "execute" and "UPDATE entities" in call[1]
+        if call[0] == "execute" and "UPDATE project_entity_contexts" in call[1]
     )
     assert update_primary_call[2] == ("Projects", 200, 2, "project-1")
 
@@ -392,16 +392,13 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     update_primary_params = json.loads(projection_update_call[2][0])
     assert set(update_primary_params) == {
         "primary_id",
-        "project_id",
         "aliases",
-        "last_mentioned",
     }
     assert set(update_primary_params["aliases"]) == {
         "Ada",
         "Augusta",
         "Countess Lovelace",
     }
-    assert update_primary_params["last_mentioned"] == 200
 
     relationship_projection_call = next(
         call
@@ -434,11 +431,11 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
         for call in client.calls
     )
     assert any(
-        call[0] == "execute"
-        and "UPDATE message_entity_refs" in call[1]
-        and call[2] == (2, 3)
-        for call in client.calls
-    )
+            call[0] == "execute"
+            and "UPDATE message_entity_refs" in call[1]
+            and call[2] == (2, 3, "project-1")
+            for call in client.calls
+        )
     assert any(
         call[0] == "execute"
         and "INSERT INTO relationships" in call[1]
@@ -495,17 +492,26 @@ async def test_graph_writer_merge_entities_happy_path_reaches_dual_write_cleanup
     )
     assert dependency_check[2] == (
         3,
+        "project-1",
         3,
+        "project-1",
+        "project-1",
         3,
         3,
     )
     assert any(
-        call[0] == "execute"
-        and "DELETE FROM entities" in call[1]
-        and "RETURNING entity_id" in call[1]
-        and call[2] == (3, "project-1")
-        for call in client.calls
-    )
+            call[0] == "execute"
+            and "DELETE FROM project_entity_contexts" in call[1]
+            and call[2] == (3, "project-1")
+            for call in client.calls
+        )
+    assert any(
+            call[0] == "execute"
+            and "DELETE FROM entities" in call[1]
+            and "RETURNING entity_id" in call[1]
+            and call[2] == (3, 3)
+            for call in client.calls
+        )
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1
     assert client.cursor_enters == 1
@@ -592,6 +598,6 @@ async def test_graph_writer_merge_entities_raises_on_transaction_error():
     assert len(client.calls) == 4
     assert "pg_advisory_xact_lock" in client.calls[0][1]
     assert "FROM entities p" in client.calls[1][1]
-    assert "UPDATE entities" in client.calls[2][1]
+    assert "UPDATE project_entity_contexts" in client.calls[2][1]
     assert client.transaction_enters == 1
     assert client.transaction_exits == 1

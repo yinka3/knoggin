@@ -194,10 +194,10 @@ class EntityMergeWriter:
                     """
                     SELECT
                         p.canonical_name AS p_name,
-                        p.topic AS p_topic,
-                        p.last_mentioned_ms AS p_last,
+                        p_context.topic AS p_topic,
+                        p_context.last_mentioned_ms AS p_last,
                         s.canonical_name AS s_name,
-                        s.last_mentioned_ms AS s_last,
+                        s_context.last_mentioned_ms AS s_last,
                         COALESCE(
                             array_agg(DISTINCT p_alias.alias)
                             FILTER (WHERE p_alias.alias IS NOT NULL),
@@ -211,27 +211,31 @@ class EntityMergeWriter:
                     FROM entities p
                     JOIN entities s
                       ON s.entity_id = %s
-                     AND s.project_id = %s
+                    JOIN project_entity_contexts p_context
+                      ON p_context.entity_id = p.entity_id
+                     AND p_context.project_id = %s
+                    JOIN project_entity_contexts s_context
+                      ON s_context.entity_id = s.entity_id
+                     AND s_context.project_id = %s
                     LEFT JOIN entity_aliases p_alias
                       ON p_alias.entity_id = p.entity_id
                     LEFT JOIN entity_aliases s_alias
                       ON s_alias.entity_id = s.entity_id
                     WHERE p.entity_id = %s
-                      AND p.project_id = %s
                     GROUP BY
                         p.entity_id,
                         p.canonical_name,
-                        p.topic,
-                        p.last_mentioned_ms,
+                        p_context.topic,
+                        p_context.last_mentioned_ms,
                         s.entity_id,
                         s.canonical_name,
-                        s.last_mentioned_ms
+                        s_context.last_mentioned_ms
                     """,
                     (
                         secondary_id,
                         project_id,
-                        primary_id,
                         project_id,
+                        primary_id,
                     ),
                 )
                 check = await cur.fetchone()
@@ -254,10 +258,11 @@ class EntityMergeWriter:
                     check.get("s_aliases"),
                     [s_name_raw],
                 )
+                primary_aliases = self._dedupe_aliases(check.get("p_aliases"))
                 new_last = s_last if s_last > p_last else p_last
                 await cur.execute(
                     """
-                    UPDATE entities
+                    UPDATE project_entity_contexts
                     SET topic = %s,
                         last_mentioned_ms = %s
                     WHERE entity_id = %s
@@ -270,22 +275,13 @@ class EntityMergeWriter:
                         project_id,
                     ),
                 )
-                for alias in combined_aliases:
-                    if not alias:
-                        continue
-                    await cur.execute(
-                        """
-                        INSERT INTO entity_aliases (entity_id, alias)
-                        VALUES (%s, %s)
-                        ON CONFLICT (entity_id, alias) DO NOTHING
-                        """,
-                        (primary_id, alias),
-                    )
-
                 await cur.execute(
                     """
                     DELETE FROM message_entity_refs secondary_ref
-                    WHERE secondary_ref.entity_id = %s
+                    USING messages message
+                    WHERE secondary_ref.message_id = message.message_id
+                      AND secondary_ref.entity_id = %s
+                      AND message.project_id = %s
                       AND EXISTS (
                           SELECT 1
                           FROM message_entity_refs primary_ref
@@ -293,15 +289,18 @@ class EntityMergeWriter:
                             AND primary_ref.entity_id = %s
                       )
                     """,
-                    (secondary_id, primary_id),
+                    (secondary_id, project_id, primary_id),
                 )
                 await cur.execute(
                     """
                     UPDATE message_entity_refs
                     SET entity_id = %s
-                    WHERE entity_id = %s
+                    FROM messages message
+                    WHERE message_entity_refs.message_id = message.message_id
+                      AND message_entity_refs.entity_id = %s
+                      AND message.project_id = %s
                     """,
-                    (primary_id, secondary_id),
+                    (primary_id, secondary_id, project_id),
                 )
                 await cur.execute(
                     """
@@ -716,24 +715,31 @@ class EntityMergeWriter:
                     SELECT
                         (
                             SELECT count(*)
-                            FROM message_entity_refs
-                            WHERE entity_id = %s
+                            FROM message_entity_refs ref
+                            JOIN messages message ON message.message_id = ref.message_id
+                            WHERE ref.entity_id = %s
+                              AND message.project_id = %s
                         ) AS message_ref_count,
                         (
                             SELECT count(*)
                             FROM episode_entities
-                            WHERE entity_id = %s
+                            WHERE entity_id = %s AND project_id = %s
                         ) AS episode_entity_count,
                         (
                             SELECT count(*)
                             FROM relationships
-                            WHERE entity_a_id = %s
+                            WHERE project_id = %s
+                              AND (entity_a_id = %s
                                OR entity_b_id = %s
+                              )
                         ) AS relationship_count
                     """,
                     (
                         secondary_id,
+                        project_id,
                         secondary_id,
+                        project_id,
+                        project_id,
                         secondary_id,
                         secondary_id,
                     ),
@@ -752,40 +758,58 @@ class EntityMergeWriter:
                         f"entity {secondary_id}"
                     )
 
-                await self.projection.update_merged_entity(
-                    cur,
-                    primary_id,
-                    project_id,
-                    combined_aliases,
-                    new_last,
-                )
                 await self.projection.replace_relationships_for_entities(
                     cur,
                     project_id,
                     [primary_id, secondary_id],
                     relationship_projection,
                 )
-                await self.projection.delete_entity_projection(
-                    cur,
-                    secondary_id,
-                    project_id,
+                await cur.execute(
+                    """
+                    DELETE FROM project_entity_contexts
+                    WHERE entity_id = %s AND project_id = %s
+                    """,
+                    (secondary_id, project_id),
                 )
-
                 await cur.execute(
                     """
                     DELETE FROM entities
                     WHERE entity_id = %s
-                      AND project_id = %s
+                      AND NOT EXISTS (
+                          SELECT 1 FROM project_entity_contexts
+                          WHERE entity_id = %s
+                      )
                     RETURNING entity_id
                     """,
-                    (secondary_id, project_id),
+                    (secondary_id, secondary_id),
                 )
                 deleted_secondary = await cur.fetchone()
-                if not deleted_secondary:
-                    raise RuntimeError(
-                        f"Secondary entity {secondary_id} disappeared "
-                        "before merge deletion"
+                if deleted_secondary:
+                    await self.projection.delete_entity_projection(
+                        cur,
+                        secondary_id,
+                        project_id,
                     )
+                    for alias in combined_aliases:
+                        await cur.execute(
+                            """
+                            INSERT INTO entity_aliases (entity_id, alias)
+                            VALUES (%s, %s)
+                            ON CONFLICT (entity_id, alias) DO NOTHING
+                            """,
+                            (primary_id, alias),
+                        )
+                    projected_aliases = combined_aliases
+                else:
+                    # The secondary identity is still active in another
+                    # project. Do not transfer its globally owned aliases.
+                    projected_aliases = primary_aliases
+
+                await self.projection.update_merged_entity(
+                    cur,
+                    primary_id,
+                    projected_aliases,
+                )
 
                 logger.info(f"Merged entity {secondary_id} into {primary_id}")
                 return True

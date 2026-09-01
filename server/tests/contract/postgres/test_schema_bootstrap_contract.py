@@ -30,6 +30,8 @@ def test_schema_separates_global_entity_identity_from_project_context():
     assert "FOREIGN KEY (entity_id, user_name)" in SCHEMA_SQL
     assert "REFERENCES public.entities(entity_id, user_name)" in SCHEMA_SQL
     assert "CREATE OR REPLACE FUNCTION public.reject_entity_identity_mutation()" in SCHEMA_SQL
+    assert "context.project_id = message_project_id" in SCHEMA_SQL
+    assert "context.project_id = NEW.project_id" in SCHEMA_SQL
 
 
 def test_schema_keeps_aac_state_user_owned_and_insights_retention_independent():

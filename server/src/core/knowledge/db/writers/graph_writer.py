@@ -118,7 +118,7 @@ class GraphWriter:
             )
             await cur.execute(
                 """
-                SELECT entity_id, user_name, project_id, canonical_name
+                SELECT entity_id, user_name, canonical_name
                 FROM entities
                 WHERE entity_id = %s
                 FOR UPDATE
@@ -127,8 +127,7 @@ class GraphWriter:
             )
             existing = await cur.fetchone()
             if existing and (
-                existing["project_id"] != IDENTITY_SCOPE
-                or self._normalized_identity_value(existing["user_name"])
+                self._normalized_identity_value(existing["user_name"])
                 != canonical_key
                 or self._normalized_identity_value(existing["canonical_name"])
                 != canonical_key
@@ -143,30 +142,16 @@ class GraphWriter:
                 INSERT INTO entities (
                     entity_id,
                     user_name,
-                    project_id,
                     canonical_name,
-                    type,
-                    topic,
-                    last_mentioned_ms,
                     embedding
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NULL)
-                ON CONFLICT (entity_id) DO UPDATE SET
-                    user_name = EXCLUDED.user_name,
-                    project_id = EXCLUDED.project_id,
-                    canonical_name = EXCLUDED.canonical_name,
-                    type = EXCLUDED.type,
-                    topic = EXCLUDED.topic,
-                    last_mentioned_ms = EXCLUDED.last_mentioned_ms
+                VALUES (%s, %s, %s, NULL)
+                ON CONFLICT (entity_id) DO NOTHING
                 """,
                 (
                     IDENTITY_ENTITY_ID,
                     user_name,
-                    IDENTITY_SCOPE,
                     user_name,
-                    "person",
-                    "Identity",
-                    now_ms,
                 ),
             )
             await cur.execute(
@@ -231,81 +216,74 @@ class GraphWriter:
                         }
                     )
 
-                    if entity.is_new:
-                        await cur.execute(
-                            """
-                            INSERT INTO entities (
-                                entity_id,
-                                user_name,
-                                project_id,
-                                canonical_name,
-                                type,
-                                topic,
-                                last_mentioned_ms,
-                                embedding
-                            )
-                            VALUES (
-                                %s, %s, %s, %s, %s, %s, %s, %s::vector
-                            )
-                            ON CONFLICT (entity_id) DO UPDATE SET
-                                canonical_name = EXCLUDED.canonical_name,
-                                type = EXCLUDED.type,
-                                topic = EXCLUDED.topic,
-                                last_mentioned_ms = EXCLUDED.last_mentioned_ms,
-                                embedding = EXCLUDED.embedding
-                            WHERE entities.project_id = EXCLUDED.project_id
-                            RETURNING entity_id
-                            """,
-                            (
-                                entity.entity_id,
-                                user_name,
-                                project_id,
-                                entity.canonical_name,
-                                entity.entity_type,
-                                entity.topic,
-                                now_ms,
-                                json.dumps(entity.embedding) if entity.embedding else None,
-                            ),
+                    await cur.execute(
+                        """
+                        INSERT INTO entities (
+                            entity_id, user_name, canonical_name, embedding
                         )
-                        if await cur.fetchone() is None:
-                            raise RuntimeError(
-                                f"Entity {entity.entity_id} already exists "
-                                f"outside project {project_id}"
-                            )
-                    else:
-                        await cur.execute(
-                            """
-                            UPDATE entities
-                            SET canonical_name = %s,
-                                type = COALESCE(type, %s),
-                                topic = %s,
-                                last_mentioned_ms = %s,
-                                embedding = COALESCE(%s::vector, embedding)
-                            WHERE entity_id = %s
-                              AND (
-                                  project_id = %s
-                                  OR entity_id = %s
-                              )
-                            RETURNING entity_id
-                            """,
-                            (
-                                entity.canonical_name,
-                                entity.entity_type,
-                                entity.topic,
-                                now_ms,
-                                json.dumps(entity.embedding) if entity.embedding else None,
-                                entity.entity_id,
-                                project_id,
-                                IDENTITY_ENTITY_ID,
-                            ),
+                        VALUES (%s, %s, %s, %s::vector)
+                        ON CONFLICT (entity_id) DO NOTHING
+                        """,
+                        (
+                            entity.entity_id,
+                            user_name,
+                            entity.canonical_name,
+                            json.dumps(entity.embedding) if entity.embedding else None,
+                        ),
+                    )
+                    await cur.execute(
+                        """
+                        SELECT user_name, canonical_name
+                        FROM entities
+                        WHERE entity_id = %s
+                        FOR UPDATE
+                        """,
+                        (entity.entity_id,),
+                    )
+                    persisted = await cur.fetchone()
+                    if (
+                        persisted is None
+                        or persisted["user_name"] != user_name
+                        or persisted["canonical_name"] != entity.canonical_name
+                    ):
+                        raise RuntimeError(
+                            f"Entity {entity.entity_id} does not match its immutable identity"
                         )
-
-                        persisted = await cur.fetchone()
-                        if not persisted:
-                            raise RuntimeError(
-                                f"Existing entity {entity.entity_id} was not "
-                                f"found in project {project_id}"
+                    await cur.execute(
+                        """
+                        UPDATE entities
+                        SET embedding = COALESCE(embedding, %s::vector)
+                        WHERE entity_id = %s
+                        """,
+                        (
+                            json.dumps(entity.embedding) if entity.embedding else None,
+                            entity.entity_id,
+                        ),
+                    )
+                    await cur.execute(
+                        """
+                        INSERT INTO project_entity_contexts (
+                            project_id, entity_id, user_name, entity_type, topic,
+                            last_mentioned_ms
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (project_id, entity_id) DO UPDATE
+                        SET entity_type = EXCLUDED.entity_type,
+                            topic = EXCLUDED.topic,
+                            last_mentioned_ms = GREATEST(
+                                project_entity_contexts.last_mentioned_ms,
+                                EXCLUDED.last_mentioned_ms
                             )
+                        """,
+                        (
+                            project_id,
+                            entity.entity_id,
+                            user_name,
+                            entity.entity_type,
+                            entity.topic,
+                            now_ms,
+                        ),
+                    )
 
                     for alias in entity.aliases:
                         if not alias:
@@ -366,21 +344,15 @@ class GraphWriter:
                             %s, %s, %s, %s, %s, %s, %s
                         WHERE EXISTS (
                             SELECT 1
-                            FROM entities
-                            WHERE entity_id = %s
-                              AND (
-                                  project_id = %s
-                                  OR entity_id = %s
-                              )
+                            FROM project_entity_contexts
+                            WHERE (project_id = %s AND entity_id = %s)
+                               OR %s = %s
                         )
                         AND EXISTS (
                             SELECT 1
-                            FROM entities
-                            WHERE entity_id = %s
-                              AND (
-                                  project_id = %s
-                                  OR entity_id = %s
-                              )
+                            FROM project_entity_contexts
+                            WHERE (project_id = %s AND entity_id = %s)
+                               OR %s = %s
                         )
                         ON CONFLICT (relationship_id) DO UPDATE SET
                             relationship_id = EXCLUDED.relationship_id
@@ -394,11 +366,13 @@ class GraphWriter:
                             relationship.entity_b_id,
                             relationship.relationship_type,
                             relationship.symmetric,
+                            project_id,
                             relationship.entity_a_id,
-                            project_id,
+                            relationship.entity_a_id,
                             IDENTITY_ENTITY_ID,
-                            relationship.entity_b_id,
                             project_id,
+                            relationship.entity_b_id,
+                            relationship.entity_b_id,
                             IDENTITY_ENTITY_ID,
                         ),
                     )
@@ -695,12 +669,20 @@ class GraphWriter:
 
         await cur.execute(
             """
-            SELECT entity_id
-            FROM entities
-            WHERE entity_id = ANY(%s)
-              AND (project_id = %s OR entity_id = %s)
+            SELECT entity.entity_id
+            FROM entities entity
+            WHERE entity.entity_id = ANY(%s)
+              AND (
+                  entity.entity_id = %s
+                  OR EXISTS (
+                      SELECT 1
+                      FROM project_entity_contexts context
+                      WHERE context.entity_id = entity.entity_id
+                        AND context.project_id = %s
+                  )
+              )
             """,
-            (entity_ids, project_id, IDENTITY_ENTITY_ID),
+            (entity_ids, IDENTITY_ENTITY_ID, project_id),
         )
         scoped_entity_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
         if scoped_entity_ids != set(entity_ids):
@@ -797,45 +779,9 @@ class GraphWriter:
     async def update_entity_canonical_name(
         self, entity_id: int, canonical_name: str, *, project_id: str
     ) -> None:
-        project_id = self._require_project_id(
-            project_id,
-            "update_entity_canonical_name",
+        raise ValueError(
+            "Entity canonical names are immutable; create an alias or merge identities"
         )
-        async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                UPDATE entities
-                SET canonical_name = %s
-                WHERE entity_id = %s
-                  AND (project_id = %s OR entity_id = %s)
-                """,
-                (
-                    canonical_name,
-                    entity_id,
-                    project_id,
-                    IDENTITY_ENTITY_ID,
-                ),
-            )
-
-            cypher = """
-            MATCH (e:Entity {id: $id})
-            WHERE e.project_id = $project_id OR e.id = $identity_entity_id
-            SET e.canonical_name = $canonical_name
-            RETURN e.id
-            """
-            await cur.execute(
-                self.client.build_cypher(cypher),
-                (
-                    json.dumps(
-                        {
-                            "id": entity_id,
-                            "canonical_name": canonical_name,
-                            "project_id": project_id,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
-                        }
-                    ),
-                ),
-            )
 
     @_storage_write("update_entity_embedding")
     async def update_entity_embedding(
@@ -848,9 +794,16 @@ class GraphWriter:
                 UPDATE entities
                 SET embedding = %s::vector
                 WHERE entity_id = %s
-                  AND (project_id = %s OR entity_id = %s)
+                  AND (
+                      entity_id = %s
+                      OR EXISTS (
+                          SELECT 1 FROM project_entity_contexts context
+                          WHERE context.entity_id = entities.entity_id
+                            AND context.project_id = %s
+                      )
+                  )
                 """,
-                (json.dumps(embedding), entity_id, project_id, IDENTITY_ENTITY_ID),
+                (json.dumps(embedding), entity_id, IDENTITY_ENTITY_ID, project_id),
             )
     @_storage_write("update_entity_aliases")
     async def update_entity_aliases(
@@ -877,11 +830,15 @@ class GraphWriter:
                         SELECT %s, %s
                         WHERE EXISTS (
                             SELECT 1
-                            FROM entities
-                            WHERE entity_id = %s
+                            FROM entities entity
+                            WHERE entity.entity_id = %s
                               AND (
-                                  project_id = %s
-                                  OR entity_id = %s
+                                  entity.entity_id = %s
+                                  OR EXISTS (
+                                      SELECT 1 FROM project_entity_contexts context
+                                      WHERE context.entity_id = entity.entity_id
+                                        AND context.project_id = %s
+                                  )
                               )
                         )
                         ON CONFLICT (entity_id, alias) DO NOTHING
@@ -890,15 +847,14 @@ class GraphWriter:
                             item["id"],
                             alias,
                             item["id"],
-                            project_id,
                             IDENTITY_ENTITY_ID,
+                            project_id,
                         ),
                     )
 
             cypher = """
             UNWIND $batch AS data
             MATCH (e:Entity {id: data.id})
-            WHERE e.project_id = $project_id OR e.id = $identity_entity_id
             WITH e,
                 coalesce(e.aliases, []) + coalesce(data.aliases, [])
                 AS all_aliases
@@ -920,8 +876,6 @@ class GraphWriter:
                     json.dumps(
                         {
                             "batch": params,
-                            "project_id": project_id,
-                            "identity_entity_id": IDENTITY_ENTITY_ID,
                         }
                     ),
                 ),
@@ -960,21 +914,67 @@ class GraphWriter:
 
         await cur.execute(
             """
-            DELETE FROM entities
+            DELETE FROM relationship_observations
+            WHERE relationship_id IN (
+                SELECT relationship_id
+                FROM relationships
+                WHERE project_id = %s
+                  AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
+            )
+            """,
+            (project_id, entity_ids, entity_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM relationships
+            WHERE project_id = %s
+              AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
+            """,
+            (project_id, entity_ids, entity_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM message_entity_refs ref
+            USING messages message
+            WHERE ref.message_id = message.message_id
+              AND message.project_id = %s
+              AND ref.entity_id = ANY(%s)
+            """,
+            (project_id, entity_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM episode_entities
+            WHERE project_id = %s AND entity_id = ANY(%s)
+            """,
+            (project_id, entity_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM project_entity_contexts
+            WHERE project_id = %s AND entity_id = ANY(%s)
+            """,
+            (project_id, entity_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM entities entity
             WHERE entity_id = ANY(%s)
-              AND project_id = %s
-              AND entity_id <> %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM project_entity_contexts context
+                  WHERE context.entity_id = entity.entity_id
+              )
             RETURNING entity_id
             """,
-            (entity_ids, project_id, IDENTITY_ENTITY_ID),
+            (entity_ids,),
         )
-        deleted_ids = sorted(int(row["entity_id"]) for row in await cur.fetchall())
+        orphaned_ids = sorted(int(row["entity_id"]) for row in await cur.fetchall())
         await self.projection.delete_entities_projection(
             cur,
-            deleted_ids,
+            orphaned_ids,
             project_id,
         )
-        return deleted_ids
+        return sorted(entity_ids)
 
     @_storage_write("delete_selected_project_entities")
     async def delete_selected_project_entities(
@@ -1008,11 +1008,13 @@ class GraphWriter:
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
-                SELECT entity_id
-                FROM public.entities
-                WHERE entity_id = ANY(%s)
-                  AND user_name = %s
-                  AND project_id = %s
+            SELECT entity.entity_id
+                FROM public.entities entity
+                JOIN public.project_entity_contexts context
+                  ON context.entity_id = entity.entity_id
+                WHERE entity.entity_id = ANY(%s)
+                  AND entity.user_name = %s
+                  AND context.project_id = %s
                 FOR UPDATE
                 """,
                 (selected_ids, user_name, project_id),

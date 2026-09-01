@@ -8,14 +8,18 @@ async def _seed_scoped_graph(client) -> None:
         INSERT INTO sessions (session_id, user_name, project_id)
         VALUES ('session-1', 'ada', 'project-1');
 
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, topic
-        )
+        INSERT INTO entities (entity_id, user_name, canonical_name)
         VALUES
-            (1, 'ada', '__identity__', 'Ada', 'Identity'),
-            (2, 'ada', 'project-1', 'Primary', 'People'),
-            (3, 'ada', 'project-1', 'Secondary', 'People'),
-            (4, 'ada', 'project-2', 'Other Project', 'People');
+            (1, 'ada', 'Ada'),
+            (2, 'ada', 'Primary'),
+            (3, 'ada', 'Secondary'),
+            (4, 'ada', 'Other Project');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 2, 'ada', 'person', 'People'),
+            ('project-1', 3, 'ada', 'person', 'People'),
+            ('project-2', 4, 'ada', 'person', 'People');
 
         INSERT INTO messages (
             user_name, session_id, message_id, project_id, role, content
@@ -186,10 +190,8 @@ async def test_additive_constraints_reject_invalid_graph_and_episode_values(
     with pytest.raises(CheckViolation, match="entities_canonical_name_nonblank_check"):
         await real_postgres_client.execute(
             """
-            INSERT INTO entities (
-                entity_id, user_name, project_id, canonical_name, topic
-            )
-            VALUES (5, 'ada', 'project-1', '   ', 'People')
+            INSERT INTO entities (entity_id, user_name, canonical_name)
+            VALUES (5, 'ada', '   ')
             """
         )
     with pytest.raises(CheckViolation, match="messages_id_positive_check"):
@@ -204,10 +206,11 @@ async def test_additive_constraints_reject_invalid_graph_and_episode_values(
 
     await real_postgres_client.execute(
         """
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, topic
-        )
-        VALUES (5, 'ada', 'project-1', 'Third', 'People');
+        INSERT INTO entities (entity_id, user_name, canonical_name)
+        VALUES (5, 'ada', 'Third');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES ('project-1', 5, 'ada', 'person', 'People');
         INSERT INTO episodes (episode_id, project_id, summary)
         VALUES ('episode-1', 'project-1', 'Focus limit');
         INSERT INTO episode_entities (

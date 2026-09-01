@@ -349,7 +349,7 @@ async def test_episode_reader_returns_resolved_generation_catalogs():
     entity_query, entity_params = client.calls[0][1], client.calls[0][2]
     relationship_query, relationship_params = client.calls[1][1], client.calls[1][2]
     assert "entity_aliases" in entity_query
-    assert entity_params == ([11, 12], "ada", "project-1", "session-1", "project-1", 1)
+    assert entity_params == ([11, 12], "ada", "project-1", "session-1", 1)
     assert "relationship_type" in relationship_query
     assert relationship_params == (
         [11, 12],
@@ -359,6 +359,8 @@ async def test_episode_reader_returns_resolved_generation_catalogs():
         "project-1",
         "session-1",
         "project-1",
+        1,
+        1,
     )
 
 

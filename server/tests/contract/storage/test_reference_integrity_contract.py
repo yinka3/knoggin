@@ -35,12 +35,13 @@ async def test_relationship_observation_requires_a_scoped_message_and_cascades(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, type, topic
-        )
-        VALUES
-            (2, 'ada', 'project-1', 'Ada', 'person', 'People'),
-            (3, 'ada', 'project-1', 'Knoggin', 'organization', 'Work')
+        INSERT INTO entities (entity_id, user_name, canonical_name)
+        VALUES (2, 'ada', 'Ada'), (3, 'ada', 'Knoggin');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 2, 'ada', 'person', 'People'),
+            ('project-1', 3, 'ada', 'organization', 'Work')
         """
     )
     await real_postgres_client.execute(

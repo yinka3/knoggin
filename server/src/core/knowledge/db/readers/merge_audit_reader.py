@@ -44,20 +44,22 @@ class MergeAuditReader:
             SELECT
                 e.entity_id,
                 e.user_name,
-                e.project_id,
                 e.canonical_name,
-                e.type,
-                e.topic,
-                e.last_mentioned_ms,
+                context.project_id,
+                context.entity_type AS type,
+                context.topic,
+                context.last_mentioned_ms,
                 COALESCE(
                     array_agg(DISTINCT a.alias ORDER BY a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
                     ARRAY[]::text[]
                 ) AS aliases
             FROM entities e
+            JOIN project_entity_contexts context
+              ON context.entity_id = e.entity_id
             LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
             WHERE e.user_name = %s
-              AND e.project_id = %s
+              AND context.project_id = %s
               AND e.entity_id = ANY(%s)
             GROUP BY e.entity_id
             ORDER BY e.entity_id

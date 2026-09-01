@@ -5,7 +5,7 @@ from typing import Dict, List
 from loguru import logger
 
 from common.exceptions import StorageWriteError
-from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
+from common.scoping import require_scope_value
 from core.knowledge.db.writers.age_projection_writer import (
     AgeProjectionWriter,
 )
@@ -117,25 +117,27 @@ class GraphBuilder:
             SELECT
                 e.entity_id AS id,
                 e.user_name,
-                e.project_id,
                 e.canonical_name,
-                e.type,
-                e.topic,
-                e.last_mentioned_ms AS last_mentioned,
+                context.project_id,
+                context.entity_type AS type,
+                context.topic,
+                context.last_mentioned_ms AS last_mentioned,
                 COALESCE(
                     array_agg(DISTINCT a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
                     ARRAY[]::text[]
                 ) AS aliases
             FROM entities e
+            JOIN project_entity_contexts context
+              ON context.entity_id = e.entity_id
             LEFT JOIN entity_aliases a
               ON a.entity_id = e.entity_id
-            WHERE (e.project_id = %s OR e.entity_id = %s)
-              AND (e.user_name = %s OR e.entity_id = %s)
+            WHERE context.project_id = %s
+              AND e.user_name = %s
             GROUP BY e.entity_id
             ORDER BY e.entity_id
             """,
-            (project_id, IDENTITY_ENTITY_ID, user_name, IDENTITY_ENTITY_ID),
+            (project_id, user_name),
         )
         return list(await cur.fetchall())
 

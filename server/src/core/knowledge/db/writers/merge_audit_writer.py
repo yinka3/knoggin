@@ -261,24 +261,20 @@ class MergeAuditWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM message_entity_refs
-                WHERE entity_id = ANY(%s)
+                DELETE FROM message_entity_refs ref
+                USING messages message
+                WHERE ref.message_id = message.message_id
+                  AND message.project_id = %s
+                  AND ref.entity_id = ANY(%s)
                 """,
-                (ids,),
+                (project_id, ids),
             )
             await cur.execute(
                 """
                 DELETE FROM episode_entities
-                WHERE entity_id = ANY(%s)
+                WHERE project_id = %s AND entity_id = ANY(%s)
                 """,
-                (ids,),
-            )
-            await cur.execute(
-                """
-                DELETE FROM entity_aliases
-                WHERE entity_id = ANY(%s)
-                """,
-                (ids,),
+                (project_id, ids),
             )
 
             for entity in before_state["entities"]:
@@ -287,26 +283,33 @@ class MergeAuditWriter:
                     INSERT INTO entities (
                         entity_id,
                         user_name,
-                        project_id,
-                        canonical_name,
-                        type,
-                        topic,
-                        last_mentioned_ms
+                        canonical_name
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (entity_id) DO UPDATE SET
-                        user_name = EXCLUDED.user_name,
-                        project_id = EXCLUDED.project_id,
-                        canonical_name = EXCLUDED.canonical_name,
-                        type = EXCLUDED.type,
-                        topic = EXCLUDED.topic,
-                        last_mentioned_ms = EXCLUDED.last_mentioned_ms
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (entity_id) DO NOTHING
                     """,
                     (
                         int(entity["entity_id"]),
                         entity["user_name"],
-                        entity["project_id"],
                         entity["canonical_name"],
+                    ),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO project_entity_contexts (
+                        project_id, entity_id, user_name, entity_type, topic,
+                        last_mentioned_ms
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (project_id, entity_id) DO UPDATE SET
+                        entity_type = EXCLUDED.entity_type,
+                        topic = EXCLUDED.topic,
+                        last_mentioned_ms = EXCLUDED.last_mentioned_ms
+                    """,
+                    (
+                        project_id,
+                        int(entity["entity_id"]),
+                        entity["user_name"],
                         entity.get("type"),
                         entity.get("topic") or "General",
                         entity.get("last_mentioned_ms"),

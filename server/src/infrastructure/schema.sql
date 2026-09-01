@@ -1423,10 +1423,12 @@ BEGIN
         WHERE entity.entity_id = NEW.entity_id
           AND entity.user_name = message_user_name
           AND (
-              entity.project_id = message_project_id
-              OR (
-                  entity.entity_id = 1
-                  AND entity.project_id = '__identity__'
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts context
+                  WHERE context.entity_id = entity.entity_id
+                    AND context.project_id = message_project_id
               )
           )
     ) THEN
@@ -1456,10 +1458,12 @@ BEGIN
         WHERE entity.entity_id = NEW.entity_a_id
           AND entity.user_name = NEW.user_name
           AND (
-              entity.project_id = NEW.project_id
-              OR (
-                  entity.entity_id = 1
-                  AND entity.project_id = '__identity__'
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts context
+                  WHERE context.entity_id = entity.entity_id
+                    AND context.project_id = NEW.project_id
               )
           )
     ) OR NOT EXISTS (
@@ -1468,10 +1472,12 @@ BEGIN
         WHERE entity.entity_id = NEW.entity_b_id
           AND entity.user_name = NEW.user_name
           AND (
-              entity.project_id = NEW.project_id
-              OR (
-                  entity.entity_id = 1
-                  AND entity.project_id = '__identity__'
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts context
+                  WHERE context.entity_id = entity.entity_id
+                    AND context.project_id = NEW.project_id
               )
           )
     ) THEN

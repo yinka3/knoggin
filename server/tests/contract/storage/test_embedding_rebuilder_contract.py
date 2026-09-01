@@ -75,8 +75,8 @@ async def test_embedding_rebuilder_replaces_canonical_embeddings():
     }
     assert embedding.calls == [
         [
-            "Widget (concept)",
-            "ada (person)",
+            "Widget (unknown)",
+            "ada (unknown)",
         ],
         [
             "Summary:\nWidget storage will use direct evidence.\n\n"
@@ -218,12 +218,15 @@ async def test_embedding_rebuild_is_idempotent_and_preserves_sibling_project(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, type, topic
+        INSERT INTO entities (entity_id, user_name, canonical_name) VALUES
+            (1, 'ada', 'ada'),
+            (2, 'ada', 'Project One'),
+            (3, 'ada', 'Project Two');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
         ) VALUES
-            (1, 'ada', '__identity__', 'ada', 'person', 'Identity'),
-            (2, 'ada', 'project-1', 'Project One', 'concept', 'General'),
-            (3, 'ada', 'project-2', 'Project Two', 'concept', 'General')
+            ('project-1', 2, 'ada', 'concept', 'General'),
+            ('project-2', 3, 'ada', 'concept', 'General')
         """
     )
     await real_postgres_client.execute(
@@ -252,13 +255,13 @@ async def test_embedding_rebuild_is_idempotent_and_preserves_sibling_project(
         "SELECT count(*) AS count FROM messages WHERE project_id = 'project-1'"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM entities WHERE project_id = 'project-1'"
+        "SELECT count(*) AS count FROM project_entity_contexts WHERE project_id = 'project-1'"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM entities WHERE entity_id = 2 AND embedding IS NOT NULL"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM entities WHERE project_id = '__identity__' AND embedding IS NOT NULL"
+        "SELECT count(*) AS count FROM entities WHERE entity_id = 1 AND embedding IS NOT NULL"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM episodes WHERE project_id = 'project-1' AND embedding IS NOT NULL"

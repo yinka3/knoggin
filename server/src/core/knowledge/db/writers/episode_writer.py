@@ -343,9 +343,13 @@ class EpisodeWriter:
             FROM message_entity_refs mer
             JOIN entities e ON e.entity_id = mer.entity_id
             WHERE mer.message_id = ANY(%s)
-              AND (e.project_id = %s OR e.entity_id = %s)
+              AND (e.entity_id = %s OR EXISTS (
+                  SELECT 1 FROM project_entity_contexts context
+                  WHERE context.entity_id = e.entity_id
+                    AND context.project_id = %s
+              ))
             """,
-            (message_ids, project_id, IDENTITY_ENTITY_ID),
+            (message_ids, IDENTITY_ENTITY_ID, project_id),
         )
         entities_by_message = {message_id: set() for message_id in message_ids}
         for row in await cur.fetchall():

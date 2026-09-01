@@ -162,15 +162,12 @@ class GraphReader:
         cypher = f"""
         MATCH (start:Entity {{canonical_name: $start_name}})
         MATCH (end:Entity {{canonical_name: $end_name}})
-        WHERE ($filter_projects = false OR start.project_id IN $visible_project_ids OR start.id = $identity_entity_id)
-          AND ($filter_projects = false OR end.project_id IN $visible_project_ids OR end.id = $identity_entity_id)
         MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
         WITH p, nodes(p) AS path_nodes, relationships(p) AS path_rels
-        WHERE ALL(node IN path_nodes WHERE $filter_projects = false OR node.project_id IN $visible_project_ids OR node.id = $identity_entity_id)
-          AND ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
+        WHERE ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
         ORDER BY length(p) ASC LIMIT 1
         WITH path_nodes, path_rels,
-             [node IN path_nodes | coalesce(node.topic, 'General')] AS node_topics,
+             [node IN path_nodes | 'General'] AS node_topics,
              [node IN path_nodes | node.canonical_name] AS names,
              [relationship IN path_rels | relationship.relationship_id] AS relationship_ids
         RETURN names, node_topics, relationship_ids,
@@ -227,16 +224,12 @@ class GraphReader:
         cypher = f"""
         MATCH (start:Entity {{canonical_name: $start_name}})
         MATCH (end:Entity {{canonical_name: $end_name}})
-        WHERE ($filter_projects = false OR start.project_id IN $visible_project_ids OR start.id = $identity_entity_id)
-          AND ($filter_projects = false OR end.project_id IN $visible_project_ids OR end.id = $identity_entity_id)
         MATCH p = (start)-[rels:RELATED_TO*1..{max_depth}]-(end)
         WITH p, nodes(p) AS path_nodes, relationships(p) AS path_rels
-        WHERE ALL(node IN path_nodes WHERE $filter_projects = false OR node.project_id IN $visible_project_ids OR node.id = $identity_entity_id)
-          AND ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
-          AND ALL(node IN path_nodes WHERE node.topic IN $active_topics OR node.topic IS NULL)
+        WHERE ALL(relationship IN path_rels WHERE relationship.project_id IN $visible_project_ids)
         ORDER BY length(p) ASC LIMIT 1
         RETURN [node IN path_nodes | node.canonical_name] AS names,
-               [node IN path_nodes | coalesce(node.topic, 'General')] AS node_topics,
+               [node IN path_nodes | 'General'] AS node_topics,
                [relationship IN path_rels | relationship.relationship_id] AS relationship_ids
         """
         query = self.client.build_cypher(
@@ -640,9 +633,7 @@ class GraphReader:
         )
         cypher = """
         MATCH (e:Entity {id: $entity_id})-[r:RELATED_TO]-(neighbor:Entity)
-        WHERE (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
-          AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
-          AND r.project_id IN $visible_project_ids
+        WHERE r.project_id IN $visible_project_ids
         RETURN neighbor.id
         """
         query = self.client.build_cypher(cypher, "neighbor_id agtype")
@@ -677,11 +668,9 @@ class GraphReader:
         )
         cypher = """
         MATCH (e:Entity {id: $entity_id})-[r:RELATED_TO]-(neighbor:Entity)
-        WHERE (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
-          AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
-          AND r.project_id IN $visible_project_ids
+        WHERE r.project_id IN $visible_project_ids
         RETURN DISTINCT neighbor.id, neighbor.canonical_name
-        ORDER BY neighbor.last_mentioned DESC
+        ORDER BY neighbor.canonical_name
         LIMIT $limit
         """
         query = self.client.build_cypher(cypher, "id agtype, name agtype")
@@ -713,9 +702,7 @@ class GraphReader:
         )
         cypher = """
         MATCH (a:Entity {id: $id_a})-[r:RELATED_TO]-(b:Entity {id: $id_b})
-        WHERE (a.project_id IN $visible_project_ids OR a.id = $identity_entity_id)
-          AND (b.project_id IN $visible_project_ids OR b.id = $identity_entity_id)
-          AND r.project_id IN $visible_project_ids
+        WHERE r.project_id IN $visible_project_ids
         RETURN count(r) > 0 as connected
         """
         query = self.client.build_cypher(cypher, "connected agtype")
@@ -752,10 +739,10 @@ class GraphReader:
 
         query = """
         SELECT
-            p.topic AS p_topic,
-            p.last_mentioned_ms AS p_last,
-            s.topic AS s_topic,
-            s.last_mentioned_ms AS s_last,
+            p_context.topic AS p_topic,
+            p_context.last_mentioned_ms AS p_last,
+            s_context.topic AS s_topic,
+            s_context.last_mentioned_ms AS s_last,
             (
                 SELECT count(*)
                 FROM episode_entities episode_entity
@@ -809,11 +796,15 @@ class GraphReader:
                   )
             ) AS s_relationship_count
         FROM entities p
+        JOIN project_entity_contexts p_context
+          ON p_context.entity_id = p.entity_id
+         AND p_context.project_id = %s
         JOIN entities s
           ON s.entity_id = %s
-         AND s.project_id = %s
+        JOIN project_entity_contexts s_context
+          ON s_context.entity_id = s.entity_id
+         AND s_context.project_id = %s
         WHERE p.entity_id = %s
-          AND p.project_id = %s
         """
         try:
             row = await self.client.fetch_one(
@@ -837,10 +828,10 @@ class GraphReader:
                     secondary_id,
                     secondary_id,
                     primary_id,
+                    project_id,
                     secondary_id,
                     project_id,
                     primary_id,
-                    project_id,
                 ),
             )
             return dict(row) if row else {}
@@ -862,8 +853,8 @@ class GraphReader:
         SELECT
             (
                 SELECT count(*)
-                FROM entities
-                WHERE project_id = ANY(%s) OR entity_id = %s
+                FROM project_entity_contexts
+                WHERE project_id = ANY(%s)
             ) AS entities,
             (
                 SELECT count(*)
@@ -881,7 +872,6 @@ class GraphReader:
                 query,
                 (
                     visible_project_ids,
-                    IDENTITY_ENTITY_ID,
                     visible_project_ids,
                     visible_project_ids,
                 ),
@@ -912,8 +902,6 @@ class GraphReader:
         cypher = """
         MATCH (e:Entity)-[r:RELATED_TO]-(neighbor:Entity)
         WHERE e.id IN $ids
-          AND (e.project_id IN $visible_project_ids OR e.id = $identity_entity_id)
-          AND (neighbor.project_id IN $visible_project_ids OR neighbor.id = $identity_entity_id)
           AND r.project_id IN $visible_project_ids
         RETURN e.id as entity_id, collect(DISTINCT neighbor.id) as neighbor_ids
         """

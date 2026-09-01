@@ -38,7 +38,8 @@ async def test_entity_list_count_and_page_use_one_repeatable_read_snapshot():
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
         in client.calls[0][1]
     )
-    assert "SELECT count(*) AS total FROM entities e" in client.calls[1][1]
+    assert "count(DISTINCT e.entity_id) AS total" in client.calls[1][1]
+    assert "project_entity_contexts" in client.calls[1][1]
     assert "SELECT" in client.calls[2][1]
     assert all(call[0] == "execute" for call in client.calls)
 
@@ -96,15 +97,25 @@ async def test_entity_reader_rejects_invalid_bounded_query_inputs_before_queryin
 async def test_entity_name_lookup_uses_valid_scoped_sql_and_returns_matches():
     client = RecordingPostgresClient(
         fetch_all_results=[
+            [{"id": 2}],
             [
                 {
                     "id": 2,
-                    "project_id": "project-1",
+                    "user_name": "ada",
                     "canonical_name": "Widget",
-                    "type": "concept",
                     "aliases": ["widget-service"],
                 }
-            ]
+            ],
+            [{"entity_id": 2, "embedding": [0.1, 0.2]}],
+            [
+                {
+                    "entity_id": 2,
+                    "project_id": "project-1",
+                    "entity_type": "concept",
+                    "topic": "General",
+                    "last_mentioned_ms": 1000,
+                }
+            ],
         ]
     )
 
@@ -116,10 +127,18 @@ async def test_entity_name_lookup_uses_valid_scoped_sql_and_returns_matches():
     assert matches == [
         {
             "id": 2,
-            "project_id": "project-1",
             "canonical_name": "Widget",
-            "type": "concept",
             "aliases": ["widget-service"],
+            "user_name": "ada",
+            "embedding": [0.1, 0.2],
+            "contexts": [
+                {
+                    "project_id": "project-1",
+                    "entity_type": "concept",
+                    "topic": "General",
+                    "last_mentioned_ms": 1000,
+                }
+            ],
         }
     ]
     query, params = client.calls[0][1], client.calls[0][2]
@@ -127,8 +146,8 @@ async def test_entity_name_lookup_uses_valid_scoped_sql_and_returns_matches():
     assert params == [
         ["widget", "widget-service"],
         ["widget", "widget-service"],
-        ["project-1"],
         1,
+        ["project-1"],
     ]
 
 

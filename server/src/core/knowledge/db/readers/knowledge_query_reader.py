@@ -7,7 +7,7 @@ from typing import Any
 from loguru import logger
 
 from common.exceptions import StorageReadError
-from common.scoping import IDENTITY_ENTITY_ID, require_visible_project_ids
+from common.scoping import require_visible_project_ids
 from common.utils.time_utils import get_now_ms
 from infrastructure.postgres_client import PostgresClient
 
@@ -44,7 +44,7 @@ class KnowledgeQueryReader:
 
         query = """
         SELECT
-            entity.topic,
+            context.topic,
             entity.canonical_name AS name,
             COALESCE(
                 array_agg(DISTINCT alias.alias) FILTER (WHERE alias.alias IS NOT NULL),
@@ -61,27 +61,27 @@ class KnowledgeQueryReader:
                 '[]'::jsonb
             ) AS message_refs
         FROM entities entity
+        JOIN project_entity_contexts context
+          ON context.entity_id = entity.entity_id
         LEFT JOIN entity_aliases alias ON alias.entity_id = entity.entity_id
         LEFT JOIN relationships relationship
-          ON relationship.entity_a_id = entity.entity_id
-          OR relationship.entity_b_id = entity.entity_id
+          ON (relationship.entity_a_id = entity.entity_id
+              OR relationship.entity_b_id = entity.entity_id)
+         AND relationship.project_id = context.project_id
         LEFT JOIN relationship_observations observation
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
-        WHERE entity.topic = ANY(%s)
-          AND (entity.project_id = ANY(%s) OR entity.entity_id = %s)
-          AND (relationship.project_id = ANY(%s) OR relationship.project_id IS NULL)
-        GROUP BY entity.entity_id, entity.topic, entity.canonical_name,
-                 entity.last_mentioned_ms
-        ORDER BY entity.last_mentioned_ms DESC NULLS LAST
+        WHERE context.topic = ANY(%s)
+          AND context.project_id = ANY(%s)
+        GROUP BY entity.entity_id, context.project_id, context.topic,
+                 entity.canonical_name, context.last_mentioned_ms
+        ORDER BY context.last_mentioned_ms DESC NULLS LAST
         """
         try:
             rows = await self.client.fetch_all(
                 query,
                 (
                     hot_topic_names,
-                    visible_project_ids,
-                    IDENTITY_ENTITY_ID,
                     visible_project_ids,
                 ),
             )
@@ -141,6 +141,8 @@ class KnowledgeQueryReader:
                 '[]'::jsonb
             ) AS evidence_refs
         FROM entities source
+        JOIN project_entity_contexts source_context
+          ON source_context.entity_id = source.entity_id
         JOIN relationships relationship
           ON relationship.entity_a_id = source.entity_id
           OR relationship.entity_b_id = source.entity_id
@@ -150,26 +152,24 @@ class KnowledgeQueryReader:
               THEN relationship.entity_b_id
               ELSE relationship.entity_a_id
           END
+        JOIN project_entity_contexts target_context
+          ON target_context.entity_id = target.entity_id
+         AND target_context.project_id = relationship.project_id
         JOIN relationship_observations observation
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
         WHERE source.canonical_name = %s
           AND observation.observed_at_ms > %s
-          AND (source.project_id = ANY(%s) OR source.entity_id = %s)
-          AND (target.project_id = ANY(%s) OR target.entity_id = %s)
+          AND source_context.project_id = relationship.project_id
           AND relationship.project_id = ANY(%s)
         """
         params: tuple = (
             entity_name,
             cutoff_ms,
             visible_project_ids,
-            IDENTITY_ENTITY_ID,
-            visible_project_ids,
-            IDENTITY_ENTITY_ID,
-            visible_project_ids,
         )
         if active_topics is not None:
-            query += " AND target.topic = ANY(%s)"
+            query += " AND target_context.topic = ANY(%s)"
             params = (*params, active_topics)
         query += """
         GROUP BY target.entity_id, target.canonical_name

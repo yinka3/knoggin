@@ -89,13 +89,16 @@ class EntityReclassificationWriter:
             raise ValueError("limit must be a positive integer when provided")
 
         query = """
-            SELECT entity_id, canonical_name, type, topic
-            FROM public.entities
-            WHERE user_name = %s
-              AND project_id = %s
-              AND entity_id <> %s
-              AND entity_id > %s
-            ORDER BY entity_id
+            SELECT e.entity_id, e.canonical_name,
+                   context.entity_type AS type, context.topic
+            FROM public.entities e
+            JOIN public.project_entity_contexts context
+              ON context.entity_id = e.entity_id
+            WHERE e.user_name = %s
+              AND context.project_id = %s
+              AND e.entity_id <> %s
+              AND e.entity_id > %s
+            ORDER BY e.entity_id
         """
         params: list[Any] = [
             user_name,
@@ -166,12 +169,15 @@ class EntityReclassificationWriter:
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
-                SELECT entity_id, canonical_name, type, topic
-                FROM public.entities
-                WHERE user_name = %s
-                  AND project_id = %s
-                  AND entity_id = ANY(%s)
-                  AND entity_id <> %s
+                SELECT e.entity_id, e.canonical_name,
+                       context.entity_type AS type, context.topic
+                FROM public.entities e
+                JOIN public.project_entity_contexts context
+                  ON context.entity_id = e.entity_id
+                WHERE e.user_name = %s
+                  AND context.project_id = %s
+                  AND e.entity_id = ANY(%s)
+                  AND e.entity_id <> %s
                 FOR UPDATE
                 """,
                 (user_name, project_id, entity_ids, IDENTITY_ENTITY_ID),
@@ -202,13 +208,13 @@ class EntityReclassificationWriter:
 
                 await cur.execute(
                     """
-                    UPDATE public.entities
-                    SET type = %s,
+                    UPDATE public.project_entity_contexts
+                    SET entity_type = %s,
                         topic = %s
                     WHERE user_name = %s
                       AND project_id = %s
                       AND entity_id = %s
-                      AND type IS NOT DISTINCT FROM %s
+                      AND entity_type IS NOT DISTINCT FROM %s
                       AND topic IS NOT DISTINCT FROM %s
                     RETURNING entity_id
                     """,

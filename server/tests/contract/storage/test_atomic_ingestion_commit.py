@@ -103,7 +103,7 @@ async def test_atomic_ingestion_commit_marks_exact_claim_processed(
     assert summary.entities_written == 2
     assert summary.relationships_written == 1
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.entities WHERE project_id = 'project-1'"
+        "SELECT count(*) AS count FROM public.project_entity_contexts WHERE project_id = 'project-1'"
     ) == {"count": 2}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.relationship_observations WHERE message_id = 101"

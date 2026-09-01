@@ -146,7 +146,7 @@ async def test_direct_edge_scopes_relationship_and_decodes_age_booleans(
 
     assert result is expected
     _, query, params = client.calls[0]
-    assert "AND r.project_id IN $visible_project_ids" in query
+    assert "WHERE r.project_id IN $visible_project_ids" in query
     assert json.loads(params[0]) == {
         "id_a": IDENTITY_ENTITY_ID,
         "id_b": 2,
@@ -264,7 +264,7 @@ async def test_direct_edge_ignores_an_edge_from_an_invisible_project(
         real_postgres_client.build_cypher(
             """
             UNWIND $nodes AS node
-            CREATE (:Entity {id: node.id, project_id: node.project_id})
+            CREATE (:Entity {id: node.id})
             RETURN count(*) AS created
             """,
             "created agtype",
@@ -273,8 +273,8 @@ async def test_direct_edge_ignores_an_edge_from_an_invisible_project(
             json.dumps(
                 {
                     "nodes": [
-                        {"id": IDENTITY_ENTITY_ID, "project_id": "identity"},
-                        {"id": 2, "project_id": "project-1"},
+                        {"id": IDENTITY_ENTITY_ID},
+                        {"id": 2},
                     ]
                 }
             ),

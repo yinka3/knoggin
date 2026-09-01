@@ -1091,7 +1091,7 @@ class EpisodeReader:
             SELECT
                 e.entity_id,
                 e.canonical_name,
-                e.type,
+                context.entity_type AS type,
                 COALESCE(
                     array_agg(DISTINCT ea.alias)
                         FILTER (WHERE ea.alias IS NOT NULL),
@@ -1100,16 +1100,19 @@ class EpisodeReader:
             FROM message_entity_refs mer
             JOIN messages m ON m.message_id = mer.message_id
             JOIN entities e ON e.entity_id = mer.entity_id
+            LEFT JOIN project_entity_contexts context
+              ON context.entity_id = e.entity_id
+             AND context.project_id = m.project_id
             LEFT JOIN entity_aliases ea ON ea.entity_id = e.entity_id
             WHERE mer.message_id = ANY(%s)
               AND m.user_name = %s
               AND m.project_id = %s
               AND m.session_id = %s
-              AND (e.project_id = %s OR e.entity_id = %s)
-            GROUP BY e.entity_id, e.canonical_name, e.type
+              AND (context.entity_id IS NOT NULL OR e.entity_id = %s)
+            GROUP BY e.entity_id, e.canonical_name, context.entity_type
             ORDER BY e.entity_id
             """,
-            (normalized_message_ids, *scope, project_id, IDENTITY_ENTITY_ID),
+            (normalized_message_ids, *scope, IDENTITY_ENTITY_ID),
         )
         relationship_rows = await self.client.fetch_all(
             """
@@ -1117,10 +1120,10 @@ class EpisodeReader:
                 r.relationship_id,
                 r.entity_a_id,
                 entity_a.canonical_name AS entity_a_name,
-                entity_a.type AS entity_a_type,
+                entity_a_context.entity_type AS entity_a_type,
                 r.entity_b_id,
                 entity_b.canonical_name AS entity_b_name,
-                entity_b.type AS entity_b_type,
+                entity_b_context.entity_type AS entity_b_type,
                 r.relationship_type,
                 MAX(rer.confidence) AS confidence,
                 (array_agg(rer.context ORDER BY rer.observed_at_ms DESC)
@@ -1138,6 +1141,12 @@ class EpisodeReader:
              AND m.project_id = rer.project_id
             JOIN entities entity_a ON entity_a.entity_id = r.entity_a_id
             JOIN entities entity_b ON entity_b.entity_id = r.entity_b_id
+            LEFT JOIN project_entity_contexts entity_a_context
+              ON entity_a_context.entity_id = entity_a.entity_id
+             AND entity_a_context.project_id = r.project_id
+            LEFT JOIN project_entity_contexts entity_b_context
+              ON entity_b_context.entity_id = entity_b.entity_id
+             AND entity_b_context.project_id = r.project_id
             WHERE rer.message_id = ANY(%s)
               AND rer.user_name = %s
               AND rer.session_id = %s
@@ -1145,14 +1154,16 @@ class EpisodeReader:
               AND m.project_id = %s
               AND m.session_id = %s
               AND r.project_id = %s
+              AND (entity_a_context.entity_id IS NOT NULL OR entity_a.entity_id = %s)
+              AND (entity_b_context.entity_id IS NOT NULL OR entity_b.entity_id = %s)
             GROUP BY
                 r.relationship_id,
                 r.entity_a_id,
                 entity_a.canonical_name,
-                entity_a.type,
+                entity_a_context.entity_type,
                 r.entity_b_id,
                 entity_b.canonical_name,
-                entity_b.type,
+                entity_b_context.entity_type,
                 r.relationship_type
             ORDER BY r.relationship_id
             """,
@@ -1162,6 +1173,8 @@ class EpisodeReader:
                 scope[2],
                 *scope,
                 project_id,
+                IDENTITY_ENTITY_ID,
+                IDENTITY_ENTITY_ID,
             ),
         )
         return (

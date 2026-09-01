@@ -126,6 +126,14 @@ class FakeEntityKnowledgeStore:
             return None
         return dict(entity)
 
+    async def get_entities_by_ids(self, entity_ids, *, visible_project_ids):
+        return [
+            dict(entity)
+            for entity_id in entity_ids
+            if (entity := self.entities.get(entity_id))
+            and self._is_visible(entity, visible_project_ids)
+        ]
+
     async def get_entity_embedding(self, entity_id, *, visible_project_ids):
         self.embedding_lookups.append(entity_id)
         entity = self.entities.get(entity_id)

@@ -435,10 +435,12 @@ class EntityMergeService:
         await cur.execute(
             """
             SELECT entity_id
-            FROM entities
-            WHERE user_name = %s
-              AND project_id = %s
-              AND entity_id = ANY(%s)
+            FROM entities entity
+            JOIN project_entity_contexts context
+              ON context.entity_id = entity.entity_id
+            WHERE entity.user_name = %s
+              AND context.project_id = %s
+              AND entity.entity_id = ANY(%s)
             ORDER BY entity_id
             FOR UPDATE
             """,

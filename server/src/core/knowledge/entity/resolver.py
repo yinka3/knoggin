@@ -580,6 +580,22 @@ class EntityResolver:
 
     def _populate_cache(self, entity: dict) -> EntityProfile:
         """Hydrate internal indexes from a KnowledgeStore entity record."""
+        contexts = entity.get("contexts")
+        if contexts:
+            context = next(
+                (
+                    item
+                    for item in contexts
+                    if item.get("project_id") == self.project_id
+                ),
+                contexts[0],
+            )
+            entity = {
+                **entity,
+                "project_id": context.get("project_id"),
+                "type": context.get("entity_type"),
+                "topic": context.get("topic"),
+            }
         with self._lock:
             profile, aliases_changed = self._index.populate(entity)
             if aliases_changed:
@@ -851,6 +867,28 @@ class EntityResolver:
                     "vector", vec_score
                 )
 
+        # The durable vector index can contain a visible identity that has not
+        # yet been loaded into this process. Hydrate those rows before applying
+        # the cache membership filter; otherwise vector-only matches disappear.
+        with self._lock:
+            missing_ids = [
+                entity_id
+                for entity_id in candidates
+                if not self._index.has_entity(entity_id)
+            ]
+        if missing_ids:
+            try:
+                hydrated = await self.knowledge_store.get_entities_by_ids(
+                    missing_ids,
+                    visible_project_ids=self.readable_project_ids,
+                )
+                for entity in hydrated:
+                    self._populate_cache(entity)
+            except Exception as exc:
+                if strict:
+                    raise
+                logger.warning("Candidate hydration failed: {}", exc)
+
         with self._lock:
             valid_candidates = [
                 candidate
@@ -878,7 +916,9 @@ class EntityResolver:
         """
 
         project_id = project_id or self.project_id
-        text_to_embed = build_entity_embedding_text(canonical_name, entity_type)
+        # Identity vectors are shared across every project context.  A context
+        # type must not alter the vector persisted for the same identity.
+        text_to_embed = build_entity_embedding_text(canonical_name, None)
         embedding = await self.embedding_service.encode_single(text_to_embed)
 
         with self._lock:
