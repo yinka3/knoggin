@@ -60,9 +60,6 @@ class IngestionWorker:
         self.batch_size, self.batch_timeout = config.batch_size, config.batch_timeout
         self.session_window = config.session_window
         self.message_lifecycle_poll_seconds = config.message_lifecycle_poll_seconds
-        self.ingestion_batch_settle_delay_seconds = (
-            config.ingestion_batch_settle_delay_seconds
-        )
         self.ingestion_max_attempts = config.ingestion_max_attempts
 
     def start(self) -> None:
@@ -180,7 +177,6 @@ class IngestionWorker:
             user_name=self.user_name,
             project_id=project,
             session_id=self.session_id,
-            settle_delay_seconds=self.ingestion_batch_settle_delay_seconds,
         )
         processed = 0
         while not self._shutdown_requested:
@@ -228,7 +224,6 @@ class IngestionWorker:
                     project_id=project,
                     session_id=self.session_id,
                     batch_id=claim.batch_id,
-                    blocked=False,
                 )
                 raise
             except LLMBudgetExceededError:
@@ -237,7 +232,6 @@ class IngestionWorker:
                     project_id=project,
                     session_id=self.session_id,
                     batch_id=claim.batch_id,
-                    blocked=False,
                 )
                 break
             except Exception as exc:

@@ -274,7 +274,7 @@ CREATE TABLE IF NOT EXISTS public.messages (
     replaces_message_id BIGINT,
     superseded_at_ms BIGINT,
     ingestion_state TEXT NOT NULL DEFAULT 'excluded'
-        CHECK (ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'processed', 'blocked', 'excluded')),
+        CHECK (ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'processed', 'failed', 'excluded')),
     ingestion_not_before_ms BIGINT,
     ingestion_claim_id TEXT,
     ingestion_claimed_at_ms BIGINT,
@@ -320,7 +320,7 @@ ON public.messages USING gin (search_tsvector);
 
 CREATE INDEX IF NOT EXISTS messages_ingestion_queue_idx
 ON public.messages(user_name, session_id, message_id)
-WHERE role = 'user' AND ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'blocked');
+WHERE role = 'user' AND ingestion_state IN ('waiting_for_seal', 'ready', 'claimed');
 
 CREATE UNIQUE INDEX IF NOT EXISTS messages_acceptance_key_idx
 ON public.messages(user_name, session_id, acceptance_key)

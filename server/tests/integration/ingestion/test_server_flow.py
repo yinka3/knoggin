@@ -357,7 +357,6 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
             batch_size=1,
             batch_debounce_seconds=0,
             batch_timeout=10,
-            ingestion_batch_settle_delay_seconds=0,
         ),
     )
     context.ingestion_worker = worker
@@ -991,7 +990,6 @@ async def test_real_worker_processes_message_persisted_during_acceptance(
             batch_size=1,
             batch_debounce_seconds=0,
             batch_timeout=10,
-            ingestion_batch_settle_delay_seconds=0,
         ),
     )
     context.ingestion_worker = worker

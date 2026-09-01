@@ -198,13 +198,11 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
         session_id: str,
-        settle_delay_seconds: float,
     ) -> List[int]:
         return await self._message_lifecycle_writer.seal_due_user_messages(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
-            settle_delay_seconds=settle_delay_seconds,
         )
 
     async def reset_claimed_ingestion(
@@ -249,7 +247,7 @@ class KnowledgeStore:
             SELECT
                 count(*) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS pending_count,
                 count(*) FILTER (WHERE ingestion_state = 'claimed') AS claimed_count,
-                count(*) FILTER (WHERE ingestion_state = 'blocked') AS blocked_count,
+                count(*) FILTER (WHERE ingestion_state = 'failed') AS failed_count,
                 min(timestamp_ms) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS oldest_pending_ms,
                 max(timestamp_ms) FILTER (WHERE ingestion_state = 'processed') AS last_processed_ms
             FROM public.messages
@@ -263,7 +261,7 @@ class KnowledgeStore:
             for key in (
                 "pending_count",
                 "claimed_count",
-                "blocked_count",
+                "failed_count",
                 "oldest_pending_ms",
                 "last_processed_ms",
             )
@@ -276,14 +274,12 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         batch_id: str,
-        blocked: bool,
     ) -> None:
         await self._message_lifecycle_writer.release_ingestion_claim(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
             batch_id=batch_id,
-            blocked=blocked,
         )
 
     async def fail_ingestion_claim(
@@ -311,7 +307,7 @@ class KnowledgeStore:
             max_attempts=max_attempts,
         )
 
-    async def retry_blocked_ingestion(
+    async def retry_failed_ingestion(
         self,
         *,
         user_name: str,
@@ -319,7 +315,7 @@ class KnowledgeStore:
         session_id: str,
         message_ids: List[int],
     ) -> List[int]:
-        return await self._message_lifecycle_writer.retry_blocked_ingestion(
+        return await self._message_lifecycle_writer.retry_failed_ingestion(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,

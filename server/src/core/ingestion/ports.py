@@ -17,7 +17,6 @@ class IngestionPersistence(Protocol):
         user_name: str,
         project_id: str,
         session_id: str,
-        settle_delay_seconds: float,
     ) -> int: ...
 
     async def claim_next_ingestion_batch(
@@ -36,7 +35,6 @@ class IngestionPersistence(Protocol):
         project_id: str,
         session_id: str,
         batch_id: str,
-        blocked: bool,
     ) -> bool: ...
 
     async def fail_ingestion_claim(

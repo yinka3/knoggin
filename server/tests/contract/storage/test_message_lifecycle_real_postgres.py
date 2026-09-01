@@ -118,7 +118,7 @@ async def test_real_postgres_ingestion_failure_metadata_blocks_and_retries(
         MessageWriter(real_postgres_client),
     )
 
-    blocked = await lifecycle.fail_ingestion_claim(
+    terminal = await lifecycle.fail_ingestion_claim(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
@@ -130,7 +130,7 @@ async def test_real_postgres_ingestion_failure_metadata_blocks_and_retries(
         max_attempts=3,
     )
 
-    assert blocked is False
+    assert terminal is False
     assert await real_postgres_client.fetch_one(
         """
         SELECT ingestion_state, ingestion_attempt_count,
@@ -155,7 +155,7 @@ async def test_real_postgres_ingestion_failure_metadata_blocks_and_retries(
     )
     assert claim is not None
 
-    blocked = await lifecycle.fail_ingestion_claim(
+    terminal = await lifecycle.fail_ingestion_claim(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
@@ -166,8 +166,8 @@ async def test_real_postgres_ingestion_failure_metadata_blocks_and_retries(
         retryable=True,
         max_attempts=3,
     )
-    assert blocked is True
-    assert await lifecycle.retry_blocked_ingestion(
+    assert terminal is True
+    assert await lifecycle.retry_failed_ingestion(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",

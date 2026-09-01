@@ -229,7 +229,7 @@ class RuntimeHealthService:
         queue_available = queue_details.get("queue_available") is True
         pending_count = self._nonnegative_int(queue_details.get("pending_count"))
         claimed_count = self._nonnegative_int(queue_details.get("claimed_count"))
-        blocked_count = self._nonnegative_int(queue_details.get("blocked_count"))
+        failed_count = self._nonnegative_int(queue_details.get("failed_count"))
         consecutive_failures = self._nonnegative_int(
             worker_snapshot.get("consecutive_failures")
         )
@@ -271,8 +271,8 @@ class RuntimeHealthService:
             warnings.append("pending ingestion work is stalled")
         elif delay_state == "delayed":
             warnings.append("pending ingestion work is delayed")
-        if blocked_count:
-            warnings.append("ingestion queue has blocked work")
+        if failed_count:
+            warnings.append("ingestion queue has failed work")
         if consecutive_failures:
             warnings.append("ingestion worker has consecutive failures")
         if worker_state in {"not_started", "stopped"}:
@@ -287,7 +287,7 @@ class RuntimeHealthService:
             not queue_available
             or worker_state != "running"
             or delay_state in {"delayed", "stalled"}
-            or blocked_count
+            or failed_count
             or consecutive_failures
         ):
             status = HealthStatus.DEGRADED
@@ -308,8 +308,8 @@ class RuntimeHealthService:
         else:
             activity = HealthActivity.IDLE
 
-        if blocked_count:
-            message_state = "blocked"
+        if failed_count:
+            message_state = "failed"
         elif claimed_count:
             message_state = "claimed"
         elif pending_count:
@@ -329,7 +329,7 @@ class RuntimeHealthService:
                     "available": queue_available,
                     "pending_count": pending_count,
                     "claimed_count": claimed_count,
-                    "blocked_count": blocked_count,
+                    "failed_count": failed_count,
                     "oldest_pending_available": (
                         queue_details.get("oldest_pending_available") is True
                     ),
@@ -517,7 +517,7 @@ class RuntimeHealthService:
                 "warnings": ["PostgreSQL ingestion metrics are unavailable"],
                 "pending_count": 0,
                 "claimed_count": 0,
-                "blocked_count": 0,
+                "failed_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "last_processed_available": False,
@@ -536,7 +536,7 @@ class RuntimeHealthService:
                 "warnings": ["PostgreSQL ingestion metrics are unavailable"],
                 "pending_count": 0,
                 "claimed_count": 0,
-                "blocked_count": 0,
+                "failed_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "last_processed_available": False,
@@ -553,7 +553,7 @@ class RuntimeHealthService:
             "warnings": [],
             "pending_count": self._nonnegative_int(queue.get("pending_count")),
             "claimed_count": self._nonnegative_int(queue.get("claimed_count")),
-            "blocked_count": self._nonnegative_int(queue.get("blocked_count")),
+            "failed_count": self._nonnegative_int(queue.get("failed_count")),
             "oldest_pending_available": oldest_ms is not None,
             "oldest_pending_age_seconds": oldest_age,
             "last_processed_available": queue.get("last_processed_ms") is not None,

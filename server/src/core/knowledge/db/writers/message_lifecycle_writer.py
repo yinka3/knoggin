@@ -243,12 +243,10 @@ class MessageLifecycleWriter:
         user_name: str,
         project_id: str,
         session_id: str,
-        settle_delay_seconds: float,
     ) -> List[int]:
-        """Seal only expired editable messages and start their settle period."""
+        """Seal expired editable messages and make them immediately claimable."""
 
         now_ms = self._now_ms()
-        not_before_ms = now_ms + int(settle_delay_seconds * 1000)
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
@@ -277,7 +275,7 @@ class MessageLifecycleWriter:
                 """,
                 (
                     now_ms,
-                    not_before_ms,
+                    now_ms,
                     user_name,
                     project_id,
                     session_id,
@@ -329,10 +327,11 @@ class MessageLifecycleWriter:
         session_id: str,
         batch_size: int,
     ) -> IngestionClaim | None:
-        """Claim the earliest contiguous, settled FIFO batch, or nothing.
+        """Claim the earliest contiguous ready FIFO batch, or nothing.
 
-        A preceding editable, blocked, or live claim deliberately prevents later
-        messages from overtaking it. This preserves the meaning of a session.
+        A preceding editable message or live claim prevents later messages from
+        overtaking it. Terminally failed messages are excluded so an explicit
+        retry does not starve later ready work.
         """
 
         if batch_size < 1:
@@ -353,9 +352,8 @@ class MessageLifecycleWriter:
                   AND message.session_id = %s
                   AND session.status = 'open'
                   AND message.role = 'user'
-                  AND message.ingestion_state <> 'excluded'
+                  AND message.ingestion_state IN ('waiting_for_seal', 'ready', 'claimed')
                   AND message.lifecycle_state <> 'superseded'
-                  AND message.ingestion_state <> 'processed'
                 ORDER BY message.message_id
                 LIMIT %s
                 FOR UPDATE
@@ -425,7 +423,7 @@ class MessageLifecycleWriter:
         retryable: bool,
         max_attempts: int,
     ) -> bool:
-        """Record one bounded failure and return whether the batch is blocked."""
+        """Record one bounded failure and return whether it is terminal."""
 
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
@@ -462,11 +460,11 @@ class MessageLifecycleWriter:
             if not rows:
                 raise RuntimeError("Ingestion claim no longer belongs to this worker")
 
-            blocked = (not retryable) or any(
+            terminal = (not retryable) or any(
                 int(row["ingestion_attempt_count"]) + 1 >= max_attempts
                 for row in rows
             )
-            state = "blocked" if blocked else "ready"
+            state = "failed" if terminal else "ready"
             message_ids = [int(row["message_id"]) for row in rows]
             await cur.execute(
                 """
@@ -501,9 +499,9 @@ class MessageLifecycleWriter:
             )
             if cur.rowcount != len(message_ids):
                 raise RuntimeError("Ingestion claim no longer belongs to this worker")
-            return blocked
+            return terminal
 
-    async def retry_blocked_ingestion(
+    async def retry_failed_ingestion(
         self,
         *,
         user_name: str,
@@ -511,7 +509,7 @@ class MessageLifecycleWriter:
         session_id: str,
         message_ids: List[int],
     ) -> List[int]:
-        """Explicitly make selected blocked messages eligible for a fresh run."""
+        """Explicitly make selected failed messages eligible for a fresh run."""
 
         ids = sorted({int(message_id) for message_id in message_ids})
         if not ids or any(message_id <= 0 for message_id in ids):
@@ -529,7 +527,7 @@ class MessageLifecycleWriter:
                   AND session_id = %s
                   AND role = 'user'
                   AND message_id = ANY(%s)
-                  AND ingestion_state = 'blocked'
+                  AND ingestion_state = 'failed'
                   AND EXISTS (
                       SELECT 1
                       FROM public.sessions AS session
@@ -551,21 +549,20 @@ class MessageLifecycleWriter:
         project_id: str,
         session_id: str,
         batch_id: str,
-        blocked: bool,
     ) -> None:
         await self._set_claim_state(
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
             batch_id=batch_id,
-            state="blocked" if blocked else "ready",
+            state="ready",
         )
 
     async def _set_claim_state(
         self, *, user_name: str, project_id: str, session_id: str, batch_id: str, state: str
     ) -> None:
-        if state not in {"ready", "blocked"}:
-            raise ValueError("Ingestion claims may only be released or blocked")
+        if state != "ready":
+            raise ValueError("Ingestion claims may only be released to ready")
         async with self.client.transaction() as cur:
             await cur.execute(
                 """

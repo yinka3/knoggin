@@ -86,7 +86,7 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
             return {
                 "pending_count": 2,
                 "claimed_count": 1,
-                "blocked_count": 0,
+                "failed_count": 0,
                 "oldest_pending_ms": None,
                 "last_processed_ms": 1,
             }
@@ -229,7 +229,7 @@ async def test_ingestion_health_reports_durable_queue_delay():
             return {
                 "pending_count": 1,
                 "claimed_count": 0,
-                "blocked_count": 0,
+                "failed_count": 0,
                 "oldest_pending_ms": 1,
                 "last_processed_ms": None,
             }
