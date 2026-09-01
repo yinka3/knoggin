@@ -1107,55 +1107,6 @@ class EntityResolver:
                 return profile.canonical_name
         return None
 
-    async def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
-        """Detect potential entity merges using vector search + fuzzy matching."""
-        # With lazy loading, scan memory or the specifically passed IDs.
-        # If dirty_ids is None, we scan the current memory cache.
-        with self._lock:
-            scan_targets = dirty_ids if dirty_ids else self._index.iter_profile_ids()
-
-        if not scan_targets:
-            logger.debug("Merge detection skipped: No entities to check.")
-            return []
-
-        logger.info(
-            "Merge detection started. "
-            f"Scanning {len(scan_targets)} entities against graph."
-        )
-
-        generic_tokens = self._build_generic_tokens(self.get_alias_version())
-        candidate_pairs = await self._collect_candidate_pairs(
-            scan_targets, generic_tokens
-        )
-
-        if not candidate_pairs:
-            return []
-
-        entity_ids = set()
-        for id_a, id_b in candidate_pairs.keys():
-            entity_ids.add(id_a)
-            entity_ids.add(id_b)
-
-        evidence_by_entity = await self.knowledge_store.get_merge_evidence_for_entities(
-            sorted(entity_ids),
-            project_id=self.project_id,
-        )
-
-        candidates = []
-        for (id_a, id_b), candidate_meta in candidate_pairs.items():
-            result = await self._classify_pair(
-                id_a,
-                id_b,
-                candidate_meta,
-                evidence_by_entity,
-            )
-            if result:
-                result["reasons"] = list(candidate_meta["reasons"])
-                candidates.append(result)
-
-        logger.info(f"Detection complete: {len(candidates)} candidates found")
-        return candidates
-
     def remove_entities(self, entity_ids: List[int]) -> int:
         """Remove entities from entities indexes. Call after KnowledgeStore deletion."""
         if not entity_ids:

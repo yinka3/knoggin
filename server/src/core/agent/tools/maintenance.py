@@ -2,6 +2,7 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from core.knowledge.entity.maintenance import EntityMaintenance
 from core.knowledge.entity.merge_service import EntityMergeService
 
 
@@ -14,7 +15,9 @@ class MaintenanceTools:
         Returns a list of potential duplicates for the agent to review.
         """
         try:
-            candidates = await self.entities.detect_merge_entity_candidates()
+            candidates = await EntityMaintenance(
+                self.entities
+            ).discover_duplicate_candidates()
 
             if not candidates:
                 return {
