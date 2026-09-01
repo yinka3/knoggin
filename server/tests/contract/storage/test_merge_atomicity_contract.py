@@ -20,12 +20,17 @@ async def _insert_entities(client, entity_ids):
         await client.execute(
             """
             INSERT INTO entities (entity_id, user_name, canonical_name)
-            VALUES (%s, 'ada', %s);
+            VALUES (%s, 'ada', %s)
+            """,
+            (entity_id, f"Entity {entity_id}"),
+        )
+        await client.execute(
+            """
             INSERT INTO project_entity_contexts (
                 project_id, entity_id, user_name, entity_type, topic
             ) VALUES ('project-1', %s, 'ada', 'person', 'People')
             """,
-            (entity_id, f"Entity {entity_id}", entity_id),
+            (entity_id,),
         )
 
 

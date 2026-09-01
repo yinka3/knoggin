@@ -553,11 +553,11 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
             ('bob', 'session-3', 103, 'project-3', 'user', 'Bob project source', 3000, TRUE);
 
         INSERT INTO episodes (
-            episode_id, project_id, session_id, summary, source_message_count,
+            episode_id, project_id, summary, source_message_count,
             first_message_at, last_message_at, created_at, updated_at
         ) VALUES
             (
-                'episode-1', 'project-1', 'session-1',
+                'episode-1', 'project-1',
                 'Visible project one memory', 1,
                 TIMESTAMPTZ '2026-01-01 00:00:01+00',
                 TIMESTAMPTZ '2026-01-01 00:00:01+00',
@@ -565,7 +565,7 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
                 TIMESTAMPTZ '2026-01-01 00:00:01+00'
             ),
             (
-                'episode-2', 'project-2', 'session-2',
+                'episode-2', 'project-2',
                 'Private project two memory', 1,
                 TIMESTAMPTZ '2026-01-02 00:00:01+00',
                 TIMESTAMPTZ '2026-01-02 00:00:01+00',
@@ -573,7 +573,7 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
                 TIMESTAMPTZ '2026-01-02 00:00:01+00'
             ),
             (
-                'episode-3', 'project-3', 'session-3',
+                'episode-3', 'project-3',
                 'Private Bob memory', 1,
                 TIMESTAMPTZ '2026-01-03 00:00:01+00',
                 TIMESTAMPTZ '2026-01-03 00:00:01+00',

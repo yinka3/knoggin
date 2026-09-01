@@ -587,6 +587,7 @@ CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
 ON public.relationship_observations(project_id, user_name, session_id, message_id);
 
 ALTER TABLE public.relationship_observations
+    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_check,
     DROP CONSTRAINT IF EXISTS relationship_observations_confidence_range_check;
 ALTER TABLE public.relationship_observations
     ADD CONSTRAINT relationship_observations_confidence_range_check
@@ -1045,7 +1046,9 @@ ALTER COLUMN project_id SET NOT NULL;
 ALTER TABLE public.episode_entities
 DROP CONSTRAINT IF EXISTS episode_entities_episode_id_fkey,
 DROP CONSTRAINT IF EXISTS episode_entities_entity_id_fkey,
-DROP CONSTRAINT IF EXISTS episode_entities_entity_project_fk;
+DROP CONSTRAINT IF EXISTS episode_entities_entity_project_fk,
+DROP CONSTRAINT IF EXISTS episode_entities_entity_fk,
+DROP CONSTRAINT IF EXISTS episode_entities_entity_context_fk;
 
 DO $$
 BEGIN
@@ -1061,17 +1064,6 @@ BEGIN
         ON DELETE CASCADE;
     END IF;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_entities_entity_fk'
-        AND conrelid = 'public.episode_entities'::regclass
-    ) THEN
-        ALTER TABLE public.episode_entities
-        ADD CONSTRAINT episode_entities_entity_fk
-        FOREIGN KEY (entity_id)
-        REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE;
-    END IF;
 END $$;
 
 -- Unreleased schema cut: promote each legacy project-owned row into a context,
@@ -1119,6 +1111,8 @@ BEGIN
         ALTER TABLE public.entities
             DROP CONSTRAINT IF EXISTS entities_id_project_key,
             DROP CONSTRAINT IF EXISTS entities_id_user_project_key,
+            DROP CONSTRAINT IF EXISTS entities_type_nonblank_check,
+            DROP CONSTRAINT IF EXISTS entities_topic_nonblank_check,
             DROP COLUMN project_id,
             DROP COLUMN type,
             DROP COLUMN topic,
@@ -1163,6 +1157,21 @@ BEGIN
         ALTER TABLE public.entities
         ADD CONSTRAINT entities_redirect_status_check
         CHECK ((status = 'redirected') = (redirect_entity_id IS NOT NULL));
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'episode_entities_entity_context_fk'
+          AND conrelid = 'public.episode_entities'::regclass
+    ) THEN
+        ALTER TABLE public.episode_entities
+        ADD CONSTRAINT episode_entities_entity_context_fk
+        FOREIGN KEY (project_id, entity_id)
+        REFERENCES public.project_entity_contexts(project_id, entity_id)
+        ON DELETE CASCADE;
     END IF;
 END $$;
 
@@ -2396,26 +2405,6 @@ BEGIN
         ALTER TABLE public.entities
         ADD CONSTRAINT entities_canonical_name_nonblank_check
         CHECK (btrim(canonical_name) <> '') NOT VALID;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_type_nonblank_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_type_nonblank_check
-        CHECK (type IS NULL OR btrim(type) <> '') NOT VALID;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_topic_nonblank_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_topic_nonblank_check
-        CHECK (btrim(topic) <> '') NOT VALID;
     END IF;
 
     IF NOT EXISTS (

@@ -61,7 +61,12 @@ class MergeAuditReader:
             WHERE e.user_name = %s
               AND context.project_id = %s
               AND e.entity_id = ANY(%s)
-            GROUP BY e.entity_id
+            GROUP BY
+                e.entity_id,
+                context.project_id,
+                context.entity_type,
+                context.topic,
+                context.last_mentioned_ms
             ORDER BY e.entity_id
             """,
             (user_name, project_id, list(ids)),
