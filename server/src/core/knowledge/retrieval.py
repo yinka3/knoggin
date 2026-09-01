@@ -225,7 +225,6 @@ class KnowledgeRetrieval:
                 [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
-                session_id=session_id,
                 limit=self._episode_retrieval_limit(),
                 visible_project_ids=self.readable_project_ids,
             )

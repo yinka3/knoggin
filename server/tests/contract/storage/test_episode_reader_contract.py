@@ -64,6 +64,46 @@ def attachment_results(*, focus=False):
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_merge_evidence_selects_episode_session_before_serializing_it():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [],
+            [
+                {
+                    "entity_id": 2,
+                    "episode_id": "episode-1",
+                    "session_id": "session-1",
+                    "summary": "Ada chose the episodic-memory approach.",
+                    "importance": 0.8,
+                    "is_focus_entity": True,
+                    "prominence_weight": 0.9,
+                }
+            ],
+            [],
+        ]
+    )
+
+    evidence = await EpisodeReader(client).get_merge_evidence_for_entities(
+        [2], project_id="project-1"
+    )
+
+    assert evidence[2] == [
+        {
+            "kind": "episode",
+            "episode_id": "episode-1",
+            "session_id": "session-1",
+            "text": "Ada chose the episodic-memory approach.",
+            "importance": 0.8,
+            "is_focus_entity": True,
+            "prominence_weight": 0.9,
+        }
+    ]
+    _, query, _ = client.calls[1]
+    assert "e.session_id" in query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_episode_reader_hydrates_one_complete_episode_aggregate():
     client = RecordingPostgresClient(
         fetch_one_results=[episode_row()],

@@ -524,7 +524,9 @@ class Tools(
         )
 
     async def read_recent_episodes(self, limit: int = 2):
-        return await self.knowledge_retrieval.read_recent_episodes( limit=limit
+        return await self.knowledge_retrieval.read_recent_episodes(
+            session_id=self.session_id,
+            limit=limit,
         )
 
     async def find_path(self, entity_a: str, entity_b: str):

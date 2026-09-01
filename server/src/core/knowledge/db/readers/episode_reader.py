@@ -214,6 +214,7 @@ class EpisodeReader:
                 SELECT
                     ee.entity_id,
                     e.episode_id,
+                    e.session_id,
                     e.summary,
                     e.importance,
                     ee.is_focus_entity,
