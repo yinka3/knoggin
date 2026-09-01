@@ -198,6 +198,7 @@ async def test_search_messages_uses_readable_project_scope_directly():
     class FakePostgres:
         async def fetch_all(self, _query, _params):
             return [
+                {"session_id": "session-1"},
                 {"session_id": "session-2"},
                 {"session_id": "session-3"},
                 {"session_id": "session-4"},

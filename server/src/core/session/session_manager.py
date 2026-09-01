@@ -364,7 +364,7 @@ class SessionManager:
 
     async def delete_session(self, session_id: str) -> None:
         """
-        Tombstone a session and purge its session-owned documents.
+        Tombstone a session without mutating project-owned documents.
 
         Canonical messages and their graph projections remain as read-only
         evidence for existing project memories. The durable tombstone excludes

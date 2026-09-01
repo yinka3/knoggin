@@ -1712,18 +1712,17 @@ class SearchTools:
         if not self.readable_project_ids:
             return [self.session_id]
 
-        visible = {self.session_id}
         rows = await self.postgres.fetch_all(
             """
             SELECT session_id
             FROM public.sessions
             WHERE user_name = %s
               AND project_id = ANY(%s)
+              AND status = 'open'
             """,
             (self.user_name, self.readable_project_ids),
         )
-        visible.update(str(row["session_id"]) for row in rows)
-        return sorted(visible)
+        return sorted({str(row["session_id"]) for row in rows})
 
 
 
@@ -1751,6 +1750,7 @@ class SearchTools:
                     visible_project_ids=self.readable_project_ids,
                     forward=forward,
                     target_total=target_total,
+                    discoverable_only=True,
                 )
 
                 formatted_fallback = []

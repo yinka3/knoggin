@@ -535,7 +535,7 @@ class KnowledgeRetrieval:
     ) -> List[Tuple[str, float, Optional[str]]]:
         fts_limit = self.search_cfg.get("fts_limit", 50)
         rerank_candidates = self.search_cfg.get("rerank_candidates", 25)
-        visible_sessions = await self._get_visible_session_ids(session_id)
+        visible_sessions = await self._get_visible_session_ids()
         fts_results = await self.knowledge_store.search_messages_fts(
             query,
             user_name=self.user_name,
@@ -650,19 +650,18 @@ class KnowledgeRetrieval:
                         results_by_idx[item["idx"]] = hydrated
         return [results_by_idx[index] for index in sorted(results_by_idx)]
 
-    async def _get_visible_session_ids(self, session_id: str) -> List[str]:
-        visible = {session_id}
+    async def _get_visible_session_ids(self) -> List[str]:
         rows = await self.postgres.fetch_all(
             """
             SELECT session_id
             FROM public.sessions
             WHERE user_name = %s
               AND project_id = ANY(%s)
+              AND status = 'open'
             """,
             (self.user_name, self.readable_project_ids),
         )
-        visible.update(str(row["session_id"]) for row in rows)
-        return sorted(visible)
+        return sorted({str(row["session_id"]) for row in rows})
 
     async def _get_surrounding_context(
         self,
@@ -685,6 +684,7 @@ class KnowledgeRetrieval:
             visible_project_ids=self.readable_project_ids,
             forward=forward,
             target_total=target_total,
+            discoverable_only=True,
         )
         return [
             {

@@ -27,6 +27,7 @@ async def test_surrounding_context_uses_durable_scoped_messages():
             visible_project_ids,
             forward,
             target_total,
+            discoverable_only,
         ):
             self.calls.append(
                 (
@@ -36,6 +37,7 @@ async def test_surrounding_context_uses_durable_scoped_messages():
                     user_name,
                     session_id,
                     visible_project_ids,
+                    discoverable_only,
                 )
             )
             return [
@@ -61,7 +63,7 @@ async def test_surrounding_context_uses_durable_scoped_messages():
     )
 
     assert knowledge_store.calls == [
-        (5, 1, 3, "ada", "session-2", ["project-1"])
+        (5, 1, 3, "ada", "session-2", ["project-1"], True)
     ]
     assert [item["id"] for item in context] == ["msg_4", "msg_5"]
     assert context[1]["is_hit"] is True

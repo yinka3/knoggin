@@ -52,14 +52,20 @@ class MessageReader:
 
         sql = """
         SELECT
-            message_id,
-            session_id,
-            ts_rank(search_tsvector, to_tsquery('english', %s)) AS score
-        FROM messages
-        WHERE search_tsvector @@ to_tsquery('english', %s)
-          AND user_name = %s
-          AND session_id = ANY(%s)
-          AND project_id = ANY(%s)
+            m.message_id,
+            m.session_id,
+            ts_rank(m.search_tsvector, to_tsquery('english', %s)) AS score
+        FROM messages m
+        JOIN sessions s
+          ON s.session_id = m.session_id
+         AND s.project_id = m.project_id
+         AND s.user_name = m.user_name
+        WHERE m.search_tsvector @@ to_tsquery('english', %s)
+          AND m.user_name = %s
+          AND m.session_id = ANY(%s)
+          AND m.project_id = ANY(%s)
+          AND m.lifecycle_state = 'sealed'
+          AND s.status = 'open'
         ORDER BY score DESC
         LIMIT %s
         """

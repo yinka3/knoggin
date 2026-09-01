@@ -1305,6 +1305,7 @@ class KnowledgeStore:
         visible_project_ids: List[str],
         forward: int = 3,
         target_total: int = 10,
+        discoverable_only: bool = False,
     ) -> List[Dict]:
         return await self._graph_reader.get_surrounding_messages(
             message_id,
@@ -1313,6 +1314,7 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
             forward=forward,
             target_total=target_total,
+            discoverable_only=discoverable_only,
         )
 
     async def validate_existing_ids(

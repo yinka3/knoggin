@@ -358,6 +358,7 @@ class GraphReader:
         user_name: str,
         session_ids: List[str],
         visible_project_ids: List[str],
+        discoverable_only: bool = False,
     ) -> List[Dict]:
         user_name = require_scope_value(
             user_name,
@@ -375,7 +376,22 @@ class GraphReader:
 
         params = {"ids": ids, "user_name": user_name, "session_ids": session_ids}
 
-        query = """
+        discovery_clause = (
+            """
+          AND lifecycle_state = 'sealed'
+          AND EXISTS (
+              SELECT 1
+              FROM sessions
+              WHERE sessions.session_id = messages.session_id
+                AND sessions.project_id = messages.project_id
+                AND sessions.user_name = messages.user_name
+                AND sessions.status = 'open'
+          )
+            """
+            if discoverable_only
+            else ""
+        )
+        query = f"""
         SELECT
             message_id AS id,
             user_name,
@@ -388,6 +404,7 @@ class GraphReader:
           AND user_name = %s
           AND session_id = ANY(%s)
           AND project_id = ANY(%s)
+          {discovery_clause}
         ORDER BY message_id ASC
         """
         try:
@@ -473,6 +490,7 @@ class GraphReader:
         visible_project_ids: List[str],
         forward: int = 3,
         target_total: int = 10,
+        discoverable_only: bool = False,
     ) -> List[Dict]:
         user_name = require_scope_value(
             user_name,
@@ -499,13 +517,30 @@ class GraphReader:
                 user_name=user_name,
                 session_ids=session_ids,
                 visible_project_ids=visible_project_ids,
+                discoverable_only=discoverable_only,
             )
             if not target_res:
                 return []
             target = target_res[0]
             target_ts = target["timestamp"]
 
-            back_query = """
+            discovery_clause = (
+                """
+              AND lifecycle_state = 'sealed'
+              AND EXISTS (
+                  SELECT 1
+                  FROM sessions
+                  WHERE sessions.session_id = messages.session_id
+                    AND sessions.project_id = messages.project_id
+                    AND sessions.user_name = messages.user_name
+                    AND sessions.status = 'open'
+              )
+                """
+                if discoverable_only
+                else ""
+            )
+
+            back_query = f"""
             SELECT
                 message_id AS id,
                 user_name,
@@ -527,11 +562,12 @@ class GraphReader:
               AND user_name = %s
               AND session_id = %s
               AND project_id = ANY(%s)
+              {discovery_clause}
             ORDER BY timestamp_ms DESC NULLS FIRST, message_id DESC
             LIMIT %s
             """
 
-            fwd_query = """
+            fwd_query = f"""
             SELECT
                 message_id AS id,
                 user_name,
@@ -553,6 +589,7 @@ class GraphReader:
               AND user_name = %s
               AND session_id = %s
               AND project_id = ANY(%s)
+              {discovery_clause}
             ORDER BY timestamp_ms ASC NULLS LAST, message_id ASC
             LIMIT %s
             """
