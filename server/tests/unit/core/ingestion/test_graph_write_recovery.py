@@ -12,7 +12,7 @@ class _Resolver:
     def __init__(self):
         self.applied = []
         self.committed_aliases = []
-        self.readable_project_ids = ["project-1"]
+        self.readable_project_ids = ["project-1", "project-2"]
 
     def get_cached_profile(self, entity_id):
         assert entity_id == 101
@@ -105,7 +105,7 @@ async def test_graph_commit_builds_one_durable_change_set_then_refreshes_cache()
         (101, ("Bobby",))
     ]
     assert resolver.committed_aliases == [(101, ["Bobby"])]
-    assert store.validation_scope == ["project-1"]
+    assert store.validation_scope == ["project-1", "project-2"]
     assert summary.aliases_updated == 1
 
 

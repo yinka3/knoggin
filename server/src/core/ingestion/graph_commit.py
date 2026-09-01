@@ -98,9 +98,11 @@ async def build_ingestion_commit(
         )
 
     entity_writes: list[EntityWrite] = []
-    for entity_id in sorted(new_entity_ids | set(batch.alias_updated_ids)):
-        if entity_id not in writable_entity_ids:
-            continue
+    # Every accepted identity needs a context in this project before its
+    # message provenance can be committed. Existing identities may have been
+    # discovered through another readable project, so alias changes alone are
+    # not the admission signal here.
+    for entity_id in sorted(writable_entity_ids):
         write = await entity_write_for(entity_id)
         if write is not None:
             entity_writes.append(write)
