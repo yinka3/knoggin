@@ -6,6 +6,8 @@ from dataclasses import replace
 from typing import Any
 
 from common.scoping import require_scope_value
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
+from core.knowledge.maintenance_reviews import RelationshipAdvisoryPlan
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
@@ -112,31 +114,29 @@ class RelationshipObservationReader:
             "project_id",
             "get_relationship_advisory_decisions",
         )
-        rows = await self.client.fetch_all(
-            """
-            SELECT
-                pattern_key,
-                disposition,
-                proposed_relationship_type,
-                last_action,
-                decision_note,
-                decided_by,
-                revision
-            FROM relationship_advisories
-            WHERE user_name = %s
-              AND project_id = %s
-            """,
-            (user_name, project_id),
+        reviews = await MaintenanceReviewWriter(self.client).list(
+            user_name=user_name,
+            project_id=project_id,
         )
-        return {
-            row["pattern_key"]: RelationshipAdvisoryDecision(
-                pattern_key=row["pattern_key"],
-                disposition=row.get("disposition", "pending"),
-                proposed_relationship_type=row.get("proposed_relationship_type"),
-                last_action=row.get("last_action"),
-                decision_note=row.get("decision_note"),
-                decided_by=row.get("decided_by"),
-                revision=int(row.get("revision", 0)),
+        decisions: dict[str, RelationshipAdvisoryDecision] = {}
+        for review in reviews:
+            if review.kind != "relationship_advisory":
+                continue
+            plan = review.proposed_plan
+            if not isinstance(plan, RelationshipAdvisoryPlan):
+                continue
+            disposition = "pending"
+            if review.status == "applied":
+                disposition = "accepted"
+            elif review.status == "dismissed":
+                disposition = "suppressed" if plan.action == "suppress" else "dismissed"
+            previous = decisions.get(plan.pattern_key)
+            decisions[plan.pattern_key] = RelationshipAdvisoryDecision(
+                pattern_key=plan.pattern_key,
+                disposition=disposition,
+                proposed_relationship_type=plan.proposed_relationship_type,
+                last_action=plan.action,
+                decision_note=plan.note,
+                revision=(previous.revision + 1 if previous else 1),
             )
-            for row in rows
-        }
+        return decisions

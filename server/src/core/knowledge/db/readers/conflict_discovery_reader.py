@@ -24,7 +24,7 @@ class ConflictDiscoveryReader:
         project_id = require_scope_value(project_id, "project_id", "get_conflict_cursor")
         await self.client.execute(
             """
-            INSERT INTO public.conflict_discovery_checkpoints (
+            INSERT INTO public.maintenance_review_checkpoints (
                 user_name, project_id
             )
             VALUES (%s, %s)
@@ -35,7 +35,7 @@ class ConflictDiscoveryReader:
         row = await self.client.fetch_one(
             """
             SELECT last_reviewed_observation_id
-            FROM public.conflict_discovery_checkpoints
+            FROM public.maintenance_review_checkpoints
             WHERE user_name = %s AND project_id = %s
             """,
             (user_name, project_id),
@@ -123,7 +123,7 @@ class ConflictDiscoveryReader:
         if last_reviewed_observation_id < cursor.last_reviewed_observation_id:
             raise ValueError("Conflict discovery cursor cannot move backwards")
         query = """
-            UPDATE public.conflict_discovery_checkpoints
+            UPDATE public.maintenance_review_checkpoints
             SET last_reviewed_observation_id = GREATEST(
                     last_reviewed_observation_id, %s
                 ),

@@ -146,12 +146,15 @@ class MaintenanceTools:
                 metadata={"reported_by": "agent"},
             )
             return {
+                "review_id": result.group.conflict_id,
+                # Kept as a response label for callers that have not yet
+                # migrated their UI; the value is the MaintenanceReview ID.
                 "conflict_id": result.group.conflict_id,
                 "created": result.created,
                 "evidence_added": result.evidence_added,
                 "status": result.group.status,
                 "message": (
-                    "Recorded a possible conflict for human review. "
+                    "Recorded a possible conflict as a typed maintenance review. "
                     "The relationship evidence was not changed."
                 ),
             }

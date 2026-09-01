@@ -674,6 +674,82 @@ CREATE TABLE IF NOT EXISTS public.human_reviews (
 CREATE INDEX IF NOT EXISTS human_reviews_open_inbox_idx
 ON public.human_reviews(user_name, project_id, status, priority, created_at DESC);
 
+-- One typed envelope for project and user-global semantic maintenance.  The
+-- proposal and evidence snapshot are immutable while a review is open; a
+-- transition records only its outcome in the event log below.
+CREATE TABLE IF NOT EXISTS public.maintenance_reviews (
+    review_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    scope TEXT NOT NULL CHECK (scope IN ('project', 'user-global')),
+    project_id TEXT REFERENCES public.projects(project_id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    dedupe_key TEXT,
+    evidence_refs JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK (jsonb_typeof(evidence_refs) = 'array'),
+    evidence_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(evidence_snapshot) = 'object'),
+    reasoning TEXT NOT NULL CHECK (btrim(reasoning) <> ''),
+    proposed_plan JSONB NOT NULL CHECK (jsonb_typeof(proposed_plan) = 'object'),
+    expected_state JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(expected_state) = 'object'),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'applied', 'dismissed', 'stale')),
+    signature TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    CONSTRAINT maintenance_reviews_project_scope_fk
+        CHECK (scope = 'user-global' OR project_id IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS maintenance_reviews_open_idx
+ON public.maintenance_reviews(user_name, project_id, status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS maintenance_reviews_key_idx
+ON public.maintenance_reviews(user_name, project_id, kind, dedupe_key, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.maintenance_review_evidence (
+    review_id TEXT NOT NULL REFERENCES public.maintenance_reviews(review_id)
+        ON DELETE CASCADE,
+    evidence_kind TEXT NOT NULL,
+    evidence_id TEXT NOT NULL,
+    observation_id BIGINT REFERENCES public.relationship_observations(observation_id)
+        ON DELETE SET NULL,
+    snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (review_id, evidence_kind, evidence_id)
+);
+
+CREATE INDEX IF NOT EXISTS maintenance_review_evidence_observation_idx
+ON public.maintenance_review_evidence(observation_id)
+WHERE observation_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.maintenance_review_events (
+    event_id BIGSERIAL PRIMARY KEY,
+    review_id TEXT NOT NULL REFERENCES public.maintenance_reviews(review_id)
+        ON DELETE CASCADE,
+    status TEXT NOT NULL
+        CHECK (status IN ('open', 'applied', 'dismissed', 'stale')),
+    actor TEXT NOT NULL,
+    reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS maintenance_review_events_review_idx
+ON public.maintenance_review_events(review_id, created_at, event_id);
+
+-- Cursor for the bounded background evidence scan.  It is maintenance
+-- progress, not a conflict-group workflow state machine.
+CREATE TABLE IF NOT EXISTS public.maintenance_review_checkpoints (
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0
+        CHECK (last_reviewed_observation_id >= 0),
+    last_completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_name, project_id)
+);
+
 -- Conflict groups never replace or rewrite relationship evidence. The group is
 -- a user-visible interpretation workflow over immutable observation snapshots.
 CREATE TABLE IF NOT EXISTS public.conflict_groups (
@@ -2534,3 +2610,13 @@ END $$;
 -- marker to databases created before that field was introduced.
 ALTER TABLE public.episodes
 ADD COLUMN IF NOT EXISTS user_modified BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- The typed review envelope supersedes the former pointer, advisory, and
+-- conflict workflow tables in this unreleased schema.  Evidence itself stays
+-- in relationship_observations and is never deleted with a review.
+DROP TABLE IF EXISTS public.relationship_advisory_decisions;
+DROP TABLE IF EXISTS public.relationship_advisories;
+DROP TABLE IF EXISTS public.human_reviews;
+DROP TABLE IF EXISTS public.conflict_evidence_refs;
+DROP TABLE IF EXISTS public.conflict_groups;
+DROP TABLE IF EXISTS public.conflict_discovery_checkpoints;

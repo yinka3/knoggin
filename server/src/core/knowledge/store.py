@@ -58,6 +58,9 @@ from core.knowledge.db.writers.entity_reclassification_writer import (
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
+from core.knowledge.db.writers.maintenance_review_writer import (
+    MaintenanceReviewWriter,
+)
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
@@ -74,7 +77,7 @@ from core.knowledge.db.writers.relationship_reclassification_writer import (
 )
 from core.knowledge.db.writers.retention_writer import RetentionWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
-from core.knowledge.human_reviews import HumanReview
+from core.knowledge.maintenance_reviews import MaintenanceReview
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
@@ -114,9 +117,12 @@ class KnowledgeStore:
             self._postgres_client, self._message_writer
         )
         self._human_review_writer = HumanReviewWriter(self._postgres_client)
+        self._maintenance_review_writer = MaintenanceReviewWriter(
+            self._postgres_client
+        )
         self._conflict_writer = ConflictWriter(
             self._postgres_client,
-            reviews=self._human_review_writer,
+            reviews=self._maintenance_review_writer,
         )
         self._conflict_service = ConflictService(self._conflict_writer)
         self._conflict_discovery_reader = ConflictDiscoveryReader(self._postgres_client)
@@ -125,7 +131,7 @@ class KnowledgeStore:
         self._retention_writer = RetentionWriter(self._postgres_client)
         self._relationship_advisory_writer = RelationshipAdvisoryWriter(
             self._postgres_client,
-            reviews=self._human_review_writer,
+            reviews=self._maintenance_review_writer,
         )
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._artifact_writer = ArtifactWriter(self._postgres_client)
@@ -1138,8 +1144,8 @@ class KnowledgeStore:
 
     async def get_open_human_reviews(
         self, *, user_name: str, project_id: str
-    ) -> list[HumanReview]:
-        return await self._human_review_writer.list_open(
+    ) -> list[MaintenanceReview]:
+        return await self._maintenance_review_writer.list_open(
             user_name=user_name,
             project_id=project_id,
         )
