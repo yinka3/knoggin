@@ -110,10 +110,12 @@ class _ReferenceLocalizer:
                 self._handles[reference] = f"{prefix}{counters[prefix]}"
 
         for reference in snapshot.get("entity_pages", {}):
-            self._handles.setdefault(reference, self._new_handle("E", counters))
+            if reference not in self._handles:
+                self._handles[reference] = self._new_handle("E", counters)
 
         for reference in snapshot.get("actions", {}):
-            self._handles.setdefault(reference, self._new_handle("A", counters))
+            if reference not in self._handles:
+                self._handles[reference] = self._new_handle("A", counters)
 
     @staticmethod
     def _record_sections(snapshot: dict[str, Any]):
