@@ -2,8 +2,8 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
-from core.knowledge.entity.maintenance import EntityMaintenance
-from core.knowledge.entity.merge_service import EntityMergeService
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
+from core.knowledge.maintenance_reviews import EvidenceRef
 
 
 class MaintenanceTools:
@@ -15,8 +15,10 @@ class MaintenanceTools:
         Returns a list of potential duplicates for the agent to review.
         """
         try:
-            candidates = await EntityMaintenance(
-                self.entities
+            candidates = await EntityMaintenanceService(
+                self.postgres,
+                self.knowledge_store,
+                self.user_name,
             ).discover_duplicate_candidates()
 
             if not candidates:
@@ -28,14 +30,11 @@ class MaintenanceTools:
                 }
 
             # Return top 5 to avoid overwhelming the agent.
-            candidates.sort(
-                key=self._merge_candidate_rank_key,
-                reverse=True,
-            )
+            candidates.sort(key=lambda candidate: candidate["message_ref_count"], reverse=True)
             return {
                 "message": f"Found {len(candidates)} potential duplicates.",
                 "suggestions": [
-                    self._format_merge_candidate(candidate)
+                    self._format_global_merge_candidate(candidate)
                     for candidate in candidates[:5]
                 ],
             }
@@ -93,6 +92,19 @@ class MaintenanceTools:
             )
         return formatted
 
+    @staticmethod
+    def _format_global_merge_candidate(candidate: Dict) -> Dict:
+        return {
+            "primary_id": candidate["entity_a_id"],
+            "primary_name": candidate["name_a"],
+            "secondary_id": candidate["entity_b_id"],
+            "secondary_name": candidate["name_b"],
+            "project_ids": candidate["project_ids"],
+            "message_ref_count": candidate["message_ref_count"],
+            "reasons": [candidate["signal"]],
+            "survivor_required": True,
+        }
+
     async def propose_entity_merge(
         self,
         primary_id: int,
@@ -104,20 +116,35 @@ class MaintenanceTools:
     ) -> Dict:
         """Submit a grounded merge proposal without granting destructive access."""
         try:
-            service = EntityMergeService(
+            service = EntityMaintenanceService(
                 self.postgres,
                 self.knowledge_store,
+                self.user_name,
             )
-            return await service.propose(
+            evidence_refs = [
+                *(
+                    EvidenceRef(kind="message", id=str(message_id))
+                    for message_id in (evidence_message_ids or [])
+                ),
+                *(
+                    EvidenceRef(kind="episode", id=str(episode_id))
+                    for episode_id in (evidence_episode_ids or [])
+                ),
+            ]
+            review = await service.propose(
                 user_name=self.user_name,
-                project_id=self.project_id,
-                primary_id=primary_id,
-                duplicate_id=duplicate_id,
-                evidence_message_ids=evidence_message_ids or [],
-                evidence_episode_ids=evidence_episode_ids or [],
+                survivor_entity_id=primary_id,
+                retired_entity_id=duplicate_id,
+                evidence_refs=evidence_refs,
                 reasoning=reasoning,
-                model_confidence=confidence,
             )
+            return {
+                "policy_result": "confirmation_required",
+                "review_id": review.review_id,
+                "plan": review.proposed_plan.model_dump(mode="json"),
+                "expected_state": review.expected_state,
+                "message": "Global merge review created; explicit user confirmation is required.",
+            }
         except Exception as e:
             logger.error(f"Error proposing entity merge: {e}")
             return {"error": str(e)}

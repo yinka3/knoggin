@@ -120,6 +120,7 @@ class EntityMaintenanceService:
         survivor_entity_id: int,
         retired_entity_id: int,
         context_choices: Iterable[EntityContextMergeChoice | dict[str, Any]] = (),
+        capture_frontiers: bool = True,
     ) -> dict[str, Any]:
         """Build a typed merge plan and expose any required context decisions."""
 
@@ -165,6 +166,12 @@ class EntityMaintenanceService:
                         "retired": {"entity_type": secondary["entity_type"], "topic": secondary["topic"]},
                     }
                 )
+        frontiers = (
+            await self.capture_frontier(by_project)
+            if capture_frontiers
+            else {project_id: {"token": ""} for project_id in by_project}
+        )
+        definition_versions = await self._definition_versions(actor, by_project)
         plan = EntityMergePlan(
             survivor_entity_id=survivor_entity_id,
             retired_entity_id=retired_entity_id,
@@ -176,6 +183,12 @@ class EntityMaintenanceService:
                 )
                 for project_id, value in sorted(choices.items())
             ],
+            frontier_tokens={
+                project_id: frontier["token"]
+                for project_id, frontier in sorted(frontiers.items())
+            },
+            definition_versions=definition_versions,
+            expected_state_hash=self.state_hash(snapshot),
         )
         return {
             "plan": plan,
@@ -184,6 +197,8 @@ class EntityMaintenanceService:
             "context_conflicts": conflicts,
             "ready": not conflicts,
             "state_hash": self.state_hash(snapshot),
+            "frontiers": frontiers,
+            "definition_versions": definition_versions,
         }
 
     async def propose(
@@ -211,6 +226,25 @@ class EntityMaintenanceService:
             value if isinstance(value, EvidenceRef) else EvidenceRef.from_value(value)
             for value in evidence_refs
         ]
+        if not refs:
+            raise ValueError("at least one merge evidence reference is required")
+        valid_message_ids = {
+            str(item["message_id"]) for item in preview["snapshot"]["message_refs"]
+        }
+        valid_episode_ids = {
+            str(item["episode_id"])
+            for item in preview["snapshot"]["episode_entities"]
+        }
+        invalid_refs = [
+            ref
+            for ref in refs
+            if (
+                ref.kind == "message" and ref.id not in valid_message_ids
+            )
+            or (ref.kind == "episode" and ref.id not in valid_episode_ids)
+        ]
+        if invalid_refs:
+            raise ValueError("merge evidence must belong to one of the candidate entities")
         return await self.review_writer.open(
             user_name=actor,
             scope="user-global",
@@ -220,7 +254,11 @@ class EntityMaintenanceService:
             proposed_plan=preview["plan"],
             evidence_refs=refs,
             evidence_snapshot=preview["snapshot"],
-            expected_state={"state_hash": preview["state_hash"]},
+            expected_state={
+                "state_hash": preview["state_hash"],
+                "frontiers": preview["frontiers"],
+                "definition_versions": preview["definition_versions"],
+            },
             dedupe_key=f"{survivor_entity_id}:{retired_entity_id}",
         )
 
@@ -244,11 +282,24 @@ class EntityMaintenanceService:
             survivor_entity_id=typed_plan.survivor_entity_id,
             retired_entity_id=typed_plan.retired_entity_id,
             context_choices=typed_plan.context_choices,
+            capture_frontiers=False,
         )
         if preview["context_conflicts"]:
             raise EntityMergeConflict(preview["context_conflicts"])
-        if expected_state_hash and expected_state_hash != preview["state_hash"]:
+        expected_hash = expected_state_hash or typed_plan.expected_state_hash
+        if expected_hash and expected_hash != preview["state_hash"]:
             raise ValueError("merge plan is stale; entity evidence changed")
+        expected_frontiers = {
+            project_id: {"token": token}
+            for project_id, token in typed_plan.frontier_tokens.items()
+        }
+        if not await self.revalidate_frontier(expected_frontiers, user_name=actor):
+            raise ValueError("merge plan is stale; ingestion advanced after review")
+        current_versions = await self._definition_versions(
+            actor, preview["frontiers"]
+        )
+        if current_versions != typed_plan.definition_versions:
+            raise ValueError("merge plan is stale; project definition changed")
         merge_id = str(uuid.uuid4())
         choices = {
             choice.project_id: {
@@ -324,7 +375,19 @@ class EntityMaintenanceService:
             user_name=actor,
             safe_mutation_ids=plan["safe_mutation_ids"],
         )
-        conflicts = plan["conflicting_mutations"]
+        conflicts = list(plan["conflicting_mutations"])
+        concurrent_ids = set(result.get("concurrent_conflicts") or [])
+        if concurrent_ids:
+            conflicts.extend(
+                {
+                    "mutation_id": mutation_id,
+                    "object_kind": "concurrent_change",
+                    "object_key": str(mutation_id),
+                    "expected": None,
+                    "current": None,
+                }
+                for mutation_id in sorted(concurrent_ids)
+            )
         if conflicts:
             review = await self.review_writer.open(
                 user_name=actor,
@@ -467,3 +530,20 @@ class EntityMaintenanceService:
         return hashlib.sha256(
             f"{int(message_id)}:{timestamp_ms if timestamp_ms is not None else ''}".encode()
         ).hexdigest()
+
+    async def _definition_versions(
+        self, user_name: str, project_ids: Iterable[str] | dict[str, Any]
+    ) -> dict[str, int]:
+        ids = project_ids.keys() if isinstance(project_ids, dict) else project_ids
+        normalized = sorted({str(project_id) for project_id in ids})
+        if not normalized:
+            return {}
+        rows = await self.postgres.fetch_all(
+            """
+            SELECT project_id, COALESCE((domain_config->>'version')::integer, 0) AS version
+            FROM public.projects
+            WHERE user_name = %s AND project_id = ANY(%s)
+            """,
+            (user_name, normalized),
+        )
+        return {str(row["project_id"]): int(row["version"] or 0) for row in rows}

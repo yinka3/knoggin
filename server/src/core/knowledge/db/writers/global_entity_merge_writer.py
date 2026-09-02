@@ -337,6 +337,15 @@ class GlobalEntityMergeWriter:
                         """,
                         (survivor_id, project_id, retired_id),
                     )
+                    await record(
+                        "project_context",
+                        project_id,
+                        {"survivor": None, "retired": secondary},
+                        {
+                            **secondary,
+                            "entity_id": survivor_id,
+                        },
+                    )
                 elif secondary and primary:
                     choice = choices.get(project_id)
                     merged_type = (choice or {}).get("entity_type") or primary[
@@ -768,16 +777,18 @@ class GlobalEntityMergeWriter:
                 """,
                 (merge_id,),
             )
+            await active_cur.execute(
+                "SELECT count(*) AS count FROM public.entity_global_merge_mutations WHERE merge_id = %s",
+                (merge_id,),
+            )
+            mutation_count_row = await active_cur.fetchone()
 
             return {
                 "merge_id": merge_id,
                 "survivor_entity_id": survivor_id,
                 "retired_entity_id": retired_id,
                 "affected_project_ids": affected_projects,
-                "mutation_count": len(before["message_refs"])
-                + len(before["episode_entities"])
-                + len(before["relationships"])
-                + len(before["contexts"]),
+                "mutation_count": int((mutation_count_row or {}).get("count") or 0),
             }
 
     async def get_audit(self, merge_id: str, *, cur=None) -> dict[str, Any] | None:
@@ -1006,10 +1017,17 @@ class GlobalEntityMergeWriter:
             if not audit:
                 raise ValueError("unknown global merge")
             mutations = await self._mutation_rows(active_cur, merge_id)
+            fresh_plan = await self.plan_rollback(
+                merge_id=merge_id,
+                user_name=user_name,
+                cur=active_cur,
+            )
+            fresh_safe_ids = set(fresh_plan["safe_mutation_ids"])
             selected = {
                 int(mutation["mutation_id"]): mutation
                 for mutation in mutations
                 if int(mutation["mutation_id"]) in set(safe_mutation_ids)
+                and int(mutation["mutation_id"]) in fresh_safe_ids
             }
             order = {
                 "entity": 0,
@@ -1036,6 +1054,9 @@ class GlobalEntityMergeWriter:
                 "merge_id": merge_id,
                 "applied_mutation_ids": sorted(selected),
                 "rolled_back": bool(selected) and len(selected) == len(mutations),
+                "concurrent_conflicts": sorted(
+                    set(safe_mutation_ids) - fresh_safe_ids
+                ),
             }
 
     async def _apply_inverse(self, cur, mutation: dict[str, Any]) -> None:
@@ -1059,12 +1080,18 @@ class GlobalEntityMergeWriter:
         elif kind == "project_context":
             survivor = before["survivor"]
             retired = before["retired"]
-            await cur.execute(
-                """UPDATE public.project_entity_contexts
-                   SET entity_type = %s, topic = %s, last_mentioned_ms = %s
-                   WHERE project_id = %s AND entity_id = %s""",
-                (survivor["entity_type"], survivor["topic"], survivor["last_mentioned_ms"], key, survivor["entity_id"]),
-            )
+            if survivor is None:
+                await cur.execute(
+                    "DELETE FROM public.project_entity_contexts WHERE project_id = %s AND entity_id = %s",
+                    (key, after["entity_id"]),
+                )
+            else:
+                await cur.execute(
+                    """UPDATE public.project_entity_contexts
+                       SET entity_type = %s, topic = %s, last_mentioned_ms = %s
+                       WHERE project_id = %s AND entity_id = %s""",
+                    (survivor["entity_type"], survivor["topic"], survivor["last_mentioned_ms"], key, survivor["entity_id"]),
+                )
             await cur.execute(
                 """INSERT INTO public.project_entity_contexts
                    (project_id, entity_id, user_name, entity_type, topic, last_mentioned_ms)

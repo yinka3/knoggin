@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from time import time
 from typing import Any, Dict, List
@@ -27,6 +28,16 @@ class MessageAcceptance:
     created: bool
 
 
+@dataclass(frozen=True, slots=True)
+class IngestionFrontier:
+    """The last durable message included in a stable maintenance boundary."""
+
+    project_id: str
+    message_id: int
+    timestamp_ms: int | None
+    token: str
+
+
 class MessageLifecycleWriter:
     """Keep message editing and ingestion eligibility in Postgres.
 
@@ -41,6 +52,43 @@ class MessageLifecycleWriter:
     @staticmethod
     def _now_ms() -> int:
         return int(time() * 1000)
+
+    async def get_stable_ingestion_frontier(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> IngestionFrontier | None:
+        """Return a frontier only when no live ingestion work can overtake it.
+
+        ``failed`` is terminal for frontier purposes.  An explicit retry moves
+        a message back to ``ready`` and therefore correctly makes the frontier
+        unavailable until that retry settles.
+        """
+
+        row = await self.client.fetch_one(
+            """
+            SELECT
+                count(*) FILTER (WHERE ingestion_state IN
+                    ('waiting_for_seal', 'ready', 'claimed')) AS pending_count,
+                COALESCE(max(message_id) FILTER (WHERE ingestion_state IN
+                    ('processed', 'failed', 'excluded')), 0) AS frontier_message_id,
+                max(timestamp_ms) FILTER (WHERE ingestion_state IN
+                    ('processed', 'failed', 'excluded')) AS frontier_timestamp_ms
+            FROM public.messages
+            WHERE user_name = %s AND project_id = %s
+              AND role = 'user' AND lifecycle_state <> 'superseded'
+            """,
+            (user_name, project_id),
+        )
+        if row is None or int(row["pending_count"] or 0):
+            return None
+        message_id = int(row["frontier_message_id"] or 0)
+        timestamp_ms = row["frontier_timestamp_ms"]
+        token = hashlib.sha256(
+            f"{message_id}:{timestamp_ms if timestamp_ms is not None else ''}".encode()
+        ).hexdigest()
+        return IngestionFrontier(project_id, message_id, timestamp_ms, token)
 
     async def create_editable_user_message(
         self, message: Dict[str, Any], *, edit_window_seconds: int

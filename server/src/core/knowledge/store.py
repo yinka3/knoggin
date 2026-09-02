@@ -63,6 +63,7 @@ from core.knowledge.db.writers.maintenance_review_writer import (
 from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
+    IngestionFrontier,
     MessageAcceptance,
     MessageLifecycleWriter,
 )
@@ -165,6 +166,16 @@ class KnowledgeStore:
     ) -> MessageAcceptance:
         return await self._message_lifecycle_writer.create_editable_user_message(
             message, edit_window_seconds=edit_window_seconds
+        )
+
+    async def get_stable_ingestion_frontier(
+        self, *, user_name: str, project_id: str
+    ) -> IngestionFrontier | None:
+        """Expose the canonical ingestion boundary to application maintenance."""
+
+        return await self._message_lifecycle_writer.get_stable_ingestion_frontier(
+            user_name=user_name,
+            project_id=project_id,
         )
 
     async def edit_user_message(

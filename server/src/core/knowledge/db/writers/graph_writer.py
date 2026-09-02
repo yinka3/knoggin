@@ -199,6 +199,14 @@ class GraphWriter:
         )
 
         async with self._cursor_context(cur) as cur:
+            # Serialize graph writes with user-global identity maintenance.  A
+            # merge can span every project, so project-only locks are not
+            # sufficient to prevent a stale retired-entity reference racing
+            # the redirect update.
+            await cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"entity-merge:{user_name}",),
+            )
             if entities:
                 entity_params = []
                 for entity in entities:
