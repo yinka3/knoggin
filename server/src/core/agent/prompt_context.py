@@ -176,7 +176,11 @@ def _format_evidence(
         result = recent.get("result")
         if isinstance(tool_name, str) and isinstance(result, dict):
             fresh_references.update(
-                evidence.notebook.references_for_result(tool_name, result)
+                evidence.notebook.references_for_result(
+                    tool_name,
+                    result,
+                    local_references=evidence.short_uuid_references,
+                )
             )
 
     def is_fresh(section: str, item: dict) -> bool:

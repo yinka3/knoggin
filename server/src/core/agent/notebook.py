@@ -778,12 +778,35 @@ class RunNotebook:
         return NotebookApplyResult(bool(references), self._last_applied_references)
 
     def references_for_result(
-        self, tool_name: str, result: dict[str, Any]
+        self,
+        tool_name: str,
+        result: dict[str, Any],
+        *,
+        local_references: dict[str, str] | None = None,
     ) -> tuple[str, ...]:
         """Preview the references admitted by a result without mutating state."""
 
         preview = deepcopy(self)
-        return preview.apply(tool_name, result).references
+        candidate = deepcopy(result)
+        if local_references:
+            candidate = self._restore_local_references(candidate, local_references)
+        return preview.apply(tool_name, candidate).references
+
+    @staticmethod
+    def _restore_local_references(value: Any, local_references: dict[str, str]):
+        if isinstance(value, str):
+            return local_references.get(value, value)
+        if isinstance(value, list):
+            return [
+                RunNotebook._restore_local_references(item, local_references)
+                for item in value
+            ]
+        if isinstance(value, dict):
+            return {
+                key: RunNotebook._restore_local_references(item, local_references)
+                for key, item in value.items()
+            }
+        return value
 
     def render(self) -> str:
         """Render this notebook for a model-facing prompt view."""
