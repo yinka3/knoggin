@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.scoping import IDENTITY_SCOPE
+from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager, ProjectStatus
 from tests.fixtures.factories import make_domain_config
 
@@ -132,13 +133,20 @@ async def test_acquire_bootstraps_once_and_tracks_exact_session_leases():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_create_project_persists_metadata_and_default_topics(monkeypatch):
+async def test_create_project_persists_metadata_and_default_topics(
+    monkeypatch,
+    tmp_path,
+):
     postgres = RecordingPostgres(
         [
             [project_row()],
         ]
     )
-    manager = make_manager(postgres)
+    manager = ProjectManager(
+        resources=SimpleNamespace(postgres=postgres),
+        user_name="ada",
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
     monkeypatch.setattr(
         "core.project.project_manager.uuid.uuid4",
         lambda: "project-1",

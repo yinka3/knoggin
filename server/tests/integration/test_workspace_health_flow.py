@@ -71,7 +71,6 @@ async def test_native_project_context_is_readable_before_indexing_and_searchable
     ]
     results = await document_service.search(
         "bounded workspace indexing",
-        session_id="session-a",
         n_results=3,
     )
     assert results[0]["relative_path"] == PROJECT_FILE_PATH

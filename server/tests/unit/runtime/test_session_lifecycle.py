@@ -128,6 +128,7 @@ async def test_resume_reconstructs_all_durable_session_configuration(
     manager, resources, project_manager, factory = session_manager
     focus = {
         "mode": "pinned",
+        "behavior": "prefer",
         "target_type": "subtree",
         "path_prefix": "folder-1",
         "created_at": "2026-08-20T12:00:00+00:00",
@@ -161,6 +162,7 @@ async def test_document_focus_read_is_durable_and_excludes_deleted_sessions(
     manager, resources, _, _ = session_manager
     focus = {
         "mode": "pinned",
+        "behavior": "prefer",
         "target_type": "document",
         "document_id": "document-1",
         "relative_path": "docs/notes.md",

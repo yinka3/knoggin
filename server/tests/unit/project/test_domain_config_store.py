@@ -62,9 +62,12 @@ async def test_domain_config_store_activation_assigns_next_revision_transactiona
     assert activation.previous_version == 4
     assert activation.config.version == 5
     assert activation.compiled.version == 5
-    update_call = postgres.calls[-1]
+    update_call = next(
+        call
+        for call in postgres.calls
+        if call[0] == "execute" and "domain_config =" in call[1]
+    )
     assert update_call[0] == "execute"
-    assert "domain_config =" in update_call[1]
     assert json.loads(update_call[2]["config"])["version"] == 5
     assert postgres.transaction_enters == 1
     assert postgres.transaction_exits == 1
