@@ -12,6 +12,7 @@ from common.conf.manager import ConfigManager
 from common.scoping import build_readable_project_ids
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.project.domain_config_operations import (
     DomainCandidate,
     DomainPreview,
@@ -103,6 +104,15 @@ class ProjectManager:
             project_lookup=self.get_project,
             active_projects=self.active_projects,
             project_leases=self._project_leases,
+        )
+        # Entity identity maintenance is user-global and must not be tied to a
+        # loaded ProjectRuntime.  ProjectManager exposes the application-owned
+        # service for the current local user while project maintenance remains
+        # separately scoped above.
+        self.entity_maintenance_service = EntityMaintenanceService(
+            self.pg,
+            resources.knowledge_store,
+            user_name,
         )
         self._closed = False
 

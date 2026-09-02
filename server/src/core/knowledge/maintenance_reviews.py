@@ -107,6 +107,7 @@ class EntityMergePlan(BaseModel):
     kind: Literal["entity_merge"] = "entity_merge"
     survivor_entity_id: int = Field(gt=0)
     retired_entity_id: int = Field(gt=0)
+    context_choices: list["EntityContextMergeChoice"] = Field(default_factory=list)
 
     @field_validator("retired_entity_id")
     @classmethod
@@ -115,6 +116,28 @@ class EntityMergePlan(BaseModel):
         if survivor is not None and value == survivor:
             raise ValueError("merge entities must be distinct")
         return value
+
+
+class EntityContextMergeChoice(BaseModel):
+    """Explicit replacement for one conflicting project context."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=200)
+    entity_type: str = Field(min_length=1, max_length=200)
+    topic: str = Field(min_length=1, max_length=200)
+
+
+class EntityMergeRollbackPlan(BaseModel):
+    """Change-oriented inverse plan for a completed global merge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["entity_merge_rollback"] = "entity_merge_rollback"
+    merge_id: str = Field(min_length=1, max_length=200)
+    safe_mutation_ids: list[int] = Field(default_factory=list)
+    conflicting_mutation_ids: list[int] = Field(default_factory=list)
+    required_decisions: list[str] = Field(default_factory=list)
 
 
 class ConflictResolutionPlan(BaseModel):
@@ -145,6 +168,7 @@ MaintenancePlan = Annotated[
         RelationshipDomainChangePlan,
         EntityContextChangePlan,
         EntityMergePlan,
+        EntityMergeRollbackPlan,
         ConflictResolutionPlan,
         RelationshipAdvisoryPlan,
     ],

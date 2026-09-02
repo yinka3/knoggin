@@ -662,6 +662,25 @@ CREATE TABLE IF NOT EXISTS public.maintenance_review_checkpoints (
     PRIMARY KEY (user_name, project_id)
 );
 
+-- Stable ingestion boundaries captured by semantic maintenance passes.  A
+-- terminally failed message is part of the frontier; only live work states
+-- (waiting_for_seal, ready, claimed) hold it back.
+CREATE TABLE IF NOT EXISTS public.maintenance_frontiers (
+    user_name TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
+        ON DELETE CASCADE,
+    frontier_message_id BIGINT NOT NULL DEFAULT 0
+        CHECK (frontier_message_id >= 0),
+    frontier_timestamp_ms BIGINT,
+    frontier_token TEXT NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_name, project_id)
+);
+
+CREATE INDEX IF NOT EXISTS maintenance_frontiers_updated_idx
+ON public.maintenance_frontiers(user_name, updated_at DESC);
+
 -- Global provider-budget state survives process restarts. Reservations protect
 -- concurrent requests until provider usage is recorded or their lease expires.
 CREATE TABLE IF NOT EXISTS public.llm_budget_windows (
@@ -1274,6 +1293,47 @@ ON public.entity_merge_audits(proposal_id);
 
 CREATE INDEX IF NOT EXISTS entity_merge_audits_rollback_expiry_idx
 ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
+
+-- User-global merge history.  Unlike the legacy project-scoped proposal/audit
+-- tables above, these records survive project deletion and retain the exact
+-- object-level mutations needed to plan a safe inverse.
+CREATE TABLE IF NOT EXISTS public.entity_global_merge_audits (
+    merge_id TEXT PRIMARY KEY,
+    user_name TEXT NOT NULL,
+    survivor_entity_id BIGINT NOT NULL,
+    retired_entity_id BIGINT NOT NULL,
+    plan JSONB NOT NULL CHECK (jsonb_typeof(plan) = 'object'),
+    affected_project_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK (jsonb_typeof(affected_project_ids) = 'array'),
+    status TEXT NOT NULL DEFAULT 'executed'
+        CHECK (status IN ('executing', 'executed', 'rolled_back', 'failed')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ,
+    failure_reason TEXT,
+    CONSTRAINT entity_global_merge_audits_distinct_entities
+        CHECK (survivor_entity_id <> retired_entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS entity_global_merge_audits_user_idx
+ON public.entity_global_merge_audits(user_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.entity_global_merge_mutations (
+    mutation_id BIGSERIAL PRIMARY KEY,
+    merge_id TEXT NOT NULL
+        REFERENCES public.entity_global_merge_audits(merge_id)
+        ON DELETE RESTRICT,
+    object_kind TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    before_value JSONB,
+    after_value JSONB,
+    inverse_status TEXT NOT NULL DEFAULT 'safe'
+        CHECK (inverse_status IN ('safe', 'conflict', 'applied')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (merge_id, object_kind, object_key)
+);
+
+CREATE INDEX IF NOT EXISTS entity_global_merge_mutations_merge_idx
+ON public.entity_global_merge_mutations(merge_id, mutation_id);
 
 -- ==============================================================================
 -- DOMAIN INVARIANTS
