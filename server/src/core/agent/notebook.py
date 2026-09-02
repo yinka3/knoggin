@@ -22,6 +22,19 @@ NotebookAudience = Literal["system", "agent"]
 _KNOWLEDGE_SECTIONS = ("entities", "relationships", "episodes", "paths")
 _EVIDENCE_SECTIONS = ("messages", "documents", "web_discoveries", "web_reads")
 _ALL_SECTIONS = _KNOWLEDGE_SECTIONS + _EVIDENCE_SECTIONS
+_ACTION_TOOLS = frozenset(
+    {
+        "edit_brain",
+        "restore_brain_section",
+        "create_file",
+        "update_file",
+        "append_file",
+        "move_file",
+        "delete_file",
+        "report_relationship_conflict",
+        "propose_entity_merge",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,7 +326,15 @@ class RunNotebook:
         existing = self._records[section].get(ref)
         if existing is not None:
             merged = dict(existing)
-            merged.update(value)
+            for key, incoming in value.items():
+                if (
+                    key == "score"
+                    and isinstance(merged.get(key), (int, float))
+                    and isinstance(incoming, (int, float))
+                ):
+                    merged[key] = max(merged[key], incoming)
+                else:
+                    merged[key] = incoming
             value = merged
         self._records[section][ref] = value
         if ref not in self._orders[section]:
@@ -747,7 +768,10 @@ class RunNotebook:
                             ],
                         )
                         references.append(self._add_message(topic_message))
-        else:
+        elif tool_name in _ACTION_TOOLS or (
+            isinstance(data, dict)
+            and any(key in data for key in ("success", "status", "action"))
+        ):
             references.append(self._record_action(tool_name, data))
 
         self._last_applied_references = tuple(dict.fromkeys(references))

@@ -328,11 +328,18 @@ class AgentRun:
 
         values = []
         for item in self.notebook.messages:
+            is_topic_compatibility_item = (
+                "timestamp" in item
+                and item.get("message") is not None
+                and item.get("score") == 1.0
+                and not item.get("user_name")
+                and not item.get("session_id")
+            )
             if (
                 "context" not in item
                 and "timestamp" in item
                 and item.get("message") is not None
-            ):
+            ) or is_topic_compatibility_item:
                 values.append(
                     {
                         "id": item.get("id", item.get("message_id")),

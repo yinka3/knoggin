@@ -646,9 +646,12 @@ class AgentExecutor:
                     capture_tool_source_candidates(self.ctx, call, result)
                 )
 
+                # Keep the untouched backend result in the canonical notebook.
+                # Localization is a model-facing projection and must happen only
+                # after accumulation so compact handles cannot erase references.
+                self.ctx.accumulate_tool_result(call.name, result)
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
-                self.ctx.accumulate_tool_result(call.name, model_result)
                 self.ctx.record_tool_success()
                 results_out.append({"tool": call.name, "result": model_result})
 
