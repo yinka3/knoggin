@@ -111,6 +111,9 @@ class AgentExecutor:
         self.tools = tools
         self._on_successful_completion = on_successful_completion
         self._aac_budget = aac_budget
+        token_counter = getattr(llm, "count_tokens", None)
+        if callable(token_counter):
+            ctx.notebook.set_token_counter(token_counter)
         install_tool_runtime(
             tools,
             ctx.tool_runtime,
@@ -852,16 +855,12 @@ class AgentExecutor:
 
             summary = await self._generate_evidence_summary(evidence_str)
 
-            if summary:
-                self.ctx.compact_evidence(summary)
-            else:
-                logger.warning(
-                    "Evidence summarization failed. Truncating raw evidence as "
-                    "fallback."
-                )
-
             if not summary:
-                self.ctx.compact_evidence(None)
+                logger.warning(
+                    "Evidence summarization failed. Rolling over the retained "
+                    "notebook neighborhood without a generated summary."
+                )
+            self.ctx.rollover_notebook(summary)
 
             # Recalculate against the actual bounded state retained by the run.
             post_compaction = build_evidence_context(self.ctx)
@@ -905,9 +904,7 @@ class AgentExecutor:
                 "reasoning": reasoning,
                 "turn": self.ctx.attempt_count,
                 "evidence_state": {
-                    "profiles": len(self.ctx.profiles),
-                    "messages": len(self.ctx.messages),
-                    "graph": len(self.ctx.graph),
+                    **self.ctx.notebook.capacity_report(),
                 },
             },
             verbose_only=True,

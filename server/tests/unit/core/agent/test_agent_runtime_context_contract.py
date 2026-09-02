@@ -263,9 +263,9 @@ def test_update_accumulators_skips_non_source_search_status_items():
 
 
 @pytest.mark.no_network
-def test_compact_evidence_trims_sources_with_other_evidence():
+def test_rollover_evidence_preserves_sources_and_summary_references():
     ctx = make_ctx()
-    ctx.sources = [
+    sources = [
         {
             "title": f"Source {index}",
             "url": f"https://example.test/{index}",
@@ -273,17 +273,15 @@ def test_compact_evidence_trims_sources_with_other_evidence():
         }
         for index in range(6)
     ]
+    assert ctx.accumulate_tool_result("web_search", {"data": sources}) is True
 
-    ctx.compact_evidence("Condensed source evidence")
+    rollover = ctx.rollover_notebook("Condensed source evidence")
 
     assert ctx.evidence_summary == "Condensed source evidence"
-    assert [item["title"] for item in ctx.sources] == [
-        "Source 1",
-        "Source 2",
-        "Source 3",
-        "Source 4",
-        "Source 5",
-    ]
+    assert rollover.generation == 2
+    assert [item["title"] for item in ctx.sources] == [f"Source {index}" for index in range(6)]
+    assert ctx.notebook.summary.references
+    assert all(ctx.notebook._known_reference(ref) for ref in ctx.notebook.summary.references)
 
 
 @pytest.mark.no_network
@@ -393,7 +391,7 @@ def test_build_user_message_includes_absolute_and_elapsed_last_turn_time():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_dedupes_and_trims_messages_by_score():
+def test_update_accumulators_dedupes_without_blind_tail_trimming():
     ctx = make_ctx()
 
     update_accumulators(
@@ -437,7 +435,10 @@ def test_update_accumulators_dedupes_and_trims_messages_by_score():
         },
     )
 
-    assert [msg["id"] for msg in ctx.messages] == ["msg_2", "msg_3"]
+    assert [msg["id"] for msg in ctx.messages] == ["msg_1", "msg_2"]
+    assert ctx.messages[0]["score"] == 1.0
+    assert ctx.notebook.last_apply_result.accepted is False
+    assert ctx.notebook.last_apply_result.reason == "capacity"
 
 
 @pytest.mark.no_network
@@ -611,19 +612,10 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_caps_non_message_evidence_buckets():
+def test_update_accumulators_rejects_oversized_buckets_atomically():
     ctx = make_ctx(
-        limits=AgentRunLimits(
-            max_history_turns=2,
-            max_accumulated_messages=2,
-            max_accumulated_profiles=2,
-            max_accumulated_graph=2,
-            max_accumulated_paths=1,
-            max_accumulated_episodes=1,
-            max_accumulated_sources=1,
-        )
+        limits=AgentRunLimits(max_accumulated_profiles=2)
     )
-
     update_accumulators(
         ctx,
         "search_entity",
@@ -635,90 +627,10 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
             ]
         },
     )
-    update_accumulators(
-        ctx,
-        "get_connections",
-        {
-            "data": [
-                {"source": "Ada", "target": "Alpha"},
-                {"source": "Ada", "target": "Beta"},
-                {"source": "Ada", "target": "Gamma"},
-            ]
-        },
-    )
-    update_accumulators(
-        ctx,
-        "find_path",
-        {
-            "data": [
-                {"entity_a": "Ada", "entity_b": "Alpha"},
-                {"entity_a": "Ada", "entity_b": "Beta"},
-            ]
-        },
-    )
-    update_accumulators(
-        ctx,
-        "episode_check",
-        {"data": [{"id": "episode-1"}, {"id": "episode-2"}]},
-    )
-    update_accumulators(
-        ctx,
-        "web_search",
-        {
-            "data": [
-                {
-                    "title": "Old result",
-                    "url": "https://example.test/old",
-                    "snippet": "Old snippet.",
-                },
-                {
-                    "title": "New result",
-                    "url": "https://example.test/new",
-                    "snippet": "New snippet.",
-                },
-            ]
-        },
-    )
-    update_accumulators(
-        ctx,
-        "search_documents",
-        {
-            "data": [
-                {
-                    "document_id": "file-1",
-                    "chunk_index": 1,
-                    "content": "one",
-                },
-                {
-                    "document_id": "file-1",
-                    "chunk_index": 2,
-                    "content": "two",
-                },
-                {
-                    "document_id": "file-1",
-                    "chunk_index": 3,
-                    "content": "three",
-                },
-            ]
-        },
-    )
 
-    assert [profile["id"] for profile in ctx.profiles] == [2, 3]
-    assert [(item["source"], item["target"]) for item in ctx.graph] == [
-        ("Ada", "Beta"),
-        ("Ada", "Gamma"),
-    ]
-    assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
-    assert ctx.episodes == [{"id": "episode-2"}]
-    assert ctx.sources == [
-        {
-            "title": "New result",
-            "url": "https://example.test/new",
-            "snippet": "New snippet.",
-            "source_kind": "web_search_result",
-        }
-    ]
-    assert [message["chunk_index"] for message in ctx.messages] == [2, 3]
+    assert list(ctx.profiles) == []
+    assert ctx.notebook.last_apply_result.accepted is False
+    assert ctx.notebook.last_apply_result.reason == "capacity"
 
 
 @pytest.mark.no_network

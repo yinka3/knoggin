@@ -21,7 +21,7 @@ from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
-from core.agent.notebook import RunNotebook
+from core.agent.notebook import NotebookRolloverResult, RunNotebook
 from core.agent.tools.registry import (
     ToolRuntime,
     build_tool_runtime,
@@ -558,18 +558,11 @@ class AgentRun:
             raise ValueError("evidence token count must be a non-negative integer")
         self.evidence_token_count = token_count
 
-    def compact_evidence(self, summary: Optional[str]) -> None:
-        """Keep only the bounded evidence needed after summarization."""
+    def rollover_notebook(self, summary: Optional[str] = None) -> NotebookRolloverResult:
+        """Start a bounded notebook generation while preserving references."""
 
         self._require_active()
-        if summary:
-            self.evidence_summary = summary
-        self.messages = list(self.messages)[-5:]
-        self.profiles = list(self.profiles)[-5:]
-        self.graph = list(self.graph)[-15:]
-        self.sources = self.sources[-5:]
-        self.episodes = []
-        self.paths = []
+        return self.notebook.rollover(summary)
 
     def finalize(self, content: str) -> None:
         self._require_active()
