@@ -10,6 +10,10 @@ from core.agent.notebook_renderer import (
 )
 
 
+def test_empty_notebook_renders_a_stable_minimal_view():
+    assert render_notebook(RunNotebook()) == "RUN NOTEBOOK"
+
+
 def test_notebook_renderer_is_strict_localized_and_read_only():
     notebook = RunNotebook()
     notebook.apply(
@@ -34,6 +38,7 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
 
     assert "E1 Sarah Johnson" in rendered
     assert "EP1: Changed" in rendered
+    assert '"entity_id": "E1"' in rendered
     assert "ep-secret" not in rendered
     assert "project-a" not in rendered
     assert notebook.as_dict() == before

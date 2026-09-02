@@ -403,10 +403,21 @@ class RunNotebook:
                         page["evidence_refs"].append(evidence_ref)
         return ref
 
-    def _add_episode(self, item: dict[str, Any], *, group: dict[str, Any] | None = None) -> str:
+    def _add_episode(
+        self,
+        item: dict[str, Any],
+        *,
+        group: dict[str, Any] | None = None,
+    ) -> str:
         value = deepcopy(item)
         if group:
-            for key in ("query", "entity_name", "entity_id", "similarity"):
+            for key in (
+                "query",
+                "entity_name",
+                "entity_id",
+                "similarity",
+                "resolution",
+            ):
                 if key in group and key not in value:
                     value[key] = group[key]
         evidence = value.pop("evidence", [])
@@ -673,9 +684,12 @@ class RunNotebook:
                     references.append(self._add_path(item))
         elif tool_name in {"episode_check", "read_recent_episodes"}:
             groups = data.get("results", []) if isinstance(data, dict) else []
+            resolution = data.get("resolution") if isinstance(data, dict) else None
             for group in groups if isinstance(groups, list) else []:
                 if not isinstance(group, dict):
                     continue
+                if resolution is not None and "resolution" not in group:
+                    group = {**group, "resolution": resolution}
                 episodes = group.get("episodes", [])
                 if isinstance(episodes, list) and episodes:
                     for item in episodes:

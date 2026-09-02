@@ -163,6 +163,27 @@ def _safe_text(value: object, *, limit: int = 320) -> str:
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
 
+def _localize_arguments(value: Any, localizer: _ReferenceLocalizer, key: str = ""):
+    if isinstance(value, dict):
+        return {
+            child_key: _localize_arguments(child, localizer, child_key)
+            for child_key, child in value.items()
+        }
+    if isinstance(value, list):
+        if key.endswith("_refs"):
+            return [localizer.reference(item) for item in value]
+        return [_localize_arguments(item, localizer, key) for item in value]
+    if key == "entity_id" and value is not None:
+        return localizer.reference(f"entity:{value}")
+    if key == "relationship_id" and value is not None:
+        return localizer.reference(f"relationship:{value}")
+    if key == "episode_id" and value is not None:
+        return localizer.reference(f"episode:{value}")
+    if key == "document_id" and value is not None:
+        return localizer.reference(f"document:{value}:0")
+    return value
+
+
 def _public_details(
     record: dict[str, Any], localizer: _ReferenceLocalizer
 ) -> str:
@@ -269,7 +290,8 @@ def _render_context(notebook: RunNotebook) -> dict[str, Any]:
     possible_next_steps = []
     for hint in snapshot["possible_next_steps"]:
         item = deepcopy(hint)
-        item["arguments"] = _safe_text(json.dumps(item.get("arguments", {}), default=str))
+        arguments = _localize_arguments(item.get("arguments", {}), localizer)
+        item["arguments"] = _safe_text(json.dumps(arguments, default=str))
         item.setdefault("reason", "")
         item.setdefault("when", "")
         possible_next_steps.append(item)

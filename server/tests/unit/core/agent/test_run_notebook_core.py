@@ -121,6 +121,7 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
     )
 
     assert [item["episode_id"] for item in notebook.episodes] == ["ep-1"]
+    assert notebook.model_view()["episodes"][0]["resolution"] == "semantic"
     assert [item["id"] for item in notebook.messages] == ["msg_8"]
     assert [item["chunk_index"] for item in notebook.documents] == [1, 2]
     assert notebook.entity_pages["entity:24"]["episode_refs"] == ["episode:ep-1"]
