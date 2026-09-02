@@ -4,6 +4,7 @@ import pytest
 
 from common.schema.primitives import Message
 from common.utils.events import EventEmitter
+from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager
 from core.session.session_manager import SessionManager
 from runtime.session_runtime import SessionRuntime as Session
@@ -17,9 +18,16 @@ from tests.fixtures.fakes import (
 
 @pytest.mark.integration
 @pytest.mark.no_network
-async def test_session_create_run_admission_history_and_delete_flow(monkeypatch):
+async def test_session_create_run_admission_history_and_delete_flow(
+    monkeypatch,
+    tmp_path,
+):
     resources = FakeResources()
-    project_manager = ProjectManager(resources, user_name="ada")
+    project_manager = ProjectManager(
+        resources,
+        user_name="ada",
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
     project = await project_manager.create_project(
         "Research",
         domain_config=make_domain_config(version=0),
@@ -100,9 +108,13 @@ async def test_session_create_run_admission_history_and_delete_flow(monkeypatch)
 
 @pytest.mark.integration
 @pytest.mark.no_network
-async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent():
+async def test_hard_project_delete_makes_explicit_session_cleanup_idempotent(tmp_path):
     resources = FakeResources()
-    project_manager = ProjectManager(resources, user_name="ada")
+    project_manager = ProjectManager(
+        resources,
+        user_name="ada",
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
 
     class FakeAggregateDeletionWriter:
         async def delete_project(self, *, user_name, project_id):
