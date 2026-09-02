@@ -82,7 +82,7 @@ async def test_entity_search_returns_stable_identity_and_project_contexts():
         postgres=_Postgres(),
     )
 
-    results = await retrieval.search_entities("Ada", session_id="session-1")
+    results = await retrieval.search_entities("Ada")
 
     assert results == [
         {

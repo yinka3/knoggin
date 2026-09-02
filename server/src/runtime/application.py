@@ -89,6 +89,7 @@ class ApplicationRuntime:
             agent_orchestrator = AgentOrchestrator(
                 agent_manager,
                 config_provider=ConfigManager,
+                entity_maintenance_service=projects.entity_maintenance_service,
             )
             sessions = SessionManager(
                 resources=resources,

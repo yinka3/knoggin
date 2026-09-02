@@ -25,11 +25,48 @@ class RecordingKnowledgeStore:
 
 
 class MaintenanceHarness(MaintenanceTools):
-    def __init__(self) -> None:
+    def __init__(self, entity_maintenance_service=None) -> None:
         self.user_name = "ada"
         self.project_id = "project-1"
         self.knowledge_store = RecordingKnowledgeStore()
         self.postgres = object()
+        self.entity_maintenance_service = entity_maintenance_service
+
+
+@pytest.mark.no_network
+async def test_agent_merge_proposal_uses_injected_application_service():
+    class Plan:
+        @staticmethod
+        def model_dump(*, mode):
+            assert mode == "json"
+            return {"kind": "entity_merge"}
+
+    class EntityMaintenance:
+        def __init__(self):
+            self.calls = []
+
+        async def propose(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                review_id="review-1",
+                proposed_plan=Plan(),
+                expected_state={"hash": "expected"},
+            )
+
+    service = EntityMaintenance()
+    tools = MaintenanceHarness(service)
+
+    result = await tools.propose_entity_merge(
+        primary_id=2,
+        duplicate_id=3,
+        reasoning="The cited evidence identifies one entity.",
+        evidence_message_ids=[7],
+    )
+
+    assert result["review_id"] == "review-1"
+    assert result["policy_result"] == "confirmation_required"
+    assert service.calls[0]["survivor_entity_id"] == 2
+    assert service.calls[0]["retired_entity_id"] == 3
 
 
 @pytest.mark.no_network

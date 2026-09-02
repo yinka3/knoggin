@@ -23,6 +23,7 @@ from core.agent.services.agent_manager import AgentManager
 from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 
 if TYPE_CHECKING:
     from runtime.session_runtime import SessionRuntime
@@ -39,9 +40,16 @@ class AgentOrchestrator:
     It prepares the environment and delegates the reasoning loop to AgentExecutor.
     """
 
-    def __init__(self, agent_manager: AgentManager, *, config_provider):
+    def __init__(
+        self,
+        agent_manager: AgentManager,
+        *,
+        config_provider,
+        entity_maintenance_service: EntityMaintenanceService | None = None,
+    ):
         self._agent_manager = agent_manager
         self._config_provider = config_provider
+        self._entity_maintenance_service = entity_maintenance_service
 
     async def run_stream(
         self,
@@ -237,6 +245,7 @@ class AgentOrchestrator:
             postgres=context.resources.postgres,
             agent_id=agent_id,
             health_service=getattr(context, "health_service", None),
+            entity_maintenance_service=self._entity_maintenance_service,
         )
 
         return tools

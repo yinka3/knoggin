@@ -45,6 +45,7 @@ class AACTools(Tools):
             postgres=base_tools.postgres,
             agent_id=agent_id,
             health_service=None,
+            entity_maintenance_service=base_tools.entity_maintenance_service,
         )
         self.aac_store = store
         self.agent_manager = agent_manager

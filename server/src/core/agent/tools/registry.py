@@ -19,6 +19,7 @@ from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools, create_web_page_http_client
 from core.agent.tools.workspace import ProjectFileTools
 from core.knowledge.documents import DocumentService
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 
@@ -455,6 +456,7 @@ class Tools(
         postgres=None,
         agent_id: Optional[str] = None,
         health_service=None,
+        entity_maintenance_service: Optional[EntityMaintenanceService] = None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -479,6 +481,10 @@ class Tools(
         self.active_tool_schemas: Dict[str, dict] = {}
         self.short_uuid_references: Dict[str, str] = {}
         self.health_service = health_service
+        self.entity_maintenance_service = (
+            entity_maintenance_service
+            or EntityMaintenanceService(postgres, user_name=user_name)
+        )
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
         self._web_page_client = create_web_page_http_client()
@@ -494,9 +500,7 @@ class Tools(
         )
 
     async def search_entity(self, query: str, limit: int = None):
-        return await self.knowledge_retrieval.search_entities(
-            query, session_id=self.session_id, limit=limit
-        )
+        return await self.knowledge_retrieval.search_entities(query, limit=limit)
 
     async def get_connections(self, entity_id: int):
         return await self.knowledge_retrieval.get_connections(

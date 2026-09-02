@@ -83,6 +83,11 @@ class EpisodeTool(KnowledgeRetrieval):
         return [{"id": "msg_1", "message": "fallback hit"}]
 
 
+class EpisodeStore:
+    async def get_project_episode_source_refs(self, _episode_id, **_scope):
+        return []
+
+
 @pytest.mark.no_network
 async def test_episode_check_exact_entity_returns_scoped_episode_card():
     class FakeEntities:
@@ -94,7 +99,7 @@ async def test_episode_check_exact_entity_returns_scoped_episode_card():
             assert entity_id == 2
             return EntityProfile(canonical_name="Ada Lovelace")
 
-    class FakeKnowledgeStore:
+    class FakeKnowledgeStore(EpisodeStore):
         def __init__(self):
             self.entity_calls = []
             self.source_message_calls = 0
@@ -138,7 +143,7 @@ async def test_episode_check_exact_entity_returns_scoped_episode_card():
 
 @pytest.mark.no_network
 async def test_episode_serialization_includes_separate_sources_consulted():
-    class FakeKnowledgeStore:
+    class FakeKnowledgeStore(EpisodeStore):
         async def get_project_episodes_for_entities(self, entity_ids, **scope):
             return [episode_card("episode-1", entity_ids[0])]
 
@@ -212,7 +217,7 @@ async def test_episode_check_emits_retrieval_without_source_expansion(monkeypatc
         async def get_profile(self, entity_id):
             return EntityProfile(canonical_name="Ada")
 
-    class FakeKnowledgeStore:
+    class FakeKnowledgeStore(EpisodeStore):
         async def get_project_episodes_for_entities(self, entity_ids, **scope):
             return [episode_card("episode-1", entity_ids[0])]
 
@@ -244,7 +249,7 @@ async def test_episode_check_emits_retrieval_without_source_expansion(monkeypatc
 
 @pytest.mark.no_network
 async def test_read_recent_episodes_returns_latest_summaries_without_search():
-    class FakeKnowledgeStore:
+    class FakeKnowledgeStore(EpisodeStore):
         def __init__(self):
             self.recent_calls = []
             self.source_message_calls = 0
@@ -281,7 +286,7 @@ async def test_read_recent_episodes_returns_latest_summaries_without_search():
 
 @pytest.mark.no_network
 async def test_episode_check_searches_episodes_before_raw_message_fallback():
-    class FakeKnowledgeStore:
+    class FakeKnowledgeStore(EpisodeStore):
         async def search_project_episodes(self, query, **scope):
             assert query == "What changed in the memory design?"
             return [episode_card("episode-question")]
@@ -308,7 +313,7 @@ async def test_episode_check_uses_semantic_episode_matches_before_lexical_search
             assert query == "How will we find related memories?"
             return [0.1] * 1024
 
-    class FakeKnowledgeStore:
+    class FakeKnowledgeStore(EpisodeStore):
         async def search_project_episodes_by_embedding(self, embedding, **scope):
             assert embedding == [0.1] * 1024
             return [(episode_card("episode-semantic"), 0.91)]
@@ -335,7 +340,7 @@ async def test_episode_check_uses_semantic_episode_matches_before_lexical_search
 
 @pytest.mark.no_network
 async def test_read_episode_returns_all_scoped_source_messages():
-    class FakeKnowledgeStore:
+    class FakeKnowledgeStore(EpisodeStore):
         async def get_project_episode(self, episode_id, **scope):
             assert episode_id == "episode-1"
             return episode(episode_id)

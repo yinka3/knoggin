@@ -121,7 +121,6 @@ class KnowledgeRetrieval:
         self,
         query: str,
         *,
-        session_id: str,
         limit: Optional[int] = None,
     ) -> List[Dict]:
         """Discover visible entities before requesting a stable-ID follow-up."""
@@ -144,12 +143,7 @@ class KnowledgeRetrieval:
             limit=50,
             visible_project_ids=self.readable_project_ids,
         )
-        for result in results:
-            refs = result.pop("evidence_refs", result.pop("evidence_ids", []))
-            result["evidence"] = await self._hydrate_evidence(
-                refs, session_id=session_id
-            )
-        return results
+        return await self._hydrate_result_evidence(results, session_id=session_id)
 
     async def get_recent_activity(
         self, entity_id: int, *, session_id: str, hours: int = 24
@@ -162,12 +156,7 @@ class KnowledgeRetrieval:
             hours=hours,
             visible_project_ids=self.readable_project_ids,
         )
-        for result in results:
-            refs = result.pop("evidence_refs", result.pop("evidence_ids", []))
-            result["evidence"] = await self._hydrate_evidence(
-                refs, session_id=session_id
-            )
-        return results
+        return await self._hydrate_result_evidence(results, session_id=session_id)
 
     async def episode_check(
         self,
@@ -188,13 +177,11 @@ class KnowledgeRetrieval:
                 [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
-                limit=self._episode_retrieval_limit(),
+                limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
                 visible_project_ids=self.readable_project_ids,
             )
             metrics: Dict[str, int | float] = {}
-            serialized = await self._serialize_episodes(
-                episodes, session_id=session_id, metrics=metrics
-            )
+            serialized = await self._serialize_episodes(episodes, metrics=metrics)
             await self._emit_episode_retrieval(
                 session_id=session_id,
                 strategy="exact_entity",
@@ -225,7 +212,7 @@ class KnowledgeRetrieval:
                 embedding,
                 user_name=self.user_name,
                 project_id=self.project_id,
-                limit=self._episode_retrieval_limit(),
+                limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
                 visible_project_ids=self.readable_project_ids,
             )
             if semantic_matches:
@@ -233,7 +220,6 @@ class KnowledgeRetrieval:
                 metrics: Dict[str, int | float] = {}
                 serialized = await self._serialize_episodes(
                     episodes,
-                    session_id=session_id,
                     similarity_by_episode={
                         episode.episode_id: similarity
                         for episode, similarity in zip(episodes, similarities)
@@ -257,14 +243,12 @@ class KnowledgeRetrieval:
             query,
             user_name=self.user_name,
             project_id=self.project_id,
-            limit=self._episode_retrieval_limit(),
+            limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
             visible_project_ids=self.readable_project_ids,
         )
         if episodes:
             metrics: Dict[str, int | float] = {}
-            serialized = await self._serialize_episodes(
-                episodes, session_id=session_id, metrics=metrics
-            )
+            serialized = await self._serialize_episodes(episodes, metrics=metrics)
             await self._emit_episode_retrieval(
                 session_id=session_id,
                 strategy="lexical",
@@ -324,7 +308,7 @@ class KnowledgeRetrieval:
     async def read_recent_episodes(self, *, session_id: str, limit: int = 2) -> Dict:
         if limit <= 0:
             raise ValueError("read_recent_episodes limit must be positive")
-        effective_limit = min(limit, self._episode_retrieval_limit())
+        effective_limit = min(limit, DEFAULT_EPISODE_RETRIEVAL_LIMIT)
         started_at = perf_counter()
         episodes = await self.knowledge_store.get_recent_project_episodes(
             user_name=self.user_name,
@@ -333,9 +317,7 @@ class KnowledgeRetrieval:
             visible_project_ids=self.readable_project_ids,
         )
         metrics: Dict[str, int | float] = {}
-        serialized = await self._serialize_episodes(
-            episodes, session_id=session_id, metrics=metrics
-        )
+        serialized = await self._serialize_episodes(episodes, metrics=metrics)
         await self._emit_episode_retrieval(
             session_id=session_id,
             strategy="recent",
@@ -372,11 +354,7 @@ class KnowledgeRetrieval:
             max_depth=4,
             visible_project_ids=self.readable_project_ids,
         )
-        for step in path:
-            step["evidence"] = await self._hydrate_evidence(
-                step.pop("evidence_refs", []), session_id=session_id
-            )
-        return path
+        return await self._hydrate_result_evidence(path, session_id=session_id)
 
     async def get_hot_topic_context(
         self, hot_topics: List[str], *, session_id: str
@@ -480,8 +458,13 @@ class KnowledgeRetrieval:
             return []
 
         grouped: Dict[tuple[str, str], List[Dict]] = {}
+        requested_indexes: Dict[tuple[str, str, int], List[int]] = {}
         for item in normalized:
             grouped.setdefault((item["user_name"], item["session_id"]), []).append(item)
+            requested_indexes.setdefault(
+                (item["user_name"], item["session_id"], item["message_id"]),
+                [],
+            ).append(item["idx"])
 
         results_by_idx: Dict[int, Dict] = {}
         for (user_name, reference_session_id), items in grouped.items():
@@ -498,24 +481,43 @@ class KnowledgeRetrieval:
                     if isinstance(timestamp, (int, float))
                     else ""
                 )
-                for item in items:
-                    if (
-                        item["idx"] not in results_by_idx
-                        and item["user_name"] == user_name
-                        and item["session_id"] == reference_session_id
-                        and item["message_id"] == message["id"]
-                    ):
-                        hydrated = {
-                            "id": f"msg_{message['id']}",
-                            "user_name": message.get("user_name"),
-                            "session_id": message.get("session_id"),
-                            "message": message["content"],
-                            "timestamp": rendered_timestamp,
-                        }
-                        if message.get("role") is not None:
-                            hydrated["role"] = message["role"]
-                        results_by_idx[item["idx"]] = hydrated
+                key = (
+                    str(message.get("user_name") or user_name),
+                    str(message.get("session_id") or reference_session_id),
+                    int(message["id"]),
+                )
+                hydrated = {
+                    "id": f"msg_{message['id']}",
+                    "user_name": message.get("user_name"),
+                    "session_id": message.get("session_id"),
+                    "message": message["content"],
+                    "timestamp": rendered_timestamp,
+                }
+                if message.get("role") is not None:
+                    hydrated["role"] = message["role"]
+                for index in requested_indexes.get(key, ()):
+                    results_by_idx[index] = dict(hydrated)
         return [results_by_idx[index] for index in sorted(results_by_idx)]
+
+    async def _hydrate_result_evidence(
+        self,
+        results: List[Dict],
+        *,
+        session_id: str,
+    ) -> List[Dict]:
+        """Replace stored evidence references with scoped durable messages."""
+
+        for result in results:
+            refs = result.pop("evidence_refs", None)
+            if refs is None:
+                refs = result.pop("evidence_ids", [])
+            else:
+                result.pop("evidence_ids", None)
+            result["evidence"] = await self._hydrate_evidence(
+                refs,
+                session_id=session_id,
+            )
+        return results
 
     async def _get_visible_session_ids(self) -> List[str]:
         rows = await self.postgres.fetch_all(
@@ -594,23 +596,15 @@ class KnowledgeRetrieval:
         self,
         episodes,
         *,
-        session_id: str,
         similarity_by_episode: Optional[Dict[str, float]] = None,
         metrics: Optional[Dict[str, int | float]] = None,
     ) -> List[Dict]:
         serialized = []
         for episode in episodes or []:
-            source_reader = getattr(
-                self.knowledge_store, "get_project_episode_source_refs", None
-            )
-            sources_consulted = (
-                await source_reader(
-                    episode.episode_id,
-                    user_name=self.user_name,
-                    project_id=episode.project_id,
-                )
-                if callable(source_reader)
-                else []
+            sources_consulted = await self.knowledge_store.get_project_episode_source_refs(
+                episode.episode_id,
+                user_name=self.user_name,
+                project_id=episode.project_id,
             )
             item = {
                 "episode_id": episode.episode_id,
@@ -728,7 +722,3 @@ class KnowledgeRetrieval:
                 }
             ],
         }
-
-    @staticmethod
-    def _episode_retrieval_limit() -> int:
-        return DEFAULT_EPISODE_RETRIEVAL_LIMIT

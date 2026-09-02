@@ -33,21 +33,15 @@ class EntityMaintenanceService:
 
     def __init__(
         self,
-        postgres: PostgresClient | None = None,
-        knowledge_store=None,
-        user_name: str | None = None,
-        *,
-        resources=None,
+        postgres: PostgresClient,
+        user_name: str,
     ) -> None:
-        if resources is not None:
-            postgres = resources.postgres
-            if knowledge_store is None:
-                knowledge_store = getattr(resources, "knowledge_store", None)
         if postgres is None:
-            raise ValueError("EntityMaintenanceService requires PostgreSQL resources")
+            raise ValueError("EntityMaintenanceService requires PostgreSQL")
+        if not user_name or not user_name.strip():
+            raise ValueError("EntityMaintenanceService requires user_name")
         self.postgres = postgres
-        self.knowledge_store = knowledge_store
-        self.user_name = user_name
+        self.user_name = user_name.strip()
         self.writer = GlobalEntityMergeWriter(postgres)
         self.review_writer = MaintenanceReviewWriter(postgres)
         self.projection_rebuilder = GraphBuilder(postgres)

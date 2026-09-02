@@ -113,7 +113,7 @@ class ProjectManager:
         # service for the current local user while project maintenance remains
         # separately scoped above.
         self.entity_maintenance_service = EntityMaintenanceService(
-            resources=resources,
+            resources.postgres,
             user_name=user_name,
         )
         self.maintenance_scheduler = ApplicationMaintenanceScheduler(

@@ -212,15 +212,10 @@ class RunNotebook:
             "possible_next_steps": len(self.possible_next_steps),
         }
 
-    def _render_token_count(self) -> int:
-        rendered = self.render()
-        if self._token_counter is not None:
-            return max(0, int(self._token_counter(rendered)))
-        return len(rendered.split())
+    def _capacity_limits(self) -> dict[str, int]:
+        """Expose the explicit policy mapping for every bounded collection."""
 
-    def _fits_capacity(self) -> bool:
-        counts = self._counts()
-        section_limits = {
+        return {
             "entities": self.capacity.max_entities,
             "relationships": self.capacity.max_relationships,
             "episodes": self.capacity.max_episodes,
@@ -232,25 +227,27 @@ class RunNotebook:
             "actions": self.capacity.max_actions,
             "possible_next_steps": self.capacity.max_next_steps,
         }
+
+    def _render_token_count(self) -> int:
+        rendered = self.render()
+        if self._token_counter is not None:
+            return max(0, int(self._token_counter(rendered)))
+        return len(rendered.split())
+
+    def _fits_capacity(self) -> bool:
+        counts = self._counts()
         return (
-            all(counts[key] <= limit for key, limit in section_limits.items())
+            all(
+                counts[key] <= limit
+                for key, limit in self._capacity_limits().items()
+            )
             and len(self.summary.text or "") <= self.capacity.max_summary_chars
             and self._render_token_count() <= self.capacity.max_render_tokens
         )
 
     def capacity_report(self) -> dict[str, Any]:
         counts = self._counts()
-        limits = {
-            "entities": self.capacity.max_entities,
-            "relationships": self.capacity.max_relationships,
-            "episodes": self.capacity.max_episodes,
-            "paths": self.capacity.max_paths,
-            "messages": self.capacity.max_messages,
-            "documents": self.capacity.max_documents,
-            "web_discoveries": self.capacity.max_web_discoveries,
-            "web_reads": self.capacity.max_web_reads,
-            "actions": self.capacity.max_actions,
-            "possible_next_steps": self.capacity.max_next_steps,
+        limits = self._capacity_limits() | {
             "summary_chars": self.capacity.max_summary_chars,
             "render_tokens": self.capacity.max_render_tokens,
         }
@@ -439,15 +436,21 @@ class RunNotebook:
         self._add_entity_page(ref)
         return ref
 
-    def _add_relationship(self, item: dict[str, Any]) -> str:
-        value = deepcopy(item)
+    def _admit_evidence(self, value: dict[str, Any]) -> None:
+        """Normalize embedded messages into canonical evidence references."""
+
+        raw_refs = value.pop("evidence_refs", [])
+        evidence_refs = list(raw_refs) if isinstance(raw_refs, (list, tuple)) else []
         evidence = value.pop("evidence", [])
-        evidence_refs = list(value.pop("evidence_refs", []))
         for message in evidence if isinstance(evidence, list) else []:
             if isinstance(message, dict):
                 evidence_refs.append(self._add_message(message))
         if evidence_refs:
             value["evidence_refs"] = list(dict.fromkeys(evidence_refs))
+
+    def _add_relationship(self, item: dict[str, Any]) -> str:
+        value = deepcopy(item)
+        self._admit_evidence(value)
         ref = self._upsert("relationships", value)
         for identifier in (
             value.get("source_entity_id"),
@@ -480,17 +483,7 @@ class RunNotebook:
             ):
                 if key in group and key not in value:
                     value[key] = group[key]
-        evidence = value.pop("evidence", [])
-        evidence_refs = list(value.pop("evidence_refs", []))
-        for message in evidence if isinstance(evidence, list) else []:
-            if not isinstance(message, dict):
-                continue
-            message = dict(message)
-            if message.get("id") is None and message.get("message_id") is not None:
-                message["id"] = message["message_id"]
-            evidence_refs.append(self._add_message(message))
-        if evidence_refs:
-            value["evidence_refs"] = list(dict.fromkeys(evidence_refs))
+        self._admit_evidence(value)
         ref = self._upsert("episodes", value)
         for entity in value.get("entities", []) if isinstance(value.get("entities"), list) else []:
             if not isinstance(entity, dict):
@@ -504,13 +497,7 @@ class RunNotebook:
 
     def _add_path(self, item: dict[str, Any]) -> str:
         value = deepcopy(item)
-        evidence = value.pop("evidence", [])
-        evidence_refs = list(value.pop("evidence_refs", []))
-        for message in evidence if isinstance(evidence, list) else []:
-            if isinstance(message, dict):
-                evidence_refs.append(self._add_message(message))
-        if evidence_refs:
-            value["evidence_refs"] = list(dict.fromkeys(evidence_refs))
+        self._admit_evidence(value)
         return self._upsert("paths", value)
 
     @staticmethod
@@ -1040,18 +1027,10 @@ class RunNotebook:
         return retained
 
     def _bounded_retained_references(self, retained: set[str]) -> set[str]:
-        section_limits = {
-            "entities": self.capacity.max_entities,
-            "relationships": self.capacity.max_relationships,
-            "episodes": self.capacity.max_episodes,
-            "paths": self.capacity.max_paths,
-            "messages": self.capacity.max_messages,
-            "documents": self.capacity.max_documents,
-            "web_discoveries": self.capacity.max_web_discoveries,
-            "web_reads": self.capacity.max_web_reads,
-        }
+        limits = self._capacity_limits()
         bounded: set[str] = set()
-        for section, limit in section_limits.items():
+        for section in _ALL_SECTIONS:
+            limit = limits[section]
             ordered = [ref for ref in self._orders[section] if ref in retained]
             bounded.update(ordered[-limit:])
         page_entities = [

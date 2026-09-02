@@ -138,6 +138,8 @@ async def test_application_start_cleans_resources_when_composition_fails(monkeyp
 async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(monkeypatch):
     calls = []
     resources = RecordingOwner("resources", calls)
+    projects = RecordingOwner("projects", calls)
+    projects.entity_maintenance_service = SimpleNamespace()
 
     class KnowledgeStore:
         async def ensure_identity_entity(self, _user_name, _aliases):
@@ -171,7 +173,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(m
     monkeypatch.setattr(
         application_module,
         "ProjectManager",
-        lambda **_kwargs: RecordingOwner("projects", calls),
+        lambda **_kwargs: projects,
     )
     monkeypatch.setattr(application_module, "AgentManager", RecordingAgentManager)
     monkeypatch.setattr(
@@ -209,6 +211,7 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
     resources = RecordingOwner("resources", calls)
     resources.knowledge_store = KnowledgeStore()
     projects = RecordingOwner("projects", calls)
+    projects.entity_maintenance_service = SimpleNamespace()
     sessions = RecordingSessions("sessions", calls)
 
     class RecordingAgentManager:
@@ -221,8 +224,12 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
             calls.append("ensure_default_agent")
 
     class RecordingAgentOrchestrator:
-        def __init__(self, manager, **_kwargs):
+        def __init__(self, manager, **kwargs):
             assert isinstance(manager, RecordingAgentManager)
+            assert (
+                kwargs["entity_maintenance_service"]
+                is projects.entity_maintenance_service
+            )
             calls.append("agent_orchestrator")
 
     class RecordingAACRuntime:

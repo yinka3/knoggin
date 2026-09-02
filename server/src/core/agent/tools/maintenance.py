@@ -4,7 +4,6 @@ from loguru import logger
 
 from core.knowledge.conflict_service import ConflictService
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
-from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.maintenance_reviews import EvidenceRef
 
 
@@ -17,11 +16,9 @@ class MaintenanceTools:
         Returns a list of potential duplicates for the agent to review.
         """
         try:
-            candidates = await EntityMaintenanceService(
-                self.postgres,
-                self.knowledge_store,
-                self.user_name,
-            ).discover_duplicate_candidates()
+            candidates = (
+                await self.entity_maintenance_service.discover_duplicate_candidates()
+            )
 
             if not candidates:
                 return {
@@ -68,11 +65,6 @@ class MaintenanceTools:
     ) -> Dict:
         """Submit a grounded merge proposal without granting destructive access."""
         try:
-            service = EntityMaintenanceService(
-                self.postgres,
-                self.knowledge_store,
-                self.user_name,
-            )
             evidence_refs = [
                 *(
                     EvidenceRef(kind="message", id=str(message_id))
@@ -83,7 +75,7 @@ class MaintenanceTools:
                     for episode_id in (evidence_episode_ids or [])
                 ),
             ]
-            review = await service.propose(
+            review = await self.entity_maintenance_service.propose(
                 user_name=self.user_name,
                 survivor_entity_id=primary_id,
                 retired_entity_id=duplicate_id,
