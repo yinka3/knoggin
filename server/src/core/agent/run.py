@@ -21,6 +21,7 @@ from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
+from core.agent.notebook import RunNotebook
 from core.agent.tools.registry import (
     ToolRuntime,
     build_tool_runtime,
@@ -139,19 +140,13 @@ class AgentRun:
     document_selection_context: Optional[Dict[str, Any]] = None
     hot_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
+    notebook: RunNotebook = field(default_factory=RunNotebook)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
     last_turn_at: Optional[datetime] = None
     initial_source_candidates: List[SourceReferenceCandidate] = field(
         default_factory=list
     )
-    messages: List[Dict] = field(default_factory=list)
-    profiles: List[Dict] = field(default_factory=list)
-    graph: List[Dict] = field(default_factory=list)
-    paths: List[Dict] = field(default_factory=list)
-    episodes: List[Dict] = field(default_factory=list)
-    sources: List[Dict] = field(default_factory=list)
-    evidence_summary: Optional[str] = None
     new_evidence_gathered: bool = False
     evidence_token_count: int = 0
     call_count: int = 0
@@ -193,6 +188,7 @@ class AgentRun:
         document_selection_context: Optional[Dict[str, Any]] = None,
         hot_topics: Optional[List[str]] = None,
         hot_topic_context: Optional[Dict[str, Dict]] = None,
+        notebook: Optional[RunNotebook] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
         last_turn_at: Optional[datetime] = None,
@@ -247,6 +243,7 @@ class AgentRun:
             document_selection_context=document_selection_context,
             hot_topics=list(hot_topics or []),
             hot_topic_context=dict(hot_topic_context or {}),
+            notebook=notebook or RunNotebook(limits=limits),
             is_community=is_community,
             current_participants=list(current_participants or []),
             last_turn_at=effective_last_turn_at,
@@ -274,6 +271,7 @@ class AgentRun:
         document_selection_context: Optional[Dict[str, Any]] = None,
         hot_topics: Optional[List[str]] = None,
         hot_topic_context: Optional[Dict[str, Dict]] = None,
+        notebook: Optional[RunNotebook] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
         last_turn_at: Optional[datetime] = None,
@@ -301,6 +299,7 @@ class AgentRun:
             document_selection_context=document_selection_context,
             hot_topics=hot_topics,
             hot_topic_context=hot_topic_context,
+            notebook=notebook,
             is_community=is_community,
             current_participants=current_participants,
             last_turn_at=last_turn_at,
@@ -312,6 +311,104 @@ class AgentRun:
             raise RuntimeError("AgentRun has been released")
         if self.sealed:
             raise RuntimeError("AgentRun has been finalized")
+
+    @property
+    def profiles(self):
+        """Compatibility view backed by the canonical entity section."""
+
+        return self.notebook.entities
+
+    @profiles.setter
+    def profiles(self, values) -> None:
+        self.notebook._replace_section("entities", list(values or []))
+
+    @property
+    def messages(self):
+        """Compatibility view backed by canonical message and document evidence."""
+
+        values = []
+        for item in self.notebook.messages:
+            if (
+                "context" not in item
+                and "timestamp" in item
+                and item.get("message") is not None
+            ):
+                values.append(
+                    {
+                        "id": item.get("id", item.get("message_id")),
+                        "score": item.get("score", 1.0),
+                        "user_name": item.get("user_name"),
+                        "session_id": item.get("session_id"),
+                        "context": [
+                            {
+                                "role": item.get("role", "assistant"),
+                                "timestamp": item.get("timestamp", ""),
+                                "content": item.get("message", ""),
+                                "is_hit": True,
+                            }
+                        ],
+                    }
+                )
+            else:
+                values.append(item)
+        values.extend(self.notebook.model_view()["messages"][len(values) :])
+        return values
+
+    @messages.setter
+    def messages(self, values) -> None:
+        self.notebook._replace_section("messages", list(values or []))
+
+    @property
+    def graph(self):
+        """Compatibility view backed by canonical relationship knowledge."""
+
+        return self.notebook.relationships
+
+    @graph.setter
+    def graph(self, values) -> None:
+        self.notebook._replace_section("relationships", list(values or []))
+
+    @property
+    def paths(self):
+        return self.notebook.paths
+
+    @paths.setter
+    def paths(self, values) -> None:
+        self.notebook._replace_section("paths", list(values or []))
+
+    @property
+    def episodes(self):
+        return self.notebook.episodes
+
+    @episodes.setter
+    def episodes(self, values) -> None:
+        self.notebook._replace_section("episodes", list(values or []))
+
+    @property
+    def sources(self):
+        return list(self.notebook.web_discoveries) + list(self.notebook.web_reads)
+
+    @sources.setter
+    def sources(self, values) -> None:
+        self.notebook._replace_section("web_discoveries", [])
+        self.notebook._replace_section("web_reads", [])
+        for value in values or []:
+            if not isinstance(value, dict):
+                continue
+            section = (
+                "web_reads"
+                if value.get("source_kind") in {"web_page", "web_pdf"}
+                else "web_discoveries"
+            )
+            self.notebook._upsert(section, value)
+
+    @property
+    def evidence_summary(self) -> Optional[str]:
+        return self.notebook.summary.text
+
+    @evidence_summary.setter
+    def evidence_summary(self, value: Optional[str]) -> None:
+        self.notebook.summary.text = value
 
     def begin_attempt(self) -> bool:
         """Reserve the next LLM attempt if this run has capacity remaining."""
@@ -400,11 +497,8 @@ class AgentRun:
         """Apply one tool result to the aggregate's owned evidence buffers."""
 
         self._require_active()
-        # Kept local to avoid a run/prompt-context import cycle.
-        from core.agent.prompt_context import update_accumulators
-
         before = self._evidence_fingerprint()
-        update_accumulators(self, tool_name, result)
+        self.notebook.apply(tool_name, result)
         gathered = before != self._evidence_fingerprint()
         self.new_evidence_gathered = self.new_evidence_gathered or gathered
         return gathered
@@ -412,19 +506,7 @@ class AgentRun:
     def _evidence_fingerprint(self) -> str:
         """Serialize evidence state for change detection within one run."""
 
-        return json.dumps(
-            {
-                "messages": self.messages,
-                "profiles": self.profiles,
-                "graph": self.graph,
-                "paths": self.paths,
-                "episodes": self.episodes,
-                "sources": self.sources,
-                "summary": self.evidence_summary,
-            },
-            sort_keys=True,
-            default=str,
-        )
+        return self.notebook.fingerprint()
 
     def record_empty_result(self) -> bool:
         """Record an empty tool turn and report whether replanning is due."""
@@ -443,15 +525,7 @@ class AgentRun:
     def has_any(self) -> bool:
         """Whether this run has accumulated any model-visible evidence."""
 
-        return bool(
-            self.profiles
-            or self.messages
-            or self.graph
-            or self.paths
-            or self.episodes
-            or self.sources
-            or self.evidence_summary
-        )
+        return self.notebook.has_any()
 
     def record_usage(self, usage: Optional[StreamUsage]) -> None:
         self._require_active()
@@ -478,9 +552,9 @@ class AgentRun:
         self._require_active()
         if summary:
             self.evidence_summary = summary
-        self.messages = self.messages[-5:]
-        self.profiles = self.profiles[-5:]
-        self.graph = self.graph[-15:]
+        self.messages = list(self.messages)[-5:]
+        self.profiles = list(self.profiles)[-5:]
+        self.graph = list(self.graph)[-15:]
         self.sources = self.sources[-5:]
         self.episodes = []
         self.paths = []
@@ -507,12 +581,6 @@ class AgentRun:
         self.short_uuid_references.clear()
         self.history.clear()
         self.initial_source_candidates.clear()
-        self.messages.clear()
-        self.profiles.clear()
-        self.graph.clear()
-        self.paths.clear()
-        self.episodes.clear()
-        self.sources.clear()
+        self.notebook.clear()
         self.source_candidates.clear()
-        self.evidence_summary = None
         self.released = True
