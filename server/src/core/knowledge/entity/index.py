@@ -170,31 +170,6 @@ class EntityIndex:
         profile.set_embedding(embedding)
         return True
 
-    def merge_into(
-        self,
-        primary_id: int,
-        secondary_id: int,
-        primary_profile_updates: dict = None,
-    ) -> int:
-        secondary_names = self._id_to_names.pop(secondary_id, set())
-        if primary_id not in self._id_to_names:
-            self._id_to_names[primary_id] = set()
-
-        for alias in secondary_names:
-            owners = self._name_to_ids.get(alias)
-            if owners is None:
-                owners = set()
-                self._name_to_ids[alias] = owners
-            owners.discard(secondary_id)
-            owners.add(primary_id)
-            self._id_to_names[primary_id].add(alias)
-
-        if primary_profile_updates and primary_id in self._profiles:
-            self._profiles[primary_id].apply_updates(primary_profile_updates)
-
-        self._profiles.pop(secondary_id, None)
-        return len(secondary_names)
-
     def remove(self, entity_ids: List[int]) -> Tuple[int, bool]:
         removed = 0
         aliases_changed = False

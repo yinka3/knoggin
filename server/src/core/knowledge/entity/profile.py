@@ -71,20 +71,6 @@ class EntityProfile:
     def set_embedding(self, embedding: list[float]) -> None:
         self.embedding = embedding
 
-    def apply_updates(self, updates: Mapping[str, Any]) -> None:
-        if "canonical_name" in updates:
-            self.canonical_name = updates["canonical_name"]
-        if "type" in updates:
-            self.entity_type = updates["type"]
-        if "entity_type" in updates:
-            self.entity_type = updates["entity_type"]
-        if "topic" in updates:
-            self.topic = updates["topic"] or "General"
-        if "project_id" in updates:
-            self.project_id = updates["project_id"]
-        if "embedding" in updates:
-            self.embedding = updates["embedding"]
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "canonical_name": self.canonical_name,

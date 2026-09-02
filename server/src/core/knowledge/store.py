@@ -1141,14 +1141,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_neighbor_ids(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> Set[int]:
-        return await self._graph_reader.get_neighbor_ids(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
     async def get_entities_by_names(
         self, names: List[str], *, visible_project_ids: List[str]
     ) -> List[Dict]:
@@ -1165,40 +1157,6 @@ class KnowledgeStore:
         limit: int = 5,
     ) -> List[Dict]:
         return await self._graph_reader.get_neighbor_entities(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_merge_topic_strength(
-        self,
-        primary_id: int,
-        secondary_id: int,
-        project_id: str,
-    ) -> Dict:
-        return await self._graph_reader.get_merge_topic_strength(
-            primary_id,
-            secondary_id,
-            project_id,
-        )
-
-    async def has_direct_edge(
-        self, id_a: int, id_b: int, *, visible_project_ids: List[str]
-    ) -> bool:
-        return await self._graph_reader.has_direct_edge(
-            id_a,
-            id_b,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def search_similar_entities(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        limit: int = 50,
-    ) -> List[Tuple[int, float]]:
-        return await self._entity_reader.search_similar_entities(
             entity_id,
             visible_project_ids=visible_project_ids,
             limit=limit,

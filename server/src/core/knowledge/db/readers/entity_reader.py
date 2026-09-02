@@ -556,54 +556,6 @@ class EntityReader:
         except Exception as exc:
             self._raise_storage_read("search_by_name", exc)
 
-    async def search_similar_entities(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        limit: int = 50,
-    ) -> List[Tuple[int, float]]:
-        limit = self._validate_query_limit(limit, "search_similar_entities")
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "search_similar_entities",
-        )
-        """Find similar entities using Postgres pgvector."""
-        # 1. Get the source vector
-        emb = await self.get_entity_embedding(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-        if not emb:
-            return []
-
-        # 2. Search using pgvector cosine distance `<=>`
-        # `<=>` returns distance, so we do 1 - distance for similarity
-        params = [
-            emb,
-            entity_id,
-            IDENTITY_ENTITY_ID,
-            visible_project_ids,
-        ]
-        query = """
-        SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
-        FROM entities
-        WHERE entity_id != %s
-          AND (entity_id = %s OR EXISTS (
-              SELECT 1 FROM project_entity_contexts context
-              WHERE context.entity_id = entities.entity_id
-                AND context.project_id = ANY(%s)
-          ))
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-        """
-        try:
-            params.extend([emb, limit])
-            res = await self.client.fetch_all(query, tuple(params))
-            return [(r["entity_id"], r["similarity"]) for r in res]
-        except Exception as e:
-            self._raise_storage_read("search_similar_entities", e)
-
     async def search_entities_by_embedding(
         self,
         embedding: List[float],

@@ -7,8 +7,6 @@ class FakeEmbeddingService:
     def __init__(self):
         self.batch_calls = []
         self.single_calls = []
-        self.text_pair_calls = []
-        self.text_pair_labels = []
         self.fail_single_texts = set()
         self.fail_single = False
 
@@ -26,33 +24,6 @@ class FakeEmbeddingService:
         total = sum(ord(ch) for ch in text)
         return [float(total % 97), float(len(text)), float(total % 13)]
 
-    async def classify_text_pairs(self, pairs, batch_size=None):
-        self.text_pair_calls.append(list(pairs))
-        labels = list(self.text_pair_labels)
-        results = []
-        for index, pair in enumerate(pairs):
-            label = labels[index] if index < len(labels) else "neutral"
-            results.append(
-                type(
-                    "TextPairClassification",
-                    (),
-                    {
-                        "premise": pair[0],
-                        "hypothesis": pair[1],
-                        "label": label,
-                        "scores": {
-                            "entailment": 1.0 if label == "entailment" else 0.0,
-                            "contradiction": (
-                                1.0 if label == "contradiction" else 0.0
-                            ),
-                            "neutral": 1.0 if label == "neutral" else 0.0,
-                        },
-                    },
-                )()
-            )
-        return results
-
-
 class FakeEntityKnowledgeStore:
     def __init__(self, entities=None):
         self.entities = {
@@ -63,13 +34,6 @@ class FakeEntityKnowledgeStore:
         self.embedding_lookups = []
         self.vector_searches = []
         self.vector_results = {}
-        self.similar_entities_by_id = {}
-        self.similar_entity_searches = []
-        self.facts_by_entity = {}
-        self.facts_for_entities_calls = []
-        self.neighbor_ids_by_entity = {}
-        self.neighbor_id_calls = []
-        self.direct_edges = set()
 
     def add_entity(
         self,
@@ -163,46 +127,6 @@ class FakeEntityKnowledgeStore:
             if score >= score_threshold:
                 visible_results.append((entity_id, score))
         return visible_results[:limit]
-
-    async def search_similar_entities(
-        self,
-        entity_id,
-        limit=50,
-        visible_project_ids=None,
-    ):
-        self.similar_entity_searches.append(
-            {
-                "entity_id": entity_id,
-                "limit": limit,
-                "visible_project_ids": visible_project_ids,
-            }
-        )
-        results = self.similar_entities_by_id.get(entity_id, [])
-        visible_results = []
-        for neighbor_id, score in results:
-            entity = self.entities.get(neighbor_id)
-            if entity and not self._is_visible(entity, visible_project_ids):
-                continue
-            visible_results.append((neighbor_id, score))
-        return visible_results[:limit]
-
-    async def get_facts_for_entities(
-        self, entity_ids, *, visible_project_ids, active_only=True
-    ):
-        self.facts_for_entities_calls.append(
-            {"entity_ids": list(entity_ids), "active_only": active_only}
-        )
-        return {
-            entity_id: list(self.facts_by_entity.get(entity_id, []))
-            for entity_id in entity_ids
-        }
-
-    async def get_neighbor_ids(self, entity_id, *, visible_project_ids):
-        self.neighbor_id_calls.append(entity_id)
-        return set(self.neighbor_ids_by_entity.get(entity_id, set()))
-
-    async def has_direct_edge(self, id_a, id_b, *, visible_project_ids):
-        return tuple(sorted((id_a, id_b))) in self.direct_edges
 
     def _is_visible(self, entity, visible_project_ids):
         if visible_project_ids is None:

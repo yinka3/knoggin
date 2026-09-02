@@ -118,7 +118,7 @@ def test_entity_index_normalizes_aliases_and_ignores_blanks():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_entity_index_merge_remove_and_embedding_update_keep_views_coherent():
+def test_entity_index_remove_and_embedding_update_keep_views_coherent():
     index = EntityIndex()
     index.populate(
         {
@@ -140,24 +140,6 @@ def test_entity_index_merge_remove_and_embedding_update_keep_views_coherent():
     assert index.update_embedding(101, [0.9, 0.8]) is True
     assert index.get_profile(101).embedding == [0.9, 0.8]
 
-    transferred = index.merge_into(
-        101,
-        202,
-        {"topic": "Identity"},
-    )
-
-    assert transferred == 2
-    assert index.get_profile(202) is None
-    assert index.get_profile(101).topic == "Identity"
-    assert index.get_entity_id_for_name("rob chen") == 101
-    assert index.get_entity_id_for_name("robbie") == 101
-    assert set(index.get_mentions(101)) == {
-        "robert chen",
-        "bob",
-        "rob chen",
-        "robbie",
-    }
-
     removed, aliases_changed = index.remove([101])
 
     assert removed == 1
@@ -165,6 +147,8 @@ def test_entity_index_merge_remove_and_embedding_update_keep_views_coherent():
     assert index.get_profile(101) is None
     assert index.get_entity_id_for_name("bob") is None
     assert index.get_mentions(101) == []
+    assert index.get_profile(202) is not None
+    assert index.get_entity_id_for_name("robbie") == 202
 
 
 @pytest.mark.storage

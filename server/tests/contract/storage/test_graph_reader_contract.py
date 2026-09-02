@@ -1,8 +1,5 @@
-import json
-
 import pytest
 
-from common.scoping import IDENTITY_ENTITY_ID
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
 from tests.fixtures.fakes import RecordingPostgresClient
@@ -127,35 +124,6 @@ async def test_recent_project_messages_uses_an_exclusive_cursor():
 
 
 @pytest.mark.storage
-@pytest.mark.no_network
-@pytest.mark.parametrize(
-    ("connected", "expected"),
-    [("false", False), ('"false"', False), ("true", True), (True, True)],
-)
-async def test_direct_edge_scopes_relationship_and_decodes_age_booleans(
-    connected,
-    expected,
-):
-    client = RecordingPostgresClient(fetch_one_results=[{"connected": connected}])
-
-    result = await GraphReader(client).has_direct_edge(
-        IDENTITY_ENTITY_ID,
-        2,
-        visible_project_ids=["project-1"],
-    )
-
-    assert result is expected
-    _, query, params = client.calls[0]
-    assert "WHERE r.project_id IN $visible_project_ids" in query
-    assert json.loads(params[0]) == {
-        "id_a": IDENTITY_ENTITY_ID,
-        "id_b": 2,
-        "visible_project_ids": ["project-1"],
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
-
-
-@pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
 async def test_surrounding_messages_do_not_repeat_same_timestamp_rows(
@@ -252,61 +220,3 @@ async def test_discovery_excludes_unsealed_and_deleted_session_history_but_prove
         visible_project_ids=["project-1"],
     )
     assert [message["id"] for message in retained] == [104]
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_direct_edge_ignores_an_edge_from_an_invisible_project(
-    real_postgres_client,
-):
-    await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            UNWIND $nodes AS node
-            CREATE (:Entity {id: node.id})
-            RETURN count(*) AS created
-            """,
-            "created agtype",
-        ),
-        (
-            json.dumps(
-                {
-                    "nodes": [
-                        {"id": IDENTITY_ENTITY_ID},
-                        {"id": 2},
-                    ]
-                }
-            ),
-        ),
-    )
-    await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            MATCH (a:Entity {id: $identity_entity_id})
-            MATCH (b:Entity {id: $entity_id})
-            CREATE (a)-[:RELATED_TO {project_id: $relationship_project_id}]->(b)
-            RETURN true AS created
-            """,
-            "created agtype",
-        ),
-        (
-            json.dumps(
-                {
-                    "identity_entity_id": IDENTITY_ENTITY_ID,
-                    "entity_id": 2,
-                    "relationship_project_id": "project-2",
-                }
-            ),
-        ),
-    )
-
-    reader = GraphReader(real_postgres_client)
-    assert (
-        await reader.has_direct_edge(
-            IDENTITY_ENTITY_ID,
-            2,
-            visible_project_ids=["project-1"],
-        )
-        is False
-    )
