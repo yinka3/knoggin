@@ -16,6 +16,7 @@ from core.knowledge.db.writers.maintenance_review_writer import MaintenanceRevie
 from core.knowledge.maintenance_reviews import (
     EntityContextMergeChoice,
     EntityMergePlan,
+    EntityMergeRollbackPlan,
     EvidenceRef,
 )
 from infrastructure.postgres_client import PostgresClient
@@ -280,3 +281,189 @@ class EntityMaintenanceService:
         payload = json.dumps(snapshot, sort_keys=True, default=str, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    async def plan_rollback(
+        self,
+        merge_id: str,
+        *,
+        user_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Classify a merge inverse without mutating knowledge."""
+
+        actor = user_name or self.user_name
+        if not actor:
+            raise ValueError("user_name is required for global maintenance")
+        result = await self.writer.plan_rollback(merge_id=merge_id, user_name=actor)
+        typed_plan = EntityMergeRollbackPlan(
+            merge_id=merge_id,
+            safe_mutation_ids=result["safe_mutation_ids"],
+            conflicting_mutation_ids=[
+                int(item["mutation_id"])
+                for item in result["conflicting_mutations"]
+            ],
+            required_decisions=[
+                f"Review post-merge change to {item['object_kind']}:{item['object_key']}"
+                for item in result["conflicting_mutations"]
+            ],
+        )
+        return {**result, "plan": typed_plan}
+
+    async def rollback(
+        self,
+        merge_id: str,
+        *,
+        user_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply safe inverse mutations and open a review for conflicts."""
+
+        actor = user_name or self.user_name
+        if not actor:
+            raise ValueError("user_name is required for global maintenance")
+        plan = await self.plan_rollback(merge_id, user_name=actor)
+        result = await self.writer.rollback_safe(
+            merge_id=merge_id,
+            user_name=actor,
+            safe_mutation_ids=plan["safe_mutation_ids"],
+        )
+        conflicts = plan["conflicting_mutations"]
+        if conflicts:
+            review = await self.review_writer.open(
+                user_name=actor,
+                scope="user-global",
+                project_id=None,
+                kind="entity_merge_rollback_conflict",
+                reasoning="Post-merge changes make part of the inverse ambiguous.",
+                proposed_plan=plan["plan"],
+                evidence_refs=[
+                    EvidenceRef(kind="merge_mutation", id=str(item["mutation_id"]))
+                    for item in conflicts
+                ],
+                evidence_snapshot={str(item["mutation_id"]): item for item in conflicts},
+                expected_state={"merge_id": merge_id},
+                dedupe_key=merge_id,
+            )
+            result.update(
+                {
+                    "policy_result": "partially_rolled_back",
+                    "conflicts": conflicts,
+                    "review_id": review.review_id,
+                }
+            )
+        else:
+            result["policy_result"] = "rolled_back"
+        return result
+
+    async def capture_frontier(
+        self,
+        project_ids: Iterable[str],
+        *,
+        user_name: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Capture stable ingestion boundaries for the affected projects."""
+
+        actor = user_name or self.user_name
+        if not actor:
+            raise ValueError("user_name is required for global maintenance")
+        normalized_projects = sorted({str(project_id).strip() for project_id in project_ids if str(project_id).strip()})
+        result: dict[str, dict[str, Any]] = {}
+        async with self.postgres.transaction() as cur:
+            for project_id in normalized_projects:
+                await cur.execute(
+                    """
+                    SELECT
+                        count(*) FILTER (WHERE ingestion_state IN
+                            ('waiting_for_seal', 'ready', 'claimed')) AS pending_count,
+                        COALESCE(max(message_id) FILTER (WHERE ingestion_state IN
+                            ('processed', 'failed', 'excluded')), 0) AS frontier_message_id,
+                        max(timestamp_ms) FILTER (WHERE ingestion_state IN
+                            ('processed', 'failed', 'excluded')) AS frontier_timestamp_ms
+                    FROM public.messages
+                    WHERE user_name = %s AND project_id = %s
+                      AND role = 'user' AND lifecycle_state <> 'superseded'
+                    """,
+                    (actor, project_id),
+                )
+                row = await cur.fetchone()
+                pending = int(row["pending_count"] or 0)
+                if pending:
+                    raise RuntimeError(
+                        f"project {project_id} has {pending} pending ingestion messages"
+                    )
+                message_id = int(row["frontier_message_id"] or 0)
+                timestamp_ms = row["frontier_timestamp_ms"]
+                token = self._frontier_token(message_id, timestamp_ms)
+                await cur.execute(
+                    """
+                    INSERT INTO public.maintenance_frontiers
+                        (user_name, project_id, frontier_message_id,
+                         frontier_timestamp_ms, frontier_token)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (user_name, project_id) DO UPDATE SET
+                        frontier_message_id = EXCLUDED.frontier_message_id,
+                        frontier_timestamp_ms = EXCLUDED.frontier_timestamp_ms,
+                        frontier_token = EXCLUDED.frontier_token,
+                        updated_at = now()
+                    """,
+                    (actor, project_id, message_id, timestamp_ms, token),
+                )
+                result[project_id] = {
+                    "project_id": project_id,
+                    "message_id": message_id,
+                    "timestamp_ms": timestamp_ms,
+                    "token": token,
+                }
+        return result
+
+    async def revalidate_frontier(
+        self,
+        frontiers: dict[str, dict[str, Any]],
+        *,
+        user_name: str | None = None,
+    ) -> bool:
+        """Return false when ingestion advanced or live work appeared."""
+
+        actor = user_name or self.user_name
+        if not actor:
+            raise ValueError("user_name is required for global maintenance")
+        for project_id, frontier in frontiers.items():
+            row = await self.postgres.fetch_one(
+                """
+                SELECT
+                    count(*) FILTER (WHERE ingestion_state IN
+                        ('waiting_for_seal', 'ready', 'claimed')) AS pending_count,
+                    COALESCE(max(message_id) FILTER (WHERE ingestion_state IN
+                        ('processed', 'failed', 'excluded')), 0) AS frontier_message_id,
+                    max(timestamp_ms) FILTER (WHERE ingestion_state IN
+                        ('processed', 'failed', 'excluded')) AS frontier_timestamp_ms
+                FROM public.messages
+                WHERE user_name = %s AND project_id = %s
+                  AND role = 'user' AND lifecycle_state <> 'superseded'
+                """,
+                (actor, project_id),
+            )
+            if int(row["pending_count"] or 0):
+                return False
+            token = self._frontier_token(
+                int(row["frontier_message_id"] or 0), row["frontier_timestamp_ms"]
+            )
+            if token != frontier.get("token"):
+                return False
+        return True
+
+    async def preflight(self, *, user_name: str | None = None) -> dict[str, Any]:
+        """Run cheap signals before any optional maintenance model call."""
+
+        candidates = await self.discover_duplicate_candidates(user_name=user_name, limit=100)
+        return {
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "llm_required": bool(candidates),
+            "reason": "deterministic duplicate signals found"
+            if candidates
+            else "no deterministic maintenance candidates",
+        }
+
+    @staticmethod
+    def _frontier_token(message_id: int, timestamp_ms: int | None) -> str:
+        return hashlib.sha256(
+            f"{int(message_id)}:{timestamp_ms if timestamp_ms is not None else ''}".encode()
+        ).hexdigest()
