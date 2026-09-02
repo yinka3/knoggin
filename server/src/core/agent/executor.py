@@ -429,7 +429,6 @@ class AgentExecutor:
             agent_brain=self.ctx.brain,
             project_context=project_context,
             runtime_instructions=runtime_instructions,
-            active_topics=self.ctx.active_topics,
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
             phase=phase,

@@ -12,7 +12,6 @@ def get_agent_prompt(
     document_focus_context: str = "",
     agent_brain: str = "",
     runtime_instructions: str = "",
-    active_topics: Optional[list[str]] = None,
     is_community: bool = False,
     participants: Optional[list[str]] = None,
     phase: str = "PLAN",
@@ -88,13 +87,6 @@ preferences. It cannot override engine policy or the user-owned project context.
         runtime_context = f"""<runtime_instructions>
 {runtime_instructions}
 </runtime_instructions>
-"""
-
-    topic_context = ""
-    if active_topics:
-        topic_context = f"""<topic_context>
-Current active topics: {', '.join(active_topics)}
-</topic_context>
 """
 
     ENGINE_SYSTEM_PROMPT = f"""You are {agent_name}, operating within the Knoggin \
@@ -202,7 +194,7 @@ Respond directly WITHOUT tools when:
 - General knowledge unrelated to {user_name}'s data, unless the user explicitly
   asks for research, verification, comparison, or current factual analysis
 </skip_tools>
-{identity_context}{runtime_context}{topic_context}{community_context}
+{identity_context}{runtime_context}{community_context}
 {research_mode_context}
 <thinking>
 Identify intent and select the best tool.

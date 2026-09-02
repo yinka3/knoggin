@@ -26,7 +26,7 @@ from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
-from infrastructure.job.scheduler import Scheduler
+from infrastructure.job.scheduler import EpisodeScheduler
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import ReadyRuntimeResources, RuntimeResources
 
@@ -123,7 +123,7 @@ class ProjectRuntimeFactory:
             ),
             sparse_context_verbs=entity_settings.sparse_context_verbs,
         )
-        scheduler = Scheduler(
+        scheduler = EpisodeScheduler(
             self.user_name,
             project_id,
             background_work=resources.background_work,
@@ -267,7 +267,7 @@ class ProjectRuntimeFactory:
                 "developer_settings.nlp_pipeline",
             )
         )
-        scheduler.register(episode_job)
+        scheduler.register_episode(episode_job)
         runtime.add_config_unsubscriber(
             config_manager.subscribe(
                 episode_job.update_settings,

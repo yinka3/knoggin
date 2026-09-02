@@ -503,3 +503,19 @@ class Scheduler:
             self._finish_job_run(job_name, "cancelled")
         if self._running_tasks.get(job_name) is task:
             del self._running_tasks[job_name]
+
+
+class EpisodeScheduler(Scheduler):
+    """Project-scoped runner for the single Episode maintenance job.
+
+    Project runtimes no longer register a general maintenance job set.  This
+    narrow entrypoint keeps the scheduling mechanics (cadence, timeout, and
+    bounded background admission) while making the only supported project
+    trigger explicit at the composition boundary.
+    """
+
+    def register_episode(self, job: BaseJob) -> "EpisodeScheduler":
+        if job.name != "episode":
+            raise ValueError("EpisodeScheduler accepts only the 'episode' job")
+        super().register(job)
+        return self

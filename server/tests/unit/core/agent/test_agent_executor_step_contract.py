@@ -43,7 +43,6 @@ def make_executor(llm, *, research_profile=None):
         temperature=0.2,
         brain="Use citations",
         enabled_tools=["search_messages"],
-        active_topics=["Identity", "Testing"],
         research_profile=research_profile,
     )
     tools = SimpleNamespace(document_service=None)

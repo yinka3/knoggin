@@ -148,7 +148,6 @@ class AgentOrchestrator:
                 brain=effective_brain,
                 enabled_tools=effective_enabled_tools,
                 hot_topics=effective_hot_topics,
-                active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
                 history=conversation_history or [],
                 document_focus=effective_document_focus,

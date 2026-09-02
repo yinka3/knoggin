@@ -138,7 +138,6 @@ class AgentRun:
     document_focus: Optional[DocumentFocus] = None
     document_selection_context: Optional[Dict[str, Any]] = None
     hot_topics: List[str] = field(default_factory=list)
-    active_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
@@ -193,7 +192,6 @@ class AgentRun:
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
         hot_topics: Optional[List[str]] = None,
-        active_topics: Optional[List[str]] = None,
         hot_topic_context: Optional[Dict[str, Dict]] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
@@ -248,7 +246,6 @@ class AgentRun:
             document_focus=document_focus,
             document_selection_context=document_selection_context,
             hot_topics=list(hot_topics or []),
-            active_topics=list(active_topics or []),
             hot_topic_context=dict(hot_topic_context or {}),
             is_community=is_community,
             current_participants=list(current_participants or []),
@@ -276,7 +273,6 @@ class AgentRun:
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
         hot_topics: Optional[List[str]] = None,
-        active_topics: Optional[List[str]] = None,
         hot_topic_context: Optional[Dict[str, Dict]] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
@@ -304,7 +300,6 @@ class AgentRun:
             document_focus=document_focus,
             document_selection_context=document_selection_context,
             hot_topics=hot_topics,
-            active_topics=active_topics,
             hot_topic_context=hot_topic_context,
             is_community=is_community,
             current_participants=current_participants,

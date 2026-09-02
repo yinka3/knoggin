@@ -29,7 +29,7 @@ class RecordingScheduler:
     def __init__(self):
         self._jobs = {}
 
-    def register(self, job):
+    def register_episode(self, job):
         self._jobs[job.name] = job
         return self
 
@@ -134,19 +134,6 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         "runtime.project_factory.ConfigManager.get",
         staticmethod(lambda: config_manager),
     )
-    monkeypatch.setattr(
-        "runtime.project_factory.MergeCleanupJob",
-        lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
-    )
-    monkeypatch.setattr(
-        "runtime.project_factory.AuditRetentionCleanupJob",
-        lambda **kwargs: RecordingJob("audit_retention_cleanup", **kwargs),
-    )
-    monkeypatch.setattr(
-        "runtime.project_factory.ConflictDiscoveryJob",
-        lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
-    )
-
     factory._register_background_jobs(
         project_state,
         entities=entities,
@@ -154,21 +141,13 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         episode_job=episode,
     )
 
-    assert list(project_state.scheduler._jobs) == [
-        "episode",
-        "merge_rollback_cleanup",
-        "audit_retention_cleanup",
-        "conflict_discovery",
-    ]
+    assert list(project_state.scheduler._jobs) == ["episode"]
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
         "developer_settings.jobs.episode",
-        "developer_settings.jobs.merge_rollback",
-        "developer_settings.jobs.audit_retention",
-        "developer_settings.jobs.conflict_discovery",
     ]
-    assert len(project_state.unsubscribers) == 6
+    assert len(project_state.unsubscribers) == 3
 
 
 @pytest.mark.runtime
@@ -198,18 +177,6 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         "runtime.project_factory.ConfigManager.get",
         staticmethod(lambda: config_manager),
     )
-    monkeypatch.setattr(
-        "runtime.project_factory.MergeCleanupJob",
-        lambda **kwargs: RecordingJob("merge_rollback_cleanup", **kwargs),
-    )
-    monkeypatch.setattr(
-        "runtime.project_factory.AuditRetentionCleanupJob",
-        lambda **kwargs: RecordingJob("audit_retention_cleanup", **kwargs),
-    )
-    monkeypatch.setattr(
-        "runtime.project_factory.ConflictDiscoveryJob",
-        lambda **kwargs: RecordingJob("conflict_discovery", **kwargs),
-    )
     factory._register_background_jobs(
         state,
         entities=entities,
@@ -221,14 +188,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     config_manager.emit("developer_settings.entity_resolution", marker)
     config_manager.emit("developer_settings.nlp_pipeline", marker)
     config_manager.emit("developer_settings.jobs.episode", marker)
-    config_manager.emit("developer_settings.jobs.merge_rollback", marker)
-    config_manager.emit("developer_settings.jobs.audit_retention", marker)
-    config_manager.emit("developer_settings.jobs.conflict_discovery", marker)
 
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
     assert episode.updates[-1] is marker
-    assert state.scheduler._jobs["merge_rollback_cleanup"].updates[-1] is marker
-    assert state.scheduler._jobs["audit_retention_cleanup"].updates[-1] is marker
-    assert state.scheduler._jobs["conflict_discovery"].updates[-1] is marker
-    assert "merge_detection" not in state.scheduler._jobs

@@ -254,7 +254,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.limits.tool_timeout == 1.5
     assert executor.ctx.limits.get_tool_limit("search_entity") == 4
     assert executor.ctx.hot_topics == []
-    assert executor.ctx.active_topics == ["Research", "Identity"]
+    assert not hasattr(executor.ctx, "active_topics")
     assert executor.ctx.hot_topic_context == {}
     assert tools.hot_topic_calls == []
     assert executor.ctx.model == "agent-model"

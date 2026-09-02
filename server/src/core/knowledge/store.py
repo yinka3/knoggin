@@ -1,6 +1,5 @@
-from collections.abc import Callable, Iterable
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -21,35 +20,18 @@ from common.schema.source.references import (
     SourceReference,
     SourceReferenceCandidate,
 )
-from core.knowledge.conflict_discovery import ConflictPacketBuilder
-from core.knowledge.conflict_service import ConflictService
-from core.knowledge.conflicts import (
-    ConflictDiscoveryPackage,
-    ConflictGroup,
-    ConflictOrigin,
-    ConflictResolutionKind,
-    ConflictWriteResult,
-)
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
-from core.knowledge.db.readers.conflict_discovery_reader import (
-    ConflictDiscoveryReader,
-)
-from core.knowledge.db.readers.conflict_reader import ConflictReader
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.readers.message_reader import MessageReader
-from core.knowledge.db.readers.relationship_observation_reader import (
-    RelationshipObservationReader,
-)
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
-from core.knowledge.db.writers.conflict_writer import ConflictWriter
 from core.knowledge.db.writers.entity_merge_writer import EntityMergeWriter
 from core.knowledge.db.writers.entity_reclassification_writer import (
     EntityReclassificationWriter,
@@ -68,9 +50,6 @@ from core.knowledge.db.writers.message_lifecycle_writer import (
     MessageLifecycleWriter,
 )
 from core.knowledge.db.writers.message_writer import MessageWriter
-from core.knowledge.db.writers.relationship_advisory_writer import (
-    RelationshipAdvisoryWriter,
-)
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationWriter,
 )
@@ -81,11 +60,6 @@ from core.knowledge.db.writers.relationship_reclassification_writer import (
 from core.knowledge.db.writers.retention_writer import RetentionWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from core.knowledge.maintenance_reviews import MaintenanceReview
-from core.knowledge.relationship_advisories import (
-    AdvisoryThresholds,
-    RelationshipAdvisory,
-    RelationshipAdvisoryDecision,
-)
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -125,19 +99,8 @@ class KnowledgeStore:
         self._maintenance_review_writer = MaintenanceReviewWriter(
             self._postgres_client
         )
-        self._conflict_writer = ConflictWriter(
-            self._postgres_client,
-            reviews=self._maintenance_review_writer,
-        )
-        self._conflict_service = ConflictService(self._conflict_writer)
-        self._conflict_discovery_reader = ConflictDiscoveryReader(self._postgres_client)
-        self._conflict_reader = ConflictReader(self._postgres_client)
         self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
         self._retention_writer = RetentionWriter(self._postgres_client)
-        self._relationship_advisory_writer = RelationshipAdvisoryWriter(
-            self._postgres_client,
-            reviews=self._maintenance_review_writer,
-        )
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._artifact_writer = ArtifactWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
@@ -148,9 +111,6 @@ class KnowledgeStore:
         self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._artifact_reader = ArtifactReader(self._postgres_client)
-        self._relationship_observation_reader = RelationshipObservationReader(
-            self._postgres_client
-        )
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._embedding_rebuilder = EmbeddingRebuilder(
             self._postgres_client,
@@ -1172,30 +1132,6 @@ class KnowledgeStore:
             project_id=project_id,
         )
 
-    async def get_relationship_advisories(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        thresholds: AdvisoryThresholds | None = None,
-        domain_version: int | None = None,
-    ) -> list[RelationshipAdvisory]:
-        """Derive actionable unknown-relationship suggestions from evidence."""
-
-        advisories = await self._relationship_observation_reader.get_advisories(
-            user_name=user_name,
-            project_id=project_id,
-            thresholds=thresholds,
-        )
-        for advisory in advisories:
-            await self._relationship_advisory_writer.materialize_pending(
-                user_name=user_name,
-                project_id=project_id,
-                advisory=advisory,
-                domain_version=domain_version,
-            )
-        return advisories
-
     async def get_open_human_reviews(
         self, *, user_name: str, project_id: str
     ) -> list[MaintenanceReview]:
@@ -1244,149 +1180,6 @@ class KnowledgeStore:
             expected_state=expected_state,
             actor=actor,
             reason=reason,
-        )
-
-    async def build_conflict_discovery_package(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        max_seed_span_days: int,
-        max_package_tokens: int,
-        token_counter: Callable[[str], int] | None = None,
-    ) -> ConflictDiscoveryPackage | None:
-        cursor = await self._conflict_discovery_reader.get_cursor(
-            user_name=user_name,
-            project_id=project_id,
-        )
-        return await ConflictPacketBuilder(
-            self._conflict_discovery_reader,
-            token_counter=token_counter,
-        ).build(
-            cursor,
-            max_span_days=max_seed_span_days,
-            max_tokens=max_package_tokens,
-        )
-
-    async def complete_conflict_discovery(
-        self,
-        package: ConflictDiscoveryPackage,
-        *,
-        candidates: Iterable[Any],
-    ) -> int:
-        """Persist grounded conflict groups and advance the cursor atomically."""
-
-        results = []
-        async with self._postgres_client.transaction() as cur:
-            for candidate in candidates:
-                result = await self._conflict_writer.record_detection(
-                    user_name=package.cursor.user_name,
-                    project_id=package.cursor.project_id,
-                    origin="background_discovery",
-                    kind=candidate.kind,
-                    rationale=candidate.rationale,
-                    confidence=candidate.confidence,
-                    evidence_ids=candidate.evidence_ids,
-                    metadata={
-                        "discovery_packet_tokens": package.estimated_tokens,
-                        "packet_compacted": package.compacted,
-                    },
-                    cur=cur,
-                )
-                results.append(result)
-            await self._conflict_discovery_reader.advance(
-                package.cursor,
-                last_reviewed_observation_id=package.next_observation_id,
-                cur=cur,
-            )
-
-        for result in results:
-            await self._conflict_service.notify_detection(
-                user_name=package.cursor.user_name,
-                project_id=package.cursor.project_id,
-                origin="background_discovery",
-                result=result,
-            )
-        return sum(int(result.should_notify) for result in results)
-
-    async def record_conflict_detection(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        origin: ConflictOrigin,
-        kind: str,
-        rationale: str,
-        confidence: float | None,
-        evidence_ids: List[int],
-        metadata: Dict | None = None,
-        existing_conflict_id: str | None = None,
-    ) -> ConflictWriteResult:
-        return await self._conflict_service.record_detection(
-            user_name=user_name,
-            project_id=project_id,
-            origin=origin,
-            kind=kind,
-            rationale=rationale,
-            confidence=confidence,
-            evidence_ids=evidence_ids,
-            metadata=metadata,
-            existing_conflict_id=existing_conflict_id,
-        )
-
-    async def get_conflict_group(
-        self,
-        *,
-        conflict_id: str,
-        user_name: str,
-        project_id: str,
-    ) -> Dict | None:
-        return await self._conflict_reader.get_detail(
-            conflict_id=conflict_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def resolve_conflict_group(
-        self,
-        *,
-        conflict_id: str,
-        user_name: str,
-        project_id: str,
-        resolution_kind: ConflictResolutionKind,
-        resolved_by: str,
-        resolution_note: str | None = None,
-    ) -> ConflictGroup:
-        return await self._conflict_service.resolve(
-            conflict_id=conflict_id,
-            user_name=user_name,
-            project_id=project_id,
-            resolution_kind=resolution_kind,
-            resolved_by=resolved_by,
-            resolution_note=resolution_note,
-        )
-
-    async def apply_relationship_advisory_action(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        pattern_key: str,
-        action: str,
-        relationship_type: str | None = None,
-        note: str | None = None,
-        decided_by: str | None = None,
-    ) -> RelationshipAdvisoryDecision:
-        """Persist one explicit advisory decision without changing the domain."""
-
-        return await self._relationship_advisory_writer.apply_action(
-            user_name=user_name,
-            project_id=project_id,
-            pattern_key=pattern_key,
-            action=action,
-            relationship_type=relationship_type,
-            note=note,
-            decided_by=decided_by,
         )
 
     async def get_recent_project_messages(

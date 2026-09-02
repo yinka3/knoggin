@@ -7,7 +7,7 @@ from core.knowledge.conflicts import (
     ConflictDiscoveryPackage,
     LLMConflictCandidate,
 )
-from core.knowledge.store import KnowledgeStore
+from core.project.maintenance_service import ProjectMaintenanceService
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -53,8 +53,14 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         fetch_all_results=[evidence],
         fetch_one_results=[None, review],
     )
-    store = KnowledgeStore(client, embedding_service=object())
-    store._conflict_service.notify_detection = AsyncMock()
+    service = ProjectMaintenanceService(
+        resources=type("Resources", (), {"postgres": client, "knowledge_store": None})(),
+        user_name="ada",
+        project_lookup=lambda _project_id: None,
+        active_projects={},
+        project_leases={},
+    )
+    service._conflict_service.notify_detection = AsyncMock()
     package = ConflictDiscoveryPackage(
         cursor=ConflictDiscoveryCursor("ada", "project-1", 0),
         observations=tuple(evidence),
@@ -69,7 +75,7 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         confidence=0.8,
     )
 
-    written = await store.complete_conflict_discovery(package, candidates=[candidate])
+    written = await service.complete_conflict_discovery(package, candidates=[candidate])
 
     assert written == 1
     assert client.transaction_enters == 1
@@ -80,4 +86,4 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         if "UPDATE public.maintenance_review_checkpoints" in call[1]
     )
     assert cursor_call[2] == (11, "ada", "project-1")
-    store._conflict_service.notify_detection.assert_awaited_once()
+    service._conflict_service.notify_detection.assert_awaited_once()

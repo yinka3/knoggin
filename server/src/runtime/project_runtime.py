@@ -10,7 +10,7 @@ from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.project.domain_config_store import DomainActivation, DomainConfigStore
 from infrastructure.background_work import BackgroundWorkCoordinator
-from infrastructure.job.scheduler import Scheduler
+from infrastructure.job.scheduler import EpisodeScheduler
 
 
 class ProjectRuntime:
@@ -24,7 +24,7 @@ class ProjectRuntime:
         entities: EntityResolver,
         knowledge_retrieval: Any,
         text_processor: TextProcessor,
-        scheduler: Scheduler,
+        scheduler: EpisodeScheduler,
         user_name: str,
         readable_project_ids: list[str],
         domain_config: DomainConfig,
@@ -119,7 +119,7 @@ class ProjectRuntime:
         if self.scheduler is not None:
             owners.update(
                 f"project:{self.project_id}:{name}"
-                for name in self.scheduler.registered_job_names
+                for name in getattr(self.scheduler, "registered_job_names", ())
             )
         for owner in sorted(owners):
             await self.background_work.cancel_owner(owner)

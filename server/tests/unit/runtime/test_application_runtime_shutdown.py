@@ -13,6 +13,9 @@ class RecordingOwner:
         self.error = error
         self.shutdown_count = 0
 
+    async def start(self):
+        self.calls.append(f"{self.name}_start")
+
     async def shutdown(self):
         self.shutdown_count += 1
         self.calls.append(self.name)
@@ -165,7 +168,11 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(m
         "create",
         classmethod(create_resources),
     )
-    monkeypatch.setattr(application_module, "ProjectManager", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        application_module,
+        "ProjectManager",
+        lambda **_kwargs: RecordingOwner("projects", calls),
+    )
     monkeypatch.setattr(application_module, "AgentManager", RecordingAgentManager)
     monkeypatch.setattr(
         application_module,
@@ -187,7 +194,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(m
     with pytest.raises(RuntimeError, match="AAC start failed"):
         await application_module.ApplicationRuntime.start(user_name="ada")
 
-    assert calls == ["aac", "resources"]
+    assert calls == ["projects_start", "aac", "projects", "resources"]
 
 
 @pytest.mark.runtime
@@ -260,6 +267,7 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
 
     assert calls == [
         ("identity", "ada", ["Ada"]),
+        "projects_start",
         "agent_manager",
         "ensure_default_agent",
         "agent_orchestrator",

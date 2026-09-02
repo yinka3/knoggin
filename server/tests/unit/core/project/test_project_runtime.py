@@ -39,12 +39,14 @@ async def test_project_runtime_shutdown_cancels_project_work_after_scheduler_sto
     calls = []
 
     class RecordingScheduler:
+        registered_job_names = ("episode",)
+
         async def stop(self):
             calls.append("scheduler")
 
     class RecordingBackgroundWork:
-        async def cancel_project(self, project_id):
-            calls.append(f"background:{project_id}")
+        async def cancel_owner(self, owner):
+            calls.append(f"background:{owner}")
 
     class RecordingIndexer:
         async def shutdown(self):
@@ -54,7 +56,7 @@ async def test_project_runtime_shutdown_cancels_project_work_after_scheduler_sto
         scheduler=RecordingScheduler(),
         background_work=RecordingBackgroundWork(),
     )
-    state.document_indexer = RecordingIndexer()
+    state.document_service._indexer = RecordingIndexer()
     state.add_config_unsubscriber(lambda: calls.append("unsubscribe"))
 
     await state.shutdown()
@@ -62,7 +64,8 @@ async def test_project_runtime_shutdown_cancels_project_work_after_scheduler_sto
     assert calls == [
         "scheduler",
         "document-indexer",
-        "background:project-1",
+        "background:project:project-1:document-index",
+        "background:project:project-1:episode",
         "unsubscribe",
     ]
 
@@ -73,13 +76,15 @@ async def test_project_runtime_shutdown_finishes_cleanup_after_a_phase_failure()
     calls = []
 
     class FailingScheduler:
+        registered_job_names = ("episode",)
+
         async def stop(self):
             calls.append("scheduler")
             raise RuntimeError("scheduler failed")
 
     class RecordingBackgroundWork:
-        async def cancel_project(self, project_id):
-            calls.append(f"background:{project_id}")
+        async def cancel_owner(self, owner):
+            calls.append(f"background:{owner}")
 
     class RecordingIndexer:
         async def shutdown(self):
@@ -89,7 +94,7 @@ async def test_project_runtime_shutdown_finishes_cleanup_after_a_phase_failure()
         scheduler=FailingScheduler(),
         background_work=RecordingBackgroundWork(),
     )
-    state.document_indexer = RecordingIndexer()
+    state.document_service._indexer = RecordingIndexer()
     state.add_config_unsubscriber(lambda: calls.append("unsubscribe"))
 
     with pytest.raises(RuntimeError, match="ProjectRuntime shutdown failed"):
@@ -98,6 +103,7 @@ async def test_project_runtime_shutdown_finishes_cleanup_after_a_phase_failure()
     assert calls == [
         "scheduler",
         "document-indexer",
-        "background:project-1",
+        "background:project:project-1:document-index",
+        "background:project:project-1:episode",
         "unsubscribe",
     ]

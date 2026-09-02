@@ -115,7 +115,8 @@ class JobStore:
         self.package = package
         self.completed = []
 
-    async def build_conflict_discovery_package(self, **kwargs):
+    async def build_conflict_discovery_package(self, project_id=None, **kwargs):
+        self.project_id = project_id
         self.build_args = kwargs
         return self.package
 

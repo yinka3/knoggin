@@ -119,7 +119,7 @@ class ProjectManager:
         self.maintenance_scheduler = ApplicationMaintenanceScheduler(
             maintenance_service=self.entity_maintenance_service,
             user_name=user_name,
-            background_work=resources.background_work,
+            background_work=getattr(resources, "background_work", None),
         )
         self._closed = False
 

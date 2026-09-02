@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 
+from core.knowledge.conflict_discovery import ConflictPacketBuilder
+from core.knowledge.conflict_service import ConflictService
+from core.knowledge.conflicts import (
+    ConflictDiscoveryPackage,
+    ConflictOrigin,
+    ConflictWriteResult,
+    LLMConflictCandidate,
+)
+from core.knowledge.db.readers.conflict_discovery_reader import (
+    ConflictDiscoveryReader,
+)
+from core.knowledge.db.readers.conflict_reader import ConflictReader
+from core.knowledge.db.readers.relationship_observation_reader import (
+    RelationshipObservationReader,
+)
+from core.knowledge.db.writers.conflict_writer import ConflictWriter
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
+from core.knowledge.db.writers.relationship_advisory_writer import (
+    RelationshipAdvisoryWriter,
+)
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
@@ -45,6 +65,21 @@ class ProjectMaintenanceService:
         self._active_projects = active_projects
         self._project_leases = project_leases
         self._lock = asyncio.Lock()
+        # Semantic review workflows live above KnowledgeStore. The persistence
+        # facade remains focused on durable reads/writes and graph projections.
+        self._maintenance_reviews = MaintenanceReviewWriter(self.pg)
+        self._conflict_writer = ConflictWriter(
+            self.pg,
+            reviews=self._maintenance_reviews,
+        )
+        self._conflict_service = ConflictService(self._conflict_writer)
+        self._conflict_discovery_reader = ConflictDiscoveryReader(self.pg)
+        self._conflict_reader = ConflictReader(self.pg)
+        self._relationship_observation_reader = RelationshipObservationReader(self.pg)
+        self._relationship_advisory_writer = RelationshipAdvisoryWriter(
+            self.pg,
+            reviews=self._maintenance_reviews,
+        )
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -80,25 +115,26 @@ class ProjectMaintenanceService:
         """Read evidence-backed relationship advisories with dispositions."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        knowledge_store = self.resources.knowledge_store
-        if knowledge_store is None:
-            raise RuntimeError("Knowledge storage is unavailable")
         domain = await DomainConfigStore(self.pg).load(self.user_name, project_id)
-        return await knowledge_store.get_relationship_advisories(
+        advisories = await self._relationship_observation_reader.get_advisories(
             user_name=self.user_name,
             project_id=project_id,
             thresholds=thresholds,
-            domain_version=domain.version,
         )
+        for advisory in advisories:
+            await self._relationship_advisory_writer.materialize_pending(
+                user_name=self.user_name,
+                project_id=project_id,
+                advisory=advisory,
+                domain_version=domain.version,
+            )
+        return advisories
 
     async def get_open_human_reviews(self, project_id: str):
         """Return workflow-neutral inbox entries for a project."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        knowledge_store = self.resources.knowledge_store
-        if knowledge_store is None:
-            raise RuntimeError("Knowledge storage is unavailable")
-        return await knowledge_store.get_open_human_reviews(
+        return await self._maintenance_reviews.list_open(
             user_name=self.user_name,
             project_id=project_id,
         )
@@ -107,10 +143,7 @@ class ProjectMaintenanceService:
         """Return durable typed review history for this project."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        knowledge_store = self.resources.knowledge_store
-        if knowledge_store is None:
-            raise RuntimeError("Knowledge storage is unavailable")
-        return await knowledge_store.list_maintenance_reviews(
+        return await self._maintenance_reviews.list(
             user_name=self.user_name,
             project_id=project_id,
         )
@@ -127,10 +160,7 @@ class ProjectMaintenanceService:
         """Apply a review decision after the caller has inspected its plan."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        knowledge_store = self.resources.knowledge_store
-        if knowledge_store is None:
-            raise RuntimeError("Knowledge storage is unavailable")
-        return await knowledge_store.transition_maintenance_review(
+        return await self._maintenance_reviews.transition(
             review_id=review_id,
             user_name=self.user_name,
             project_id=project_id,
@@ -144,10 +174,7 @@ class ProjectMaintenanceService:
         """Return the conflict workflow subject and immutable evidence snapshots."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        knowledge_store = self.resources.knowledge_store
-        if knowledge_store is None:
-            raise RuntimeError("Knowledge storage is unavailable")
-        detail = await knowledge_store.get_conflict_group(
+        detail = await self._conflict_reader.get_detail(
             conflict_id=conflict_id,
             user_name=self.user_name,
             project_id=project_id,
@@ -155,6 +182,94 @@ class ProjectMaintenanceService:
         if detail is None:
             raise FileNotFoundError("Conflict group not found")
         return detail
+
+    async def build_conflict_discovery_package(
+        self,
+        project_id: str,
+        *,
+        max_seed_span_days: int,
+        max_package_tokens: int,
+        token_counter: Callable[[str], int] | None = None,
+    ) -> ConflictDiscoveryPackage | None:
+        """Build bounded conflict evidence above the persistence facade."""
+        await self._require_domain_project(project_id, allow_archived=True)
+        cursor = await self._conflict_discovery_reader.get_cursor(
+            user_name=self.user_name,
+            project_id=project_id,
+        )
+        return await ConflictPacketBuilder(
+            self._conflict_discovery_reader,
+            token_counter=token_counter,
+        ).build(
+            cursor,
+            max_span_days=max_seed_span_days,
+            max_tokens=max_package_tokens,
+        )
+
+    async def complete_conflict_discovery(
+        self,
+        package: ConflictDiscoveryPackage,
+        *,
+        candidates: Iterable[LLMConflictCandidate],
+    ) -> int:
+        """Persist grounded conflict reviews and advance the cursor atomically."""
+        results = []
+        async with self.pg.transaction() as cur:
+            for candidate in candidates:
+                result = await self._conflict_writer.record_detection(
+                    user_name=package.cursor.user_name,
+                    project_id=package.cursor.project_id,
+                    origin="background_discovery",
+                    kind=candidate.kind,
+                    rationale=candidate.rationale,
+                    confidence=candidate.confidence,
+                    evidence_ids=candidate.evidence_ids,
+                    metadata={
+                        "discovery_packet_tokens": package.estimated_tokens,
+                        "packet_compacted": package.compacted,
+                    },
+                    cur=cur,
+                )
+                results.append(result)
+            await self._conflict_discovery_reader.advance(
+                package.cursor,
+                last_reviewed_observation_id=package.next_observation_id,
+                cur=cur,
+            )
+        for result in results:
+            await self._conflict_service.notify_detection(
+                user_name=package.cursor.user_name,
+                project_id=package.cursor.project_id,
+                origin="background_discovery",
+                result=result,
+            )
+        return sum(int(result.should_notify) for result in results)
+
+    async def record_conflict_detection(
+        self,
+        project_id: str,
+        *,
+        origin: ConflictOrigin,
+        kind: str,
+        rationale: str,
+        confidence: float | None,
+        evidence_ids: list[int],
+        metadata: dict | None = None,
+        existing_conflict_id: str | None = None,
+    ) -> ConflictWriteResult:
+        """Record an agent/user conflict report at the maintenance boundary."""
+        await self._require_domain_project(project_id, allow_archived=True)
+        return await self._conflict_service.record_detection(
+            user_name=self.user_name,
+            project_id=project_id,
+            origin=origin,
+            kind=kind,
+            rationale=rationale,
+            confidence=confidence,
+            evidence_ids=evidence_ids,
+            metadata=metadata,
+            existing_conflict_id=existing_conflict_id,
+        )
 
     async def resolve_conflict_group(
         self,
@@ -168,10 +283,7 @@ class ProjectMaintenanceService:
         """Apply a user-led classification without rewriting the evidence."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        knowledge_store = self.resources.knowledge_store
-        if knowledge_store is None:
-            raise RuntimeError("Knowledge storage is unavailable")
-        return await knowledge_store.resolve_conflict_group(
+        return await self._conflict_service.resolve(
             conflict_id=conflict_id,
             user_name=self.user_name,
             project_id=project_id,
@@ -193,10 +305,7 @@ class ProjectMaintenanceService:
         """Persist an advisory decision without activating domain changes."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        knowledge_store = self.resources.knowledge_store
-        if knowledge_store is None:
-            raise RuntimeError("Knowledge storage is unavailable")
-        return await knowledge_store.apply_relationship_advisory_action(
+        return await self._relationship_advisory_writer.apply_action(
             user_name=self.user_name,
             project_id=project_id,
             pattern_key=pattern_key,

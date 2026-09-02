@@ -2,6 +2,8 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from core.knowledge.conflict_service import ConflictService
+from core.knowledge.db.writers.conflict_writer import ConflictWriter
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.maintenance_reviews import EvidenceRef
 
@@ -162,7 +164,9 @@ class MaintenanceTools:
         changes relationship evidence nor decides which observation is current.
         """
         try:
-            result = await self.knowledge_store.record_conflict_detection(
+            result = await ConflictService(
+                ConflictWriter(self.postgres)
+            ).record_detection(
                 user_name=self.user_name,
                 project_id=self.project_id,
                 origin="agent_discovery",
