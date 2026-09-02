@@ -32,10 +32,18 @@ class EntityMaintenanceService:
 
     def __init__(
         self,
-        postgres: PostgresClient,
+        postgres: PostgresClient | None = None,
         knowledge_store=None,
         user_name: str | None = None,
+        *,
+        resources=None,
     ) -> None:
+        if resources is not None:
+            postgres = resources.postgres
+            if knowledge_store is None:
+                knowledge_store = resources.knowledge_store
+        if postgres is None:
+            raise ValueError("EntityMaintenanceService requires PostgreSQL resources")
         self.postgres = postgres
         self.knowledge_store = knowledge_store
         self.user_name = user_name
@@ -332,6 +340,21 @@ class EntityMaintenanceService:
                 projection_errors.append({"project_id": project_id, "error": str(exc)})
         result["projection_errors"] = projection_errors
         return result
+
+    async def merge_entities(
+        self,
+        plan: EntityMergePlan | dict[str, Any],
+        *,
+        user_name: str | None = None,
+        expected_state_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Explicitly named application entry point for merge execution."""
+
+        return await self.merge(
+            plan,
+            user_name=user_name,
+            expected_state_hash=expected_state_hash,
+        )
 
     @staticmethod
     def state_hash(snapshot: dict[str, Any]) -> str:

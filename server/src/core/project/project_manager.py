@@ -110,9 +110,8 @@ class ProjectManager:
         # service for the current local user while project maintenance remains
         # separately scoped above.
         self.entity_maintenance_service = EntityMaintenanceService(
-            self.pg,
-            resources.knowledge_store,
-            user_name,
+            resources=resources,
+            user_name=user_name,
         )
         self._closed = False
 
