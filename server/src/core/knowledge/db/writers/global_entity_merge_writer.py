@@ -941,6 +941,8 @@ class GlobalEntityMergeWriter:
             safe: list[int] = []
             conflicts: list[dict[str, Any]] = []
             for mutation in mutations:
+                if mutation["inverse_status"] == "applied":
+                    continue
                 current = await self._current_mutation_value(active_cur, mutation)
                 expected = mutation["after_value"]
                 # A mutation that intentionally created no row is safe while
@@ -994,6 +996,11 @@ class GlobalEntityMergeWriter:
                 "merge_id": merge_id,
                 "safe_mutation_ids": safe,
                 "conflicting_mutations": conflicts,
+                "already_applied_mutation_ids": [
+                    int(item["mutation_id"])
+                    for item in mutations
+                    if item["inverse_status"] == "applied"
+                ],
                 "mutations": mutations,
             }
 
@@ -1003,6 +1010,7 @@ class GlobalEntityMergeWriter:
         merge_id: str,
         user_name: str,
         safe_mutation_ids: list[int],
+        force_mutation_ids: list[int] | None = None,
         cur=None,
     ) -> dict[str, Any]:
         """Apply only the inverse mutations proven safe by ``plan_rollback``."""
@@ -1023,11 +1031,16 @@ class GlobalEntityMergeWriter:
                 cur=active_cur,
             )
             fresh_safe_ids = set(fresh_plan["safe_mutation_ids"])
+            forced_ids = set(force_mutation_ids or [])
             selected = {
                 int(mutation["mutation_id"]): mutation
                 for mutation in mutations
                 if int(mutation["mutation_id"]) in set(safe_mutation_ids)
-                and int(mutation["mutation_id"]) in fresh_safe_ids
+                and (
+                    int(mutation["mutation_id"]) in fresh_safe_ids
+                    or int(mutation["mutation_id"]) in forced_ids
+                )
+                and mutation["inverse_status"] != "applied"
             }
             order = {
                 "entity": 0,
@@ -1045,7 +1058,12 @@ class GlobalEntityMergeWriter:
                     "UPDATE public.entity_global_merge_mutations SET inverse_status = 'applied' WHERE mutation_id = %s",
                     (mutation["mutation_id"],),
                 )
-            if selected and len(selected) == len(mutations):
+            pending_mutation_count = sum(
+                mutation["inverse_status"] != "applied" for mutation in mutations
+            )
+            if pending_mutation_count == 0 or (
+                selected and len(selected) == pending_mutation_count
+            ):
                 await active_cur.execute(
                     "UPDATE public.entity_global_merge_audits SET status = 'rolled_back', completed_at = now() WHERE merge_id = %s",
                     (merge_id,),

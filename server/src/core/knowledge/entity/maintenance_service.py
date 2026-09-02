@@ -287,8 +287,14 @@ class EntityMaintenanceService:
         if preview["context_conflicts"]:
             raise EntityMergeConflict(preview["context_conflicts"])
         expected_hash = expected_state_hash or typed_plan.expected_state_hash
-        if expected_hash and expected_hash != preview["state_hash"]:
+        if not expected_hash:
+            raise ValueError("merge plan requires an expected state hash")
+        if expected_hash != preview["state_hash"]:
             raise ValueError("merge plan is stale; entity evidence changed")
+        if preview["affected_project_ids"] and set(typed_plan.frontier_tokens) != set(
+            preview["affected_project_ids"]
+        ):
+            raise ValueError("merge plan requires a frontier token for every affected project")
         expected_frontiers = {
             project_id: {"token": token}
             for project_id, token in typed_plan.frontier_tokens.items()
@@ -363,6 +369,7 @@ class EntityMaintenanceService:
         merge_id: str,
         *,
         user_name: str | None = None,
+        approved_mutation_ids: Iterable[int] = (),
     ) -> dict[str, Any]:
         """Apply safe inverse mutations and open a review for conflicts."""
 
@@ -370,12 +377,21 @@ class EntityMaintenanceService:
         if not actor:
             raise ValueError("user_name is required for global maintenance")
         plan = await self.plan_rollback(merge_id, user_name=actor)
+        approved_ids = sorted({int(item) for item in approved_mutation_ids})
+        requested_ids = sorted(
+            set(plan["safe_mutation_ids"]) | set(approved_ids)
+        )
         result = await self.writer.rollback_safe(
             merge_id=merge_id,
             user_name=actor,
-            safe_mutation_ids=plan["safe_mutation_ids"],
+            safe_mutation_ids=requested_ids,
+            force_mutation_ids=approved_ids,
         )
-        conflicts = list(plan["conflicting_mutations"])
+        conflicts = [
+            item
+            for item in plan["conflicting_mutations"]
+            if int(item["mutation_id"]) not in set(approved_ids)
+        ]
         concurrent_ids = set(result.get("concurrent_conflicts") or [])
         if concurrent_ids:
             conflicts.extend(
