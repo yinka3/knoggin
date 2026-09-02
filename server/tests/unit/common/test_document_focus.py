@@ -24,6 +24,7 @@ def test_document_focus_uses_the_document_variant_with_only_its_selectors():
     assert isinstance(focus, DocumentFocusDocument)
     assert dump_document_focus(focus) == {
         "mode": "pinned",
+        "behavior": "prefer",
         "created_at": "2026-06-22T12:00:00+00:00",
         "target_type": "document",
         "document_id": "doc-1",

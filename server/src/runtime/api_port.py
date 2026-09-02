@@ -25,6 +25,7 @@ from common.schema.public import (
     DocumentFocusResponse,
     MessageDeltaEvent,
     ProjectResponse,
+    PromoteSourceRequest,
     PublicError,
     RunCompletedEvent,
     RunFailedEvent,
@@ -166,6 +167,7 @@ class ApplicationRuntimePort:
                     if target["target_type"] == "subtree"
                     else None
                 ),
+                behavior=target.get("behavior", "prefer"),
             )
         except FileNotFoundError as exc:
             raise NotFoundError("session") from exc
@@ -182,6 +184,36 @@ class ApplicationRuntimePort:
             await self.runtime.sessions.clear_document_focus(session_id)
         except FileNotFoundError as exc:
             raise NotFoundError("session") from exc
+
+    async def promote_source(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        request: PromoteSourceRequest,
+    ) -> dict:
+        """Promote a cited assistant source only after an explicit user action."""
+        session = await self._session(
+            user_name=user_name,
+            session_id=request.session_id,
+        )
+        if session.project_id != project_id:
+            raise PermissionError("Source promotion must target the session project")
+        source = await self.runtime.resources.knowledge_store.get_source_reference(
+            request.source_ref_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=request.session_id,
+        )
+        if source is None:
+            raise NotFoundError("source")
+        if session.document_service is None:
+            raise RuntimeError("Session document service is unavailable")
+        return await session.document_service.promote_source(
+            source,
+            title=request.title,
+            summary=request.summary,
+        )
 
     async def _request_document_focus(
         self,
@@ -220,6 +252,7 @@ class ApplicationRuntimePort:
             )
         return create_document_focus(
             mode="request",
+            behavior=requested.behavior,
             created_at=datetime.now(timezone.utc),
             **target,
         )

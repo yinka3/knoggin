@@ -406,6 +406,45 @@ class SearchTools:
 
     _CONTENT_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
+    def _focus_behavior(self) -> str:
+        """Return the focus retrieval policy, including old request records."""
+        if not self.document_focus:
+            return "prefer"
+        behavior = self.document_focus.get("behavior")
+        if behavior in {"prefer", "restrict"}:
+            return behavior
+        # Request focus historically meant an unbypassable selector. Keep that
+        # safety property for persisted records written before ``behavior``.
+        return "restrict" if self.document_focus.get("mode") == "request" else "prefer"
+
+    def _focus_is_restrictive(self) -> bool:
+        return bool(self.document_focus) and self._focus_behavior() == "restrict"
+
+    def _focus_path_contains(self, relative_path: str) -> bool:
+        prefix = self.document_focus.get("path_prefix") if self.document_focus else None
+        if not isinstance(prefix, str) or not prefix:
+            return False
+        return relative_path == prefix or relative_path.startswith(prefix.rstrip("/") + "/")
+
+    async def _require_focus_document(self, *, document_id: str | None, relative_path: str | None) -> None:
+        """Reject an explicit document selector outside a restrictive focus."""
+        if not self._focus_is_restrictive() or not self.document_focus:
+            return
+        if self.document_focus.get("target_type") == "document":
+            focused_id = self.document_focus.get("document_id")
+            focused_path = self.document_focus.get("relative_path")
+            if document_id is not None and document_id != focused_id:
+                raise ValueError("document operation is restricted to the selected document")
+            if relative_path is not None and relative_path != focused_path:
+                raise ValueError("document operation is restricted to the selected document")
+            return
+        if document_id is not None:
+            document = await self.document_service.get_document_info(document_id=document_id)
+            if not self._focus_path_contains(str(document.get("relative_path", ""))):
+                raise ValueError("document operation is restricted to the focused subtree")
+        elif relative_path is not None and not self._focus_path_contains(relative_path):
+            raise ValueError("document operation is restricted to the focused subtree")
+
     def _request_focus_document_id(self) -> Optional[str]:
         """Return the document ID for an unbypassable request selector."""
         if (
@@ -655,17 +694,23 @@ class SearchTools:
         ):
             raise ValueError("limit must be between 1 and 100")
 
-        if (
-            use_focus
-            and path_prefix is None
-            and self.document_focus
-        ):
-            if self.document_focus["target_type"] == "document":
-                document = await self.document_service.get_document_info(
-                    document_id=self.document_focus["document_id"],
-                )
-                return [document]
-            path_prefix = self.document_focus.get("path_prefix")
+        if self.document_focus:
+            restrictive = self._focus_is_restrictive()
+            should_apply = restrictive or (use_focus and path_prefix is None)
+            if should_apply:
+                if self.document_focus["target_type"] == "document":
+                    await self._require_focus_document(relative_path=path_prefix, document_id=None)
+                    document = await self.document_service.get_document_info(
+                        document_id=self.document_focus["document_id"],
+                    )
+                    return [document]
+                focused_prefix = self.document_focus.get("path_prefix")
+                if restrictive and path_prefix is not None and not self._focus_path_contains(path_prefix):
+                    raise ValueError("list_documents is restricted to the focused subtree")
+                if path_prefix is None:
+                    path_prefix = focused_prefix
+            elif path_prefix is not None:
+                await self._require_focus_document(relative_path=path_prefix, document_id=None)
 
         documents = await self.document_service.list_documents(
             path_prefix=path_prefix,
@@ -682,6 +727,8 @@ class SearchTools:
         """Get metadata for one visible document."""
         if not self.document_service:
             return {"error": "No project document service available"}
+        if self.document_focus and self._focus_is_restrictive():
+            await self._require_focus_document(document_id=document_id, relative_path=relative_path)
         if (
             document_id is None
             and relative_path is None
@@ -690,6 +737,14 @@ class SearchTools:
             and self.document_focus["target_type"] == "document"
         ):
             document_id = self.document_focus["document_id"]
+        elif (
+            document_id is None
+            and relative_path is None
+            and self.document_focus
+            and self._focus_is_restrictive()
+            and self.document_focus["target_type"] == "subtree"
+        ):
+            raise ValueError("get_document_info requires a selector within the focused subtree")
         return await self.document_service.get_document_info(
             document_id=document_id,
             relative_path=relative_path,
@@ -708,6 +763,8 @@ class SearchTools:
         if not self.document_service:
             return [{"error": "No project document service available"}]
         request_document_id = self._request_focus_document_id()
+        if self.document_focus and self._focus_is_restrictive():
+            await self._require_focus_document(document_id=document_id, relative_path=relative_path)
         if request_document_id is not None:
             if document_id is not None and document_id != request_document_id:
                 raise ValueError(
@@ -730,6 +787,14 @@ class SearchTools:
             and self.document_focus["target_type"] == "document"
         ):
             document_id = self.document_focus["document_id"]
+        elif (
+            document_id is None
+            and relative_path is None
+            and self.document_focus
+            and self._focus_is_restrictive()
+            and self.document_focus["target_type"] == "subtree"
+        ):
+            raise ValueError("read_document requires a selector within the focused subtree")
         page_number, start_line, end_line = self._request_selection_defaults(
             page_number=page_number,
             start_line=start_line,
@@ -790,6 +855,13 @@ class SearchTools:
             )
 
         request_document_id = self._request_focus_document_id()
+        if self.document_focus and self._focus_is_restrictive():
+            await self._require_focus_document(
+                document_id=(None if document_name is not None else request_document_id),
+                relative_path=relative_path,
+            )
+            if path_prefix is not None and self.document_focus["target_type"] == "subtree" and not self._focus_path_contains(path_prefix):
+                raise ValueError("search_documents is restricted to the focused subtree")
         if request_document_id is not None:
             if (
                 relative_path is not None
@@ -801,6 +873,8 @@ class SearchTools:
             relative_path = None
             path_prefix = None
         document_filter = request_document_id
+        if self.document_focus and self._focus_is_restrictive() and self.document_focus["target_type"] == "document":
+            document_filter = self.document_focus["document_id"]
         if request_document_id is None and (
             use_focus
             and document_name is None

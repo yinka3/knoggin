@@ -136,6 +136,7 @@ class RunDocumentFocusDocument(PublicModel):
     target_type: Literal["document"]
     document_id: str = Field(min_length=1)
     selection: DocumentSelection | None = None
+    behavior: Literal["prefer", "restrict"] = "restrict"
 
 
 class RunDocumentFocusSubtree(PublicModel):
@@ -143,6 +144,7 @@ class RunDocumentFocusSubtree(PublicModel):
 
     target_type: Literal["subtree"]
     path_prefix: str = Field(min_length=1)
+    behavior: Literal["prefer", "restrict"] = "prefer"
 
 
 RunDocumentFocus = Annotated[
@@ -156,6 +158,7 @@ class SetDocumentFocusDocument(PublicModel):
 
     target_type: Literal["document"]
     document_id: str = Field(min_length=1)
+    behavior: Literal["prefer", "restrict"] = "prefer"
 
 
 class SetDocumentFocusSubtree(PublicModel):
@@ -163,6 +166,7 @@ class SetDocumentFocusSubtree(PublicModel):
 
     target_type: Literal["subtree"]
     path_prefix: str = Field(min_length=1)
+    behavior: Literal["prefer", "restrict"] = "prefer"
 
 
 SetDocumentFocusRequest = Annotated[
@@ -175,11 +179,21 @@ class DocumentFocusResponse(PublicModel):
     """Stable public projection of the currently pinned session focus."""
 
     mode: Literal["pinned"]
+    behavior: Literal["prefer", "restrict"] = "prefer"
     created_at: datetime
     target_type: Literal["document", "subtree"]
     document_id: str | None = None
     relative_path: str | None = None
     path_prefix: str | None = None
+
+
+class PromoteSourceRequest(PublicModel):
+    """Explicitly keep one source previously returned by an assistant."""
+
+    session_id: str = Field(min_length=1)
+    source_ref_id: str = Field(min_length=1)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
 
 
 class StartRunRequest(PublicModel):

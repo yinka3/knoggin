@@ -300,6 +300,7 @@ def format_document_focus_context(
     lines = [
         "Active document focus:",
         f"- mode: {'request' if is_request_focus else 'pinned'}",
+        f"- behavior: {focus.get('behavior', 'restrict' if is_request_focus else 'prefer')}",
         f"- expires: {'this request' if is_request_focus else 'this session'}",
     ]
     target_type = focus.get("target_type")

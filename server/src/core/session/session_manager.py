@@ -467,8 +467,11 @@ class SessionManager:
         *,
         document_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
+        behavior: str = "prefer",
     ) -> dict:
         """Validate and persist one pinned document focus for a session."""
+        if behavior not in {"prefer", "restrict"}:
+            raise ValueError("document focus behavior must be 'prefer' or 'restrict'")
         async with self._lifecycle_lock:
             context = await self._get_or_resume_session_locked(session_id)
             if context is None:
@@ -483,6 +486,7 @@ class SessionManager:
             focus = dump_document_focus(
                 create_document_focus(
                     mode="pinned",
+                    behavior=behavior,
                     created_at=get_now_iso(),
                     **target,
                 )

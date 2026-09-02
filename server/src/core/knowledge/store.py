@@ -480,6 +480,22 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
+    async def get_source_reference(
+        self,
+        source_ref_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> SourceReference | None:
+        """Read one assistant-owned provenance row for explicit promotion."""
+        return await self._source_reference_reader.get_source_reference(
+            source_ref_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
     async def get_assistant_message_with_sources(
         self,
         message_id: int,

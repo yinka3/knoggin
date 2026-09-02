@@ -54,6 +54,54 @@ class SavedWebLink(BaseModel):
         return value.strip() or None
 
 
+class UserAttachedFile(BaseModel):
+    """One file explicitly introduced by the user for a conversation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_type: Literal["file"] = "file"
+    original_name: str = Field(min_length=1, max_length=512)
+    content: bytes = Field(min_length=1, repr=False)
+    relative_path: str | None = Field(default=None, min_length=1, max_length=2048)
+
+    @field_validator("original_name", "relative_path")
+    @classmethod
+    def _normalize_file_names(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("attached file names must be non-blank and null-free")
+        return normalized
+
+
+class UserAttachedUrl(BaseModel):
+    """One HTTP(S) URL explicitly introduced by the user."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_type: Literal["url"] = "url"
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        return SavedWebLink._require_http_url(value)
+
+    @field_validator("title", "summary")
+    @classmethod
+    def _normalize_text(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
+UserAttachedSource = Annotated[
+    Union[UserAttachedFile, UserAttachedUrl],
+    Field(discriminator="source_type"),
+]
+
+
 class FolderUploadEntry(BaseModel):
     """One browser-uploaded file in a virtual folder manifest."""
 
@@ -194,6 +242,10 @@ class _DocumentFocusBase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     mode: Literal["pinned", "request"] = "pinned"
+    # Duration (``mode``) and retrieval behavior are intentionally separate:
+    # a persisted focus can be a preference, while a request may opt into a
+    # hard boundary for one run.
+    behavior: Literal["prefer", "restrict"] = "prefer"
     created_at: datetime
 
     @field_validator("created_at")
@@ -296,12 +348,20 @@ def parse_document_focus(value: object) -> DocumentFocus:
 def create_document_focus(
     *,
     mode: Literal["pinned", "request"] = "pinned",
+    behavior: Literal["prefer", "restrict"] = "prefer",
     created_at: datetime | str,
     **target: object,
 ) -> DocumentFocus:
     """Create one focus variant from a resolved document-service target."""
 
-    return parse_document_focus({"mode": mode, "created_at": created_at, **target})
+    return parse_document_focus(
+        {
+            "mode": mode,
+            "behavior": behavior,
+            "created_at": created_at,
+            **target,
+        }
+    )
 
 
 def dump_document_focus(value: DocumentFocus) -> dict:

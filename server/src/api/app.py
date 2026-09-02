@@ -37,6 +37,7 @@ from common.schema.public import (
     CreateSessionRequest,
     DocumentFocusResponse,
     ProjectResponse,
+    PromoteSourceRequest,
     PublicError,
     RunCancelledEvent,
     RunCompletedEvent,
@@ -93,6 +94,14 @@ class ApplicationPort(Protocol):
         user_name: str,
         session_id: str,
     ) -> None: ...
+
+    async def promote_source(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        request: PromoteSourceRequest,
+    ) -> Any: ...
 
     async def run_stream(
         self,
@@ -525,6 +534,23 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             port.clear_document_focus,
             user_name=user_name,
             session_id=session_id,
+        )
+
+    @app.post(
+        "/v1/projects/{project_id}/sources/promote",
+        status_code=201,
+    )
+    async def promote_source(
+        project_id: str,
+        body: PromoteSourceRequest,
+        request: Request,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(
+            port.promote_source,
+            user_name=user_name,
+            project_id=project_id,
+            request=body,
         )
 
     @app.get(

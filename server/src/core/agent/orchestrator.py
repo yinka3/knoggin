@@ -301,6 +301,7 @@ class AgentOrchestrator:
                 target["selection"] = persisted.selection
             return create_document_focus(
                 mode=("request" if persisted.mode == "request" else "pinned"),
+                behavior=persisted.behavior,
                 created_at=persisted.created_at,
                 **target,
             )

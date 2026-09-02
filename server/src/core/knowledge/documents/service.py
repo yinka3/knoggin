@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from loguru import logger
+from pydantic import TypeAdapter
 
 from common.schema.document import (
     DocumentSelection,
@@ -14,6 +15,9 @@ from common.schema.document import (
     FolderScanSettings,
     FolderUploadEntry,
     SavedWebLink,
+    UserAttachedFile,
+    UserAttachedSource,
+    UserAttachedUrl,
 )
 from common.schema.health import sanitize_health_details
 from common.schema.source.locators import (
@@ -67,6 +71,7 @@ class _UnsetSavedWebLinkField:
 
 
 _UNSET_SAVED_WEB_LINK_FIELD = _UnsetSavedWebLinkField()
+_USER_ATTACHED_SOURCE_ADAPTER = TypeAdapter(UserAttachedSource)
 
 
 async def _run_in_worker(
@@ -1137,6 +1142,71 @@ class DocumentService:
             document_id=document["document_id"],
         )
 
+    async def admit_user_source(
+        self,
+        source: UserAttachedSource | Dict[str, Any],
+        *,
+        durable: bool = True,
+    ) -> Dict[str, Any]:
+        """Admit one user-introduced source, durably by default.
+
+        ``durable=False`` is an explicit per-request opt-out.  The transient
+        descriptor is returned to the caller so it can remain run-local; no
+        catalog row, bookmark, or index entry is created in that mode.
+        """
+        if not isinstance(durable, bool):
+            raise ValueError("durable must be a boolean")
+        validated = (
+            source
+            if isinstance(source, (UserAttachedFile, UserAttachedUrl))
+            else _USER_ATTACHED_SOURCE_ADAPTER.validate_python(source)
+        )
+        if isinstance(validated, UserAttachedFile):
+            content_hash = hashlib.sha256(validated.content).hexdigest()
+            if not durable:
+                return {
+                    "source_type": "file",
+                    "durable": False,
+                    "original_name": validated.original_name,
+                    "relative_path": validated.relative_path,
+                    "content_hash": content_hash,
+                    "size_bytes": len(validated.content),
+                }
+            return await self.submit_document(
+                content=validated.content,
+                original_name=validated.original_name,
+                relative_path=validated.relative_path,
+            )
+
+        if not durable:
+            return {
+                "source_type": "url",
+                "durable": False,
+                "url": validated.url,
+                "title": validated.title,
+                "summary": validated.summary,
+            }
+        return await self.save_web_link(
+            url=validated.url,
+            title=validated.title,
+            summary=validated.summary,
+        )
+
+    async def admit_user_sources(
+        self,
+        sources: Iterable[UserAttachedSource | Dict[str, Any]],
+        *,
+        durable: bool = True,
+    ) -> list[Dict[str, Any]]:
+        """Admit a bounded batch of user sources with one explicit policy."""
+        values = list(sources)
+        if len(values) > 100:
+            raise ValueError("at most 100 user sources may be admitted at once")
+        return [
+            await self.admit_user_source(source, durable=durable)
+            for source in values
+        ]
+
     async def schedule_document_index(
         self,
         *,
@@ -1229,6 +1299,44 @@ class DocumentService:
             created_at=saved_at,
         )
         return self._public_saved_web_link(row)
+
+    async def promote_source(
+        self,
+        source: Dict[str, Any] | Any,
+        *,
+        title: str | None = None,
+        summary: str | None = None,
+    ) -> Dict:
+        """Explicitly promote an assistant-observed web source to a bookmark.
+
+        Source provenance remains message-owned unless this method is called.
+        Promotion stores only the URL bookmark; it never treats a transient
+        search/read excerpt as durable document content.
+        """
+        from common.schema.source.references import SourceReferenceCandidate
+
+        candidate = (
+            source
+            if isinstance(source, SourceReferenceCandidate)
+            else SourceReferenceCandidate.model_validate(source)
+        )
+        if candidate.source_kind not in {
+            "web_search_result",
+            "news_search_result",
+            "web_page",
+            "web_pdf",
+        }:
+            raise ValueError("only assistant-observed web sources can be promoted")
+        if not candidate.canonical_url:
+            raise ValueError("assistant source is missing a canonical URL")
+        if title is None:
+            candidate_title = candidate.metadata.get("title")
+            title = candidate_title if isinstance(candidate_title, str) else None
+        return await self.save_web_link(
+            url=candidate.canonical_url,
+            title=title,
+            summary=summary,
+        )
 
     async def list_saved_web_links(self, *, limit: int = 50) -> List[Dict]:
         """List this project's durable bookmarks, newest update first."""
