@@ -186,7 +186,6 @@ class RunNotebook:
         if not isinstance(generation, int) or generation < 1:
             raise ValueError("notebook generation must be a positive integer")
         self.generation = generation
-        self._limits = limits
         self.capacity = capacity or NotebookCapacity.from_limits(limits)
         self._token_counter = token_counter
         self._records: dict[str, dict[str, dict[str, Any]]] = {
@@ -200,6 +199,26 @@ class RunNotebook:
         self._last_applied_references: tuple[str, ...] = ()
         self._contribution_history: list[tuple[str, tuple[str, ...]]] = []
         self._last_apply_result = NotebookApplyResult(False)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "RunNotebook":
+        """Copy state without cloning the live model tokenizer or service."""
+
+        clone = type(self)(
+            capacity=self.capacity,
+            generation=self.generation,
+            token_counter=self._token_counter,
+        )
+        memo[id(self)] = clone
+        clone._records = deepcopy(self._records, memo)
+        clone._orders = deepcopy(self._orders, memo)
+        clone._entity_pages = deepcopy(self._entity_pages, memo)
+        clone._actions = deepcopy(self._actions, memo)
+        clone.possible_next_steps = deepcopy(self.possible_next_steps, memo)
+        clone.summary = deepcopy(self.summary, memo)
+        clone._last_applied_references = self._last_applied_references
+        clone._contribution_history = deepcopy(self._contribution_history, memo)
+        clone._last_apply_result = self._last_apply_result
+        return clone
 
     @property
     def entities(self) -> _SectionView:
@@ -332,7 +351,7 @@ class RunNotebook:
 
     @evidence_summary.setter
     def evidence_summary(self, value: str | None) -> None:
-        self.summary.text = value
+        self.set_summary(value, self.summary.references)
 
     def _section_values(self, section: str) -> list[dict[str, Any]]:
         return [self._records[section][key] for key in self._orders[section]]
@@ -655,21 +674,29 @@ class RunNotebook:
             "arguments": deepcopy(arguments),
             "reason": reason,
         }
+        previous_steps = self.possible_next_steps
         self.possible_next_steps = [
             item
             for item in self.possible_next_steps
             if not (item.get("audience") == "agent" and item.get("tool") == tool)
         ]
         self.possible_next_steps.append(hint)
+        if not self._fits_capacity():
+            self.possible_next_steps = previous_steps
+            raise ValueError("notebook next-step guidance exceeds capacity")
         return hint
 
     def set_summary(self, text: str | None, references: list[str] | tuple[str, ...] = ()) -> None:
         if text is not None and (not isinstance(text, str) or not text.strip()):
             raise ValueError("notebook summary must be non-blank when provided")
+        previous_summary = self.summary
         self.summary = NotebookSummary(
             text=" ".join(text.split()) if text is not None else None,
             references=list(dict.fromkeys(str(ref) for ref in references)),
         )
+        if not self._fits_capacity():
+            self.summary = previous_summary
+            raise ValueError("notebook summary exceeds capacity")
 
     @staticmethod
     def _model_message(item: dict[str, Any]) -> dict[str, Any]:
@@ -981,7 +1008,17 @@ class RunNotebook:
             return applied
 
         rolled = deepcopy(self)
-        rollover = rolled.rollover()
+        try:
+            rollover = rolled.rollover()
+        except ValueError:
+            self._last_applied_references = ()
+            self._last_apply_result = NotebookApplyResult(
+                False,
+                (),
+                False,
+                "capacity",
+            )
+            return self._last_apply_result
         retried = rolled._apply_unchecked(tool_name, result)
         if retried.references and rolled._fits_capacity():
             applied = NotebookApplyResult(
@@ -1068,17 +1105,24 @@ class RunNotebook:
         roots: list[str] = [
             ref for ref in (active_references or ()) if self._known_reference(ref)
         ]
-        if not roots:
-            for _, references in self._contribution_history[-recent_contributions:]:
-                roots.extend(references)
-        for hint in self.possible_next_steps:
-            if hint.get("audience") == "system":
-                roots.extend(
-                    ref for ref in hint.get("references", []) if isinstance(ref, str)
-                )
+        roots.extend(
+            ref
+            for ref in self._last_applied_references
+            if self._known_reference(ref)
+        )
+        for _, references in self._contribution_history[-recent_contributions:]:
+            roots.extend(references)
         roots.extend(ref for ref in self.summary.references if self._known_reference(ref))
 
         retained = {ref for ref in roots if self._known_reference(ref)}
+        for hint in self.possible_next_steps:
+            if hint.get("audience") == "system" and any(
+                isinstance(ref, str) and ref in retained
+                for ref in hint.get("references", [])
+            ):
+                retained.update(
+                    ref for ref in hint.get("references", []) if isinstance(ref, str)
+                )
         changed = True
         while changed:
             changed = False

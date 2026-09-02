@@ -167,17 +167,16 @@ class EpisodeWriter:
         return None
 
     async def _write_project_episode(self, cur, episode: Episode, *, user_name: str) -> None:
-        if episode.generator_metadata.get("effective_action") == "consolidate":
-            await cur.execute(
-                """
-                SELECT user_modified FROM episodes
-                WHERE episode_id = %s AND project_id = %s FOR UPDATE
-                """,
-                (episode.episode_id, episode.project_id),
-            )
-            existing = await cur.fetchone()
-            if existing is not None and bool(existing["user_modified"]):
-                raise ValueError("User-modified episodes cannot be consolidated automatically")
+        await cur.execute(
+            """
+            SELECT user_modified FROM episodes
+            WHERE episode_id = %s AND project_id = %s FOR UPDATE
+            """,
+            (episode.episode_id, episode.project_id),
+        )
+        existing = await cur.fetchone()
+        if existing is not None and bool(existing["user_modified"]):
+            raise ValueError("User-modified episodes cannot be regenerated automatically")
         source_ids = [item.message_id for item in episode.messages]
         expected_sessions = {item.message_id: item.session_id for item in episode.messages}
         await cur.execute(

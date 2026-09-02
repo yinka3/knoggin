@@ -99,12 +99,11 @@ async def test_merge_evidence_selects_episode_session_before_serializing_it():
         {
             "kind": "episode",
             "episode_id": "episode-1",
-            "session_id": "session-1",
             "text": "Ada chose the episodic-memory approach.",
         }
     ]
     _, query, _ = client.calls[1]
-    assert "e.session_id" in query
+    assert "e.session_id" not in query
 
 
 @pytest.mark.storage

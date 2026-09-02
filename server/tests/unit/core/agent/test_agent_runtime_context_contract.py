@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.utils.time_utils import frozen_time
-from core.agent.prompt_context import build_user_message, update_accumulators
+from core.agent.prompt_context import build_user_message
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.tool_runtime import summarize_result
 
@@ -186,8 +186,8 @@ def test_build_user_message_renders_discovered_sources_for_next_step():
             "source_kind": "news_search_result",
         },
     ]
-    update_accumulators(ctx, "web_search", {"data": result_data[:1]})
-    update_accumulators(ctx, "news_search", {"data": result_data[1:]})
+    ctx.accumulate_tool_result("web_search", {"data": result_data[:1]})
+    ctx.accumulate_tool_result("news_search", {"data": result_data[1:]})
 
     message = build_user_message(
         ctx,
@@ -217,9 +217,8 @@ def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
         "query": "useful context",
         "rank": 1,
     }
-    update_accumulators(ctx, "web_search", {"data": [source]})
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result("web_search", {"data": [source]})
+    ctx.accumulate_tool_result(
         "search_entity",
         {"data": [{"id": 1, "canonical_name": "Ada"}]},
     )
@@ -239,11 +238,10 @@ def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_skips_non_source_search_status_items():
+def test_notebook_skips_non_source_search_status_items():
     ctx = make_ctx()
 
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "web_search",
         {
             "data": [
@@ -303,10 +301,9 @@ def test_read_web_page_ranges_remain_distinct_and_visible_after_later_tool_calls
         "start_line": 2,
         "end_line": 2,
     }
-    update_accumulators(ctx, "read_web_page", {"data": [first_range]})
-    update_accumulators(ctx, "read_web_page", {"data": [second_range]})
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result("read_web_page", {"data": [first_range]})
+    ctx.accumulate_tool_result("read_web_page", {"data": [second_range]})
+    ctx.accumulate_tool_result(
         "search_entity",
         {"data": [{"id": 1, "canonical_name": "Ada"}]},
     )
@@ -351,7 +348,7 @@ def test_read_external_pdf_page_is_rendered_as_read_content_not_discovery():
         "source_kind": "web_pdf",
     }
 
-    update_accumulators(ctx, "read_web_page", {"data": [pdf_page]})
+    ctx.accumulate_tool_result("read_web_page", {"data": [pdf_page]})
     message = build_user_message(
         ctx,
         last_result={"tool": "read_web_page", "result": {"data": [pdf_page]}},
@@ -391,11 +388,10 @@ def test_build_user_message_includes_absolute_and_elapsed_last_turn_time():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_dedupes_without_blind_tail_trimming():
+def test_notebook_dedupes_without_blind_tail_trimming():
     ctx = make_ctx()
 
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_messages",
         {
             "data": [
@@ -420,8 +416,7 @@ def test_update_accumulators_dedupes_without_blind_tail_trimming():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_messages",
         {
             "data": [
@@ -442,16 +437,14 @@ def test_update_accumulators_dedupes_without_blind_tail_trimming():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
+def test_notebook_dedupes_profiles_graph_files_and_sources():
     ctx = make_ctx()
 
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_entity",
         {"data": [{"id": 1, "canonical_name": "Ada"}, {"id": 1}]},
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "get_connections",
         {
             "data": [
@@ -460,18 +453,15 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "get_recent_activity",
         {"data": [{"source": "Ada", "target": "Testing"}]},
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "find_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "find_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
@@ -487,10 +477,9 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ],
         }
     }
-    update_accumulators(ctx, "episode_check", episode_result)
-    update_accumulators(ctx, "episode_check", episode_result)
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result("episode_check", episode_result)
+    ctx.accumulate_tool_result("episode_check", episode_result)
+    ctx.accumulate_tool_result(
         "search_documents",
         {
             "data": [
@@ -510,8 +499,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "read_document",
         {
             "data": [
@@ -524,8 +512,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "web_search",
         {
             "data": [
@@ -548,8 +535,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "news_search",
         {
             "data": [
@@ -612,12 +598,11 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_rejects_oversized_buckets_atomically():
+def test_notebook_rejects_oversized_buckets_atomically():
     ctx = make_ctx(
         limits=AgentRunLimits(max_accumulated_profiles=2)
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_entity",
         {
             "data": [
@@ -634,12 +619,12 @@ def test_update_accumulators_rejects_oversized_buckets_atomically():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_ignores_errors_and_empty_results():
+def test_notebook_ignores_errors_and_empty_results():
     ctx = make_ctx()
 
-    update_accumulators(ctx, "search_messages", {"error": "failed"})
-    update_accumulators(ctx, "search_messages", {"data": []})
-    update_accumulators(ctx, "unknown", {"data": [{"id": "x"}]})
+    ctx.accumulate_tool_result("search_messages", {"error": "failed"})
+    ctx.accumulate_tool_result("search_messages", {"data": []})
+    ctx.accumulate_tool_result("unknown", {"data": [{"id": "x"}]})
 
     assert ctx.has_any() is False
 

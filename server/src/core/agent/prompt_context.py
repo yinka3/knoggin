@@ -380,9 +380,3 @@ def _is_read_web_source(item: object) -> bool:
         "web_page",
         "web_pdf",
     }
-
-
-def update_accumulators(ctx: AgentRun, tool_name: str, result: Dict):
-    """Apply a backend result through the canonical notebook boundary."""
-
-    ctx.notebook.apply(tool_name, result)

@@ -377,7 +377,6 @@ class ProjectEpisodeBuild:
                 )
                 for index, message_id in enumerate(selected_in_source_order)
             ]
-            effective_action = decision.action
             messages = current
             episode_id = target.episode_id if target else str(uuid.uuid5(
                 uuid.NAMESPACE_URL,
@@ -391,7 +390,10 @@ class ProjectEpisodeBuild:
                 updates=decision.updates,
                 unresolved=decision.unresolved,
                 messages=messages,
-                generator_metadata={"decision_action": decision.action, "effective_action": effective_action, "episode_policy": self.policy.metadata()},
+                generator_metadata={
+                    "decision_action": decision.action,
+                    "episode_policy": self.policy.metadata(),
+                },
             ))
         self.final_episodes = episodes
         return episodes

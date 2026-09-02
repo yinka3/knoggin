@@ -208,11 +208,10 @@ class EpisodeReader:
         episode_rows = await self.client.fetch_all(
             """
             WITH ranked_episodes AS (
-                SELECT
-                    ee.entity_id,
-                    e.episode_id,
-                    e.session_id,
-                    e.summary,
+                    SELECT
+                        ee.entity_id,
+                        e.episode_id,
+                        e.summary,
                     ROW_NUMBER() OVER (
                         PARTITION BY ee.entity_id
                         ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC
@@ -289,7 +288,6 @@ class EpisodeReader:
                 {
                     "kind": "episode",
                     "episode_id": episode_id,
-                    "session_id": str(row["session_id"]),
                     "text": str(row.get("summary") or ""),
                 }
             )

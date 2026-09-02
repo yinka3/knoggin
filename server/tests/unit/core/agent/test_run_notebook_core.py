@@ -199,7 +199,7 @@ def test_notebook_rollover_keeps_dependencies_and_resolvable_summary_refs():
 
 def test_notebook_hard_token_rail_is_measured_with_injected_counter():
     notebook = RunNotebook(
-        capacity=NotebookCapacity(max_messages=10, max_render_tokens=3),
+        capacity=NotebookCapacity(max_messages=10, max_render_tokens=5),
         token_counter=lambda rendered: len(rendered.split()),
     )
     before = notebook.as_dict()
@@ -212,3 +212,77 @@ def test_notebook_hard_token_rail_is_measured_with_injected_counter():
     assert result.accepted is False
     assert result.reason == "capacity"
     assert notebook.as_dict() == before
+
+
+def test_repeated_rollover_retains_episode_and_path_neighborhood():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(
+            max_messages=8,
+            max_entities=8,
+            max_episodes=4,
+            max_paths=4,
+            max_render_tokens=1000,
+        )
+    )
+    notebook.apply(
+        "episode_check",
+        {
+            "data": {
+                "results": [
+                    {
+                        "episodes": [
+                            {
+                                "episode_id": "ep-1",
+                                "summary": "A decision",
+                                "entities": [{"entity_id": 1}],
+                                "evidence": [{"id": "m1", "message": "decision"}],
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+    )
+    notebook.apply(
+        "find_path",
+        {
+            "data": [
+                {
+                    "path_id": "path-1",
+                    "entity_a_id": 1,
+                    "entity_b_id": 2,
+                    "evidence": [{"id": "m2", "message": "path evidence"}],
+                }
+            ]
+        },
+    )
+
+    first = notebook.rollover()
+    second = notebook.rollover("Still relevant")
+    snapshot = notebook.as_dict()
+
+    assert first.generation == 2
+    assert second.generation == 3
+    assert "episode:ep-1" in second.retained_references
+    assert "path:path-1" in second.retained_references
+    assert "message:::m1" in second.retained_references
+    assert "message:::m2" in second.retained_references
+    assert snapshot["summary"]["references"]
+    assert "episode:ep-1" in snapshot["knowledge"]["episodes"]
+    assert "path:path-1" in snapshot["knowledge"]["paths"]
+
+
+def test_rollover_discards_older_inactive_contributions():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(max_messages=10, max_render_tokens=1000)
+    )
+    for index in range(4):
+        assert notebook.apply(
+            "search_messages",
+            {"data": [{"id": f"m{index}", "message": f"message {index}"}]},
+        ).accepted
+
+    notebook.rollover()
+
+    retained_ids = {item["id"] for item in notebook.messages}
+    assert retained_ids == {"m1", "m2", "m3"}

@@ -558,7 +558,13 @@ CREATE TABLE IF NOT EXISTS public.relationship_observations (
             target_entity_id,
             observed_relationship_label
         )
-);
+    );
+
+-- Existing unreleased databases may have created this table before the
+-- interpretation column was introduced.  Add it before any index or trigger
+-- references it so the schema remains reset/idempotent across that cut.
+ALTER TABLE public.relationship_observations
+    ADD COLUMN IF NOT EXISTS interpretation_source TEXT NOT NULL DEFAULT 'observed';
 
 CREATE INDEX IF NOT EXISTS relationship_observations_pattern_idx
 ON public.relationship_observations(
