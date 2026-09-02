@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterator, MutableSequence
+from collections.abc import Callable, Iterator, MutableSequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -43,6 +43,55 @@ class NotebookApplyResult:
 
     changed: bool
     references: tuple[str, ...] = ()
+    accepted: bool = True
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NotebookCapacity:
+    """Independent semantic and rendered-size limits for one run notebook."""
+
+    max_entities: int = 20
+    max_relationships: int = 40
+    max_episodes: int = 8
+    max_paths: int = 8
+    max_messages: int = 30
+    max_documents: int = 30
+    max_web_discoveries: int = 12
+    max_web_reads: int = 12
+    max_actions: int = 12
+    max_next_steps: int = 12
+    max_summary_chars: int = 4000
+    max_render_tokens: int = 10000
+
+    @classmethod
+    def from_limits(cls, limits: Any | None) -> "NotebookCapacity":
+        if limits is None:
+            return cls()
+        return cls(
+            max_entities=_positive_limit(limits, "max_accumulated_profiles", 20),
+            max_relationships=_positive_limit(limits, "max_accumulated_graph", 40),
+            max_episodes=_positive_limit(limits, "max_accumulated_episodes", 8),
+            max_paths=_positive_limit(limits, "max_accumulated_paths", 8),
+            max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
+            max_documents=_positive_limit(limits, "max_accumulated_messages", 30),
+            max_web_discoveries=_positive_limit(limits, "max_accumulated_sources", 12),
+            max_web_reads=_positive_limit(limits, "max_accumulated_sources", 12),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NotebookRolloverResult:
+    """Summary of a generation rollover."""
+
+    generation: int
+    retained_references: tuple[str, ...]
+    summary_references: tuple[str, ...]
+
+
+def _positive_limit(owner: Any, name: str, default: int) -> int:
+    value = getattr(owner, name, default)
+    return value if isinstance(value, int) and value > 0 else default
 
 
 @dataclass(slots=True)
@@ -126,11 +175,20 @@ class RunNotebook:
     rollover policy; semantic generations are Batch 12 work.
     """
 
-    def __init__(self, *, limits: Any | None = None, generation: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        limits: Any | None = None,
+        capacity: NotebookCapacity | None = None,
+        generation: int = 1,
+        token_counter: Callable[[str], int] | None = None,
+    ) -> None:
         if not isinstance(generation, int) or generation < 1:
             raise ValueError("notebook generation must be a positive integer")
         self.generation = generation
         self._limits = limits
+        self.capacity = capacity or NotebookCapacity.from_limits(limits)
+        self._token_counter = token_counter
         self._records: dict[str, dict[str, dict[str, Any]]] = {
             section: {} for section in _ALL_SECTIONS
         }
@@ -140,6 +198,8 @@ class RunNotebook:
         self.possible_next_steps: list[dict[str, Any]] = []
         self.summary = NotebookSummary()
         self._last_applied_references: tuple[str, ...] = ()
+        self._contribution_history: list[tuple[str, tuple[str, ...]]] = []
+        self._last_apply_result = NotebookApplyResult(False)
 
     @property
     def entities(self) -> _SectionView:
@@ -186,6 +246,85 @@ class RunNotebook:
         return self._last_applied_references
 
     @property
+    def last_apply_result(self) -> NotebookApplyResult:
+        return self._last_apply_result
+
+    def set_token_counter(self, token_counter: Callable[[str], int] | None) -> None:
+        """Install the active model tokenizer without making it notebook state."""
+
+        if token_counter is not None and not callable(token_counter):
+            raise TypeError("token_counter must be callable")
+        self._token_counter = token_counter
+
+    def _counts(self) -> dict[str, int]:
+        return {
+            section: len(self._orders[section]) for section in _ALL_SECTIONS
+        } | {
+            "actions": len(self._actions),
+            "possible_next_steps": len(self.possible_next_steps),
+        }
+
+    def _render_token_count(self) -> int:
+        rendered = self.render()
+        if self._token_counter is not None:
+            return max(0, int(self._token_counter(rendered)))
+        return len(rendered.split())
+
+    def _fits_capacity(self) -> bool:
+        counts = self._counts()
+        section_limits = {
+            "entities": self.capacity.max_entities,
+            "relationships": self.capacity.max_relationships,
+            "episodes": self.capacity.max_episodes,
+            "paths": self.capacity.max_paths,
+            "messages": self.capacity.max_messages,
+            "documents": self.capacity.max_documents,
+            "web_discoveries": self.capacity.max_web_discoveries,
+            "web_reads": self.capacity.max_web_reads,
+            "actions": self.capacity.max_actions,
+            "possible_next_steps": self.capacity.max_next_steps,
+        }
+        return (
+            all(counts[key] <= limit for key, limit in section_limits.items())
+            and len(self.summary.text or "") <= self.capacity.max_summary_chars
+            and self._render_token_count() <= self.capacity.max_render_tokens
+        )
+
+    def capacity_report(self) -> dict[str, Any]:
+        counts = self._counts()
+        limits = {
+            "entities": self.capacity.max_entities,
+            "relationships": self.capacity.max_relationships,
+            "episodes": self.capacity.max_episodes,
+            "paths": self.capacity.max_paths,
+            "messages": self.capacity.max_messages,
+            "documents": self.capacity.max_documents,
+            "web_discoveries": self.capacity.max_web_discoveries,
+            "web_reads": self.capacity.max_web_reads,
+            "actions": self.capacity.max_actions,
+            "possible_next_steps": self.capacity.max_next_steps,
+            "summary_chars": self.capacity.max_summary_chars,
+            "render_tokens": self.capacity.max_render_tokens,
+        }
+        token_count = self._render_token_count()
+        pressured = any(
+            counts[key] >= max(1, int(limit * 0.8))
+            for key, limit in limits.items()
+            if key in counts
+        ) or len(self.summary.text or "") >= int(self.capacity.max_summary_chars * 0.8) or token_count >= int(self.capacity.max_render_tokens * 0.8)
+        status = "FULL" if not self._fits_capacity() else "PRESSURED" if pressured else "OPEN"
+        return {
+            "status": status,
+            "generation": self.generation,
+            "counts": counts,
+            "limits": limits,
+            "render_tokens": token_count,
+        }
+
+    def capacity_state(self) -> str:
+        return str(self.capacity_report()["status"])
+
+    @property
     def evidence_summary(self) -> str | None:
         """Compatibility view for the pre-notebook summary field."""
 
@@ -216,24 +355,14 @@ class RunNotebook:
             records[reference] = deepcopy(value)
             if reference not in order:
                 order.append(reference)
+        previous_records = self._records[section]
+        previous_order = self._orders[section]
         self._records[section] = records
         self._orders[section] = order
-
-    def _limit(self, section: str) -> int | None:
-        if self._limits is None:
-            return None
-        names = {
-            "entities": "max_accumulated_profiles",
-            "relationships": "max_accumulated_graph",
-            "episodes": "max_accumulated_episodes",
-            "paths": "max_accumulated_paths",
-            "messages": "max_accumulated_messages",
-            "documents": "max_accumulated_messages",
-            "web_discoveries": "max_accumulated_sources",
-            "web_reads": "max_accumulated_sources",
-        }
-        value = getattr(self._limits, names.get(section, ""), None)
-        return value if isinstance(value, int) and value > 0 else None
+        if not self._fits_capacity():
+            self._records[section] = previous_records
+            self._orders[section] = previous_order
+            raise ValueError(f"notebook {section} section exceeds capacity")
 
     def _reference_for_section(self, section: str, item: dict[str, Any]) -> str:
         if section == "entities":
@@ -357,12 +486,6 @@ class RunNotebook:
         self._records[section][ref] = value
         if ref not in self._orders[section]:
             self._orders[section].append(ref)
-        limit = self._limit(section)
-        if limit is not None and len(self._orders[section]) > limit:
-            overflow = self._orders[section][:-limit]
-            self._orders[section] = self._orders[section][-limit:]
-            for old_ref in overflow:
-                self._records[section].pop(old_ref, None)
         return ref
 
     def _add_message(self, item: dict[str, Any]) -> str:
@@ -652,8 +775,13 @@ class RunNotebook:
             "summary": self.summary.as_dict(),
         }
 
-    def apply(self, tool_name: str, result: dict[str, Any]) -> NotebookApplyResult:
-        """Normalize one untouched backend result into canonical notebook state."""
+    def _apply_unchecked(self, tool_name: str, result: dict[str, Any]) -> NotebookApplyResult:
+        """Normalize one result without evaluating capacity.
+
+        Callers should use :meth:`apply`; this unchecked form exists so an
+        update can be evaluated on an isolated candidate and adopted
+        atomically.
+        """
 
         if not isinstance(result, dict) or result.get("error"):
             self._last_applied_references = ()
@@ -807,7 +935,306 @@ class RunNotebook:
             references.append(self._record_action(tool_name, data))
 
         self._last_applied_references = tuple(dict.fromkeys(references))
+        if self._last_applied_references:
+            self._contribution_history.append(
+                (str(tool_name), self._last_applied_references)
+            )
+            self._contribution_history = self._contribution_history[-8:]
         return NotebookApplyResult(bool(references), self._last_applied_references)
+
+    def _adopt_from(self, candidate: "RunNotebook") -> None:
+        """Adopt candidate state while retaining this notebook's policy hooks."""
+
+        self.generation = candidate.generation
+        self._records = candidate._records
+        self._orders = candidate._orders
+        self._entity_pages = candidate._entity_pages
+        self._actions = candidate._actions
+        self.possible_next_steps = candidate.possible_next_steps
+        self.summary = candidate.summary
+        self._last_applied_references = candidate._last_applied_references
+        self._contribution_history = candidate._contribution_history
+        self._last_apply_result = candidate._last_apply_result
+
+    def apply(self, tool_name: str, result: dict[str, Any]) -> NotebookApplyResult:
+        """Apply one result atomically, rolling over once when it does not fit."""
+
+        if not isinstance(result, dict) or result.get("error"):
+            self._last_applied_references = ()
+            self._last_apply_result = NotebookApplyResult(False)
+            return self._last_apply_result
+        data = result.get("data")
+        if data is None or data == [] or data == {}:
+            self._last_applied_references = ()
+            self._last_apply_result = NotebookApplyResult(False)
+            return self._last_apply_result
+
+        before = self.fingerprint()
+        candidate = deepcopy(self)
+        applied = candidate._apply_unchecked(tool_name, result)
+        if candidate._fits_capacity():
+            applied = NotebookApplyResult(
+                before != candidate.fingerprint(), applied.references
+            )
+            candidate._last_apply_result = applied
+            self._adopt_from(candidate)
+            return applied
+
+        rolled = deepcopy(self)
+        rollover = rolled.rollover()
+        retried = rolled._apply_unchecked(tool_name, result)
+        if retried.references and rolled._fits_capacity():
+            applied = NotebookApplyResult(
+                before != rolled.fingerprint(),
+                retried.references,
+                True,
+                f"rolled_over:{rollover.generation}",
+            )
+            rolled._last_apply_result = applied
+            self._adopt_from(rolled)
+            return applied
+
+        self._last_applied_references = ()
+        self._last_apply_result = NotebookApplyResult(
+            False,
+            (),
+            False,
+            "capacity",
+        )
+        return self._last_apply_result
+
+    @staticmethod
+    def _ref_section(reference: str) -> str | None:
+        if not isinstance(reference, str):
+            return None
+        prefix = reference.split(":", 1)[0]
+        prefix = {
+            "entity": "entities",
+            "relationship": "relationships",
+            "episode": "episodes",
+            "path": "paths",
+            "message": "messages",
+            "document": "documents",
+            "web_discovery": "web_discoveries",
+            "web_read": "web_reads",
+        }.get(prefix, prefix)
+        if prefix in _ALL_SECTIONS or prefix == "action":
+            return prefix
+        return None
+
+    def _known_reference(self, reference: str) -> bool:
+        section = self._ref_section(reference)
+        return bool(
+            section == "action"
+            and reference in self._actions
+            or section in _ALL_SECTIONS
+            and reference in self._records[section]
+            or reference in self._entity_pages
+        )
+
+    def _dependency_references(self, section: str, item: dict[str, Any]) -> set[str]:
+        dependencies: set[str] = set()
+        for reference in item.get("evidence_refs", []):
+            if isinstance(reference, str):
+                dependencies.add(reference)
+        if section == "relationships":
+            identifiers = (
+                item.get("source_entity_id"),
+                item.get("target_entity_id"),
+            )
+        elif section == "paths":
+            identifiers = (
+                item.get("entity_a_id"),
+                item.get("entity_b_id"),
+            )
+        elif section == "episodes":
+            identifiers = tuple(
+                entity.get("entity_id", entity.get("id"))
+                for entity in item.get("entities", [])
+                if isinstance(entity, dict)
+            )
+        else:
+            identifiers = ()
+        dependencies.update(
+            f"entity:{identifier}" for identifier in identifiers if identifier is not None
+        )
+        return dependencies
+
+    def _retain_references(
+        self,
+        active_references: list[str] | tuple[str, ...] | None,
+        recent_contributions: int,
+    ) -> set[str]:
+        roots: list[str] = [
+            ref for ref in (active_references or ()) if self._known_reference(ref)
+        ]
+        if not roots:
+            for _, references in self._contribution_history[-recent_contributions:]:
+                roots.extend(references)
+        for hint in self.possible_next_steps:
+            if hint.get("audience") == "system":
+                roots.extend(
+                    ref for ref in hint.get("references", []) if isinstance(ref, str)
+                )
+        roots.extend(ref for ref in self.summary.references if self._known_reference(ref))
+
+        retained = {ref for ref in roots if self._known_reference(ref)}
+        changed = True
+        while changed:
+            changed = False
+            for section in _ALL_SECTIONS:
+                for reference in tuple(retained):
+                    if self._ref_section(reference) != section:
+                        continue
+                    item = self._records[section].get(reference)
+                    if not item:
+                        continue
+                    for dependency in self._dependency_references(section, item):
+                        if self._known_reference(dependency) and dependency not in retained:
+                            retained.add(dependency)
+                            changed = True
+        return retained
+
+    def _bounded_retained_references(self, retained: set[str]) -> set[str]:
+        section_limits = {
+            "entities": self.capacity.max_entities,
+            "relationships": self.capacity.max_relationships,
+            "episodes": self.capacity.max_episodes,
+            "paths": self.capacity.max_paths,
+            "messages": self.capacity.max_messages,
+            "documents": self.capacity.max_documents,
+            "web_discoveries": self.capacity.max_web_discoveries,
+            "web_reads": self.capacity.max_web_reads,
+        }
+        bounded: set[str] = set()
+        for section, limit in section_limits.items():
+            ordered = [ref for ref in self._orders[section] if ref in retained]
+            bounded.update(ordered[-limit:])
+        page_entities = [
+            ref for ref in self._entity_pages if ref in retained
+        ]
+        bounded.update(page_entities[-self.capacity.max_entities :])
+        bounded.update(
+            ref
+            for ref in list(retained)
+            if self._ref_section(ref) == "action"
+        )
+        actions = [ref for ref in self._actions if ref in bounded]
+        bounded.difference_update(
+            ref for ref in bounded if self._ref_section(ref) == "action"
+        )
+        bounded.update(actions[-self.capacity.max_actions :])
+        return bounded
+
+    def rollover(
+        self,
+        summary: str | None = None,
+        *,
+        active_references: list[str] | tuple[str, ...] | None = None,
+        recent_contributions: int = 3,
+    ) -> NotebookRolloverResult:
+        """Start a bounded generation while retaining addressable context.
+
+        The retained neighborhood is selected from explicitly active refs,
+        recent tool contributions, and system hints, then expanded with the
+        evidence and entity dependencies those objects require.
+        """
+
+        if recent_contributions < 1:
+            raise ValueError("recent_contributions must be positive")
+        retained = self._bounded_retained_references(
+            self._retain_references(active_references, recent_contributions)
+        )
+        prior_entity_page_refs = list(self._entity_pages)
+        for section in _ALL_SECTIONS:
+            self._records[section] = {
+                reference: self._records[section][reference]
+                for reference in self._orders[section]
+                if reference in retained
+            }
+            self._orders[section] = list(self._records[section])
+
+        self._actions = {
+            reference: action
+            for reference, action in self._actions.items()
+            if reference in retained
+        }
+        self._entity_pages = {}
+        retained_entity_refs = [
+            ref
+            for ref in prior_entity_page_refs
+            if ref in retained or ref in self._orders["entities"]
+        ]
+        for reference in retained_entity_refs[-self.capacity.max_entities :]:
+            self._entity_pages[reference] = {
+                "entity_ref": reference,
+                "relationship_refs": [],
+                "episode_refs": [],
+                "evidence_refs": [],
+            }
+        for section in ("relationships", "episodes"):
+            for reference in self._orders[section]:
+                item = self._records[section][reference]
+                for entity_ref in self._dependency_references(section, item):
+                    if entity_ref.startswith("entity:") and entity_ref in self._entity_pages:
+                        page = self._entity_pages[entity_ref]
+                        key = "relationship_refs" if section == "relationships" else "episode_refs"
+                        page[key].append(reference)
+                for evidence_ref in item.get("evidence_refs", []):
+                    if isinstance(evidence_ref, str) and evidence_ref in self._records["messages"]:
+                        for page in self._entity_pages.values():
+                            if reference in page["relationship_refs"] + page["episode_refs"]:
+                                if evidence_ref not in page["evidence_refs"]:
+                                    page["evidence_refs"].append(evidence_ref)
+
+        self.possible_next_steps = [
+            hint
+            for hint in self.possible_next_steps
+            if hint.get("audience") == "agent"
+            or any(
+                isinstance(ref, str) and ref in retained
+                for ref in hint.get("references", [])
+            )
+        ][: self.capacity.max_next_steps]
+        summary_references = tuple(
+            ref for ref in self.summary.references if ref in retained
+        )
+        if summary is not None and not summary_references:
+            summary_references = tuple(
+                ref
+                for section in _ALL_SECTIONS
+                for ref in self._orders[section]
+            )[: self.capacity.max_next_steps]
+        if summary is None:
+            summary = (
+                "Previous generation retained "
+                f"{len(self._orders['entities'])} entities, "
+                f"{len(self._orders['relationships'])} relationships, "
+                f"{len(self._orders['episodes'])} episodes, and "
+                f"{sum(len(self._orders[name]) for name in _EVIDENCE_SECTIONS)} evidence objects."
+            )
+            summary_references = tuple(
+                ref
+                for section in _ALL_SECTIONS
+                for ref in self._orders[section]
+            )[: self.capacity.max_next_steps]
+        self.generation += 1
+        normalized_summary = " ".join(summary.split()) if summary else None
+        if normalized_summary and len(normalized_summary) > self.capacity.max_summary_chars:
+            normalized_summary = normalized_summary[: self.capacity.max_summary_chars - 1] + "…"
+        self.set_summary(normalized_summary, summary_references)
+        self._contribution_history = [("rollover", tuple(retained))]
+        self._last_applied_references = ()
+        self._last_apply_result = NotebookApplyResult(False)
+        return NotebookRolloverResult(
+            self.generation,
+            tuple(
+                ref
+                for section in _ALL_SECTIONS
+                for ref in self._orders[section]
+            ),
+            tuple(self.summary.references),
+        )
 
     def references_for_result(
         self,
@@ -902,3 +1329,5 @@ class RunNotebook:
         self.possible_next_steps.clear()
         self.summary = NotebookSummary()
         self._last_applied_references = ()
+        self._contribution_history.clear()
+        self._last_apply_result = NotebookApplyResult(False)

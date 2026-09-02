@@ -1,4 +1,4 @@
-from core.agent.notebook import RunNotebook
+from core.agent.notebook import NotebookCapacity, RunNotebook
 from core.agent.run import AgentRunLimits
 
 
@@ -125,3 +125,90 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
     assert [item["id"] for item in notebook.messages] == ["msg_8"]
     assert [item["chunk_index"] for item in notebook.documents] == [1, 2]
     assert notebook.entity_pages["entity:24"]["episode_refs"] == ["episode:ep-1"]
+
+
+def test_notebook_capacity_rejects_an_oversized_result_atomically():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(max_messages=1, max_render_tokens=1000)
+    )
+
+    first = notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m1", "message": "first"}]},
+    )
+    before = notebook.as_dict()
+
+    rejected = notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m2", "message": "second"}]},
+    )
+
+    assert first.accepted is True
+    assert rejected.accepted is False
+    assert rejected.reason == "capacity"
+    assert notebook.as_dict() == before
+    assert all(
+        item.get("id") != "m2"
+        for item in notebook.as_dict()["evidence"]["messages"].values()
+    )
+
+
+def test_notebook_rollover_keeps_dependencies_and_resolvable_summary_refs():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(
+            max_messages=4,
+            max_entities=4,
+            max_relationships=4,
+            max_render_tokens=1000,
+        )
+    )
+    notebook.apply(
+        "get_connections",
+        {
+            "data": [
+                {
+                    "relationship_id": "r1",
+                    "source_entity_id": 1,
+                    "target_entity_id": 2,
+                    "evidence": [{"id": "m1", "message": "linked"}],
+                }
+            ]
+        },
+    )
+
+    result = notebook.rollover("Retained relationship context")
+    snapshot = notebook.as_dict()
+
+    assert result.generation == 2
+    assert "relationship:r1" in result.retained_references
+    assert "message:::m1" in result.retained_references
+    assert snapshot["summary"]["references"]
+    for reference in snapshot["summary"]["references"]:
+        assert any(
+            reference in section
+            for section in (
+                snapshot["knowledge"]["entities"],
+                snapshot["knowledge"]["relationships"],
+                snapshot["evidence"]["messages"],
+            )
+        )
+    assert "entity:1" in snapshot["entity_pages"]
+    assert "entity:2" in snapshot["entity_pages"]
+    assert "relationship:r1" in snapshot["knowledge"]["relationships"]
+
+
+def test_notebook_hard_token_rail_is_measured_with_injected_counter():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(max_messages=10, max_render_tokens=3),
+        token_counter=lambda rendered: len(rendered.split()),
+    )
+    before = notebook.as_dict()
+
+    result = notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m1", "message": "one two three four five"}]},
+    )
+
+    assert result.accepted is False
+    assert result.reason == "capacity"
+    assert notebook.as_dict() == before
