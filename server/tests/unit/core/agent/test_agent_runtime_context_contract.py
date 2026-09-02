@@ -474,8 +474,20 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         "find_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
-    update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
-    update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
+    episode_result = {
+        "data": {
+            "resolution": "exact",
+            "results": [
+                {
+                    "episodes": [
+                        {"episode_id": "ep-1", "summary": "Profile changed"}
+                    ]
+                }
+            ],
+        }
+    }
+    update_accumulators(ctx, "episode_check", episode_result)
+    update_accumulators(ctx, "episode_check", episode_result)
     update_accumulators(
         ctx,
         "search_documents",
@@ -558,7 +570,13 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         {"source": "Ada", "target": "Testing"},
     ]
     assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
-    assert ctx.episodes == [{"resolution": "exact"}]
+    assert ctx.episodes == [
+        {
+            "episode_id": "ep-1",
+            "summary": "Profile changed",
+            "resolution": "exact",
+        }
+    ]
     assert [
         (msg["id"], msg["source_type"], msg["message"])
         for msg in ctx.messages

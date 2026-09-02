@@ -328,6 +328,24 @@ class RunNotebook:
             merged = dict(existing)
             for key, incoming in value.items():
                 if (
+                    section == "documents"
+                    and key == "content"
+                    and isinstance(merged.get(key), str)
+                    and merged[key].strip()
+                    and isinstance(incoming, str)
+                    and incoming.strip()
+                ):
+                    # A repeated chunk identity is the same evidence, not a
+                    # reason to replace the first bounded passage with a
+                    # differently-ranked duplicate.
+                    continue
+                if (
+                    section == "web_discoveries"
+                    and key in {"title", "snippet", "provider", "query", "rank"}
+                    and merged.get(key) not in (None, "")
+                ):
+                    continue
+                if (
                     key == "score"
                     and isinstance(merged.get(key), (int, float))
                     and isinstance(incoming, (int, float))
