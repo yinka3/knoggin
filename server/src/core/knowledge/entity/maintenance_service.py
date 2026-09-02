@@ -41,7 +41,7 @@ class EntityMaintenanceService:
         if resources is not None:
             postgres = resources.postgres
             if knowledge_store is None:
-                knowledge_store = resources.knowledge_store
+                knowledge_store = getattr(resources, "knowledge_store", None)
         if postgres is None:
             raise ValueError("EntityMaintenanceService requires PostgreSQL resources")
         self.postgres = postgres

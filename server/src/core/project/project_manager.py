@@ -13,6 +13,9 @@ from common.scoping import build_readable_project_ids
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
+from core.knowledge.jobs.application_maintenance_scheduler import (
+    ApplicationMaintenanceScheduler,
+)
 from core.project.domain_config_operations import (
     DomainCandidate,
     DomainPreview,
@@ -113,7 +116,18 @@ class ProjectManager:
             resources=resources,
             user_name=user_name,
         )
+        self.maintenance_scheduler = ApplicationMaintenanceScheduler(
+            maintenance_service=self.entity_maintenance_service,
+            user_name=user_name,
+            background_work=resources.background_work,
+        )
         self._closed = False
+
+    async def start(self) -> None:
+        """Start application-owned maintenance triggers."""
+        if self._closed:
+            raise RuntimeError("ProjectManager is shut down")
+        await self.maintenance_scheduler.start()
 
     async def create_project(
         self,
@@ -750,6 +764,8 @@ class ProjectManager:
 
     async def shutdown(self) -> None:
         """Stop every remaining project runtime before shared resources close."""
+
+        await self.maintenance_scheduler.stop()
 
         async with self.maintenance_service.lock:
             if self._closed and not self.active_projects:

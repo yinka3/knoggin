@@ -196,6 +196,44 @@ async def test_cancel_project_cancels_and_joins_only_its_owned_operations():
 
 
 @pytest.mark.no_network
+async def test_cancel_owner_is_narrower_than_project_cancellation():
+    coordinator = BackgroundWorkCoordinator(max_concurrency=1, max_queued_global=3)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def owned_work():
+        started.set()
+        await release.wait()
+
+    async def unrelated_work():
+        return "kept"
+
+    active = asyncio.create_task(
+        coordinator.submit(
+            "project-a",
+            owned_work,
+            name="document-index",
+            owner="project:project-a:document-index",
+        )
+    )
+    await started.wait()
+    unrelated = asyncio.create_task(
+        coordinator.submit(
+            "project-a",
+            unrelated_work,
+            name="episode",
+            owner="project:project-a:episode",
+        )
+    )
+
+    await coordinator.cancel_owner("project:project-a:document-index")
+    with pytest.raises(asyncio.CancelledError):
+        await active
+    assert await unrelated == "kept"
+    await coordinator.shutdown()
+
+
+@pytest.mark.no_network
 async def test_global_shutdown_cancels_queued_and_active_operations():
     coordinator = BackgroundWorkCoordinator(max_concurrency=1)
     active_started = asyncio.Event()

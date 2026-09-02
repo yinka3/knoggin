@@ -56,6 +56,11 @@ class Scheduler:
     def running(self) -> bool:
         return self._is_running
 
+    @property
+    def registered_job_names(self) -> tuple[str, ...]:
+        """Return the bounded names used to cancel scheduler-owned queue work."""
+        return tuple(self._jobs)
+
     def register(self, job: BaseJob) -> "Scheduler":
         """Register one project-owned job before scheduler startup."""
 

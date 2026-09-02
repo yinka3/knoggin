@@ -24,11 +24,6 @@ from core.knowledge.documents import (
 )
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
-from core.knowledge.jobs.audit_retention_cleanup_job import (
-    AuditRetentionCleanupJob,
-)
-from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
-from core.knowledge.jobs.merge_rollback_cleanup_job import MergeCleanupJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
 from infrastructure.job.scheduler import Scheduler
@@ -156,7 +151,7 @@ class ProjectRuntimeFactory:
         runtime.episode_job = episode_job
 
         try:
-            await runtime.document_indexer.start()
+            await runtime.document_service.indexer.start()
             self._register_background_jobs(
                 runtime,
                 entities=entities,
@@ -253,9 +248,7 @@ class ProjectRuntimeFactory:
         episode_job: EpisodeJob,
         resources: ReadyRuntimeResources | None = None,
     ) -> None:
-        resources = resources or cast(ReadyRuntimeResources, self.resources)
         scheduler = runtime.scheduler
-        jobs = self.dev_settings.jobs
         config_manager = ConfigManager.get()
 
         def update_entity_resolution(settings):
@@ -279,42 +272,5 @@ class ProjectRuntimeFactory:
             config_manager.subscribe(
                 episode_job.update_settings,
                 "developer_settings.jobs.episode",
-            )
-        )
-
-        merge_cleanup_job = MergeCleanupJob(
-            knowledge_store=resources.knowledge_store,
-            settings=jobs.merge_rollback,
-        )
-        scheduler.register(merge_cleanup_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                merge_cleanup_job.update_settings,
-                "developer_settings.jobs.merge_rollback",
-            )
-        )
-
-        audit_retention_job = AuditRetentionCleanupJob(
-            knowledge_store=resources.knowledge_store,
-            settings=jobs.audit_retention,
-        )
-        scheduler.register(audit_retention_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                audit_retention_job.update_settings,
-                "developer_settings.jobs.audit_retention",
-            )
-        )
-
-        conflict_discovery_job = ConflictDiscoveryJob(
-            knowledge_store=resources.knowledge_store,
-            settings=jobs.conflict_discovery,
-            llm=resources.llm_service,
-        )
-        scheduler.register(conflict_discovery_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                conflict_discovery_job.update_settings,
-                "developer_settings.jobs.conflict_discovery",
             )
         )

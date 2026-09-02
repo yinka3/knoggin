@@ -83,6 +83,7 @@ class ApplicationRuntime:
                 ConfigManager.get().config.user_aliases,
             )
             projects = ProjectManager(resources=resources, user_name=user_name)
+            await projects.start()
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
             agent_orchestrator = AgentOrchestrator(
@@ -116,6 +117,11 @@ class ApplicationRuntime:
                     await aac_runtime.shutdown()
                 except Exception:
                     logger.exception("AAC runtime cleanup failed during application startup")
+            if "projects" in locals() and projects is not None:
+                try:
+                    await projects.shutdown()
+                except Exception:
+                    logger.exception("Project manager cleanup failed during application startup")
             try:
                 await resources.shutdown()
             except Exception:

@@ -56,7 +56,6 @@ class ProjectRuntime:
         self.compiled_domain: CompiledDomain = domain_config.compile()
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
-        self.document_indexer = document_service.indexer
 
         self.episode_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
@@ -75,16 +74,10 @@ class ProjectRuntime:
 
         for phase, shutdown in (
             ("scheduler", self.scheduler.stop if self.scheduler else None),
-            ("document indexing", self.document_indexer.shutdown),
+            ("document indexing", self.document_service.indexer.shutdown),
             (
                 "background work",
-                (
-                    lambda: (
-                        self.background_work.cancel_project(self.project_id)
-                        if self.background_work is not None
-                        else None
-                    )
-                ),
+                self._cancel_owned_background_work,
             ),
         ):
             if shutdown is None:
@@ -117,6 +110,19 @@ class ProjectRuntime:
             ) from failures[0]
         # EntityResolver and others don't have explicit shutdown methods,
         # but they will be garbage collected.
+
+    async def _cancel_owned_background_work(self) -> None:
+        """Cancel only document-index and scheduler work owned by this runtime."""
+        if self.background_work is None:
+            return
+        owners = {f"project:{self.project_id}:document-index"}
+        if self.scheduler is not None:
+            owners.update(
+                f"project:{self.project_id}:{name}"
+                for name in self.scheduler.registered_job_names
+            )
+        for owner in sorted(owners):
+            await self.background_work.cancel_owner(owner)
 
     async def load_domain_config(self) -> DomainConfig:
         """Load the active domain and install its immutable runtime snapshot."""
