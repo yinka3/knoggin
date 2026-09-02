@@ -333,101 +333,6 @@ class AgentRun:
         if self.sealed:
             raise RuntimeError("AgentRun has been finalized")
 
-    @property
-    def profiles(self):
-        """Compatibility view backed by the canonical entity section."""
-
-        return self.notebook.entities
-
-    @profiles.setter
-    def profiles(self, values) -> None:
-        self.notebook._replace_section("entities", list(values or []))
-
-    @property
-    def messages(self):
-        """Compatibility view backed by canonical message and document evidence."""
-
-        values = []
-        for item in self.notebook.messages:
-            is_topic_compatibility_item = (
-                "timestamp" in item
-                and item.get("message") is not None
-                and item.get("score") == 1.0
-                and not item.get("user_name")
-                and not item.get("session_id")
-            )
-            if (
-                "context" not in item
-                and "timestamp" in item
-                and item.get("message") is not None
-            ) or is_topic_compatibility_item:
-                values.append(
-                    {
-                        "id": item.get("id", item.get("message_id")),
-                        "score": item.get("score", 1.0),
-                        "user_name": item.get("user_name"),
-                        "session_id": item.get("session_id"),
-                        "context": [
-                            {
-                                "role": item.get("role", "assistant"),
-                                "timestamp": item.get("timestamp", ""),
-                                "content": item.get("message", ""),
-                                "is_hit": True,
-                            }
-                        ],
-                    }
-                )
-            else:
-                values.append(item)
-        values.extend(self.notebook.model_view()["messages"][len(values) :])
-        return values
-
-    @messages.setter
-    def messages(self, values) -> None:
-        self.notebook._replace_section("messages", list(values or []))
-
-    @property
-    def graph(self):
-        """Compatibility view backed by canonical relationship knowledge."""
-
-        return self.notebook.relationships
-
-    @graph.setter
-    def graph(self, values) -> None:
-        self.notebook._replace_section("relationships", list(values or []))
-
-    @property
-    def paths(self):
-        return self.notebook.paths
-
-    @paths.setter
-    def paths(self, values) -> None:
-        self.notebook._replace_section("paths", list(values or []))
-
-    @property
-    def episodes(self):
-        return self.notebook.episodes
-
-    @episodes.setter
-    def episodes(self, values) -> None:
-        self.notebook._replace_section("episodes", list(values or []))
-
-    @property
-    def sources(self):
-        return list(self.notebook.web_discoveries) + list(self.notebook.web_reads)
-
-    @sources.setter
-    def sources(self, values) -> None:
-        self.notebook.replace_sources(list(values or []))
-
-    @property
-    def evidence_summary(self) -> Optional[str]:
-        return self.notebook.summary.text
-
-    @evidence_summary.setter
-    def evidence_summary(self, value: Optional[str]) -> None:
-        self.notebook.set_summary(value, self.notebook.summary.references)
-
     def begin_attempt(self) -> bool:
         """Reserve the next LLM attempt if this run has capacity remaining."""
 
@@ -451,8 +356,7 @@ class AgentRun:
         call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
         return call_sig in self.previous_calls
 
-    def tool_limit_reached(self, tool_name: str, config: Any = None) -> bool:
-        del config
+    def tool_limit_reached(self, tool_name: str) -> bool:
         limit = self.limits.get_tool_limit(tool_name, self.limits.max_calls)
         return self.tool_call_counts.get(tool_name, 0) >= limit
 
@@ -515,16 +419,10 @@ class AgentRun:
         """Apply one tool result to the aggregate's owned evidence buffers."""
 
         self._require_active()
-        before = self._evidence_fingerprint()
-        self.notebook.apply(tool_name, result)
-        gathered = before != self._evidence_fingerprint()
+        apply_result = self.notebook.apply(tool_name, result)
+        gathered = apply_result.changed
         self.new_evidence_gathered = self.new_evidence_gathered or gathered
         return gathered
-
-    def _evidence_fingerprint(self) -> str:
-        """Serialize evidence state for change detection within one run."""
-
-        return self.notebook.fingerprint()
 
     def record_empty_result(self) -> bool:
         """Record an empty tool turn and report whether replanning is due."""
@@ -545,11 +443,6 @@ class AgentRun:
 
         return self.notebook.has_any()
 
-    def render_notebook(self) -> str:
-        """Return the strict, localized prompt view of this run's notebook."""
-
-        return self.notebook.render()
-
     def record_usage(self, usage: Optional[StreamUsage]) -> None:
         self._require_active()
         if not usage:
@@ -559,9 +452,6 @@ class AgentRun:
         self.usage["approximate"] = self.usage["approximate"] or usage.get(
             "approximate", False
         )
-
-    def clear_short_uuid_references(self) -> None:
-        self.short_uuid_references.clear()
 
     def set_evidence_token_count(self, token_count: int) -> None:
         self._require_active()

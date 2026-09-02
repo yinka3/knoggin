@@ -23,10 +23,6 @@ _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
     "get_document_info": {"document_id": "doc"},
     "read_document": {"document_id": "doc"},
     "search_documents": {"document_id": "doc"},
-    "check_graph_health": {
-        "episode_id": "ep",
-        "evidence_episode_ids": "ep",
-    },
     "propose_entity_merge": {
         "episode_id": "ep",
         "evidence_episode_ids": "ep",

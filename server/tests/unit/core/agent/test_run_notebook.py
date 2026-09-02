@@ -63,7 +63,7 @@ def test_notebook_renderer_preserves_cross_project_records_without_duplicate_ids
 
     rendered = render_notebook(notebook)
 
-    assert len(notebook.messages) == 2
+    assert len(notebook.section_items("messages")) == 2
     assert "M1: A" in rendered
     assert "M2: B" in rendered
     assert "project-a" not in rendered

@@ -1,5 +1,3 @@
-import pytest
-
 from core.agent.notebook import NotebookCapacity, RunNotebook
 from core.agent.run import AgentRunLimits
 
@@ -20,10 +18,10 @@ def test_notebook_deduplicates_entities_and_creates_reference_pages_and_hints():
 
     assert first.changed is True
     assert first.references == ("entity:24", "entity:25")
-    assert list(notebook.entities) == [
+    assert notebook.section_items("entities") == (
         {"id": 24, "canonical_name": "Sarah J."},
         {"id": 25, "canonical_name": "Grace Hopper"},
-    ]
+    )
     assert notebook.entity_pages["entity:25"] == {
         "entity_ref": "entity:25",
         "relationship_refs": [],
@@ -65,8 +63,8 @@ def test_notebook_shares_relationship_evidence_across_retrieval_surfaces():
         },
     )
 
-    assert len(notebook.messages) == 1
-    relationship = notebook.relationships[0]
+    assert len(notebook.section_items("messages")) == 1
+    relationship = notebook.section_items("relationships")[0]
     assert relationship["evidence_refs"] == ["message:project-a:session-a:msg_7"]
     assert notebook.entity_pages["entity:24"]["relationship_refs"] == [
         "relationship:relationship-1"
@@ -122,10 +120,14 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
         },
     )
 
-    assert [item["episode_id"] for item in notebook.episodes] == ["ep-1"]
+    assert [item["episode_id"] for item in notebook.section_items("episodes")] == [
+        "ep-1"
+    ]
     assert notebook.model_view()["episodes"][0]["resolution"] == "semantic"
-    assert [item["id"] for item in notebook.messages] == ["msg_8"]
-    assert [item["chunk_index"] for item in notebook.documents] == [1, 2]
+    assert [item["id"] for item in notebook.section_items("messages")] == ["msg_8"]
+    assert [
+        item["chunk_index"] for item in notebook.section_items("documents")
+    ] == [1, 2]
     assert notebook.entity_pages["entity:24"]["episode_refs"] == ["episode:ep-1"]
 
 
@@ -153,23 +155,28 @@ def test_notebook_compiles_independent_evidence_and_render_capacities():
     assert capacity.max_render_tokens == 900
 
 
-def test_notebook_source_replacement_is_atomic_when_capacity_is_exceeded():
+def test_notebook_source_application_is_atomic_when_capacity_is_exceeded():
     notebook = RunNotebook(
         capacity=NotebookCapacity(max_web_discoveries=1, max_render_tokens=1000)
     )
-    notebook.replace_sources(
-        [{"url": "https://example.com/one", "source_kind": "web_search_result"}]
+    notebook.apply(
+        "web_search",
+        {"data": [{"url": "https://example.com/one"}]},
     )
     before = notebook.as_dict()
 
-    with pytest.raises(ValueError, match="source evidence exceeds capacity"):
-        notebook.replace_sources(
-            [
-                {"url": "https://example.com/two", "source_kind": "web_search_result"},
-                {"url": "https://example.com/three", "source_kind": "web_search_result"},
+    rejected = notebook.apply(
+        "web_search",
+        {
+            "data": [
+                {"url": "https://example.com/two"},
+                {"url": "https://example.com/three"},
             ]
-        )
+        },
+    )
 
+    assert rejected.accepted is False
+    assert rejected.reason == "capacity"
     assert notebook.as_dict() == before
 
 
@@ -330,5 +337,5 @@ def test_rollover_discards_older_inactive_contributions():
 
     notebook.rollover()
 
-    retained_ids = {item["id"] for item in notebook.messages}
+    retained_ids = {item["id"] for item in notebook.section_items("messages")}
     assert retained_ids == {"m1", "m2", "m3"}

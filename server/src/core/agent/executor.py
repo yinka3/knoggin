@@ -592,7 +592,7 @@ class AgentExecutor:
             }
 
             try:
-                if self.ctx.tool_limit_reached(call.name, self.ctx.limits):
+                if self.ctx.tool_limit_reached(call.name):
                     error_message = f"Tool '{call.name}' has reached its call limit"
                     self.ctx.note_nonfatal_error(error_message)
                     results_out.append({"tool": call.name, "error": error_message})

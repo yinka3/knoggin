@@ -54,8 +54,14 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     )
     ctx.call_count = 1
     ctx.last_error = "Duplicate call skipped"
-    ctx.profiles.append({"id": 7, "canonical_name": "Ada"})
-    ctx.profiles.append({"id": 8, "canonical_name": "Grace"})
+    ctx.notebook.apply(
+        "search_entity",
+        {"data": [{"id": 8, "canonical_name": "Grace"}]},
+    )
+    ctx.notebook.apply(
+        "search_entity",
+        {"data": [{"id": 7, "canonical_name": "Ada"}]},
+    )
 
     message = build_user_message(
         ctx,
@@ -125,12 +131,12 @@ def test_topic_context_tool_accumulates_messages_as_evidence():
         "Loaded context for 2 topic(s) with 1 supporting message(s)",
         2,
     )
-    assert ctx.messages == [
+    assert ctx.notebook.section_items("messages") == (
         {
             "id": "msg_7",
+            "message": "The offer includes a leadership role.",
+            "timestamp": "2026-01-01T10:00:00+00:00",
             "score": 1.0,
-            "user_name": None,
-            "session_id": None,
             "context": [
                 {
                     "role": "assistant",
@@ -139,8 +145,8 @@ def test_topic_context_tool_accumulates_messages_as_evidence():
                     "is_hit": True,
                 }
             ],
-        }
-    ]
+        },
+    )
 
     message = build_user_message(
         ctx,
@@ -255,7 +261,7 @@ def test_notebook_skips_non_source_search_status_items():
         },
     )
 
-    assert [item["url"] for item in ctx.sources] == [
+    assert [item["url"] for item in ctx.notebook.model_view()["sources"]] == [
         "https://example.test/source"
     ]
 
@@ -275,9 +281,11 @@ def test_rollover_evidence_preserves_sources_and_summary_references():
 
     rollover = ctx.rollover_notebook("Condensed source evidence")
 
-    assert ctx.evidence_summary == "Condensed source evidence"
+    assert ctx.notebook.summary.text == "Condensed source evidence"
     assert rollover.generation == 2
-    assert [item["title"] for item in ctx.sources] == [f"Source {index}" for index in range(6)]
+    assert [item["title"] for item in ctx.notebook.model_view()["sources"]] == [
+        f"Source {index}" for index in range(6)
+    ]
     assert ctx.notebook.summary.references
     assert all(ctx.notebook._known_reference(ref) for ref in ctx.notebook.summary.references)
 
@@ -430,8 +438,9 @@ def test_notebook_dedupes_without_blind_tail_trimming():
         },
     )
 
-    assert [msg["id"] for msg in ctx.messages] == ["msg_1", "msg_2"]
-    assert ctx.messages[0]["score"] == 1.0
+    messages = ctx.notebook.model_view()["messages"]
+    assert [msg["id"] for msg in messages] == ["msg_1", "msg_2"]
+    assert messages[0]["score"] == 1.0
     assert ctx.notebook.last_apply_result.accepted is False
     assert ctx.notebook.last_apply_result.reason == "capacity"
 
@@ -551,22 +560,26 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
 
-    assert ctx.profiles == [{"id": 1, "canonical_name": "Ada"}]
-    assert ctx.graph == [
+    assert ctx.notebook.section_items("entities") == (
+        {"id": 1, "canonical_name": "Ada"},
+    )
+    assert ctx.notebook.section_items("relationships") == (
         {"source": "Ada", "target": "Knoggin", "score": 0.8},
         {"source": "Ada", "target": "Testing"},
-    ]
-    assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
-    assert ctx.episodes == [
+    )
+    assert ctx.notebook.section_items("paths") == (
+        {"entity_a": "Ada", "entity_b": "Knoggin"},
+    )
+    assert ctx.notebook.section_items("episodes") == (
         {
             "episode_id": "ep-1",
             "summary": "Profile changed",
             "resolution": "exact",
-        }
-    ]
+        },
+    )
     assert [
         (msg["id"], msg["source_type"], msg["message"])
-        for msg in ctx.messages
+        for msg in ctx.notebook.model_view()["messages"]
     ] == [
         ("document:file-1:2", "document", "profile plan"),
         (
@@ -575,7 +588,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
             "10: exact content",
         ),
     ]
-    assert ctx.sources == [
+    assert ctx.notebook.model_view()["sources"] == [
         {
             "title": "Example A",
             "url": "https://example.test/a",
@@ -613,7 +626,7 @@ def test_notebook_rejects_oversized_buckets_atomically():
         },
     )
 
-    assert list(ctx.profiles) == []
+    assert ctx.notebook.section_items("entities") == ()
     assert ctx.notebook.last_apply_result.accepted is False
     assert ctx.notebook.last_apply_result.reason == "capacity"
 

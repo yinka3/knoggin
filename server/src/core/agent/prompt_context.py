@@ -215,8 +215,8 @@ def _format_evidence(
     ]
     old_messages = [item for item in messages if item not in new_messages]
 
-    if evidence.evidence_summary:
-        msg += f"**Core Evidence Summary:**\n{evidence.evidence_summary}\n\n"
+    if evidence.notebook.summary.text:
+        msg += f"**Core Evidence Summary:**\n{evidence.notebook.summary.text}\n\n"
 
     if profiles:
         if old_profiles:

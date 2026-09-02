@@ -161,10 +161,12 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     ]
     assert run.attempt_count == 4
     assert run.call_count == 2
-    assert run.messages == [
-        {"id": "message-1", "message": "Profile changed", "score": 0.9}
-    ]
-    assert run.graph == [{"source": "Knoggin", "target": "Profile"}]
+    assert run.notebook.section_items("messages") == (
+        {"id": "message-1", "message": "Profile changed", "score": 0.9},
+    )
+    assert run.notebook.section_items("relationships") == (
+        {"source": "Knoggin", "target": "Profile"},
+    )
     assert run.usage["total_tokens"] == 20
     assert run.sealed is True
     run.release()
@@ -315,8 +317,9 @@ async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
         schema["function"]["name"] for schema in llm.calls[0]["tools"]
     ]
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
-    assert run.messages[0]["id"] == "msg_7"
-    assert run.messages[0]["context"][0]["content"] == (
+    messages = run.notebook.model_view()["messages"]
+    assert messages[0]["id"] == "msg_7"
+    assert messages[0]["context"][0]["content"] == (
         "The offer changes compensation."
     )
 
@@ -358,36 +361,50 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     assert errors[1]["data"]["error"] == "Call limit reached for search_messages"
     assert run.call_count == 2
     assert run.tool_call_counts == {"search_messages": 2}
-    assert [item["id"] for item in run.messages] == ["one", "two"]
+    assert [item["id"] for item in run.notebook.model_view()["messages"]] == [
+        "one",
+        "two",
+    ]
 
 
 @pytest.mark.no_network
 async def test_fallback_summary_uses_all_canonical_evidence_categories():
     llm = ScriptedLLM([])
     run = make_run()
-    run.episodes = [
+    run.notebook.apply(
+        "episode_check",
         {
-            "resolution": "direct",
-            "results": [
+            "data": {
+                "resolution": "direct",
+                "results": [
+                    {
+                        "entity_name": "Ada",
+                        "episodes": [
+                            {"episode_id": "ep-1", "summary": "Found clue"}
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    run.notebook.apply(
+        "find_path",
+        {"data": [{"entity_a": "Ada", "entity_b": "Knoggin", "step": 0}]},
+    )
+    run.notebook.apply(
+        "web_search",
+        {
+            "data": [
                 {
-                    "entity_name": "Ada",
-                    "episodes": [
-                        {"episode_id": "ep-1", "summary": "Found clue"}
-                    ],
+                    "title": "Useful source",
+                    "url": "https://example.test/source",
+                    "snippet": "Useful evidence.",
+                    "source_kind": "web_search_result",
                 }
-            ],
-        }
-    ]
-    run.paths = [{"entity_a": "Ada", "entity_b": "Knoggin", "step": 0}]
-    run.sources = [
-        {
-            "title": "Useful source",
-            "url": "https://example.test/source",
-            "snippet": "Useful evidence.",
-            "source_kind": "web_search_result",
-        }
-    ]
-    run.evidence_summary = "Previously compacted evidence."
+            ]
+        },
+    )
+    run.notebook.set_summary("Previously compacted evidence.")
     prompts = []
 
     async def capture_summary(**kwargs):
@@ -412,8 +429,14 @@ async def test_fallback_summary_uses_all_canonical_evidence_categories():
 async def test_compaction_token_count_matches_post_compaction_context(monkeypatch):
     llm = ScriptedLLM([])
     run = make_run()
-    run.messages = [{"id": "m1", "message": "A retained message"}]
-    run.profiles = [{"id": "p1", "canonical_name": "Ada"}]
+    run.notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m1", "message": "A retained message"}]},
+    )
+    run.notebook.apply(
+        "search_entity",
+        {"data": [{"id": "p1", "canonical_name": "Ada"}]},
+    )
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     async def summarize(_evidence):

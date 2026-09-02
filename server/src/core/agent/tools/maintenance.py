@@ -46,55 +46,6 @@ class MaintenanceTools:
             return {"error": str(e)}
 
     @staticmethod
-    def _merge_candidate_rank_key(candidate: Dict) -> tuple:
-        evidence_support = str(candidate.get("evidence_support") or "").casefold()
-        return (
-            1 if evidence_support == "entailment" else 0,
-            candidate.get("fuzz_score") or 0,
-            candidate.get("cosine_score") or 0,
-            candidate.get("shared_neighbor_count") or 0,
-        )
-
-    @staticmethod
-    def _format_merge_candidate(candidate: Dict) -> Dict:
-        evidence = []
-        for side, key in (("primary", "evidence_a"), ("secondary", "evidence_b")):
-            for item in candidate.get(key, []) or []:
-                reference = {
-                    "side": side,
-                    "kind": item.get("kind"),
-                    "text": item.get("text"),
-                }
-                for identifier in ("message_id", "episode_id", "session_id"):
-                    if item.get(identifier) is not None:
-                        reference[identifier] = item[identifier]
-                evidence.append(reference)
-
-        formatted = {
-            "primary_id": candidate.get("primary_id"),
-            "primary_name": candidate.get("primary_name"),
-            "primary_type": candidate.get("primary_type"),
-            "secondary_id": candidate.get("secondary_id"),
-            "secondary_name": candidate.get("secondary_name"),
-            "secondary_type": candidate.get("secondary_type"),
-            "topic_a": candidate.get("topic_a"),
-            "topic_b": candidate.get("topic_b"),
-            "fuzz_score": candidate.get("fuzz_score", 0),
-            "shared_neighbor_count": candidate.get("shared_neighbor_count", 0),
-            "reasons": list(candidate.get("reasons", [])),
-            "evidence": evidence,
-        }
-        if "cosine_score" in candidate:
-            formatted["cosine_score"] = candidate.get("cosine_score")
-        if "evidence_support" in candidate:
-            formatted["evidence_support"] = candidate.get("evidence_support")
-        if "evidence_support_pairs" in candidate:
-            formatted["evidence_support_pairs"] = list(
-                candidate.get("evidence_support_pairs") or []
-            )
-        return formatted
-
-    @staticmethod
     def _format_global_merge_candidate(candidate: Dict) -> Dict:
         return {
             "primary_id": candidate["entity_a_id"],
@@ -114,7 +65,6 @@ class MaintenanceTools:
         reasoning: str,
         evidence_message_ids: Optional[List[int]] = None,
         evidence_episode_ids: Optional[List[str]] = None,
-        confidence: Optional[float] = None,
     ) -> Dict:
         """Submit a grounded merge proposal without granting destructive access."""
         try:
@@ -178,9 +128,6 @@ class MaintenanceTools:
             )
             return {
                 "review_id": result.group.conflict_id,
-                # Kept as a response label for callers that have not yet
-                # migrated their UI; the value is the MaintenanceReview ID.
-                "conflict_id": result.group.conflict_id,
                 "created": result.created,
                 "evidence_added": result.evidence_added,
                 "status": result.group.status,

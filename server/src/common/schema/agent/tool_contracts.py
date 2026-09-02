@@ -844,12 +844,6 @@ TOOL_SCHEMAS = [
                         "type": "array",
                         "items": {"type": "string", "minLength": 4},
                         "description": "Episode IDs (for example ep_a3f91c) that support the proposal."
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "Advisory model confidence; never treated as authorization."
                     }
                 },
                 "required": [

@@ -60,7 +60,7 @@ async def test_agent_conflict_report_keeps_evidence_immutable_and_opens_review_w
         confidence=0.8,
     )
 
-    assert result["conflict_id"] == "conflict-1"
+    assert result["review_id"] == "conflict-1"
     assert result["created"] is True
     assert service.calls == [
         {

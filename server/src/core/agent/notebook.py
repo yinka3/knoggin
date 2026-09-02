@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterator, MutableSequence
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -120,64 +120,6 @@ class NotebookSummary:
         }
 
 
-class _SectionView(MutableSequence[dict[str, Any]]):
-    """List-shaped access to one normalized notebook section.
-
-    The view exists only as a migration-friendly AgentRun surface.  Records
-    remain keyed by canonical references in ``RunNotebook``; list operations
-    update that one source of truth rather than creating a second accumulator.
-    """
-
-    def __init__(self, notebook: "RunNotebook", section: str):
-        self._notebook = notebook
-        self._section = section
-
-    def __len__(self) -> int:
-        return len(self._notebook._orders[self._section])
-
-    def __getitem__(self, index):
-        values = self._notebook._section_values(self._section)
-        return values[index]
-
-    def __setitem__(self, index, value) -> None:
-        values = self._notebook._section_values(self._section)
-        if isinstance(index, slice):
-            replacement = list(value)
-            values[index] = replacement
-            self._notebook._replace_section(self._section, values)
-            return
-        values[index] = value
-        self._notebook._replace_section(self._section, values)
-
-    def __delitem__(self, index) -> None:
-        values = self._notebook._section_values(self._section)
-        del values[index]
-        self._notebook._replace_section(self._section, values)
-
-    def insert(self, index: int, value: dict[str, Any]) -> None:
-        values = self._notebook._section_values(self._section)
-        values.insert(index, value)
-        self._notebook._replace_section(self._section, values)
-
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        return iter(self._notebook._section_values(self._section))
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, _SectionView):
-            other = other._notebook._section_values(other._section)
-        if isinstance(other, (list, tuple)):
-            return self._notebook._section_values(self._section) == list(other)
-        return NotImplemented
-
-    def __repr__(self) -> str:
-        return repr(self._notebook._section_values(self._section))
-
-    def sort(self, *args, **kwargs) -> None:
-        values = self._notebook._section_values(self._section)
-        values.sort(*args, **kwargs)
-        self._notebook._replace_section(self._section, values)
-
-
 class RunNotebook:
     """Normalized working memory for a single AgentRun.
 
@@ -232,37 +174,12 @@ class RunNotebook:
         clone._last_apply_result = self._last_apply_result
         return clone
 
-    @property
-    def entities(self) -> _SectionView:
-        return _SectionView(self, "entities")
+    def section_items(self, section: str) -> tuple[dict[str, Any], ...]:
+        """Return a detached, read-only snapshot of one canonical section."""
 
-    @property
-    def relationships(self) -> _SectionView:
-        return _SectionView(self, "relationships")
-
-    @property
-    def episodes(self) -> _SectionView:
-        return _SectionView(self, "episodes")
-
-    @property
-    def paths(self) -> _SectionView:
-        return _SectionView(self, "paths")
-
-    @property
-    def messages(self) -> _SectionView:
-        return _SectionView(self, "messages")
-
-    @property
-    def documents(self) -> _SectionView:
-        return _SectionView(self, "documents")
-
-    @property
-    def web_discoveries(self) -> _SectionView:
-        return _SectionView(self, "web_discoveries")
-
-    @property
-    def web_reads(self) -> _SectionView:
-        return _SectionView(self, "web_reads")
+        if section not in _ALL_SECTIONS:
+            raise ValueError(f"unknown notebook section: {section}")
+        return tuple(deepcopy(self._section_values(section)))
 
     @property
     def entity_pages(self) -> dict[str, dict[str, Any]]:
@@ -355,16 +272,6 @@ class RunNotebook:
     def capacity_state(self) -> str:
         return str(self.capacity_report()["status"])
 
-    @property
-    def evidence_summary(self) -> str | None:
-        """Compatibility view for the pre-notebook summary field."""
-
-        return self.summary.text
-
-    @evidence_summary.setter
-    def evidence_summary(self, value: str | None) -> None:
-        self.set_summary(value, self.summary.references)
-
     def _section_values(self, section: str) -> list[dict[str, Any]]:
         return [self._records[section][key] for key in self._orders[section]]
 
@@ -375,46 +282,6 @@ class RunNotebook:
 
     def is_last_applied(self, section: str, item: dict[str, Any]) -> bool:
         return self._reference_for_section(section, item) in self._last_applied_references
-
-    def _replace_section(self, section: str, values: list[dict[str, Any]]) -> None:
-        records: dict[str, dict[str, Any]] = {}
-        order: list[str] = []
-        for value in values:
-            if not isinstance(value, dict):
-                continue
-            reference = self._reference_for_section(section, value)
-            records[reference] = deepcopy(value)
-            if reference not in order:
-                order.append(reference)
-        previous_records = self._records[section]
-        previous_order = self._orders[section]
-        self._records[section] = records
-        self._orders[section] = order
-        if not self._fits_capacity():
-            self._records[section] = previous_records
-            self._orders[section] = previous_order
-            raise ValueError(f"notebook {section} section exceeds capacity")
-
-    def replace_sources(self, values: list[dict[str, Any]]) -> None:
-        """Replace web evidence atomically across both source sections."""
-
-        candidate = deepcopy(self)
-        candidate._records["web_discoveries"] = {}
-        candidate._orders["web_discoveries"] = []
-        candidate._records["web_reads"] = {}
-        candidate._orders["web_reads"] = []
-        for value in values:
-            if not isinstance(value, dict):
-                continue
-            section = (
-                "web_reads"
-                if value.get("source_kind") in {"web_page", "web_pdf"}
-                else "web_discoveries"
-            )
-            candidate._upsert(section, value)
-        if not candidate._fits_capacity():
-            raise ValueError("notebook source evidence exceeds capacity")
-        self._adopt_from(candidate)
 
     def _reference_for_section(self, section: str, item: dict[str, Any]) -> str:
         if section == "entities":
