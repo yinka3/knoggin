@@ -23,6 +23,9 @@ from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
     DocumentFocusResponse,
+    EntityMergeRollbackRequest,
+    MaintenanceReviewDecisionRequest,
+    MaintenanceReviewResponse,
     MessageDeltaEvent,
     ProjectResponse,
     PromoteSourceRequest,
@@ -213,6 +216,104 @@ class ApplicationRuntimePort:
             source,
             title=request.title,
             summary=request.summary,
+        )
+
+    @staticmethod
+    def _maintenance_review_response(review: Any) -> MaintenanceReviewResponse:
+        return MaintenanceReviewResponse.model_validate(
+            {
+                "review_id": review.review_id,
+                "scope": review.scope,
+                "project_id": review.project_id,
+                "kind": review.kind,
+                "reasoning": review.reasoning,
+                "proposed_plan": review.proposed_plan.model_dump(mode="json"),
+                "expected_state": review.expected_state,
+                "status": review.status,
+                "created_at": review.created_at,
+                "resolved_at": review.resolved_at,
+            }
+        )
+
+    async def list_global_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+    ) -> list[MaintenanceReviewResponse]:
+        self._require_user(user_name)
+        reviews = await self.runtime.projects.list_global_maintenance_reviews()
+        return [self._maintenance_review_response(review) for review in reviews]
+
+    async def decide_global_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> dict:
+        self._require_user(user_name)
+        if request.action == "apply":
+            return await self.runtime.projects.apply_global_entity_merge_review(
+                review_id,
+                expected_state=request.expected_state,
+            )
+        review = await self.runtime.projects.dismiss_global_maintenance_review(
+            review_id,
+            expected_state=request.expected_state,
+            reason=request.reason,
+        )
+        return {"review": self._maintenance_review_response(review).model_dump(mode="json")}
+
+    async def list_project_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[MaintenanceReviewResponse]:
+        self._require_user(user_name)
+        reviews = await self.runtime.projects.maintenance_service.list_maintenance_reviews(
+            project_id
+        )
+        return [self._maintenance_review_response(review) for review in reviews]
+
+    async def decide_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> dict:
+        self._require_user(user_name)
+        review = await self.runtime.projects.maintenance_service.transition_maintenance_review(
+            project_id,
+            review_id,
+            status="applied" if request.action == "apply" else "dismissed",
+            expected_state=request.expected_state,
+            reason=request.reason,
+        )
+        return {"review": self._maintenance_review_response(review).model_dump(mode="json")}
+
+    async def preview_entity_merge_rollback(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+    ) -> dict:
+        self._require_user(user_name)
+        return await self.runtime.projects.preview_global_entity_merge_rollback(merge_id)
+
+    async def rollback_entity_merge(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+        request: EntityMergeRollbackRequest,
+    ) -> dict:
+        self._require_user(user_name)
+        return await self.runtime.projects.rollback_global_entity_merge(
+            merge_id,
+            approved_mutation_ids=request.approved_mutation_ids,
         )
 
     async def _request_document_focus(

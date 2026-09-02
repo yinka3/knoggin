@@ -9,10 +9,13 @@ from common.schema.artifacts import ArtifactReference
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
+    EntityMergeRollbackRequest,
+    MaintenanceReviewDecisionRequest,
     SetDocumentFocusDocument,
     StartRunRequest,
     validate_public_stream,
 )
+from core.knowledge.maintenance_reviews import EntityMergePlan, MaintenanceReview
 from runtime.api_port import ApplicationRuntimePort
 
 
@@ -105,6 +108,25 @@ class FakeKnowledgeStore:
 class FakeProjects:
     def __init__(self):
         self.calls = []
+        self.maintenance_service = self
+
+    @staticmethod
+    def _review(*, scope="user-global", project_id=None, status="open"):
+        return MaintenanceReview(
+            review_id="review-1",
+            user_name="ada",
+            scope=scope,
+            project_id=project_id,
+            kind="entity_merge",
+            reasoning="The evidence identifies one entity.",
+            proposed_plan=EntityMergePlan(
+                survivor_entity_id=2,
+                retired_entity_id=3,
+                expected_state_hash="hash-1",
+            ),
+            expected_state={"state_hash": "hash-1"},
+            status=status,
+        )
 
     async def create_project(self, **kwargs):
         self.calls.append(kwargs)
@@ -115,6 +137,55 @@ class FakeProjects:
             "status": "active",
             "allowed_projects": [],
         }
+
+    async def list_global_maintenance_reviews(self):
+        self.calls.append({"operation": "list_global_reviews"})
+        return [self._review()]
+
+    async def apply_global_entity_merge_review(self, review_id, **kwargs):
+        self.calls.append(
+            {"operation": "apply_global_review", "review_id": review_id, **kwargs}
+        )
+        return {"merge_id": "merge-1", "review_id": review_id}
+
+    async def dismiss_global_maintenance_review(self, review_id, **kwargs):
+        self.calls.append(
+            {"operation": "dismiss_global_review", "review_id": review_id, **kwargs}
+        )
+        return self._review(status="dismissed")
+
+    async def list_maintenance_reviews(self, project_id):
+        self.calls.append(
+            {"operation": "list_project_reviews", "project_id": project_id}
+        )
+        return [self._review(scope="project", project_id=project_id)]
+
+    async def transition_maintenance_review(
+        self, project_id, review_id, **kwargs
+    ):
+        self.calls.append(
+            {
+                "operation": "decide_project_review",
+                "project_id": project_id,
+                "review_id": review_id,
+                **kwargs,
+            }
+        )
+        return self._review(
+            scope="project",
+            project_id=project_id,
+            status=kwargs["status"],
+        )
+
+    async def preview_global_entity_merge_rollback(self, merge_id):
+        self.calls.append({"operation": "preview_rollback", "merge_id": merge_id})
+        return {"merge_id": merge_id, "safe_mutation_ids": [1]}
+
+    async def rollback_global_entity_merge(self, merge_id, **kwargs):
+        self.calls.append(
+            {"operation": "rollback", "merge_id": merge_id, **kwargs}
+        )
+        return {"merge_id": merge_id, "rolled_back": True}
 
 
 class FakeSessions:
@@ -292,3 +363,57 @@ async def test_runtime_port_routes_pinned_and_request_document_focus(port):
 
     await application.clear_document_focus(user_name="ada", session_id="session-1")
     assert runtime.sessions.focus_calls[-1] == ("clear", "session-1")
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_runtime_port_routes_maintenance_through_project_owner(port):
+    application, runtime, _ = port
+
+    reviews = await application.list_global_maintenance_reviews(user_name="ada")
+    applied = await application.decide_global_maintenance_review(
+        user_name="ada",
+        review_id="review-1",
+        request=MaintenanceReviewDecisionRequest(
+            action="apply",
+            expected_state={"state_hash": "hash-1"},
+        ),
+    )
+    project_reviews = await application.list_project_maintenance_reviews(
+        user_name="ada",
+        project_id="project-1",
+    )
+    dismissed = await application.decide_project_maintenance_review(
+        user_name="ada",
+        project_id="project-1",
+        review_id="review-1",
+        request=MaintenanceReviewDecisionRequest(action="dismiss"),
+    )
+    preview = await application.preview_entity_merge_rollback(
+        user_name="ada",
+        merge_id="merge-1",
+    )
+    rollback = await application.rollback_entity_merge(
+        user_name="ada",
+        merge_id="merge-1",
+        request=EntityMergeRollbackRequest(approved_mutation_ids=(1,)),
+    )
+
+    assert reviews[0].scope == "user-global"
+    assert applied == {"merge_id": "merge-1", "review_id": "review-1"}
+    assert project_reviews[0].project_id == "project-1"
+    assert dismissed["review"]["status"] == "dismissed"
+    assert preview["safe_mutation_ids"] == [1]
+    assert rollback["rolled_back"] is True
+    assert [
+        call["operation"]
+        for call in runtime.projects.calls
+        if "operation" in call
+    ] == [
+        "list_global_reviews",
+        "apply_global_review",
+        "list_project_reviews",
+        "decide_project_review",
+        "preview_rollback",
+        "rollback",
+    ]

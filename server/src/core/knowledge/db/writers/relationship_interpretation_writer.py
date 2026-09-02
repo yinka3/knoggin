@@ -28,10 +28,10 @@ class RelationshipInterpretationResult:
 class RelationshipInterpretationWriter:
     """Apply a typed observation plan without replacing evidence identity."""
 
-    def __init__(self, client) -> None:
+    def __init__(self, client, *, reviews=None, projection=None) -> None:
         self.client = client
-        self.reviews = MaintenanceReviewWriter(client)
-        self.projection = GraphBuilder(client)
+        self.reviews = reviews or MaintenanceReviewWriter(client)
+        self.projection = projection or GraphBuilder(client)
 
     @asynccontextmanager
     async def _cursor_context(self, cur=None):
@@ -97,15 +97,15 @@ class RelationshipInterpretationWriter:
                 int(row["observation_id"]): row
                 for row in await active_cur.fetchall()
             }
+            prepared_changes = []
             for change in plan.changes:
                 row = rows.get(change.observation_id)
                 if row is None or row.get("relationship_id") != change.expected_relationship_id:
                     conflicts += 1
                     continue
                 old_id = row.get("relationship_id")
-                if old_id:
-                    old_relationship_ids.add(str(old_id))
                 new_id = None
+                relationship_type = None
                 if change.target_relationship_type is not None:
                     relationship_type = change.target_relationship_type
                     symmetric = bool(row.get("symmetric", False))
@@ -129,6 +129,40 @@ class RelationshipInterpretationWriter:
                     a_id, b_id = int(row["source_entity_id"]), int(row["target_entity_id"])
                     if symmetric:
                         a_id, b_id = sorted((a_id, b_id))
+                else:
+                    symmetric = False
+                    a_id = b_id = None
+                prepared_changes.append(
+                    (
+                        change,
+                        row,
+                        old_id,
+                        new_id,
+                        relationship_type,
+                        symmetric,
+                        a_id,
+                        b_id,
+                    )
+                )
+
+            if review_id is not None and conflicts:
+                raise ValueError(
+                    "maintenance review is stale; relationship evidence changed"
+                )
+
+            for (
+                change,
+                row,
+                old_id,
+                new_id,
+                relationship_type,
+                symmetric,
+                a_id,
+                b_id,
+            ) in prepared_changes:
+                if old_id:
+                    old_relationship_ids.add(str(old_id))
+                if new_id is not None:
                     await active_cur.execute(
                         """
                         INSERT INTO public.relationships
@@ -137,7 +171,15 @@ class RelationshipInterpretationWriter:
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (relationship_id) DO NOTHING
                         """,
-                        (new_id, user_name, project_id, a_id, b_id, relationship_type, symmetric),
+                        (
+                            new_id,
+                            user_name,
+                            project_id,
+                            a_id,
+                            b_id,
+                            relationship_type,
+                            symmetric,
+                        ),
                     )
                 await active_cur.execute(
                     """

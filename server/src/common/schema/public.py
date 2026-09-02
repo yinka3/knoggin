@@ -196,6 +196,48 @@ class PromoteSourceRequest(PublicModel):
     summary: str | None = Field(default=None, max_length=4000)
 
 
+class MaintenanceReviewResponse(PublicModel):
+    """Application-facing projection of one typed maintenance proposal."""
+
+    review_id: str = Field(min_length=1)
+    scope: Literal["project", "user-global"]
+    project_id: str | None = None
+    kind: str = Field(min_length=1, max_length=80)
+    reasoning: str = Field(min_length=1, max_length=8_000)
+    proposed_plan: dict[str, Any]
+    expected_state: dict[str, Any]
+    status: Literal["open", "applied", "dismissed", "stale"]
+    created_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class MaintenanceReviewListResponse(PublicModel):
+    reviews: tuple[MaintenanceReviewResponse, ...]
+
+
+class MaintenanceReviewDecisionRequest(PublicModel):
+    action: Literal["apply", "dismiss"]
+    expected_state: dict[str, Any] | None = None
+    reason: str | None = Field(default=None, max_length=2_000)
+
+
+class MaintenanceOperationResponse(PublicModel):
+    result: dict[str, Any]
+
+
+class EntityMergeRollbackRequest(PublicModel):
+    approved_mutation_ids: tuple[int, ...] = Field(default=(), max_length=10_000)
+
+    @field_validator("approved_mutation_ids")
+    @classmethod
+    def _validate_mutation_ids(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in values):
+            raise ValueError("approved mutation IDs must be positive integers")
+        if len(set(values)) != len(values):
+            raise ValueError("approved mutation IDs must be unique")
+        return values
+
+
 class StartRunRequest(PublicModel):
     session_id: str = Field(min_length=1)
     query: str = Field(min_length=1, max_length=100_000)

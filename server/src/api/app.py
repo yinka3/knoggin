@@ -36,6 +36,11 @@ from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
     DocumentFocusResponse,
+    EntityMergeRollbackRequest,
+    MaintenanceOperationResponse,
+    MaintenanceReviewDecisionRequest,
+    MaintenanceReviewListResponse,
+    MaintenanceReviewResponse,
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
@@ -136,6 +141,51 @@ class ApplicationPort(Protocol):
         artifact_id: str,
         revision: int,
         session_id: str | None = None,
+    ) -> Any: ...
+
+    async def list_global_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+    ) -> Any: ...
+
+    async def decide_global_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> Any: ...
+
+    async def list_project_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> Any: ...
+
+    async def decide_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> Any: ...
+
+    async def preview_entity_merge_rollback(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+    ) -> Any: ...
+
+    async def rollback_entity_merge(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+        request: EntityMergeRollbackRequest,
     ) -> Any: ...
 
 
@@ -322,6 +372,53 @@ def _artifact_list_response(value: Any) -> ArtifactListResponse:
     return ArtifactListResponse(
         artifacts=tuple(_artifact_response(item) for item in values)
     )
+
+
+def _maintenance_review_response(value: Any) -> MaintenanceReviewResponse:
+    if isinstance(value, MaintenanceReviewResponse):
+        return value
+    data = _as_data(value)
+    plan = _value(data, "proposed_plan", default={})
+    if not isinstance(plan, Mapping):
+        plan = _as_data(plan)
+    return MaintenanceReviewResponse.model_validate(
+        {
+            "review_id": _value(data, "review_id", "id"),
+            "scope": _value(data, "scope"),
+            "project_id": _value(data, "project_id"),
+            "kind": _value(data, "kind"),
+            "reasoning": _value(data, "reasoning"),
+            "proposed_plan": dict(plan),
+            "expected_state": dict(_value(data, "expected_state", default={}) or {}),
+            "status": _value(data, "status"),
+            "created_at": _value(data, "created_at"),
+            "resolved_at": _value(data, "resolved_at"),
+        }
+    )
+
+
+def _maintenance_review_list_response(value: Any) -> MaintenanceReviewListResponse:
+    if isinstance(value, MaintenanceReviewListResponse):
+        return value
+    if isinstance(value, Mapping):
+        values = value.get("reviews") or ()
+    else:
+        values = value or ()
+    return MaintenanceReviewListResponse(
+        reviews=tuple(_maintenance_review_response(item) for item in values)
+    )
+
+
+def _maintenance_operation_response(value: Any) -> MaintenanceOperationResponse:
+    if isinstance(value, MaintenanceOperationResponse):
+        return value
+    if isinstance(value, Mapping) and set(value) == {"result"}:
+        value = value["result"]
+    data = _as_data(value)
+    plan = data.get("plan")
+    if plan is not None and not isinstance(plan, Mapping):
+        data["plan"] = _as_data(plan)
+    return MaintenanceOperationResponse(result=data)
 
 
 def _error_response(
@@ -551,6 +648,105 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             user_name=user_name,
             project_id=project_id,
             request=body,
+        )
+
+    @app.get(
+        "/v1/maintenance/reviews",
+        response_model=MaintenanceReviewListResponse,
+    )
+    async def list_global_maintenance_reviews(
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewListResponse:
+        return _maintenance_review_list_response(
+            await _call(port.list_global_maintenance_reviews, user_name=user_name)
+        )
+
+    @app.post(
+        "/v1/maintenance/reviews/{review_id}/decision",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def decide_global_maintenance_review(
+        body: MaintenanceReviewDecisionRequest,
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.decide_global_maintenance_review,
+                user_name=user_name,
+                review_id=review_id,
+                request=body,
+            )
+        )
+
+    @app.get(
+        "/v1/projects/{project_id}/maintenance/reviews",
+        response_model=MaintenanceReviewListResponse,
+    )
+    async def list_project_maintenance_reviews(
+        project_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewListResponse:
+        return _maintenance_review_list_response(
+            await _call(
+                port.list_project_maintenance_reviews,
+                user_name=user_name,
+                project_id=project_id,
+            )
+        )
+
+    @app.post(
+        "/v1/projects/{project_id}/maintenance/reviews/{review_id}/decision",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def decide_project_maintenance_review(
+        body: MaintenanceReviewDecisionRequest,
+        project_id: str = Path(min_length=1),
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.decide_project_maintenance_review,
+                user_name=user_name,
+                project_id=project_id,
+                review_id=review_id,
+                request=body,
+            )
+        )
+
+    @app.get(
+        "/v1/maintenance/entity-merges/{merge_id}/rollback",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def preview_entity_merge_rollback(
+        merge_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.preview_entity_merge_rollback,
+                user_name=user_name,
+                merge_id=merge_id,
+            )
+        )
+
+    @app.post(
+        "/v1/maintenance/entity-merges/{merge_id}/rollback",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def rollback_entity_merge(
+        body: EntityMergeRollbackRequest,
+        merge_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.rollback_entity_merge,
+                user_name=user_name,
+                merge_id=merge_id,
+                request=body,
+            )
         )
 
     @app.get(

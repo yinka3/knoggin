@@ -122,7 +122,7 @@ class GlobalEntityMergeWriter:
                 active_cur,
                 """
                 SELECT relationship_id, user_name, project_id, entity_a_id,
-                       entity_b_id, relationship_type, symmetric
+                       entity_b_id, relationship_type, "symmetric"
                 FROM public.relationships
                 WHERE user_name = %s
                   AND (entity_a_id = ANY(%s) OR entity_b_id = ANY(%s))
@@ -388,8 +388,15 @@ class GlobalEntityMergeWriter:
                             "entity_type": merged_type,
                             "topic": merged_topic,
                             "last_mentioned_ms": max(
-                                primary["last_mentioned_ms"] or 0,
-                                secondary["last_mentioned_ms"] or 0,
+                                (
+                                    value
+                                    for value in (
+                                        primary["last_mentioned_ms"],
+                                        secondary["last_mentioned_ms"],
+                                    )
+                                    if value is not None
+                                ),
+                                default=None,
                             ),
                         },
                     )
@@ -585,7 +592,7 @@ class GlobalEntityMergeWriter:
                     """
                     INSERT INTO public.relationships
                         (relationship_id, user_name, project_id, entity_a_id,
-                         entity_b_id, relationship_type, symmetric)
+                         entity_b_id, relationship_type, "symmetric")
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (project_id, entity_a_id, entity_b_id,
                                  relationship_type) DO NOTHING
@@ -883,7 +890,7 @@ class GlobalEntityMergeWriter:
             current = await self._fetch_one(
                 cur,
                 """SELECT relationship_id, user_name, project_id, entity_a_id,
-                          entity_b_id, relationship_type, symmetric
+                          entity_b_id, relationship_type, "symmetric"
                    FROM public.relationships WHERE relationship_id = %s
                      AND project_id = %s""",
                 (after["relationship_id"], after["project_id"]),
@@ -994,6 +1001,9 @@ class GlobalEntityMergeWriter:
                     )
             return {
                 "merge_id": merge_id,
+                "survivor_entity_id": int(audit["survivor_entity_id"]),
+                "retired_entity_id": int(audit["retired_entity_id"]),
+                "affected_project_ids": list(audit.get("affected_project_ids") or []),
                 "safe_mutation_ids": safe,
                 "conflicting_mutations": conflicts,
                 "already_applied_mutation_ids": [
@@ -1061,6 +1071,7 @@ class GlobalEntityMergeWriter:
             pending_mutation_count = sum(
                 mutation["inverse_status"] != "applied" for mutation in mutations
             )
+            remaining_mutation_count = pending_mutation_count - len(selected)
             if pending_mutation_count == 0 or (
                 selected and len(selected) == pending_mutation_count
             ):
@@ -1070,8 +1081,11 @@ class GlobalEntityMergeWriter:
                 )
             return {
                 "merge_id": merge_id,
+                "survivor_entity_id": int(audit["survivor_entity_id"]),
+                "retired_entity_id": int(audit["retired_entity_id"]),
+                "affected_project_ids": list(audit.get("affected_project_ids") or []),
                 "applied_mutation_ids": sorted(selected),
-                "rolled_back": bool(selected) and len(selected) == len(mutations),
+                "rolled_back": bool(mutations) and remaining_mutation_count == 0,
                 "concurrent_conflicts": sorted(
                     set(safe_mutation_ids) - fresh_safe_ids
                 ),
@@ -1167,7 +1181,7 @@ class GlobalEntityMergeWriter:
             if before is not None:
                 await cur.execute(
                     """INSERT INTO public.relationships
-                       (relationship_id, user_name, project_id, entity_a_id, entity_b_id, relationship_type, symmetric)
+                       (relationship_id, user_name, project_id, entity_a_id, entity_b_id, relationship_type, "symmetric")
                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (relationship_id, project_id) DO NOTHING""",
                     (before["relationship_id"], before["user_name"], before["project_id"], before["entity_a_id"], before["entity_b_id"], before["relationship_type"], before["symmetric"]),

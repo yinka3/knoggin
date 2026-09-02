@@ -270,7 +270,11 @@ class MaintenanceReviewWriter:
         return [review_from_row(dict(row)) for row in rows]
 
     async def list(
-        self, *, user_name: str, project_id: str | None = None
+        self,
+        *,
+        user_name: str,
+        project_id: str | None = None,
+        scope: ReviewScope | None = None,
     ) -> list[MaintenanceReview]:
         """Return review history in deterministic creation order."""
 
@@ -285,6 +289,9 @@ class MaintenanceReviewWriter:
         if project_id is not None:
             query += " AND project_id = %s"
             params += (project_id,)
+        if scope is not None:
+            query += " AND scope = %s"
+            params += (scope,)
         query += " ORDER BY created_at, review_id"
         rows = await self.client.fetch_all(query, params)
         return [review_from_row(dict(row)) for row in rows]
@@ -373,7 +380,7 @@ class MaintenanceReviewWriter:
             SET status = 'stale', resolved_at = COALESCE(resolved_at, now()), updated_at = now()
             WHERE review.user_name = %s AND review.project_id = %s
               AND review.status = 'open'
-              AND (%s IS NULL OR review.review_id <> %s)
+              AND (%s::text IS NULL OR review.review_id <> %s)
               AND EXISTS (
                   SELECT 1 FROM public.maintenance_review_evidence evidence
                   WHERE evidence.review_id = review.review_id

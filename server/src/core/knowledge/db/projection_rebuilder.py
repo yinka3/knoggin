@@ -134,7 +134,12 @@ class GraphBuilder:
               ON a.entity_id = e.entity_id
             WHERE context.project_id = %s
               AND e.user_name = %s
-            GROUP BY e.entity_id
+            GROUP BY
+                e.entity_id,
+                context.project_id,
+                context.entity_type,
+                context.topic,
+                context.last_mentioned_ms
             ORDER BY e.entity_id
             """,
             (project_id, user_name),

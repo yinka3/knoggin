@@ -25,6 +25,10 @@ from core.knowledge.db.writers.maintenance_review_writer import MaintenanceRevie
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
 )
+from core.knowledge.db.writers.relationship_interpretation_writer import (
+    RelationshipInterpretationWriter,
+)
+from core.knowledge.maintenance_reviews import RelationshipInterpretationPlan
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
@@ -65,6 +69,7 @@ class ProjectMaintenanceService:
         self._active_projects = active_projects
         self._project_leases = project_leases
         self._lock = asyncio.Lock()
+        self._domain_store = DomainConfigStore(self.pg)
         # Semantic review workflows live above KnowledgeStore. The persistence
         # facade remains focused on durable reads/writes and graph projections.
         self._maintenance_reviews = MaintenanceReviewWriter(self.pg)
@@ -77,6 +82,10 @@ class ProjectMaintenanceService:
         self._conflict_reader = ConflictReader(self.pg)
         self._relationship_observation_reader = RelationshipObservationReader(self.pg)
         self._relationship_advisory_writer = RelationshipAdvisoryWriter(
+            self.pg,
+            reviews=self._maintenance_reviews,
+        )
+        self._relationship_interpretation_writer = RelationshipInterpretationWriter(
             self.pg,
             reviews=self._maintenance_reviews,
         )
@@ -102,9 +111,21 @@ class ProjectMaintenanceService:
         if project["status"] not in allowed_statuses:
             raise ValueError(
                 f"Project '{project_id}' is {project['status']} and cannot use "
-                "domain configuration operations"
+                "knowledge maintenance operations"
             )
         return project
+
+    def _require_knowledge_store(self):
+        knowledge_store = self.resources.knowledge_store
+        if knowledge_store is None:
+            raise RuntimeError("Knowledge storage is unavailable")
+        return knowledge_store
+
+    @staticmethod
+    def _validate_expected_domain_version(value: int) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("expected_domain_version must be a non-negative integer")
+        return value
 
     async def get_relationship_advisories(
         self,
@@ -115,7 +136,7 @@ class ProjectMaintenanceService:
         """Read evidence-backed relationship advisories with dispositions."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        domain = await DomainConfigStore(self.pg).load(self.user_name, project_id)
+        domain = await self._domain_store.load(self.user_name, project_id)
         advisories = await self._relationship_observation_reader.get_advisories(
             user_name=self.user_name,
             project_id=project_id,
@@ -148,17 +169,57 @@ class ProjectMaintenanceService:
         expected_state: dict | None = None,
         reason: str | None = None,
     ):
-        """Apply a review decision after the caller has inspected its plan."""
+        """Apply or close a review after the caller has inspected its plan."""
 
         await self._require_domain_project(project_id, allow_archived=True)
-        return await self._maintenance_reviews.transition(
-            review_id=review_id,
+        if status != "applied":
+            return await self._maintenance_reviews.transition(
+                review_id=review_id,
+                user_name=self.user_name,
+                project_id=project_id,
+                status=status,
+                expected_state=expected_state,
+                actor=self.user_name,
+                reason=reason,
+            )
+
+        review = await self._maintenance_reviews.get(
+            review_id,
             user_name=self.user_name,
             project_id=project_id,
-            status=status,
-            expected_state=expected_state,
+        )
+        if review is None or review.status != "open":
+            raise ValueError("Unknown or already-resolved maintenance review")
+        if expected_state is not None and review.expected_state != expected_state:
+            raise ValueError("Maintenance review expected state no longer matches")
+        if not isinstance(review.proposed_plan, RelationshipInterpretationPlan):
+            raise ValueError(
+                "This review requires its dedicated maintenance operation and "
+                "cannot be applied as a status transition"
+            )
+
+        domain = await self._domain_store.load(self.user_name, project_id)
+        expected_domain_version = review.expected_state.get("domain_version")
+        if (
+            isinstance(expected_domain_version, int)
+            and not isinstance(expected_domain_version, bool)
+            and domain.version != expected_domain_version
+        ):
+            raise ValueError("Maintenance review is stale; project domain changed")
+        result = await self._relationship_interpretation_writer.apply_plan(
+            user_name=self.user_name,
+            project_id=project_id,
+            plan=review.proposed_plan,
+            domain=domain.compile(),
+            review_id=review.review_id,
             actor=self.user_name,
-            reason=reason,
+        )
+        if result.conflicts:
+            raise ValueError("Maintenance review could not be applied completely")
+        return await self._maintenance_reviews.get(
+            review_id,
+            user_name=self.user_name,
+            project_id=project_id,
         )
 
     async def get_conflict_group(self, project_id: str, conflict_id: str) -> dict:

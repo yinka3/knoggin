@@ -156,6 +156,52 @@ class FakeApplication:
             else None
         )
 
+    @staticmethod
+    def _maintenance_review(scope="user-global", project_id=None):
+        return {
+            "review_id": "review-1",
+            "scope": scope,
+            "project_id": project_id,
+            "kind": "entity_merge" if scope == "user-global" else "relationship_interpretation",
+            "reasoning": "Reviewed durable evidence.",
+            "proposed_plan": {
+                "kind": "entity_merge" if scope == "user-global" else "relationship_interpretation",
+            },
+            "expected_state": {"state_hash": "hash-1"},
+            "status": "open",
+        }
+
+    async def list_global_maintenance_reviews(self, *, user_name):
+        self.calls.append(("global_reviews", user_name))
+        return [self._maintenance_review()]
+
+    async def decide_global_maintenance_review(self, *, user_name, review_id, request):
+        self.calls.append(("global_review_decision", user_name, review_id, request))
+        return {"review_id": review_id, "action": request.action}
+
+    async def list_project_maintenance_reviews(self, *, user_name, project_id):
+        self.calls.append(("project_reviews", user_name, project_id))
+        return [self._maintenance_review("project", project_id)]
+
+    async def decide_project_maintenance_review(
+        self, *, user_name, project_id, review_id, request
+    ):
+        self.calls.append(
+            ("project_review_decision", user_name, project_id, review_id, request)
+        )
+        return {"review_id": review_id, "action": request.action}
+
+    async def preview_entity_merge_rollback(self, *, user_name, merge_id):
+        self.calls.append(("rollback_preview", user_name, merge_id))
+        return {"merge_id": merge_id, "safe_mutation_ids": [1]}
+
+    async def rollback_entity_merge(self, *, user_name, merge_id, request):
+        self.calls.append(("rollback", user_name, merge_id, request))
+        return {
+            "merge_id": merge_id,
+            "applied_mutation_ids": list(request.approved_mutation_ids),
+        }
+
 
 class BrokenStreamApplication(FakeApplication):
     async def run_stream(self, *, user_name, request: StartRunRequest):
@@ -272,6 +318,56 @@ async def test_document_focus_routes_keep_selection_request_only():
         "document_focus_get",
         "document_focus_set",
         "document_focus_clear",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_maintenance_routes_expose_review_decisions_and_rollback():
+    port = FakeApplication()
+    app = create_app(port)
+    headers = {"X-User-Name": "ada"}
+
+    async with await _client(app) as client:
+        global_reviews = await client.get("/v1/maintenance/reviews", headers=headers)
+        global_decision = await client.post(
+            "/v1/maintenance/reviews/review-1/decision",
+            headers=headers,
+            json={"action": "apply", "expected_state": {"state_hash": "hash-1"}},
+        )
+        project_reviews = await client.get(
+            "/v1/projects/project-1/maintenance/reviews",
+            headers=headers,
+        )
+        project_decision = await client.post(
+            "/v1/projects/project-1/maintenance/reviews/review-2/decision",
+            headers=headers,
+            json={"action": "dismiss", "reason": "Not applicable"},
+        )
+        preview = await client.get(
+            "/v1/maintenance/entity-merges/merge-1/rollback",
+            headers=headers,
+        )
+        rollback = await client.post(
+            "/v1/maintenance/entity-merges/merge-1/rollback",
+            headers=headers,
+            json={"approved_mutation_ids": [1, 2]},
+        )
+
+    assert global_reviews.status_code == 200
+    assert global_reviews.json()["reviews"][0]["review_id"] == "review-1"
+    assert global_decision.json()["result"]["action"] == "apply"
+    assert project_reviews.json()["reviews"][0]["project_id"] == "project-1"
+    assert project_decision.json()["result"]["action"] == "dismiss"
+    assert preview.json()["result"]["safe_mutation_ids"] == [1]
+    assert rollback.json()["result"]["applied_mutation_ids"] == [1, 2]
+    assert [call[0] for call in port.calls] == [
+        "global_reviews",
+        "global_review_decision",
+        "project_reviews",
+        "project_review_decision",
+        "rollback_preview",
+        "rollback",
     ]
 
 

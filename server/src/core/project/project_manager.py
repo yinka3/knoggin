@@ -123,6 +123,88 @@ class ProjectManager:
         )
         self._closed = False
 
+    def _invalidate_entity_caches(self, result: dict) -> dict[str, int]:
+        entity_ids = {
+            int(entity_id)
+            for entity_id in (
+                result.get("survivor_entity_id"),
+                result.get("retired_entity_id"),
+            )
+            if entity_id is not None
+        }
+        invalidated: dict[str, int] = {}
+        if not entity_ids:
+            return invalidated
+        for project_id in result.get("affected_project_ids") or ():
+            runtime = self.active_projects.get(project_id)
+            if runtime is not None:
+                invalidated[project_id] = runtime.entities.remove_entities(
+                    sorted(entity_ids)
+                )
+        return invalidated
+
+    async def list_global_maintenance_reviews(self):
+        """Return application-owned user-global maintenance history."""
+
+        return await self.entity_maintenance_service.list_reviews()
+
+    async def apply_global_entity_merge_review(
+        self,
+        review_id: str,
+        *,
+        expected_state: dict | None = None,
+    ) -> dict:
+        """Apply a confirmed merge and invalidate every affected live resolver."""
+
+        async with self.maintenance_service.lock:
+            result = await self.entity_maintenance_service.apply_merge_review(
+                review_id,
+                expected_state=expected_state,
+            )
+            result["runtime_cache_invalidations"] = self._invalidate_entity_caches(
+                result
+            )
+            return result
+
+    async def dismiss_global_maintenance_review(
+        self,
+        review_id: str,
+        *,
+        expected_state: dict | None = None,
+        reason: str | None = None,
+    ):
+        """Dismiss a global proposal without changing durable knowledge."""
+
+        return await self.entity_maintenance_service.dismiss_review(
+            review_id,
+            expected_state=expected_state,
+            reason=reason,
+        )
+
+    async def preview_global_entity_merge_rollback(self, merge_id: str) -> dict:
+        """Return the safe/conflicting inverse plan for one executed merge."""
+
+        async with self.maintenance_service.lock:
+            return await self.entity_maintenance_service.plan_rollback(merge_id)
+
+    async def rollback_global_entity_merge(
+        self,
+        merge_id: str,
+        *,
+        approved_mutation_ids=(),
+    ) -> dict:
+        """Apply a reviewed inverse and invalidate affected live resolvers."""
+
+        async with self.maintenance_service.lock:
+            result = await self.entity_maintenance_service.rollback(
+                merge_id,
+                approved_mutation_ids=approved_mutation_ids,
+            )
+            result["runtime_cache_invalidations"] = self._invalidate_entity_caches(
+                result
+            )
+            return result
+
     async def start(self) -> None:
         """Start application-owned maintenance triggers."""
         if self._closed:

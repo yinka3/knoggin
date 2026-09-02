@@ -58,7 +58,10 @@ class RelationshipInterpretationPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["relationship_interpretation"] = "relationship_interpretation"
-    changes: list[RelationshipInterpretationChange] = Field(max_length=512)
+    changes: list[RelationshipInterpretationChange] = Field(
+        min_length=1,
+        max_length=512,
+    )
 
     @field_validator("changes")
     @classmethod
