@@ -51,7 +51,7 @@ async def test_reader_scopes_unknown_observations_and_derives_advisories():
     assert advisories[0].occurrence_count == 3
     assert client.calls[0][0] == "fetch_all"
     assert client.calls[0][2] == ("alice", "project")
-    assert "domain_status = 'unrecognized'" in client.calls[0][1]
+    assert "interpretation_source = 'observed'" in client.calls[0][1]
 
 
 @pytest.mark.storage
@@ -80,13 +80,27 @@ async def test_reader_applies_durable_advisory_disposition_to_derived_pattern():
             ],
             [
                 {
-                    "pattern_key": "deploys to|project|technology",
-                    "disposition": "accepted",
-                    "proposed_relationship_type": "DEPLOYS_TO",
-                    "last_action": "accept",
-                    "decision_note": "Reviewed",
-                    "decided_by": "ada",
-                    "revision": 2,
+                    "review_id": "review-1",
+                    "user_name": "alice",
+                    "scope": "project",
+                    "project_id": "project",
+                    "kind": "relationship_advisory",
+                    "dedupe_key": "deploys to|project|technology",
+                    "evidence_refs": [],
+                    "evidence_snapshot": {},
+                    "reasoning": "Repeated unrecognized wording.",
+                    "proposed_plan": {
+                        "kind": "relationship_advisory",
+                        "pattern_key": "deploys to|project|technology",
+                        "observed_label": "deploys to",
+                        "proposed_relationship_type": "DEPLOYS_TO",
+                        "action": "accept",
+                        "note": "Reviewed",
+                    },
+                    "expected_state": {"revision": 2},
+                    "status": "applied",
+                    "created_at": None,
+                    "resolved_at": None,
                 }
             ],
         ]

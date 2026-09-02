@@ -1,25 +1,12 @@
-from contextlib import asynccontextmanager
-
 import pytest
 
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
-
-
-def _group() -> dict:
-    return {
-        "conflict_id": "conflict-1",
-        "user_name": "ada",
-        "project_id": "project-1",
-        "status": "open",
-        "origin": "background_discovery",
-        "kind": "possible_contradiction",
-        "rationale": "The two observations disagree.",
-        "confidence": 0.8,
-        "evidence_signature": "signature",
-        "metadata": {},
-        "resolution_kind": None,
-        "resolution_note": None,
-    }
+from core.knowledge.maintenance_reviews import (
+    ConflictResolutionPlan,
+    EvidenceRef,
+    MaintenanceReview,
+)
+from tests.fixtures.fakes import RecordingPostgresClient
 
 
 def _observation(observation_id: int) -> dict:
@@ -29,59 +16,57 @@ def _observation(observation_id: int) -> dict:
         "message_id": observation_id,
         "session_id": "session-1",
         "source_entity_id": 1,
-        "source_entity_name": "Ada",
         "target_entity_id": 2,
-        "target_entity_name": "Acme",
         "observed_relationship_label": "works at",
-        "canonical_relationship_type": None,
-        "domain_status": "unrecognized",
-        "confidence": 0.9,
+        "interpretation_source": "observed",
         "context": "Ada works at Acme.",
         "observed_at_ms": observation_id,
     }
 
 
-class Cursor:
-    def __init__(self, client) -> None:
-        self.client = client
-        self.rowcount = 0
+def _review(evidence_ids: list[int]) -> MaintenanceReview:
+    return MaintenanceReview(
+        review_id="review-1",
+        user_name="ada",
+        scope="project",
+        project_id="project-1",
+        kind="relationship_conflict",
+        dedupe_key=ConflictWriter._evidence_signature(evidence_ids),
+        evidence_refs=[
+            EvidenceRef(kind="observation", id=str(item)) for item in evidence_ids
+        ],
+        evidence_snapshot={"origin": "background_discovery", "confidence": 0.8},
+        reasoning="The observations disagree.",
+        proposed_plan=ConflictResolutionPlan(
+            conflict_kind="possible_contradiction"
+        ),
+    )
 
-    async def execute(self, query, params=None):
-        self.client.calls.append((query, params))
-        if "INSERT INTO public.conflict_evidence_refs" in query:
-            self.rowcount = self.client.evidence_rowcounts.pop(0)
-        else:
-            self.rowcount = 1
 
-    async def fetchone(self):
-        return self.client.one.pop(0) if self.client.one else None
+class ReviewStore:
+    def __init__(self, existing=None):
+        self.existing = existing
+        self.opened = []
 
-    async def fetchall(self):
-        return self.client.all.pop(0) if self.client.all else []
+    async def get_by_key(self, **kwargs):
+        return self.existing
 
-
-class Client:
-    def __init__(self, *, one, all, evidence_rowcounts):
-        self.one = list(one)
-        self.all = list(all)
-        self.evidence_rowcounts = list(evidence_rowcounts)
-        self.calls = []
-
-    @asynccontextmanager
-    async def transaction(self):
-        yield Cursor(self)
+    async def open(self, **kwargs):
+        self.opened.append(kwargs)
+        return self.existing or _review(
+            [int(ref["id"]) for ref in kwargs["evidence_refs"]]
+        )
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_conflict_writer_creates_a_durable_group_evidence_and_human_review():
-    client = Client(
-        one=[_group()],
-        all=[[_observation(101), _observation(104)], []],
-        evidence_rowcounts=[1, 1],
+async def test_conflict_writer_creates_one_typed_review_with_immutable_evidence():
+    reviews = ReviewStore()
+    client = RecordingPostgresClient(
+        fetch_all_results=[[_observation(101), _observation(104)]]
     )
 
-    result = await ConflictWriter(client).record_detection(
+    result = await ConflictWriter(client, reviews=reviews).record_detection(
         user_name="ada",
         project_id="project-1",
         origin="background_discovery",
@@ -93,51 +78,33 @@ async def test_conflict_writer_creates_a_durable_group_evidence_and_human_review
 
     assert result.created
     assert result.evidence_added == 2
-    assert result.group.conflict_id == "conflict-1"
-    queries = [query for query, _ in client.calls]
-    assert any("INSERT INTO public.conflict_groups" in query for query in queries)
-    assert sum("INSERT INTO public.conflict_evidence_refs" in query for query in queries) == 2
-    assert any("INSERT INTO public.human_reviews" in query for query in queries)
+    assert result.group.conflict_id == "review-1"
+    assert reviews.opened[0]["kind"] == "relationship_conflict"
+    assert reviews.opened[0]["evidence_refs"] == [
+        {"kind": "observation", "id": "101"},
+        {"kind": "observation", "id": "104"},
+    ]
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_conflict_writer_extends_only_one_unambiguously_contained_group():
-    existing = _group()
-    updated = {**existing, "rationale": "The new observation supports it."}
-    client = Client(
-        one=[existing, updated],
-        all=[
-            [_observation(101), _observation(104), _observation(224)],
-            [existing],
-            [
-                {"observation_id": 101},
-                {"observation_id": 104},
-                {"observation_id": 224},
-            ],
-        ],
-        evidence_rowcounts=[0, 0, 1],
+async def test_conflict_writer_reaffirms_an_identical_review_without_new_evidence():
+    existing = _review([101, 104])
+    reviews = ReviewStore(existing)
+    client = RecordingPostgresClient(
+        fetch_all_results=[[_observation(101), _observation(104)]]
     )
 
-    result = await ConflictWriter(client).record_detection(
+    result = await ConflictWriter(client, reviews=reviews).record_detection(
         user_name="ada",
         project_id="project-1",
         origin="agent_discovery",
         kind="possible_contradiction",
-        rationale="The new observation supports it.",
+        rationale="The same evidence remains ambiguous.",
         confidence=0.8,
-        evidence_ids=[101, 104, 224],
+        evidence_ids=[104, 101],
     )
 
     assert not result.created
-    assert result.evidence_added == 1
-    queries = [query for query, _ in client.calls]
-    assert any("FROM public.conflict_groups conflict" in query for query in queries)
-    assert any("INSERT INTO public.conflict_evidence_refs" in query for query in queries)
-    assert not any("INSERT INTO public.conflict_groups" in query for query in queries)
-    review_params = next(
-        params
-        for query, params in client.calls
-        if "INSERT INTO public.human_reviews" in query
-    )
-    assert '"evidence_ids": [101, 104, 224]' in review_params[-1]
+    assert result.evidence_added == 0
+    assert reviews.opened[0]["dedupe_key"] == existing.dedupe_key

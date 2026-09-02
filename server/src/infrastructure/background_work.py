@@ -206,37 +206,6 @@ class BackgroundWorkCoordinator:
         if self._coalesced_futures.get(key) is work.future:
             del self._coalesced_futures[key]
 
-    async def cancel_project(self, project_id: str) -> None:
-        """Cancel all work for a true project deletion/shutdown operation."""
-
-        if not project_id:
-            raise ValueError("project_id is required for background-work cancellation")
-        async with self._condition:
-            retained: deque[QueuedBackgroundWork] = deque()
-            while self._queue:
-                work = self._queue.popleft()
-                if work.project_id != project_id:
-                    retained.append(work)
-                    continue
-                if not work.future.done():
-                    work.future.cancel()
-                    self._cancelled += 1
-                self._clear_coalesced_future(work)
-            self._queue = retained
-            active = [
-                task
-                for task, work in self._active_operations.items()
-                if work.project_id == project_id and not task.done()
-            ]
-            for task in active:
-                task.cancel()
-            self._condition.notify_all()
-
-        current = asyncio.current_task()
-        joinable = [task for task in active if task is not current]
-        if joinable:
-            await asyncio.gather(*joinable, return_exceptions=True)
-
     async def cancel_owner(self, owner: str) -> None:
         """Cancel and join one subsystem owner's work without broad project teardown."""
         if not isinstance(owner, str) or not owner.strip():

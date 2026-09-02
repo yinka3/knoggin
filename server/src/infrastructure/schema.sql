@@ -983,100 +983,6 @@ BEGIN
 
 END $$;
 
--- Unreleased schema cut: promote each legacy project-owned row into a context,
--- then remove the old ownership columns. Existing deployments can retain their
--- source rows through this one-way conversion; fresh installs start directly
--- on the global form above. AGE projections must be rebuilt after this cut.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'entities'
-          AND column_name = 'project_id'
-    ) THEN
-        INSERT INTO public.project_entity_contexts (
-            project_id,
-            entity_id,
-            user_name,
-            entity_type,
-            topic,
-            last_mentioned_ms
-        )
-        SELECT
-            entity.project_id,
-            entity.entity_id,
-            entity.user_name,
-            COALESCE(NULLIF(btrim(entity.type), ''), 'unknown'),
-            COALESCE(NULLIF(btrim(entity.topic), ''), 'General'),
-            entity.last_mentioned_ms
-        FROM public.entities AS entity
-        WHERE entity.project_id <> '__identity__'
-        ON CONFLICT (project_id, entity_id) DO UPDATE
-        SET
-            entity_type = EXCLUDED.entity_type,
-            topic = EXCLUDED.topic,
-            last_mentioned_ms = GREATEST(
-                public.project_entity_contexts.last_mentioned_ms,
-                EXCLUDED.last_mentioned_ms
-            ),
-            updated_at_ms = floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
-
-        DROP INDEX IF EXISTS public.entities_project_idx;
-        DROP INDEX IF EXISTS public.entities_topic_idx;
-        ALTER TABLE public.entities
-            DROP CONSTRAINT IF EXISTS entities_id_project_key,
-            DROP CONSTRAINT IF EXISTS entities_id_user_project_key,
-            DROP CONSTRAINT IF EXISTS entities_type_nonblank_check,
-            DROP CONSTRAINT IF EXISTS entities_topic_nonblank_check,
-            DROP COLUMN project_id,
-            DROP COLUMN type,
-            DROP COLUMN topic,
-            DROP COLUMN last_mentioned_ms;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_id_user_key'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_id_user_key UNIQUE (entity_id, user_name);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_redirect_entity_fk'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_redirect_entity_fk
-        FOREIGN KEY (redirect_entity_id) REFERENCES public.entities(entity_id)
-        ON DELETE RESTRICT;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_status_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_status_check
-        CHECK (status IN ('active', 'redirected', 'retired'));
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_redirect_status_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_redirect_status_check
-        CHECK ((status = 'redirected') = (redirect_entity_id IS NOT NULL));
-    END IF;
-END $$;
-
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -1196,112 +1102,13 @@ CREATE TABLE IF NOT EXISTS public.episode_processing_checkpoints (
 ALTER TABLE public.episode_processing_checkpoints
 ADD COLUMN IF NOT EXISTS last_evaluated_timestamp_ms BIGINT;
 
--- Durable review boundary for destructive entity merges. Proposal records do
--- not use entity foreign keys because the duplicate entity is deleted after a
--- successful merge and the historical IDs must remain auditable.
-CREATE TABLE IF NOT EXISTS public.entity_merge_proposals (
-    proposal_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    primary_entity_id BIGINT NOT NULL,
-    duplicate_entity_id BIGINT NOT NULL,
-    evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    reasoning TEXT NOT NULL,
-    model_confidence DOUBLE PRECISION,
-    reviewed_state_hash TEXT NOT NULL,
-    reviewed_state JSONB NOT NULL,
-    policy_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
-    status TEXT NOT NULL DEFAULT 'confirmation_required',
-    confirmation_token_hash TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    confirmed_at TIMESTAMPTZ,
-    executed_at TIMESTAMPTZ,
-    confirmed_by TEXT,
-    failure_reason TEXT,
-    CONSTRAINT entity_merge_proposals_distinct_entities
-        CHECK (primary_entity_id <> duplicate_entity_id),
-    CONSTRAINT entity_merge_proposals_status
-        CHECK (
-            status IN (
-                'confirmation_required',
-                'executing',
-                'executed',
-                'rejected',
-                'failed'
-            )
-        ),
-    CONSTRAINT entity_merge_proposals_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
+-- Remove the superseded project-scoped snapshot/expiry merge workflow from
+-- existing unreleased databases. Global reviews and change journals below are
+-- the only supported merge and reversal path.
+DROP TABLE IF EXISTS public.entity_merge_audits;
+DROP TABLE IF EXISTS public.entity_merge_proposals;
 
-CREATE INDEX IF NOT EXISTS entity_merge_proposals_project_idx
-ON public.entity_merge_proposals(project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS entity_merge_proposals_status_idx
-ON public.entity_merge_proposals(project_id, status);
-
-CREATE TABLE IF NOT EXISTS public.entity_merge_audits (
-    audit_id TEXT PRIMARY KEY,
-    proposal_id TEXT NOT NULL
-        REFERENCES public.entity_merge_proposals(proposal_id),
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    primary_entity_id BIGINT NOT NULL,
-    duplicate_entity_id BIGINT NOT NULL,
-    evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    reasoning TEXT NOT NULL,
-    confirmed_by TEXT NOT NULL,
-    before_state JSONB,
-    after_state JSONB,
-    status TEXT NOT NULL DEFAULT 'executing',
-    failure_reason TEXT,
-    rollback_status TEXT NOT NULL DEFAULT 'unavailable',
-    rollback_expires_at TIMESTAMPTZ,
-    rolled_back_at TIMESTAMPTZ,
-    rolled_back_by TEXT,
-    rollback_failure_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT entity_merge_audits_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-ALTER TABLE public.entity_merge_proposals
-    ADD COLUMN IF NOT EXISTS evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS reviewed_state_hash TEXT NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS reviewed_state JSONB NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS policy_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS confirmation_token_hash TEXT NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS confirmed_by TEXT,
-    ADD COLUMN IF NOT EXISTS failure_reason TEXT;
-
-ALTER TABLE public.entity_merge_audits
-    ALTER COLUMN before_state DROP NOT NULL,
-    ADD COLUMN IF NOT EXISTS evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS rollback_status TEXT NOT NULL DEFAULT 'unavailable',
-    ADD COLUMN IF NOT EXISTS rollback_expires_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS rolled_back_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS rolled_back_by TEXT,
-    ADD COLUMN IF NOT EXISTS rollback_failure_reason TEXT;
-
-CREATE INDEX IF NOT EXISTS entity_merge_audits_project_idx
-ON public.entity_merge_audits(project_id, created_at DESC);
-
-CREATE UNIQUE INDEX IF NOT EXISTS entity_merge_audits_proposal_uidx
-ON public.entity_merge_audits(proposal_id);
-
-CREATE INDEX IF NOT EXISTS entity_merge_audits_rollback_expiry_idx
-ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
-
--- User-global merge history.  Unlike the legacy project-scoped proposal/audit
--- tables above, these records survive project deletion and retain the exact
+-- User-global merge history survives project deletion and retains the exact
 -- object-level mutations needed to plan a safe inverse.
 CREATE TABLE IF NOT EXISTS public.entity_global_merge_audits (
     merge_id TEXT PRIMARY KEY,
@@ -1344,15 +1151,6 @@ ON public.entity_global_merge_mutations(merge_id, mutation_id);
 -- ==============================================================================
 -- DOMAIN INVARIANTS
 -- ==============================================================================
-
-ALTER TABLE public.entity_merge_audits
-    DROP CONSTRAINT IF EXISTS entity_merge_audits_status_check,
-    DROP CONSTRAINT IF EXISTS entity_merge_audits_rollback_status_check;
-ALTER TABLE public.entity_merge_audits
-    ADD CONSTRAINT entity_merge_audits_status_check
-        CHECK (status IN ('executing', 'executed', 'failed')),
-    ADD CONSTRAINT entity_merge_audits_rollback_status_check
-        CHECK (rollback_status IN ('unavailable', 'available', 'rolled_back', 'expired', 'failed'));
 
 ALTER TABLE public.episode_processing_checkpoints
     DROP CONSTRAINT IF EXISTS episode_processing_checkpoints_session_id_fkey;
@@ -2446,24 +2244,6 @@ BEGIN
     ) THEN
         ALTER TABLE public.agent_tool_audits
         ADD CONSTRAINT agent_tool_audits_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entity_merge_proposals_project_fk'
-    ) THEN
-        ALTER TABLE public.entity_merge_proposals
-        ADD CONSTRAINT entity_merge_proposals_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entity_merge_audits_project_fk'
-    ) THEN
-        ALTER TABLE public.entity_merge_audits
-        ADD CONSTRAINT entity_merge_audits_project_fk
         FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
         ON DELETE CASCADE;
     END IF;

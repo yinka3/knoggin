@@ -105,7 +105,8 @@ def test_research_profile_scales_existing_run_budget_without_new_executor():
     limits = AgentRunLimits(
         max_calls=4,
         max_attempts=5,
-        max_accumulated_sources=6,
+        max_accumulated_web_discoveries=6,
+        max_accumulated_web_reads=5,
         tool_limits=(("search_messages", 2),),
     )
     scaled = limits.for_research_profile(profile)
@@ -117,7 +118,8 @@ def test_research_profile_scales_existing_run_budget_without_new_executor():
     assert run.research_profile.mode == "deep_research"
     assert run.limits.max_calls == 12
     assert run.limits.max_attempts == 15
-    assert run.limits.max_accumulated_sources == 18
+    assert run.limits.max_accumulated_web_discoveries == 18
+    assert run.limits.max_accumulated_web_reads == 15
     assert run.limits.get_tool_limit("search_messages") == 6
 
 

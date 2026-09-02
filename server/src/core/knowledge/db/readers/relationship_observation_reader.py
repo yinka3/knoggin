@@ -135,12 +135,20 @@ class RelationshipObservationReader:
             elif review.status == "dismissed":
                 disposition = "suppressed" if plan.action == "suppress" else "dismissed"
             previous = decisions.get(plan.pattern_key)
+            stored_revision = review.expected_state.get("revision")
+            revision = (
+                int(stored_revision)
+                if isinstance(stored_revision, int)
+                and not isinstance(stored_revision, bool)
+                and stored_revision >= 0
+                else (previous.revision + 1 if previous else 1)
+            )
             decisions[plan.pattern_key] = RelationshipAdvisoryDecision(
                 pattern_key=plan.pattern_key,
                 disposition=disposition,
                 proposed_relationship_type=plan.proposed_relationship_type,
                 last_action=plan.action,
                 decision_note=plan.note,
-                revision=(previous.revision + 1 if previous else 1),
+                revision=revision,
             )
         return decisions

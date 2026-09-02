@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
@@ -28,11 +27,9 @@ from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
-from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.readers.message_reader import MessageReader
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
-from core.knowledge.db.writers.entity_merge_writer import EntityMergeWriter
 from core.knowledge.db.writers.entity_reclassification_writer import (
     EntityReclassificationWriter,
     HistoricalReclassificationResult,
@@ -42,7 +39,6 @@ from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.maintenance_review_writer import (
     MaintenanceReviewWriter,
 )
-from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
     IngestionFrontier,
@@ -57,7 +53,6 @@ from core.knowledge.db.writers.relationship_reclassification_writer import (
     HistoricalRelationshipReclassificationResult,
     RelationshipReclassificationWriter,
 )
-from core.knowledge.db.writers.retention_writer import RetentionWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from core.knowledge.maintenance_reviews import MaintenanceReview
 from core.knowledge.services.embedding_service import EmbeddingService
@@ -91,7 +86,6 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._episode_writer = EpisodeWriter(self._postgres_client)
-        self._entity_merge_writer = EntityMergeWriter(self._postgres_client)
         self._message_writer = MessageWriter(self._postgres_client)
         self._message_lifecycle_writer = MessageLifecycleWriter(
             self._postgres_client, self._message_writer
@@ -99,8 +93,6 @@ class KnowledgeStore:
         self._maintenance_review_writer = MaintenanceReviewWriter(
             self._postgres_client
         )
-        self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
-        self._retention_writer = RetentionWriter(self._postgres_client)
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._artifact_writer = ArtifactWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
@@ -108,7 +100,6 @@ class KnowledgeStore:
         self._graph_reader = GraphReader(self._postgres_client)
         self._message_reader = MessageReader(self._postgres_client)
         self._knowledge_query_reader = KnowledgeQueryReader(self._postgres_client)
-        self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._artifact_reader = ArtifactReader(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
@@ -865,13 +856,6 @@ class KnowledgeStore:
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
 
-    async def update_entity_canonical_name(
-        self, entity_id: int, canonical_name: str, *, project_id: str
-    ) -> None:
-        return await self._graph_writer.update_entity_canonical_name(
-            entity_id, canonical_name, project_id=project_id
-        )
-
     async def update_entity_embedding(
         self, entity_id: int, embedding: List[float], *, project_id: str
     ):
@@ -884,23 +868,6 @@ class KnowledgeStore:
     ) -> None:
         return await self._graph_writer.update_entity_aliases(
             alias_updates, project_id=project_id
-        )
-
-    async def merge_entities(
-        self,
-        primary_id: int,
-        secondary_id: int,
-        *,
-        project_id: str,
-        final_topic: Optional[str] = None,
-        cur=None,
-    ) -> bool:
-        return await self._entity_merge_writer.merge_entities(
-            primary_id,
-            secondary_id,
-            project_id=project_id,
-            final_topic=final_topic,
-            cur=cur,
         )
 
     async def preview_historical_reclassification(
@@ -1016,49 +983,6 @@ class KnowledgeStore:
             project_id=project_id,
         )
 
-    async def expire_merge_rollback_states(
-        self,
-        cutoff: datetime,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> int:
-        return await self._merge_audit_writer.expire_rollback_states(
-            cutoff,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def purge_expired_operational_records(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        tool_audit_cutoff: datetime,
-        merge_history_cutoff: datetime,
-    ) -> Dict[str, int]:
-        return await self._retention_writer.purge_expired_records(
-            user_name=user_name,
-            project_id=project_id,
-            tool_audit_cutoff=tool_audit_cutoff,
-            merge_history_cutoff=merge_history_cutoff,
-        )
-
-    async def delete_relationship(
-        self,
-        entity_a_id: int,
-        entity_b_id: int,
-        *,
-        relationship_type: str,
-        project_id: str,
-    ) -> bool:
-        return await self._entity_merge_writer.delete_relationship(
-            entity_a_id,
-            entity_b_id,
-            relationship_type=relationship_type,
-            project_id=project_id,
-        )
-
     async def rebuild_project_projection(
         self,
         project_id: str,
@@ -1129,14 +1053,6 @@ class KnowledgeStore:
             message_ids,
             user_name=user_name,
             session_id=session_id,
-            project_id=project_id,
-        )
-
-    async def get_open_human_reviews(
-        self, *, user_name: str, project_id: str
-    ) -> list[MaintenanceReview]:
-        return await self._maintenance_review_writer.list_open(
-            user_name=user_name,
             project_id=project_id,
         )
 

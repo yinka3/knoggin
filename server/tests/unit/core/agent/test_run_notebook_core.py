@@ -1,3 +1,5 @@
+import pytest
+
 from core.agent.notebook import NotebookCapacity, RunNotebook
 from core.agent.run import AgentRunLimits
 
@@ -82,7 +84,7 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
         limits=AgentRunLimits(
             max_accumulated_episodes=2,
             max_accumulated_messages=5,
-            max_accumulated_sources=3,
+            max_accumulated_documents=3,
         )
     )
     notebook.apply(
@@ -125,6 +127,50 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
     assert [item["id"] for item in notebook.messages] == ["msg_8"]
     assert [item["chunk_index"] for item in notebook.documents] == [1, 2]
     assert notebook.entity_pages["entity:24"]["episode_refs"] == ["episode:ep-1"]
+
+
+def test_notebook_compiles_independent_evidence_and_render_capacities():
+    capacity = NotebookCapacity.from_limits(
+        AgentRunLimits(
+            max_accumulated_messages=2,
+            max_accumulated_documents=3,
+            max_accumulated_web_discoveries=4,
+            max_accumulated_web_reads=5,
+            max_accumulated_actions=6,
+            max_accumulated_next_steps=7,
+            max_accumulated_summary_chars=800,
+            max_notebook_render_tokens=900,
+        )
+    )
+
+    assert capacity.max_messages == 2
+    assert capacity.max_documents == 3
+    assert capacity.max_web_discoveries == 4
+    assert capacity.max_web_reads == 5
+    assert capacity.max_actions == 6
+    assert capacity.max_next_steps == 7
+    assert capacity.max_summary_chars == 800
+    assert capacity.max_render_tokens == 900
+
+
+def test_notebook_source_replacement_is_atomic_when_capacity_is_exceeded():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(max_web_discoveries=1, max_render_tokens=1000)
+    )
+    notebook.replace_sources(
+        [{"url": "https://example.com/one", "source_kind": "web_search_result"}]
+    )
+    before = notebook.as_dict()
+
+    with pytest.raises(ValueError, match="source evidence exceeds capacity"):
+        notebook.replace_sources(
+            [
+                {"url": "https://example.com/two", "source_kind": "web_search_result"},
+                {"url": "https://example.com/three", "source_kind": "web_search_result"},
+            ]
+        )
+
+    assert notebook.as_dict() == before
 
 
 def test_notebook_capacity_rejects_an_oversized_result_atomically():

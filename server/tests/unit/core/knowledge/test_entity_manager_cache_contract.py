@@ -490,8 +490,10 @@ async def test_register_entity_updates_profile_aliases_and_embedding(
         session_id="session-1",
     )
 
-    assert vector == embedding.vector_for("Notion (tool)")
-    assert embedding.single_calls == ["Notion (tool)"]
+    # Global identity vectors exclude project-context classification such as
+    # type and topic, which can legitimately differ between projects.
+    assert vector == embedding.vector_for("Notion (unknown)")
+    assert embedding.single_calls == ["Notion (unknown)"]
     profile = await entities.get_profile(404)
     assert profile == EntityProfile(
         canonical_name="Notion",

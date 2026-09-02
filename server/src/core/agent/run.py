@@ -64,7 +64,13 @@ class AgentRunLimits:
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
     max_accumulated_episodes: int = 8
-    max_accumulated_sources: int = 12
+    max_accumulated_documents: int = 30
+    max_accumulated_web_discoveries: int = 12
+    max_accumulated_web_reads: int = 12
+    max_accumulated_actions: int = 12
+    max_accumulated_next_steps: int = 12
+    max_accumulated_summary_chars: int = 4000
+    max_notebook_render_tokens: int = 10000
     max_consecutive_errors: int = 3
     empty_result_replan_threshold: int = 3
     tool_timeout: float = 30.0
@@ -85,6 +91,17 @@ class AgentRunLimits:
             max_attempts=settings.max_attempts,
             max_history_turns=settings.agent_history_turns,
             max_accumulated_messages=settings.max_accumulated_messages,
+            max_accumulated_profiles=settings.max_accumulated_profiles,
+            max_accumulated_graph=settings.max_accumulated_graph,
+            max_accumulated_paths=settings.max_accumulated_paths,
+            max_accumulated_episodes=settings.max_accumulated_episodes,
+            max_accumulated_documents=settings.max_accumulated_documents,
+            max_accumulated_web_discoveries=settings.max_accumulated_web_discoveries,
+            max_accumulated_web_reads=settings.max_accumulated_web_reads,
+            max_accumulated_actions=settings.max_accumulated_actions,
+            max_accumulated_next_steps=settings.max_accumulated_next_steps,
+            max_accumulated_summary_chars=settings.max_accumulated_summary_chars,
+            max_notebook_render_tokens=settings.max_notebook_render_tokens,
             max_consecutive_errors=settings.max_consecutive_errors,
             tool_limits=tuple((defaults | overrides).items()),
         )
@@ -96,8 +113,12 @@ class AgentRunLimits:
             self,
             max_calls=self.max_calls * profile.tool_call_budget_multiplier,
             max_attempts=self.max_attempts * profile.attempt_budget_multiplier,
-            max_accumulated_sources=(
-                self.max_accumulated_sources * profile.source_budget_multiplier
+            max_accumulated_web_discoveries=(
+                self.max_accumulated_web_discoveries
+                * profile.source_budget_multiplier
+            ),
+            max_accumulated_web_reads=(
+                self.max_accumulated_web_reads * profile.source_budget_multiplier
             ),
             tool_limits=tuple(
                 (name, limit * profile.tool_call_budget_multiplier)
@@ -397,17 +418,7 @@ class AgentRun:
 
     @sources.setter
     def sources(self, values) -> None:
-        self.notebook._replace_section("web_discoveries", [])
-        self.notebook._replace_section("web_reads", [])
-        for value in values or []:
-            if not isinstance(value, dict):
-                continue
-            section = (
-                "web_reads"
-                if value.get("source_kind") in {"web_page", "web_pdf"}
-                else "web_discoveries"
-            )
-            self.notebook._upsert(section, value)
+        self.notebook.replace_sources(list(values or []))
 
     @property
     def evidence_summary(self) -> Optional[str]:
@@ -415,7 +426,7 @@ class AgentRun:
 
     @evidence_summary.setter
     def evidence_summary(self, value: Optional[str]) -> None:
-        self.notebook.summary.text = value
+        self.notebook.set_summary(value, self.notebook.summary.references)
 
     def begin_attempt(self) -> bool:
         """Reserve the next LLM attempt if this run has capacity remaining."""

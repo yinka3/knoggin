@@ -94,6 +94,7 @@ markers = [
     "requires_postgres: requires a real Postgres service",
     "requires_pgvector: requires pgvector support",
     "requires_async_psycopg: requires psycopg async support in this OS/event loop",
+    "model: requires local model assets and may perform model inference",
     "no_network: test is expected to make no external network calls",
 ]
 

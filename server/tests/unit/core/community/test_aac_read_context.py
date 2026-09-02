@@ -35,7 +35,7 @@ async def test_aac_read_context_discovers_user_projects_and_uses_identity_scope(
 
 
 @pytest.mark.no_network
-async def test_aac_document_reader_never_grants_session_private_visibility():
+async def test_aac_document_reader_uses_only_readable_project_ownership():
     postgres = FakePostgresClient()
     postgres.upsert_project("project-1", user_name="ada")
 
@@ -48,10 +48,9 @@ async def test_aac_document_reader_never_grants_session_private_visibility():
 
     await context.documents.list_documents(limit=10)
     query = postgres.calls[-1][1]
-    assert "visibility_scope = 'project'" in query
-    assert "visibility_scope = 'session'" in query
-    assert "session_id = %s" in query
+    assert "pd.project_id = ANY(%s)" in query
+    assert "visibility_scope" not in query
+    assert "session_id" not in query
     params = postgres.calls[-1][2]
     assert params[0] == list(context.readable_project_ids)
-    assert params[1] == IDENTITY_SCOPE
-    assert params[2] is None
+    assert params[1] == 10

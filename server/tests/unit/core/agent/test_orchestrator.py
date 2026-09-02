@@ -28,6 +28,17 @@ class FakeLimits:
     max_attempts = 8
     agent_history_turns = 3
     max_accumulated_messages = 12
+    max_accumulated_profiles = 8
+    max_accumulated_graph = 16
+    max_accumulated_paths = 4
+    max_accumulated_episodes = 6
+    max_accumulated_documents = 10
+    max_accumulated_web_discoveries = 5
+    max_accumulated_web_reads = 5
+    max_accumulated_actions = 6
+    max_accumulated_next_steps = 6
+    max_accumulated_summary_chars = 2000
+    max_notebook_render_tokens = 5000
     max_consecutive_errors = 2
     tool_limit_overrides = {"search_entity": 4}
 

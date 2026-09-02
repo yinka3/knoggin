@@ -134,54 +134,6 @@ async def test_domain_constraints_enforce_attachment_and_checkpoint_scope(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_domain_constraints_reject_invalid_audit_lifecycle_values(
-    real_postgres_client,
-):
-    await real_postgres_client.execute(
-        """
-        INSERT INTO entity_merge_proposals (
-            proposal_id, user_name, project_id,
-            primary_entity_id, duplicate_entity_id, reasoning,
-            reviewed_state_hash, reviewed_state, confirmation_token_hash
-        )
-        VALUES (
-            'proposal-1', 'ada', 'project-1', 2, 3, 'Test lifecycle',
-            'hash', '{}'::jsonb, 'token'
-        );
-        INSERT INTO entity_merge_audits (
-            audit_id, proposal_id, user_name, project_id,
-            primary_entity_id, duplicate_entity_id, reasoning, confirmed_by
-        )
-        VALUES (
-            'audit-1', 'proposal-1', 'ada', 'project-1',
-            2, 3, 'Test lifecycle', 'ada'
-        );
-        """
-    )
-    with pytest.raises(CheckViolation, match="entity_merge_audits_status_check"):
-        await real_postgres_client.execute(
-            """
-            UPDATE entity_merge_audits
-            SET status = 'unknown'
-            WHERE audit_id = 'audit-1'
-            """
-        )
-    with pytest.raises(
-        CheckViolation,
-        match="entity_merge_audits_rollback_status_check",
-    ):
-        await real_postgres_client.execute(
-            """
-            UPDATE entity_merge_audits
-            SET rollback_status = 'unknown'
-            WHERE audit_id = 'audit-1'
-            """
-        )
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
 async def test_additive_constraints_reject_invalid_graph_and_episode_values(
     real_postgres_client,
 ):

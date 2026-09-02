@@ -130,15 +130,6 @@ class ProjectMaintenanceService:
             )
         return advisories
 
-    async def get_open_human_reviews(self, project_id: str):
-        """Return workflow-neutral inbox entries for a project."""
-
-        await self._require_domain_project(project_id, allow_archived=True)
-        return await self._maintenance_reviews.list_open(
-            user_name=self.user_name,
-            project_id=project_id,
-        )
-
     async def list_maintenance_reviews(self, project_id: str):
         """Return durable typed review history for this project."""
 

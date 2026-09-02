@@ -49,14 +49,13 @@ async def test_project_documents_rejects_an_oversized_indexed_relative_path(
             INSERT INTO public.project_documents (
                 document_id,
                 project_id,
-                visibility_scope,
                 original_name,
                 relative_path,
                 extension,
                 size_bytes,
                 content_hash
             )
-            VALUES (%s, 'project-1', 'project', 'notes.md', %s, '.md', 1, %s)
+            VALUES (%s, 'project-1', 'notes.md', %s, '.md', 1, %s)
             """,
             (str(uuid4()), "a" * 2049, "a" * 64),
         )

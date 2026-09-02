@@ -559,7 +559,6 @@ async def test_real_document_request_persists_document_source_provenance(
         content=b"The violet launch phrase is durable and documented.\n",
         original_name="launch-note.md",
         relative_path="notes/launch-note.md",
-        visibility_scope="project",
     )
     assert document["status"] == "indexed"
 
@@ -734,7 +733,6 @@ async def test_real_document_selection_request_persists_selection_provenance(
         content=b"# Notes\nThe violet launch phrase is durable and documented.\n",
         original_name="launch-note.md",
         relative_path="notes/launch-note.md",
-        visibility_scope="project",
     )
     assert document["status"] == "indexed"
 

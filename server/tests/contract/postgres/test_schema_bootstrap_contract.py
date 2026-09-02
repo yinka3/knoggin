@@ -1,6 +1,7 @@
 """Fresh-database schema and extension bootstrap contracts."""
 
 import os
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +26,15 @@ def test_schema_drops_obsolete_ingestion_tables():
     assert "DROP TABLE IF EXISTS public.parked_dlq_items;" in SCHEMA_SQL
 
 
+def test_schema_drops_project_snapshot_merges_and_keeps_global_journals():
+    assert "DROP TABLE IF EXISTS public.entity_merge_audits;" in SCHEMA_SQL
+    assert "DROP TABLE IF EXISTS public.entity_merge_proposals;" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS public.entity_merge_audits" not in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS public.entity_merge_proposals" not in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS public.entity_global_merge_audits" in SCHEMA_SQL
+    assert "CREATE TABLE IF NOT EXISTS public.entity_global_merge_mutations" in SCHEMA_SQL
+
+
 def test_schema_separates_global_entity_identity_from_project_context():
     assert "CREATE TABLE IF NOT EXISTS public.project_entity_contexts" in SCHEMA_SQL
     assert "FOREIGN KEY (entity_id, user_name)" in SCHEMA_SQL
@@ -32,6 +42,7 @@ def test_schema_separates_global_entity_identity_from_project_context():
     assert "CREATE OR REPLACE FUNCTION public.reject_entity_identity_mutation()" in SCHEMA_SQL
     assert "context.project_id = message_project_id" in SCHEMA_SQL
     assert "context.project_id = NEW.project_id" in SCHEMA_SQL
+    assert re.search(r"\bentity\.project_id\b", SCHEMA_SQL) is None
 
 
 def test_schema_keeps_aac_state_user_owned_and_insights_retention_independent():

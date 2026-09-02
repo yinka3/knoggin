@@ -768,14 +768,6 @@ class GraphWriter:
                 (timestamp_ms, timestamp_ms, project_id, entity_id),
             )
 
-    @_storage_write("update_entity_canonical_name")
-    async def update_entity_canonical_name(
-        self, entity_id: int, canonical_name: str, *, project_id: str
-    ) -> None:
-        raise ValueError(
-            "Entity canonical names are immutable; create an alias or merge identities"
-        )
-
     @_storage_write("update_entity_embedding")
     async def update_entity_embedding(
         self, entity_id: int, embedding: List[float], *, project_id: str

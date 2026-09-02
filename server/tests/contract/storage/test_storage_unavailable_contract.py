@@ -5,9 +5,6 @@ from common.conf.domain_config import DomainConfig
 from common.exceptions import StorageReadError, StorageWriteError
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
-from core.knowledge.db.writers.entity_merge_writer import (
-    EntityMergeWriter as GraphWriter,
-)
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter as IngestionGraphWriter
 from core.knowledge.db.writers.message_writer import MessageWriter
@@ -85,27 +82,6 @@ async def test_message_search_failure_is_not_reported_as_empty_search():
 
     assert error.value.code == "storage_read_error"
     assert error.value.details["operation"] == "search_fts"
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_write_failure_is_not_reported_as_false_result():
-    writer = GraphWriter(
-        RecordingPostgresClient(
-            cursor_execute_exceptions=[OperationalError("database down")]
-        )
-    )
-
-    with pytest.raises(StorageWriteError) as error:
-        await writer.delete_relationship(
-            2,
-            3,
-            relationship_type="related_to",
-            project_id="project-1",
-        )
-
-    assert error.value.code == "storage_write_error"
-    assert error.value.details["operation"] == "delete_relationship"
 
 
 @pytest.mark.storage

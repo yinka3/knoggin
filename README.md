@@ -1,6 +1,6 @@
 # Knoggin
 
-Knoggin is a self-hosted, source-grounded memory engine for AI agents and personal tools. It turns conversations and files into a project-scoped knowledge graph of entities, relationships, facts, and evidence—so an agent can retrieve useful context without losing the path back to the original source.
+Knoggin is a local, source-grounded memory engine for AI agents and personal tools. It turns conversations and project files into global entity identities, project-specific contexts, observed relationships, Episodes, and evidence—so an agent can retrieve useful context without losing the path back to the original source.
 
 It is designed around a domain configuration supplied per project. Rather than inferring a universal ontology, Knoggin uses the entity types, aliases, relationships, topics, and matching rules that matter in your domain.
 
@@ -8,13 +8,14 @@ It is designed around a domain configuration supplied per project. Rather than i
 
 ## What it does
 
-- Keeps memory **source-grounded**: facts and graph records retain links to the messages or documents that produced them.
-- Separates data by **project**: projects, sessions, documents, entities, jobs, and memory are scoped together.
-- Extracts and resolves entities with known aliases, GLiNER, optional LLM extraction, confidence filtering, and deduplication.
+- Keeps memory **source-grounded**: relationships, Episodes, and retrieval results retain links to the messages or documents that produced them.
+- Keeps entity identity **user-global** while relationships, Episodes, documents, and entity classification remain project-scoped.
+- Extracts and conservatively resolves entities with known aliases, GLiNER, and optional LLM proposals; duplicate merging is an explicit maintenance operation.
 - Uses graph-aware and hybrid retrieval to give agents related context, not just isolated chunks.
-- Ingests documents and supports focused retrieval over a selected document, folder upload, or subtree.
-- Runs background maintenance for episodic memory, profiles, merges, duplicate detection, dead-letter replay, and retention.
-- Checks potential contradictions with embedding similarity, NLI, and LLM judgment.
+- Uses confined project files as the authoritative document bytes and supports focused retrieval over a document or subtree.
+- Builds bounded Episodes from completed conversational turns and returns compact cards before source-message expansion.
+- Runs project-owned ingestion/Episode work and application-owned global entity-maintenance preflight.
+- Records relationship conflicts and corrections as typed, evidence-backed maintenance reviews.
 
 ## Architecture
 
@@ -26,7 +27,8 @@ flowchart LR
         Session["Projects, sessions, and agent runtime"]
         Agent["Agent and tools"]
         Ingest["Ingestion and extraction"]
-        Jobs["Background jobs"]
+        Jobs["Project jobs"]
+        Maintenance["Application maintenance"]
     end
 
     Store["Postgres + Apache AGE\nevidence and graph"]
@@ -37,6 +39,7 @@ flowchart LR
     Agent --> Store
     Ingest --> Store
     Jobs <--> Store
+    Maintenance <--> Store
 ```
 
 The engine lives in `server/` and intentionally does not prescribe an HTTP transport. An embedding application owns its own integration surface while Knoggin owns the durable memory, retrieval, and background processing runtime.
@@ -73,6 +76,17 @@ docker compose down
 
 This preserves the named Postgres volume. Use `docker compose down -v` only when you intend to remove local database data.
 
+### Clean reset after schema cuts
+
+Knoggin is unreleased and schema changes target a clean state rather than legacy compatibility. After pulling a schema cut, reset the local database and rebuild derived knowledge from canonical project files and conversations:
+
+```bash
+docker compose down -v
+docker compose up -d --build
+```
+
+The first command permanently deletes the local Postgres volume. Restart Knoggin after Postgres becomes healthy, reopen or re-import the desired project sources, and run the project rebuild operation if existing canonical sources were restored. Do not treat old graph, embedding, Episode, or merge tables as portable data across a clean reset.
+
 ## Configuration
 
 `.env.example` documents local runtime settings, including the database URL, model choices, resource profile, and document storage directory. Docker Compose starts Postgres configured with Apache AGE, pgvector, and the project schema.
@@ -102,7 +116,7 @@ server/src/common/      Shared schemas, configuration, and utilities
 server/src/core/agent/  Agent orchestration, prompting, execution, and tools
 server/src/core/project/  Project state, domain config, and workspace services
 server/src/core/session/  Session lifecycle and runtime context
-server/src/core/ingestion/  Extraction, batching, episodes, and dead-letter work
+server/src/core/ingestion/  Extraction, batching, resolution, and graph commits
 server/src/core/knowledge/  Entity resolution, documents, graph, and retrieval
 server/src/infrastructure/  Postgres, models, queues, and scheduling
 server/tests/            Unit, runtime, ingestion, storage, and integration tests

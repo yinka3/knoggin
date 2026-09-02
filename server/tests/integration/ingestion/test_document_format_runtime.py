@@ -152,7 +152,6 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         content=content,
         original_name=original_name,
         relative_path=f"docs/{original_name}",
-        visibility_scope="project",
     )
     assert document["status"] == "indexed"
 

@@ -152,51 +152,7 @@ async def test_background_work_coalesces_by_project_and_operation_key():
 
 
 @pytest.mark.no_network
-async def test_cancel_project_cancels_and_joins_only_its_owned_operations():
-    coordinator = BackgroundWorkCoordinator(max_concurrency=1, max_queued_global=3)
-    active_started = asyncio.Event()
-    active_stopped = asyncio.Event()
-    other_started = asyncio.Event()
-
-    async def active_project_a_work():
-        active_started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            active_stopped.set()
-
-    async def queued_project_a_work():
-        raise AssertionError("cancelled project work must not run")
-
-    async def project_b_work():
-        other_started.set()
-        return "project-b"
-
-    active = asyncio.create_task(
-        coordinator.submit("project-a", active_project_a_work, name="profile")
-    )
-    await active_started.wait()
-    queued_a = asyncio.create_task(
-        coordinator.submit("project-a", queued_project_a_work, name="aac")
-    )
-    other = asyncio.create_task(
-        coordinator.submit("project-b", project_b_work, name="document-index")
-    )
-    await asyncio.sleep(0)
-
-    await coordinator.cancel_project("project-a")
-    await active_stopped.wait()
-    await other_started.wait()
-    with pytest.raises(asyncio.CancelledError):
-        await active
-    with pytest.raises(asyncio.CancelledError):
-        await queued_a
-    assert await other == "project-b"
-    await coordinator.shutdown()
-
-
-@pytest.mark.no_network
-async def test_cancel_owner_is_narrower_than_project_cancellation():
+async def test_cancel_owner_preserves_unrelated_project_work():
     coordinator = BackgroundWorkCoordinator(max_concurrency=1, max_queued_global=3)
     started = asyncio.Event()
     release = asyncio.Event()

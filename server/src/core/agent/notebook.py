@@ -74,9 +74,21 @@ class NotebookCapacity:
             max_episodes=_positive_limit(limits, "max_accumulated_episodes", 8),
             max_paths=_positive_limit(limits, "max_accumulated_paths", 8),
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
-            max_documents=_positive_limit(limits, "max_accumulated_messages", 30),
-            max_web_discoveries=_positive_limit(limits, "max_accumulated_sources", 12),
-            max_web_reads=_positive_limit(limits, "max_accumulated_sources", 12),
+            max_documents=_positive_limit(limits, "max_accumulated_documents", 30),
+            max_web_discoveries=_positive_limit(
+                limits, "max_accumulated_web_discoveries", 12
+            ),
+            max_web_reads=_positive_limit(limits, "max_accumulated_web_reads", 12),
+            max_actions=_positive_limit(limits, "max_accumulated_actions", 12),
+            max_next_steps=_positive_limit(
+                limits, "max_accumulated_next_steps", 12
+            ),
+            max_summary_chars=_positive_limit(
+                limits, "max_accumulated_summary_chars", 4000
+            ),
+            max_render_tokens=_positive_limit(
+                limits, "max_notebook_render_tokens", 10000
+            ),
         )
 
 
@@ -382,6 +394,27 @@ class RunNotebook:
             self._records[section] = previous_records
             self._orders[section] = previous_order
             raise ValueError(f"notebook {section} section exceeds capacity")
+
+    def replace_sources(self, values: list[dict[str, Any]]) -> None:
+        """Replace web evidence atomically across both source sections."""
+
+        candidate = deepcopy(self)
+        candidate._records["web_discoveries"] = {}
+        candidate._orders["web_discoveries"] = []
+        candidate._records["web_reads"] = {}
+        candidate._orders["web_reads"] = []
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            section = (
+                "web_reads"
+                if value.get("source_kind") in {"web_page", "web_pdf"}
+                else "web_discoveries"
+            )
+            candidate._upsert(section, value)
+        if not candidate._fits_capacity():
+            raise ValueError("notebook source evidence exceeds capacity")
+        self._adopt_from(candidate)
 
     def _reference_for_section(self, section: str, item: dict[str, Any]) -> str:
         if section == "entities":

@@ -77,21 +77,6 @@ class EpisodeSettings(ConfigModel):
     prior_episode_candidate_count: int = Field(3, ge=1, le=3)
 
 
-class MergeRollbackSettings(ConfigModel):
-    enabled: bool = Field(True)
-    retention_hours: float = Field(5.0, ge=0.5)
-    fallback_interval_hours: float = Field(1.0, ge=0.25)
-
-
-class AuditRetentionSettings(ConfigModel):
-    """Retention windows for completed, non-canonical operational records."""
-
-    enabled: bool = Field(True)
-    interval_hours: float = Field(24.0, ge=0.25)
-    tool_audit_days: int = Field(180, ge=1)
-    merge_history_days: int = Field(180, ge=1)
-
-
 class ConflictDiscoverySettings(ConfigModel):
     enabled: bool = Field(True)
     interval_hours: int = Field(48, ge=1)
@@ -104,10 +89,6 @@ class JobSettings(ConfigModel):
         default_factory=DocumentIndexingSettings
     )
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
-    merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
-    audit_retention: AuditRetentionSettings = Field(
-        default_factory=AuditRetentionSettings
-    )
     conflict_discovery: ConflictDiscoverySettings = Field(
         default_factory=ConflictDiscoverySettings
     )
