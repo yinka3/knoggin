@@ -534,6 +534,11 @@ class AgentRun:
 
         return self.notebook.has_any()
 
+    def render_notebook(self) -> str:
+        """Return the strict, localized prompt view of this run's notebook."""
+
+        return self.notebook.render()
+
     def record_usage(self, usage: Optional[StreamUsage]) -> None:
         self._require_active()
         if not usage:

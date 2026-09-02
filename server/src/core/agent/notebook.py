@@ -785,6 +785,13 @@ class RunNotebook:
         preview = deepcopy(self)
         return preview.apply(tool_name, result).references
 
+    def render(self) -> str:
+        """Render this notebook for a model-facing prompt view."""
+
+        from core.agent.notebook_renderer import render_notebook
+
+        return render_notebook(self)
+
     def has_any(self) -> bool:
         return bool(
             any(self._orders[section] for section in _ALL_SECTIONS)
