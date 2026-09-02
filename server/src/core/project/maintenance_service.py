@@ -122,7 +122,7 @@ class ProjectMaintenanceService:
         return knowledge_store
 
     @staticmethod
-    def _validate_expected_domain_version(value: int) -> int:
+    def _validate_expected_domain_version(value: object) -> int:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError("expected_domain_version must be a non-negative integer")
         return value
@@ -171,8 +171,8 @@ class ProjectMaintenanceService:
     ):
         """Apply or close a review after the caller has inspected its plan."""
 
-        await self._require_domain_project(project_id, allow_archived=True)
         if status != "applied":
+            await self._require_domain_project(project_id, allow_archived=True)
             return await self._maintenance_reviews.transition(
                 review_id=review_id,
                 user_name=self.user_name,
@@ -182,6 +182,23 @@ class ProjectMaintenanceService:
                 actor=self.user_name,
                 reason=reason,
             )
+
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            return await self._apply_maintenance_review(
+                project_id,
+                review_id,
+                expected_state=expected_state,
+            )
+
+    async def _apply_maintenance_review(
+        self,
+        project_id: str,
+        review_id: str,
+        *,
+        expected_state: dict | None,
+    ):
+        """Dispatch one reviewed plan while the maintenance lock is held."""
 
         review = await self._maintenance_reviews.get(
             review_id,
@@ -199,12 +216,10 @@ class ProjectMaintenanceService:
             )
 
         domain = await self._domain_store.load(self.user_name, project_id)
-        expected_domain_version = review.expected_state.get("domain_version")
-        if (
-            isinstance(expected_domain_version, int)
-            and not isinstance(expected_domain_version, bool)
-            and domain.version != expected_domain_version
-        ):
+        expected_domain_version = self._validate_expected_domain_version(
+            review.expected_state.get("domain_version")
+        )
+        if domain.version != expected_domain_version:
             raise ValueError("Maintenance review is stale; project domain changed")
         result = await self._relationship_interpretation_writer.apply_plan(
             user_name=self.user_name,
@@ -369,22 +384,11 @@ class ProjectMaintenanceService:
 
     async def rebuild_project_embeddings(self, project_id: str) -> dict[str, int]:
         async with self._lock:
-            project = await self._project_lookup(project_id)
-            if project is None:
-                raise ValueError(f"Project '{project_id}' does not exist")
-            active_runtime_projects = [
-                active_id
-                for active_id in self._active_projects
-                if self._project_leases.get(active_id)
-            ]
-            if active_runtime_projects:
-                raise RuntimeError(
-                    "Embedding rebuild requires all project runtimes to be "
-                    f"inactive; active projects: {active_runtime_projects}"
-                )
-            knowledge_store = self.resources.knowledge_store
-            if knowledge_store is None:
-                raise RuntimeError("Knowledge storage is unavailable")
+            await self._require_domain_project(project_id, allow_archived=True)
+            self._require_no_active_runtimes(
+                "Embedding rebuild requires all project runtimes to be inactive"
+            )
+            knowledge_store = self._require_knowledge_store()
             return await knowledge_store.rebuild_project_embeddings(
                 project_id,
                 self.user_name,
@@ -399,12 +403,8 @@ class ProjectMaintenanceService:
         """Preview project-owned derived entities for explicit user cleanup."""
 
         async with self._lock:
-            project = await self._project_lookup(project_id)
-            if project is None:
-                raise ValueError(f"Project '{project_id}' does not exist")
-            knowledge_store = self.resources.knowledge_store
-            if knowledge_store is None:
-                raise RuntimeError("Knowledge storage is unavailable")
+            await self._require_domain_project(project_id, allow_archived=True)
+            knowledge_store = self._require_knowledge_store()
             return await EntityCleanupWorkflow(knowledge_store).preview(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -420,12 +420,8 @@ class ProjectMaintenanceService:
         """Delete user-selected derived entities while preserving messages."""
 
         async with self._lock:
-            project = await self._project_lookup(project_id)
-            if project is None:
-                raise ValueError(f"Project '{project_id}' does not exist")
-            knowledge_store = self.resources.knowledge_store
-            if knowledge_store is None:
-                raise RuntimeError("Knowledge storage is unavailable")
+            await self._require_domain_project(project_id, allow_archived=True)
+            knowledge_store = self._require_knowledge_store()
             result = await EntityCleanupWorkflow(knowledge_store).apply(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -445,13 +441,9 @@ class ProjectMaintenanceService:
         """Preview deterministic historical entity changes for active domain."""
 
         async with self._lock:
-            project = await self._project_lookup(project_id)
-            if project is None:
-                raise ValueError(f"Project '{project_id}' does not exist")
-            stored = await DomainConfigStore(self.pg).load(self.user_name, project_id)
-            knowledge_store = self.resources.knowledge_store
-            if knowledge_store is None:
-                raise RuntimeError("Knowledge storage is unavailable")
+            await self._require_domain_project(project_id, allow_archived=True)
+            stored = await self._domain_store.load(self.user_name, project_id)
+            knowledge_store = self._require_knowledge_store()
             return await knowledge_store.preview_historical_reclassification(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -469,26 +461,17 @@ class ProjectMaintenanceService:
     ) -> dict:
         """Apply explicit, bounded historical entity reclassification."""
 
-        if (
-            not isinstance(expected_domain_version, int)
-            or isinstance(expected_domain_version, bool)
-            or expected_domain_version < 0
-        ):
-            raise ValueError("expected_domain_version must be a non-negative integer")
+        self._validate_expected_domain_version(expected_domain_version)
 
         async with self._lock:
-            project = await self._project_lookup(project_id)
-            if project is None:
-                raise ValueError(f"Project '{project_id}' does not exist")
+            await self._require_domain_project(project_id, allow_archived=True)
             self._require_no_active_runtimes(
                 "Historical reclassification requires all project runtimes to be inactive"
             )
-            stored = await DomainConfigStore(self.pg).load(self.user_name, project_id)
+            stored = await self._domain_store.load(self.user_name, project_id)
             if stored.version != expected_domain_version:
                 raise DomainConfigConflict(expected_domain_version, stored.version)
-            knowledge_store = self.resources.knowledge_store
-            if knowledge_store is None:
-                raise RuntimeError("Knowledge storage is unavailable")
+            knowledge_store = self._require_knowledge_store()
             result = await knowledge_store.reclassify_historical_entities(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -522,10 +505,8 @@ class ProjectMaintenanceService:
 
         async with self._lock:
             await self._require_domain_project(project_id, allow_archived=True)
-            stored = await DomainConfigStore(self.pg).load(self.user_name, project_id)
-            knowledge_store = self.resources.knowledge_store
-            if knowledge_store is None:
-                raise RuntimeError("Knowledge storage is unavailable")
+            stored = await self._domain_store.load(self.user_name, project_id)
+            knowledge_store = self._require_knowledge_store()
             return await knowledge_store.preview_historical_relationship_normalization(
                 user_name=self.user_name,
                 project_id=project_id,
@@ -543,24 +524,17 @@ class ProjectMaintenanceService:
     ) -> dict:
         """Apply explicit, bounded historical relationship normalization."""
 
-        if (
-            not isinstance(expected_domain_version, int)
-            or isinstance(expected_domain_version, bool)
-            or expected_domain_version < 0
-        ):
-            raise ValueError("expected_domain_version must be a non-negative integer")
+        self._validate_expected_domain_version(expected_domain_version)
 
         async with self._lock:
             await self._require_domain_project(project_id, allow_archived=True)
             self._require_no_active_runtimes(
                 "Historical relationship normalization requires all project runtimes to be inactive"
             )
-            stored = await DomainConfigStore(self.pg).load(self.user_name, project_id)
+            stored = await self._domain_store.load(self.user_name, project_id)
             if stored.version != expected_domain_version:
                 raise DomainConfigConflict(expected_domain_version, stored.version)
-            knowledge_store = self.resources.knowledge_store
-            if knowledge_store is None:
-                raise RuntimeError("Knowledge storage is unavailable")
+            knowledge_store = self._require_knowledge_store()
             result = await knowledge_store.normalize_historical_relationships(
                 user_name=self.user_name,
                 project_id=project_id,

@@ -9,10 +9,10 @@ from psycopg.errors import CheckViolation
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_schema_reset_does_not_accumulate_dropped_chunk_attributes(
+async def test_fresh_schema_has_no_dropped_chunk_attributes(
     real_postgres_client,
 ):
-    """Repeated schema application must not consume PostgreSQL attribute slots."""
+    """Canonical creation must not consume PostgreSQL attribute slots."""
 
     row = await real_postgres_client.fetch_one(
         """

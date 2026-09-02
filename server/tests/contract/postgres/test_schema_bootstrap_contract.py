@@ -1,7 +1,6 @@
 """Fresh-database schema and extension bootstrap contracts."""
 
 import os
-import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,41 +20,14 @@ SCHEMA_SQL = (
 ).read_text(encoding="utf-8")
 
 
-def test_schema_drops_obsolete_ingestion_tables():
-    assert "DROP TABLE IF EXISTS public.ingestion_candidate_suggestions;" in SCHEMA_SQL
-    assert "DROP TABLE IF EXISTS public.parked_dlq_items;" in SCHEMA_SQL
-
-
-def test_schema_drops_project_snapshot_merges_and_keeps_global_journals():
-    assert "DROP TABLE IF EXISTS public.entity_merge_audits;" in SCHEMA_SQL
-    assert "DROP TABLE IF EXISTS public.entity_merge_proposals;" in SCHEMA_SQL
-    assert "CREATE TABLE IF NOT EXISTS public.entity_merge_audits" not in SCHEMA_SQL
-    assert "CREATE TABLE IF NOT EXISTS public.entity_merge_proposals" not in SCHEMA_SQL
-    assert "CREATE TABLE IF NOT EXISTS public.entity_global_merge_audits" in SCHEMA_SQL
-    assert "CREATE TABLE IF NOT EXISTS public.entity_global_merge_mutations" in SCHEMA_SQL
-
-
-def test_schema_separates_global_entity_identity_from_project_context():
-    assert "CREATE TABLE IF NOT EXISTS public.project_entity_contexts" in SCHEMA_SQL
-    assert "FOREIGN KEY (entity_id, user_name)" in SCHEMA_SQL
-    assert "REFERENCES public.entities(entity_id, user_name)" in SCHEMA_SQL
-    assert "CREATE OR REPLACE FUNCTION public.reject_entity_identity_mutation()" in SCHEMA_SQL
-    assert "context.project_id = message_project_id" in SCHEMA_SQL
-    assert "context.project_id = NEW.project_id" in SCHEMA_SQL
-    assert re.search(r"\bentity\.project_id\b", SCHEMA_SQL) is None
-
-
-def test_schema_keeps_aac_state_user_owned_and_insights_retention_independent():
-    assert "CREATE TABLE IF NOT EXISTS public.aac_discussions" in SCHEMA_SQL
-    assert "CREATE TABLE IF NOT EXISTS public.aac_timeline" in SCHEMA_SQL
-    assert "CREATE TABLE IF NOT EXISTS public.aac_insights" in SCHEMA_SQL
-    assert "CREATE TABLE IF NOT EXISTS public.aac_insight_votes" in SCHEMA_SQL
-    assert "end_reason TEXT" in SCHEMA_SQL
-    assert "ADD COLUMN IF NOT EXISTS end_reason TEXT" in SCHEMA_SQL
-    assert """discussion_id TEXT REFERENCES public.aac_discussions(discussion_id)
-        ON DELETE SET NULL""" in SCHEMA_SQL
-    assert """discussion_id TEXT NOT NULL REFERENCES public.aac_discussions(discussion_id)
-        ON DELETE CASCADE""" in SCHEMA_SQL
+def test_schema_is_fresh_install_ddl_without_historical_upgrade_steps():
+    assert "CREATE TABLE IF NOT EXISTS" not in SCHEMA_SQL
+    assert "CREATE INDEX IF NOT EXISTS" not in SCHEMA_SQL
+    assert "ADD COLUMN" not in SCHEMA_SQL
+    assert "DROP COLUMN" not in SCHEMA_SQL
+    assert "DROP TABLE" not in SCHEMA_SQL
+    assert "NOT VALID" not in SCHEMA_SQL
+    assert "-- Migration" not in SCHEMA_SQL
 
 
 def _conninfo_for_database(database: str) -> str:
@@ -122,6 +94,69 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
             "AND table_name = 'agent_tool_audits' "
             "AND column_name = 'confirmation_state'"
         ) is None
+        assert await client.fetch_one(
+            "SELECT 1 AS present FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'relationship_observations' "
+            "AND column_name = 'confidence'"
+        ) is None
+        ingestion_state_constraint = await client.fetch_one(
+            "SELECT pg_get_constraintdef(oid) AS definition "
+            "FROM pg_constraint "
+            "WHERE connamespace = 'public'::regnamespace "
+            "AND conname = 'messages_ingestion_state_check'"
+        )
+        assert "'failed'::text" in ingestion_state_constraint["definition"]
+        assert "'blocked'::text" not in ingestion_state_constraint["definition"]
+        tables = await client.fetch_all(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' ORDER BY table_name"
+        )
+        table_names = {row["table_name"] for row in tables}
+        assert {
+            "aac_discussions",
+            "aac_insights",
+            "aac_insight_votes",
+            "aac_timeline",
+            "entity_global_merge_audits",
+            "entity_global_merge_mutations",
+            "project_entity_contexts",
+        } <= table_names
+        assert {
+            "entity_merge_audits",
+            "entity_merge_proposals",
+            "ingestion_candidate_suggestions",
+            "parked_dlq_items",
+        }.isdisjoint(table_names)
+        assert await client.fetch_one(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'aac_discussions' AND column_name = 'end_reason'"
+        ) == {"is_nullable": "YES"}
+        assert await client.fetch_all(
+            "SELECT conrelid::regclass::text AS table_name, confdeltype "
+            "FROM pg_constraint "
+            "WHERE conname IN ('aac_insights_discussion_id_fkey', "
+            "'aac_timeline_discussion_id_fkey') ORDER BY conname"
+        ) == [
+            {"table_name": "public.aac_insights", "confdeltype": "n"},
+            {"table_name": "public.aac_timeline", "confdeltype": "c"},
+        ]
+        assert await client.fetch_one(
+            "SELECT count(*) AS invalid_constraints FROM pg_constraint "
+            "WHERE connamespace = 'public'::regnamespace AND NOT convalidated"
+        ) == {"invalid_constraints": 0}
+        assert await client.fetch_all(
+            "SELECT proname FROM pg_proc "
+            "WHERE pronamespace = 'public'::regnamespace "
+            "AND proname IN ('enforce_message_entity_ref_scope', "
+            "'enforce_relationship_scope', 'reject_entity_identity_mutation') "
+            "ORDER BY proname"
+        ) == [
+            {"proname": "enforce_message_entity_ref_scope"},
+            {"proname": "enforce_relationship_scope"},
+            {"proname": "reject_entity_identity_mutation"},
+        ]
         assert await client.fetch_one(
             "SELECT 1 AS present FROM ag_catalog.ag_graph WHERE name = 'knoggin_graph'"
         ) == {"present": 1}

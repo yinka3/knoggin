@@ -32,7 +32,7 @@ from core.agent.tools.registry import Tools
 from core.ingestion.batch import IngestionBatch
 from core.ingestion.worker import IngestionWorker
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
-from core.knowledge.documents import DocumentService
+from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.retrieval import KnowledgeRetrieval
@@ -522,6 +522,7 @@ async def test_real_server_flow_reaches_episode_and_grounded_answer(
 async def test_real_document_request_persists_document_source_provenance(
     real_server_scope,
     monkeypatch,
+    tmp_path,
 ):
     """One canonical turn carries document-tool evidence through to durable answer refs."""
 
@@ -554,6 +555,7 @@ async def test_real_document_request_persists_document_source_provenance(
         postgres_client=postgres,
         embedding_service=embedding,
         document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
     document = await documents.submit_document(
         content=b"The violet launch phrase is durable and documented.\n",
@@ -696,6 +698,7 @@ async def test_real_document_request_persists_document_source_provenance(
 async def test_real_document_selection_request_persists_selection_provenance(
     real_server_scope,
     monkeypatch,
+    tmp_path,
 ):
     """A selected passage is resolved, answered, and retained as provenance."""
 
@@ -728,6 +731,7 @@ async def test_real_document_selection_request_persists_selection_provenance(
         postgres_client=postgres,
         embedding_service=embedding,
         document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
     document = await documents.submit_document(
         content=b"# Notes\nThe violet launch phrase is durable and documented.\n",

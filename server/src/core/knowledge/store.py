@@ -38,7 +38,6 @@ from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     IngestionClaim,
-    IngestionFrontier,
     MessageAcceptance,
     MessageLifecycleWriter,
 )
@@ -104,16 +103,6 @@ class KnowledgeStore:
     ) -> MessageAcceptance:
         return await self._message_lifecycle_writer.create_editable_user_message(
             message, edit_window_seconds=edit_window_seconds
-        )
-
-    async def get_stable_ingestion_frontier(
-        self, *, user_name: str, project_id: str
-    ) -> IngestionFrontier | None:
-        """Expose the canonical ingestion boundary to application maintenance."""
-
-        return await self._message_lifecycle_writer.get_stable_ingestion_frontier(
-            user_name=user_name,
-            project_id=project_id,
         )
 
     async def seal_due_user_messages(
@@ -229,21 +218,6 @@ class KnowledgeStore:
             error_summary=error_summary,
             retryable=retryable,
             max_attempts=max_attempts,
-        )
-
-    async def retry_failed_ingestion(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        message_ids: List[int],
-    ) -> List[int]:
-        return await self._message_lifecycle_writer.retry_failed_ingestion(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            message_ids=message_ids,
         )
 
     async def save_assistant_message_with_source_refs(

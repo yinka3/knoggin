@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -134,6 +135,27 @@ async def test_applying_relationship_review_executes_plan_before_applied_status(
 
 
 @pytest.mark.no_network
+async def test_applying_relationship_review_uses_project_maintenance_lock():
+    service, _reviews = _project_service(_relationship_review())
+    await service.lock.acquire()
+    task = asyncio.create_task(
+        service.transition_maintenance_review(
+            "project-1",
+            "review-1",
+            status="applied",
+        )
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert service._relationship_interpretation_writer.calls == []
+    finally:
+        service.lock.release()
+    result = await task
+    assert result.status == "applied"
+
+
+@pytest.mark.no_network
 async def test_generic_applied_transition_rejects_plan_with_dedicated_workflow():
     review = _relationship_review().model_copy(
         update={
@@ -146,6 +168,23 @@ async def test_generic_applied_transition_rejects_plan_with_dedicated_workflow()
     service, reviews = _project_service(review)
 
     with pytest.raises(ValueError, match="dedicated maintenance operation"):
+        await service.transition_maintenance_review(
+            "project-1",
+            "review-1",
+            status="applied",
+        )
+
+    assert reviews.transitions == []
+
+
+@pytest.mark.no_network
+async def test_relationship_review_requires_a_valid_domain_version_snapshot():
+    review = _relationship_review().model_copy(
+        update={"expected_state": {"domain_version": True}}
+    )
+    service, reviews = _project_service(review)
+
+    with pytest.raises(ValueError, match="non-negative integer"):
         await service.transition_maintenance_review(
             "project-1",
             "review-1",

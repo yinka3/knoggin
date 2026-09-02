@@ -481,10 +481,10 @@ class Tools(
         self.active_tool_schemas: Dict[str, dict] = {}
         self.short_uuid_references: Dict[str, str] = {}
         self.health_service = health_service
-        self.entity_maintenance_service = (
-            entity_maintenance_service
-            or EntityMaintenanceService(postgres, user_name=user_name)
-        )
+        # Global entity maintenance is application-owned. Read-only/community
+        # tool compositions intentionally leave it unavailable rather than
+        # constructing an uncoordinated service instance here.
+        self.entity_maintenance_service = entity_maintenance_service
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
         self._web_page_client = create_web_page_http_client()

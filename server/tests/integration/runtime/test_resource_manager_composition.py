@@ -95,7 +95,7 @@ async def real_resource_manager(monkeypatch):
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_real_runtime_startup_and_shutdown_drains_active_work(
+async def test_real_runtime_shutdown_cancels_background_and_drains_model_work(
     real_resource_manager,
 ):
     manager = real_resource_manager
@@ -145,10 +145,16 @@ async def test_real_runtime_startup_and_shutdown_drains_active_work(
     ingestion_release.set()
     agent_tool_release.set()
 
-    await asyncio.gather(shutdown_task, ingestion_task, agent_tool_task)
+    shutdown_result, ingestion_result, agent_tool_result = await asyncio.gather(
+        shutdown_task,
+        ingestion_task,
+        agent_tool_task,
+        return_exceptions=True,
+    )
 
-    assert ingestion_task.result() == "ingestion-complete"
-    assert agent_tool_task.result() == "agent-tool-complete"
+    assert shutdown_result is None
+    assert isinstance(ingestion_result, asyncio.CancelledError)
+    assert agent_tool_result == "agent-tool-complete"
     assert manager.postgres is None
     assert manager.embedding is None
     assert manager.llm_service is None

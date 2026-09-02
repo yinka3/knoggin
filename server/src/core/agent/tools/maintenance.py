@@ -10,14 +10,21 @@ from core.knowledge.maintenance_reviews import EvidenceRef
 class MaintenanceTools:
     """Agent tools for maintaining the knowledge graph."""
 
+    def _require_entity_maintenance_service(self):
+        service = self.entity_maintenance_service
+        if service is None:
+            raise RuntimeError("Entity maintenance is unavailable in this tool context")
+        return service
+
     async def check_graph_health(self) -> Dict:
         """
         Check if there are any duplicate entities in the graph that need merging.
         Returns a list of potential duplicates for the agent to review.
         """
         try:
+            service = self._require_entity_maintenance_service()
             candidates = (
-                await self.entity_maintenance_service.discover_duplicate_candidates()
+                await service.discover_duplicate_candidates()
             )
 
             if not candidates:
@@ -65,6 +72,7 @@ class MaintenanceTools:
     ) -> Dict:
         """Submit a grounded merge proposal without granting destructive access."""
         try:
+            service = self._require_entity_maintenance_service()
             evidence_refs = [
                 *(
                     EvidenceRef(kind="message", id=str(message_id))
@@ -75,7 +83,7 @@ class MaintenanceTools:
                     for episode_id in (evidence_episode_ids or [])
                 ),
             ]
-            review = await self.entity_maintenance_service.propose(
+            review = await service.propose(
                 user_name=self.user_name,
                 survivor_entity_id=primary_id,
                 retired_entity_id=duplicate_id,

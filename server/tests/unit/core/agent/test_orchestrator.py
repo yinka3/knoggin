@@ -486,10 +486,10 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
+
     class FocusDocumentService:
         async def resolve_focus_target(self, **kwargs):
             assert kwargs == {
-                "session_id": "session-1",
                 "document_id": None,
                 "path_prefix": "src",
             }
@@ -545,7 +545,6 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
     class FocusDocumentService:
         async def resolve_focus_target(self, **kwargs):
             assert kwargs == {
-                "session_id": "session-1",
                 "document_id": "document-1",
                 "path_prefix": None,
             }

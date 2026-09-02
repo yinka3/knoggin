@@ -555,26 +555,22 @@ class ApplicationRuntimePort:
         if not isinstance(message_id, int) or message_id <= 0:
             return []
         store = self.runtime.resources.knowledge_store
-        reader = getattr(store, "get_message_source_refs", None)
-        if not callable(reader):
-            return []
-        values = await reader(
+        values = await store.get_message_source_refs(
             message_id,
             user_name=session.user_name,
             project_id=session.project_id,
+            session_id=session.session_id,
         )
         return [value if isinstance(value, SourceConsulted) else SourceConsulted.model_validate(value) for value in values]
 
     async def _message_artifact(self, session: Any, message_id: Any):
         if not isinstance(message_id, int) or message_id <= 0:
             return None
-        reader = getattr(self.runtime.resources.knowledge_store, "get_message_artifact", None)
-        if not callable(reader):
-            return None
-        return await reader(
+        return await self.runtime.resources.knowledge_store.get_message_artifact(
             message_id,
             user_name=session.user_name,
             project_id=session.project_id,
+            session_id=session.session_id,
         )
 
     @staticmethod

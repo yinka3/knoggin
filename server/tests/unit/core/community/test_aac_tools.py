@@ -36,7 +36,7 @@ def _base_tools(resources):
         knowledge_retrieval=object(),
         knowledge_store=resources.knowledge_store,
         postgres=resources.postgres,
-        entity_maintenance_service=object(),
+        entity_maintenance_service=None,
     )
 
 
@@ -92,6 +92,7 @@ async def test_aac_tools_persist_local_insights_and_only_consult_owned_specialis
     insight = await tools.save_insight("The dates conflict.", visibility="private")
     consultation = await tools.consult_specialist(specialist.id, "Check dates")
 
+    assert tools.entity_maintenance_service is None
     assert insight["saved"] is True
     assert insight["visibility"] == "private"
     assert consultation["result"] == "I checked the dates."

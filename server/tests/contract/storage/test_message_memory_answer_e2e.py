@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import os
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -34,14 +33,10 @@ from tests.fixtures.fakes import FakeConfigValue, FakeIngestionWorker
 
 
 @pytest_asyncio.fixture
-async def isolated_e2e_scope():
+async def isolated_e2e_scope(storage_database_url):
     """Use one unique project and clean only that project after the test."""
 
-    dsn = os.environ.get(
-        "KNOGGIN_TEST_DATABASE_URL",
-        "postgresql://knoggin:knoggin@localhost:5432/knoggin_db",
-    )
-    client = PostgresClient(dsn=dsn, min_size=1, max_size=2)
+    client = PostgresClient(dsn=storage_database_url, min_size=1, max_size=2)
     await client.connect()
     suffix = uuid.uuid4().hex[:12]
     user_name = "e2e_test_user"
@@ -238,7 +233,9 @@ async def test_messages_become_grounded_memory_and_are_returned_as_answer_contex
     assert len(retrieved) == 1
     assert retrieved[0]["episode_id"] == episode_id
     assert retrieved[0]["summary"].startswith("The team agreed")
-    assert [evidence["message_id"] for evidence in retrieved[0]["evidence"]] == [
+    assert retrieved[0]["evidence"] == []
+    expanded = await tool.read_episode(episode_id, session_id=session_id)
+    assert [evidence["message_id"] for evidence in expanded] == [
         first_message_id,
         second_message_id,
     ]

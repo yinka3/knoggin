@@ -293,6 +293,24 @@ async def test_runtime_port_translates_project_session_and_research_stream(
     assert parsed[-1].result.research_mode == "deep_research"
     assert parsed[-1].result.artifact is not None
     assert session.run_calls[0]["research_mode"] == "deep_research"
+    assert (
+        "sources",
+        43,
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+        },
+    ) in runtime.resources.knowledge_store.calls
+    assert (
+        "message_artifact",
+        43,
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+        },
+    ) in runtime.resources.knowledge_store.calls
 
 
 @pytest.mark.runtime

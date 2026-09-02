@@ -7,7 +7,7 @@ from common.conf.manager import ConfigManager
 from common.schema.agent.identity import AgentConfig
 from common.schema.public import StartRunRequest, validate_public_stream
 from core.agent.orchestrator import AgentOrchestrator
-from core.knowledge.documents import DocumentService
+from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.documents import storage as document_storage
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
@@ -109,6 +109,7 @@ def _runtime_document_cases():
 async def test_public_runtime_preserves_format_specific_document_provenance(
     real_server_scope,
     monkeypatch,
+    tmp_path,
     original_name,
     content,
     expected_source,
@@ -147,6 +148,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         postgres_client=postgres,
         embedding_service=embedding,
         document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
     document = await documents.submit_document(
         content=content,

@@ -293,7 +293,6 @@ class AgentOrchestrator:
         try:
             persisted = parse_document_focus(focus)
             target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
                 document_id=(
                     persisted.document_id
                     if persisted.target_type == "document"

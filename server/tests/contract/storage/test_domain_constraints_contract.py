@@ -65,18 +65,18 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
     )
     with pytest.raises(
         CheckViolation,
-        match="relationship_observations_confidence_range_check",
+        match="relationship_observations_interpretation_source_check",
     ):
         await real_postgres_client.execute(
             """
             INSERT INTO relationship_observations (
                 relationship_id, project_id, user_name, session_id, message_id,
                 source_entity_id, target_entity_id, observed_relationship_label,
-                confidence, observed_at_ms
+                interpretation_source, observed_at_ms
             )
             VALUES (
                 'project-1:1:2:knows', 'project-1', 'ada', 'session-1', 101,
-                1, 2, 'knows', 1.1, 1
+                1, 2, 'knows', 'invalid', 1
             )
             """
         )

@@ -257,8 +257,8 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
     assert await real_postgres_client.fetch_one(
         """
         SELECT extracted_text, extracted_content_hash
-            FROM public.document_extractions
+        FROM public.document_extractions
         WHERE document_id = %s
         """,
         (document["document_id"],),
-    ) == {"extracted_text": None, "extracted_content_hash": None}
+    ) is None

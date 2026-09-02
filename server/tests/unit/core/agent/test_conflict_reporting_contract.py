@@ -70,6 +70,19 @@ async def test_agent_merge_proposal_uses_injected_application_service():
 
 
 @pytest.mark.no_network
+async def test_agent_merge_proposal_requires_application_owned_service():
+    result = await MaintenanceHarness().propose_entity_merge(
+        primary_id=2,
+        duplicate_id=3,
+        reasoning="The cited evidence identifies one entity.",
+    )
+
+    assert result == {
+        "error": "Entity maintenance is unavailable in this tool context"
+    }
+
+
+@pytest.mark.no_network
 async def test_agent_conflict_report_keeps_evidence_immutable_and_opens_review_workflow(
     monkeypatch,
 ):
