@@ -276,6 +276,7 @@ class AgentOrchestrator:
             candidates.append(
                 build_document_selection_candidate(
                     project_id=context.project_id or "",
+                    session_id=context.session_id,
                     agent_run_id=run_id,
                     selection_context=selection_context,
                 )

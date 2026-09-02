@@ -863,6 +863,7 @@ async def test_real_document_selection_request_persists_selection_provenance(
             "kind": "text_lines",
             "start_line": 2,
             "end_line": 2,
+            "section_path": None,
         },
         "excerpt": selected_excerpt,
         "encounter_kind": "document_selection",
