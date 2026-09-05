@@ -121,9 +121,10 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
 
     class FakeSpacy:
         @staticmethod
-        def load(_name, exclude=None):
+        def blank(language):
             if failure == "spacy":
                 raise RuntimeError("spacy failed")
+            assert language == "en"
             return FakeProcessor()
 
     class FakeGLiNER25VP01Adapter:

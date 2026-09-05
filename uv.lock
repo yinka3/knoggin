@@ -841,14 +841,6 @@ wheels = [
 ]
 
 [[package]]
-name = "en-core-web-md"
-version = "3.8.0"
-source = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }
-wheels = [
-    { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl", hash = "sha256:5e6329fe3fecedb1d1a02c3ea2172ee0fede6cea6e4aefb6a02d832dba78a310" },
-]
-
-[[package]]
 name = "fastapi"
 version = "0.135.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3913,7 +3905,6 @@ dependencies = [
     { name = "cachetools" },
     { name = "ddgs" },
     { name = "duckduckgo-search" },
-    { name = "en-core-web-md" },
     { name = "gliner2", extra = ["local"] },
     { name = "httpcore" },
     { name = "httpx" },
@@ -3975,7 +3966,6 @@ requires-dist = [
     { name = "cachetools", specifier = ">=5.4.0" },
     { name = "ddgs", specifier = ">=9.11.3" },
     { name = "duckduckgo-search", specifier = ">=8.0.0" },
-    { name = "en-core-web-md", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" },
     { name = "gliner2", extras = ["local"], specifier = ">=2.0.0" },
     { name = "httpcore", specifier = ">=1.0.9" },
     { name = "httpx", specifier = ">=0.28.1" },

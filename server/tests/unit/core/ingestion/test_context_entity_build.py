@@ -5,6 +5,7 @@ from dataclasses import asdict
 from uuid import uuid4
 
 import pytest
+import spacy
 
 from common.conf.domain_config import DomainConfig
 from common.schema.context import (
@@ -349,6 +350,66 @@ async def test_context_known_aliases_run_before_the_gliner25_pass():
 
     assert [(item.name, item.origin) for item in mentions] == [("Acme", "known_alias")]
     assert events == ["profile", "vp01"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_blank_spacy_preserves_casefolded_alias_matching():
+    compiled_domain = domain()
+    current = block("ACME LABS is selected.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+
+    async def get_profile(entity_id):
+        assert entity_id == 701
+        return EntityProfile(
+            canonical_name="Acme Labs",
+            entity_type="Company",
+            topic="Work",
+            project_id="project-1",
+        )
+
+    text_processor = TextProcessor(
+        get_known_aliases=lambda: {"acme labs": 701},
+        get_alias_version=lambda: 1,
+        get_profile=get_profile,
+        vp01=FakeVP01(),
+        spacy=spacy.blank("en"),
+        settings=TextProcessorSettings(llm_ner=False),
+        model_work=InlineModelWork(),
+    )
+
+    mentions = await text_processor.extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("ACME LABS", "known_alias")
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_blank_spacy_keeps_common_word_false_positives_out_of_context_mentions():
+    compiled_domain = domain()
+    current = block("the current vendor is acme labs.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    vp01 = FakeVP01(
+        [
+            VP01EntitySpan(text="the", label="company", start=0, end=3),
+            VP01EntitySpan(text="acme labs", label="company", start=22, end=31),
+        ]
+    )
+    text_processor = TextProcessor(
+        get_known_aliases=lambda: {},
+        get_alias_version=lambda: 0,
+        get_profile=lambda _entity_id: _async_value(None),
+        vp01=vp01,
+        spacy=spacy.blank("en"),
+        settings=TextProcessorSettings(llm_ner=False),
+        model_work=InlineModelWork(),
+    )
+
+    mentions = await text_processor.extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [("acme labs", "vp01")]
 
 
 @pytest.mark.unit

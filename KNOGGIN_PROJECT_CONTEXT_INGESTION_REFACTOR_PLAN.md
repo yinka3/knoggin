@@ -45,7 +45,13 @@ Implementation progress:
 - Batch 8 — complete: Agent reads the committed database Context directly;
   the enabled project semantic job is the sole normal owner; and the old
   per-session message-local worker, claims, checkpoints, and provenance shape
-  are deleted. Batches 9–10 remain pending follow-on work.
+  are deleted.
+- Batch 9 — complete: routine Context replacement now retires evidence with an
+  audit rather than a review and retired evidence cannot seed conflict
+  discovery. Runtime uses the blank spaCy English tokenizer for alias matching,
+  without downloading or loading `en_core_web_md`. The GLiNER2.5-only VP-01
+  benchmark has frozen Context fixtures, quality/resource gates, and no
+  fallback path; VP-02 remains LLM-only. Batch 10 remains pending.
 
 This document supersedes the earlier exploratory version. Choices described as
 **locked** are the target behavior. Explicit exclusions are outside this
@@ -1637,7 +1643,7 @@ Validation completed:
   provenance, workspace health, and the project semantic runtime boundary;
 - Ruff, Python compilation, dead-path scans, and `git diff --check` passed.
 
-### Batch 9 — Maintenance and local-model simplification
+### Batch 9 — Maintenance and local-model simplification — complete
 
 **Depends on:** Batch 8. These are follow-up commits, not cutover prerequisites
 unless benchmarks expose a blocker.
@@ -1647,7 +1653,7 @@ unless benchmarks expose a blocker.
 Files:
 
 - maintenance candidate readers/services
-- `core/knowledge/db/writers/relationship_interpretation_writer.py`
+- `core/knowledge/db/writers/semantic_commit_writer.py`
 - maintenance unit/contract tests
 
 Work:
@@ -1705,6 +1711,40 @@ Acceptance:
 - the GLiNER2.5 adapter remains the production VP-01 path;
 - regression gates identify tuning/resource problems before cutover;
 - do not retain the old GLiNER path as a permanent fallback.
+
+#### Batch 9 completion record
+
+- **9.1:** Conflict discovery reads only active relationship observations, so
+  a Context block replacement cannot turn its deterministic retirement into a
+  candidate review. `SemanticCommitWriter` records every such retirement in
+  `maintenance_reinterpretation_audits`, including old relationship identity
+  and the Context-reconciliation reason; it never creates a maintenance review.
+  Active independently sourced evidence remains available to the existing LLM
+  conflict-discovery and manual-review paths.
+- **9.2:** Runtime and prefetch no longer load or prefetch `en_core_web_md`.
+  `spacy.blank("en")` supplies the tokenizer and vocabulary required by the
+  case-insensitive `PhraseMatcher`; spaCy remains installed because that
+  matcher is still the safe known-alias boundary. Lowercase/common-word
+  filtering and alias fixtures cover the change.
+- **9.3:** `run_vp01_benchmark` accepts only `GLiNER25VP01Adapter` matching
+  the frozen domain language. For each frozen Context fixture it measures
+  synchronous CPU inference latency and process high-water RSS, then computes
+  exact span precision/recall. It exposes explicit quality, latency, memory,
+  and zero-fallback gates. The adapter-call contract verifies that compiled
+  label descriptions reach GLiNER2.5 unchanged. The harness has no VP-02
+  capability; relationship extraction remains on the separate required LLM
+  path.
+
+Validation completed:
+
+- 32 focused VP-01, Context entity, runtime-resource, and conflict-discovery
+  unit tests passed;
+- 4 fresh-schema PostgreSQL contracts passed for semantic reconciliation and
+  maintenance application behavior;
+- 1,060 service-free tests passed, with 79 PostgreSQL/Redis tests deliberately
+  deselected;
+- Ruff, Python compilation, dependency-lock refresh, trained-model removal
+  scan, and `git diff --check` passed.
 
 ### Batch 10 — Recovery, end-to-end validation, and documentation
 

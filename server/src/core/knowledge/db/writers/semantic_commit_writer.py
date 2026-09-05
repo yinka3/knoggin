@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from psycopg import Error as PsycopgError
 
@@ -109,6 +109,7 @@ class SemanticCommitWriter:
                 )
                 observations_retired = await self._retire_noncurrent_observations(
                     cur,
+                    user_name=user_name,
                     project_id=project_id,
                     revision_id=build.context.revision_id,
                 )
@@ -385,9 +386,19 @@ class SemanticCommitWriter:
 
     @staticmethod
     async def _retire_noncurrent_observations(
-        cur, *, project_id: str, revision_id: UUID
+        cur,
+        *,
+        user_name: str,
+        project_id: str,
+        revision_id: UUID,
     ) -> int:
-        """Retire whole observations if any one of their block versions vanished."""
+        """Retire replaced Context evidence and preserve a deterministic audit.
+
+        This is a reconciliation consequence of immutable Context membership,
+        not an ambiguity for a person to review.  The audit records exactly
+        which observations lost current support while deliberately avoiding a
+        maintenance-review row.
+        """
 
         await cur.execute(
             """
@@ -410,10 +421,40 @@ class SemanticCommitWriter:
                           AND membership.block_id = support.block_id
                     )
               )
+            RETURNING observation.observation_id, observation.relationship_id
             """,
             (project_id, revision_id),
         )
-        return cur.rowcount
+        retired = await cur.fetchall()
+        if not retired:
+            return 0
+
+        observation_ids = sorted(int(row["observation_id"]) for row in retired)
+        changes = [
+            {
+                "observation_id": int(row["observation_id"]),
+                "old_relationship_id": row["relationship_id"],
+                "new_relationship_id": None,
+                "interpretation_source": "context_reconciliation",
+                "reason": "context_block_replaced_or_deleted",
+            }
+            for row in sorted(retired, key=lambda row: int(row["observation_id"]))
+        ]
+        await cur.execute(
+            """
+            INSERT INTO public.maintenance_reinterpretation_audits
+                (audit_id, user_name, project_id, observation_ids, changes)
+            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb)
+            """,
+            (
+                str(uuid4()),
+                user_name,
+                project_id,
+                json.dumps(observation_ids),
+                json.dumps(changes, sort_keys=True),
+            ),
+        )
+        return len(retired)
 
     async def _write_relationships(
         self,

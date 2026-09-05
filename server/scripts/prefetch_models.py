@@ -5,7 +5,6 @@ import os
 import sys
 from pathlib import Path
 
-import spacy
 import torch
 from dotenv import load_dotenv
 from loguru import logger
@@ -57,11 +56,6 @@ async def prefetch_models() -> None:
         await embedding.load_models()
         await embedding.load_reranker(priority=ModelWorkPriority.BACKGROUND)
         await embedding.load_nli_model(priority=ModelWorkPriority.BACKGROUND)
-        await asyncio.to_thread(
-            spacy.load,
-            "en_core_web_md",
-            exclude=["ner", "lemmatizer", "attribute_ruler"],
-        )
         await asyncio.to_thread(
             GLiNER25VP01Adapter.load,
             language="en",

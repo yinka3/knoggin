@@ -27,8 +27,10 @@ from common.schema.semantic_window import (
 from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.policy import IngestionPolicy
+from core.knowledge.conflicts import ConflictDiscoveryCursor
 from core.knowledge.context.models import ContextBlockSupport, ContextMaterialization
 from core.knowledge.context.render import context_block_hash, context_document_hash
+from core.knowledge.db.readers.conflict_discovery_reader import ConflictDiscoveryReader
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.db.writers.semantic_commit_writer import SemanticCommitWriter
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
@@ -317,6 +319,13 @@ async def test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_suppor
         """,
         (first_window.window_id,),
     ) == {"status": "completed", "last_error": None}
+    old_observation = await real_postgres_client.fetch_one(
+        """
+        SELECT observation_id, relationship_id
+        FROM public.relationship_observations
+        WHERE source_entity_id = 10
+        """
+    )
 
     second_window = _window()
     assert (await window_writer.claim_window(second_window, _membership(102))).claimed
@@ -378,6 +387,31 @@ async def test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_suppor
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.relationships WHERE entity_a_id = 12"
     ) == {"count": 1}
+    audit = await real_postgres_client.fetch_one(
+        """
+        SELECT observation_ids, changes
+        FROM public.maintenance_reinterpretation_audits
+        WHERE project_id = 'project-1'
+        """
+    )
+    assert audit["observation_ids"] == [old_observation["observation_id"]]
+    assert audit["changes"] == [
+        {
+            "interpretation_source": "context_reconciliation",
+            "new_relationship_id": None,
+            "observation_id": old_observation["observation_id"],
+            "old_relationship_id": old_observation["relationship_id"],
+            "reason": "context_block_replaced_or_deleted",
+        }
+    ]
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.maintenance_reviews"
+    ) == {"count": 0}
+    seeds = await ConflictDiscoveryReader(real_postgres_client).get_seed_observations(
+        ConflictDiscoveryCursor("ada", "project-1", 0),
+        max_span_days=60,
+    )
+    assert [row["source_entity_id"] for row in seeds] == [12]
 
 
 @pytest.mark.storage

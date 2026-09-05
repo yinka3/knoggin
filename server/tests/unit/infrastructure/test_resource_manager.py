@@ -122,7 +122,8 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
     class FakeSpacy:
         @staticmethod
-        def load(name, exclude=None):
+        def blank(language):
+            assert language == "en"
             return FakeProcessor()
 
     class FakeGLiNER25VP01Adapter:
@@ -257,7 +258,8 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
     class FakeSpacy:
         @staticmethod
-        def load(name, exclude=None):
+        def blank(language):
+            assert language == "en"
             return FakeProcessor()
 
     class FakeGLiNER25VP01Adapter:
@@ -352,7 +354,8 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
 
     class FakeSpacy:
         @staticmethod
-        def load(name, exclude=None):
+        def blank(language):
+            assert language == "en"
             return MagicMock()
 
     class FakeGLiNER25VP01Adapter:
@@ -420,7 +423,8 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
 
     class FakeSpacy:
         @staticmethod
-        def load(name, exclude=None):
+        def blank(language):
+            assert language == "en"
             return MagicMock()
 
     class FakeGLiNER25VP01Adapter:
@@ -505,7 +509,8 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
 
     class FakeSpacy:
         @staticmethod
-        def load(name, exclude=None):
+        def blank(language):
+            assert language == "en"
             return MagicMock()
 
     class FakeGLiNER25VP01Adapter:

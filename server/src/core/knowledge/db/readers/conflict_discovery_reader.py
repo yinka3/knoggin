@@ -169,5 +169,6 @@ class ConflictDiscoveryReader:
              AND target_context.entity_id = observation.target_entity_id
             WHERE observation.user_name = %s
               AND observation.project_id = %s
+              AND observation.retired_at IS NULL
             {suffix}
         """  # noqa: S608

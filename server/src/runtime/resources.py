@@ -263,15 +263,13 @@ class RuntimeResources:
         self._vp01_device = str(device)
 
         async def load_spacy() -> None:
-            exclude = ["ner", "lemmatizer", "attribute_ruler"]
             processor = await self.model_work.run_blocking(
-                lambda: spacy.load("en_core_web_md", exclude=exclude),
+                lambda: spacy.blank("en"),
                 priority=ModelWorkPriority.BACKGROUND,
-                name="spacy-model-load",
+                name="spacy-blank-en-init",
             )
-            processor.add_pipe("doc_cleaner")
             self.spacy = processor
-            logger.info("Loaded spacy model")
+            logger.info("Initialized blank English spaCy tokenizer for alias matching")
 
         async def load_vp01() -> None:
             await self.get_vp01("en")
