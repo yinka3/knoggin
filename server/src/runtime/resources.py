@@ -12,12 +12,12 @@ from typing import Any, Callable, Optional, Protocol, cast
 import spacy
 import torch
 from dotenv import load_dotenv
-from gliner import GLiNER
 from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
 from common.utils.coordination_log import configure_coordination_log
+from core.ingestion.vp01 import GLiNER25VP01Adapter
 from core.knowledge.services.embedding_service import EmbeddingService
 from core.knowledge.store import KnowledgeStore
 from infrastructure.background_work import BackgroundWorkCoordinator
@@ -56,8 +56,10 @@ class ReadyRuntimeResources(Protocol):
     background_work: BackgroundWorkCoordinator
     model_work: ModelWorkCoordinator
     resource_profile: ResourceProfile
-    gliner: GLiNER
+    vp01: GLiNER25VP01Adapter
     spacy: Any
+
+    async def get_vp01(self, language: str) -> GLiNER25VP01Adapter: ...
 
 
 class RuntimeResources:
@@ -72,7 +74,10 @@ class RuntimeResources:
         self.background_work: Optional[BackgroundWorkCoordinator] = None
         self.model_work: Optional[ModelWorkCoordinator] = None
         self.resource_profile: Optional[ResourceProfile] = None
-        self.gliner: Optional[GLiNER] = None
+        self.vp01: Optional[GLiNER25VP01Adapter] = None
+        self._vp01_by_language: dict[str, GLiNER25VP01Adapter] = {}
+        self._vp01_load_lock = asyncio.Lock()
+        self._vp01_device: str | None = None
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._started = False
@@ -118,6 +123,34 @@ class RuntimeResources:
         if not self._started or self._shutdown_complete:
             raise RuntimeError("Runtime resources are not ready")
         return cast(ReadyRuntimeResources, self)
+
+    async def get_vp01(self, language: str) -> GLiNER25VP01Adapter:
+        """Return the domain-selected local VP-01 model, loading multi on demand."""
+
+        if language not in {"en", "multilingual"}:
+            raise ValueError("VP-01 language must be 'en' or 'multilingual'")
+        if self.model_work is None:
+            raise RuntimeError("VP-01 model work coordinator is unavailable")
+        existing = self._vp01_by_language.get(language)
+        if existing is not None:
+            return existing
+        async with self._vp01_load_lock:
+            existing = self._vp01_by_language.get(language)
+            if existing is not None:
+                return existing
+            model = await self.model_work.run_blocking(
+                lambda: GLiNER25VP01Adapter.load(
+                    language=language,
+                    device=self._vp01_device,
+                ),
+                priority=ModelWorkPriority.BACKGROUND,
+                name=f"vp01-{language}-model-load",
+            )
+            self._vp01_by_language[language] = model
+            if language == "en":
+                self.vp01 = model
+            logger.info("Loaded GLiNER2.5 {} VP-01 model", language)
+            return model
 
     def _configure_startup(self, *, num_workers: int | None) -> torch.device:
         load_dotenv()
@@ -227,6 +260,7 @@ class RuntimeResources:
     async def _load_heavyweight_models(self, *, device: torch.device) -> None:
         if self.llm_service is None or self.embedding is None or self.model_work is None:
             raise RuntimeError("Runtime model dependencies are unavailable")
+        self._vp01_device = str(device)
 
         async def load_spacy() -> None:
             exclude = ["ner", "lemmatizer", "attribute_ruler"]
@@ -239,24 +273,15 @@ class RuntimeResources:
             self.spacy = processor
             logger.info("Loaded spacy model")
 
-        async def load_gliner() -> None:
-            model = await self.model_work.run_blocking(
-                lambda: GLiNER.from_pretrained(
-                    os.getenv("KNOGGIN_GLINER_MODEL", "urchade/gliner_large-v2.1")
-                ),
-                priority=ModelWorkPriority.BACKGROUND,
-                name="gliner-model-load",
-            )
-            model.to(device)
-            self.gliner = model
-            logger.info("Loaded GLiNER model")
+        async def load_vp01() -> None:
+            await self.get_vp01("en")
 
         try:
             await asyncio.gather(
                 self.llm_service.load_tokenizer(),
                 self.embedding.load_models(),
                 load_spacy(),
-                load_gliner(),
+                load_vp01(),
             )
         except Exception as exc:
             logger.critical(f"Global resource initialization failed: {exc}")
@@ -311,7 +336,9 @@ class RuntimeResources:
         if llm_service is not None:
             await attempt("LLM client", llm_service.close)
 
-        self.gliner = None
+        self.vp01 = None
+        self._vp01_by_language.clear()
+        self._vp01_device = None
         self.spacy = None
         self.knowledge_store = None
         self.resource_profile = None

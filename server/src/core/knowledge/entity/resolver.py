@@ -12,7 +12,13 @@ from loguru import logger
 from rapidfuzz import fuzz, process
 from wordfreq import word_frequency
 
-from common.schema.ingestion.contracts import EntityWrite, ValidationIssue
+from common.schema.ingestion.contracts import (
+    ContextBlockEntityAssociation,
+    ContextBlockMention,
+    EntityWrite,
+    ResolvedContextBlockMention,
+    ValidationIssue,
+)
 from common.schema.settings import EntityResolutionSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit_sync
@@ -319,6 +325,199 @@ class EntityResolver:
                 "alias_updates": alias_updates,
                 "pending_entity_writes": pending_entity_writes,
             }
+
+    async def resolve_context_block_mentions(
+        self,
+        mentions: list[ContextBlockMention],
+        *,
+        block_text_by_id: dict[object, str],
+        policy: IngestionPolicy,
+        parent_work_record=None,
+        allocate_entity_id,
+        issues: Optional[List[ValidationIssue]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve typed Context-block mentions without manufacturing message refs.
+
+        The old message-local resolver remains only for the still-authoritative
+        legacy pipeline until Batch 8.  Context-first callers use this boundary:
+        block associations are returned independently, and literal message
+        evidence is deliberately left to the result assembler.
+        """
+
+        if any(not isinstance(mention, ContextBlockMention) for mention in mentions):
+            raise TypeError("Context entity resolution requires ContextBlockMention values")
+        if not isinstance(block_text_by_id, dict) or any(
+            not isinstance(text, str) for text in block_text_by_id.values()
+        ):
+            raise TypeError("Context entity resolution requires block text by ID")
+
+        async with self.resolution_lock:
+            entity_ids: List[int] = []
+            new_ids: set[int] = set()
+            alias_ids: set[int] = set()
+            created_in_build: Dict[Tuple[str, str, str], int] = {}
+            alias_updates: Dict[int, List[str]] = {}
+            pending_entity_writes: Dict[int, EntityWrite] = {}
+            resolved_mentions: list[ResolvedContextBlockMention] = []
+            associations: list[ContextBlockEntityAssociation] = []
+
+            candidate_entries = await self.candidate_entries_for_context_block_mentions(
+                mentions,
+                policy=policy,
+                parent_work_record=parent_work_record,
+            )
+
+            for index, mention in enumerate(mentions):
+                entry = candidate_entries[index]
+                if entry is None:
+                    continue
+                dedupe_key = self.mention_dedupe_key(
+                    mention.name,
+                    mention.entity_type,
+                    mention.topic,
+                    policy,
+                )
+                entity_id: int | None = None
+                support_text = "\n".join(
+                    block_text_by_id.get(block_id, "") for block_id in mention.block_ids
+                )
+
+                if entry[0] == "candidates":
+                    for candidate in entry[1]:
+                        candidate_id = candidate.entity_id
+                        profile = await self.get_profile(candidate_id)
+                        compatibility = (
+                            self.schema_compatibility(
+                                mention.entity_type,
+                                mention.topic,
+                                profile,
+                                policy,
+                            )
+                            if profile
+                            else "missing_profile"
+                        )
+                        if (
+                            candidate.score < policy.resolution_threshold
+                            or profile is None
+                            or not self.is_profile_visible(profile)
+                        ):
+                            continue
+                        if self.should_accept_candidate(
+                            mention.name,
+                            mention.entity_type,
+                            mention.topic,
+                            support_text,
+                            profile,
+                            candidate_id,
+                            policy=policy,
+                            compatibility=compatibility,
+                            candidate=candidate,
+                        ):
+                            entity_id = candidate_id
+                            existing_id, aliases_added, new_aliases = (
+                                self.validate_existing(
+                                    profile.canonical_name,
+                                    [mention.name.strip()],
+                                )
+                            )
+                            if existing_id and aliases_added:
+                                alias_ids.add(existing_id)
+                                alias_updates.setdefault(existing_id, []).extend(
+                                    new_aliases
+                                )
+                            break
+
+                if entity_id is None:
+                    if dedupe_key in created_in_build:
+                        entity_id = created_in_build[dedupe_key]
+                    else:
+                        entity_id = await allocate_entity_id()
+                        pending_entity_writes[entity_id] = await self.prepare_pending_entity(
+                            entity_id,
+                            mention.name.strip(),
+                            [mention.name.strip()],
+                            mention.entity_type,
+                            mention.topic,
+                        )
+                        new_ids.add(entity_id)
+                        created_in_build[dedupe_key] = entity_id
+
+                if entity_id not in entity_ids:
+                    entity_ids.append(entity_id)
+                resolved_mentions.append(
+                    ResolvedContextBlockMention(mention=mention, entity_id=entity_id)
+                )
+                associations.extend(
+                    ContextBlockEntityAssociation(
+                        block_id=block_id,
+                        entity_id=entity_id,
+                        mention_text=mention.name,
+                    )
+                    for block_id in mention.block_ids
+                )
+
+            unique_associations = tuple(
+                {
+                    (association.block_id, association.entity_id, association.mention_text.casefold()): association
+                    for association in associations
+                }.values()
+            )
+            return {
+                "entity_ids": tuple(entity_ids),
+                "new_entity_ids": frozenset(new_ids),
+                "alias_updated_ids": frozenset(alias_ids),
+                "alias_updates": {
+                    entity_id: tuple(dict.fromkeys(aliases))
+                    for entity_id, aliases in alias_updates.items()
+                },
+                "pending_entity_writes": pending_entity_writes,
+                "resolved_mentions": tuple(resolved_mentions),
+                "block_entity_associations": unique_associations,
+            }
+
+    async def candidate_entries_for_context_block_mentions(
+        self,
+        mentions: list[ContextBlockMention],
+        *,
+        policy: IngestionPolicy,
+        parent_work_record=None,
+    ) -> list[Optional[Tuple[str, Any]]]:
+        """Build candidate searches for Context-block mention identity decisions."""
+
+        unique_names = list({mention.name for mention in mentions if mention.name})
+        embedding_map = {}
+        if unique_names:
+            if getattr(self.embedding_service, "supports_model_work_records", False):
+                embeddings = await self.embedding_service.encode(
+                    unique_names,
+                    parent_work_record=parent_work_record,
+                )
+            else:
+                embeddings = await self.embedding_service.encode(unique_names)
+            embedding_map = dict(zip(unique_names, embeddings))
+
+        entries: list[Optional[Tuple[str, Any]]] = []
+        seen: Dict[Tuple[str, str, str], Tuple[str, Any]] = {}
+        for mention in mentions:
+            dedupe_key = self.mention_dedupe_key(
+                mention.name,
+                mention.entity_type,
+                mention.topic,
+                policy,
+            )
+            if dedupe_key not in seen:
+                candidates = await self.get_candidate_ids(
+                    mention.name,
+                    precomputed_embedding=embedding_map.get(mention.name),
+                    candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
+                    candidate_vector_threshold=policy.candidate_vector_threshold,
+                    strict=True,
+                )
+                seen[dedupe_key] = (
+                    ("candidates", candidates) if candidates else ("new", None)
+                )
+            entries.append(seen[dedupe_key])
+        return entries
 
     def is_profile_visible(self, profile: EntityProfile) -> bool:
         return profile.project_id in set(self.readable_project_ids)

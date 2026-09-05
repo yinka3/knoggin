@@ -51,15 +51,10 @@ async def real_resource_manager(monkeypatch):
         ),
         revision_env="KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION",
     )
-    gliner_model = _local_snapshot(
-        huggingface_hub,
-        os.environ.get("KNOGGIN_GLINER_MODEL", "urchade/gliner_large-v2.1"),
-        revision_env="KNOGGIN_GLINER_REVISION",
-    )
     _local_snapshot(
         huggingface_hub,
-        os.environ.get("KNOGGIN_GLINER_BASE_MODEL", "microsoft/deberta-v3-large"),
-        revision_env="KNOGGIN_GLINER_BASE_REVISION",
+        os.environ.get("KNOGGIN_VP01_MODEL", "fastino/gliner2.5-base-v1"),
+        revision_env="KNOGGIN_VP01_REVISION",
     )
 
     monkeypatch.setenv(
@@ -71,7 +66,6 @@ async def real_resource_manager(monkeypatch):
     )
     monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", embedding_model)
     monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", reranker_model)
-    monkeypatch.setenv("KNOGGIN_GLINER_MODEL", gliner_model)
     monkeypatch.setenv(
         "KNOGGIN_EMBEDDING_BACKEND",
         os.environ.get("KNOGGIN_EMBEDDING_BACKEND", "onnx"),
@@ -103,7 +97,7 @@ async def test_real_runtime_shutdown_cancels_background_and_drains_model_work(
     assert manager.embedding is not None
     assert manager.embedding.embedding_dim > 0
     assert manager.spacy is not None
-    assert manager.gliner is not None
+    assert manager.vp01 is not None
     assert manager.work_snapshot()["background_work"]["queued"] == 0
 
     ingestion_started = asyncio.Event()

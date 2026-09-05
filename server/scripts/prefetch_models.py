@@ -8,13 +8,13 @@ from pathlib import Path
 import spacy
 import torch
 from dotenv import load_dotenv
-from gliner import GLiNER
 from loguru import logger
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = SERVER_ROOT.parent
 sys.path.insert(0, str(SERVER_ROOT / "src"))
 
+from core.ingestion.vp01 import GLiNER25VP01Adapter  # noqa: E402
 from core.knowledge.services.embedding_service import EmbeddingService  # noqa: E402
 from infrastructure.model_work import ModelWorkPriority  # noqa: E402
 from infrastructure.resource_profile import ResourceProfile  # noqa: E402
@@ -62,11 +62,11 @@ async def prefetch_models() -> None:
             "en_core_web_md",
             exclude=["ner", "lemmatizer", "attribute_ruler"],
         )
-        gliner = await asyncio.to_thread(
-            GLiNER.from_pretrained,
-            "urchade/gliner_large-v2.1",
+        await asyncio.to_thread(
+            GLiNER25VP01Adapter.load,
+            language="en",
+            device=str(device),
         )
-        gliner.to(device)
         logger.info("All local models are ready in the local cache")
     finally:
         embedding.cleanup()

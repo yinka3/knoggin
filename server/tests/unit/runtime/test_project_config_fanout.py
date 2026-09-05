@@ -29,7 +29,7 @@ class RecordingScheduler:
     def __init__(self):
         self._jobs = {}
 
-    def register_episode(self, job):
+    def register(self, job):
         self._jobs[job.name] = job
         return self
 
@@ -42,6 +42,9 @@ class RecordingJob:
 
     def update_settings(self, *settings):
         self.updates.append(settings if len(settings) > 1 else settings[0])
+
+    def update_episode_settings(self, settings):
+        self.updates.append(settings)
 
 class RecordingProjectRuntime:
     def __init__(self):
@@ -192,3 +195,42 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
     assert entities.updates[-1] is marker
     assert processor.updates[-2:] == [marker, marker]
     assert episode.updates[-1] is marker
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_project_semantic_job_is_registered_with_its_settings(
+    monkeypatch,
+):
+    config_manager = RecordingConfigManager()
+    factory = ProjectRuntimeFactory(
+        resources=SimpleNamespace(),
+        user_name="ada",
+        episode_window_size_provider=lambda _project_id: 8,
+    )
+    state = RecordingProjectRuntime()
+    entities = RecordingEntities()
+    processor = RecordingProcessor()
+    episode = RecordingJob("episode")
+    semantic = RecordingJob("project_semantic")
+    monkeypatch.setattr(
+        "runtime.project_factory.ConfigManager.get",
+        staticmethod(lambda: config_manager),
+    )
+
+    factory._register_background_jobs(
+        state,
+        entities=entities,
+        processor=processor,
+        episode_job=episode,
+        project_semantic_job=semantic,
+    )
+
+    assert list(state.scheduler._jobs) == ["episode", "project_semantic"]
+    assert [path for _, path in config_manager.subscriptions] == [
+        "developer_settings.entity_resolution",
+        "developer_settings.nlp_pipeline",
+        "developer_settings.jobs.episode",
+        "developer_settings.ingestion",
+        "developer_settings.jobs.episode",
+    ]

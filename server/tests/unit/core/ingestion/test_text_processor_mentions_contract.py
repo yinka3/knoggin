@@ -91,19 +91,24 @@ class FakeLLM:
         return self.response
 
 
-class RecordingGLiNER:
+class RecordingVP01:
     def __init__(self):
         self.calls = []
 
-    def predict_entities(self, text, labels, *, threshold):
+    def extract_entities(self, text, domain, *, threshold):
         self.calls.append(
             {
                 "text": text,
-                "labels": labels,
+                "domain": domain,
                 "threshold": threshold,
             }
         )
         return []
+
+
+class InlineModelWork:
+    async def run_blocking(self, operation, **_kwargs):
+        return operation()
 
 
 def make_domain_with_tools():
@@ -166,9 +171,10 @@ def make_processor(
         get_known_aliases=lambda: known_aliases,
         get_alias_version=lambda: alias_version,
         get_profile=get_profile,
-        gliner=object(),
+        vp01=object(),
         spacy=FakeNLP(),
         settings=TextProcessorSettings(llm_ner=llm_ner),
+        model_work=InlineModelWork(),
     )
 
     processor._build_phrase_matcher = lambda: (
@@ -219,7 +225,7 @@ def test_build_phrase_matcher_reuses_cache_until_alias_version_changes(monkeypat
         get_known_aliases=lambda: known_aliases,
         get_alias_version=lambda: alias_version,
         get_profile=get_profile,
-        gliner=object(),
+        vp01=object(),
         spacy=FakeNLP(),
         settings=TextProcessorSettings(),
     )
@@ -243,10 +249,10 @@ def test_build_phrase_matcher_reuses_cache_until_alias_version_changes(monkeypat
 
 @pytest.mark.ingestion
 @pytest.mark.no_network
-def test_gliner_uses_the_threshold_captured_by_the_batch_policy():
+def test_vp01_uses_the_threshold_and_domain_captured_by_the_batch_policy():
     processor, _ = make_processor()
-    recorder = RecordingGLiNER()
-    processor._gliner = recorder
+    recorder = RecordingVP01()
+    processor._vp01 = recorder
     processor.gliner_threshold = 0.99
     policy = ingestion_policy(
         text_processor=TextProcessorSettings(gliner_threshold=0.23),
@@ -257,7 +263,7 @@ def test_gliner_uses_the_threshold_captured_by_the_batch_policy():
     assert recorder.calls == [
         {
             "text": "Ada",
-            "labels": list(policy.domain.labels),
+            "domain": policy.domain,
             "threshold": 0.23,
         }
     ]
