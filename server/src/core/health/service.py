@@ -230,6 +230,7 @@ class RuntimeHealthService:
         pending_count = self._nonnegative_int(queue_details.get("pending_count"))
         claimed_count = self._nonnegative_int(queue_details.get("claimed_count"))
         failed_count = self._nonnegative_int(queue_details.get("failed_count"))
+        exhausted_count = self._nonnegative_int(queue_details.get("exhausted_count"))
         consecutive_failures = self._nonnegative_int(
             scheduler_snapshot.get("recent_failed_jobs")
         )
@@ -253,6 +254,8 @@ class RuntimeHealthService:
             warnings.append("pending semantic work is delayed")
         if failed_count:
             warnings.append("semantic windows have recorded failures")
+        if exhausted_count:
+            warnings.append("semantic windows exhausted automatic retries; manual retry required")
         if consecutive_failures:
             warnings.append("semantic scheduler has recent failures")
         if scheduler_state in {"not_registered", "stopped"}:
@@ -266,6 +269,7 @@ class RuntimeHealthService:
             or scheduler_state != "running"
             or delay_state in {"delayed", "stalled"}
             or failed_count
+            or exhausted_count
             or consecutive_failures
         ):
             status = HealthStatus.DEGRADED
@@ -285,7 +289,9 @@ class RuntimeHealthService:
         else:
             activity = HealthActivity.IDLE
 
-        if failed_count:
+        if exhausted_count:
+            window_state = "exhausted"
+        elif failed_count:
             window_state = "failed"
         elif claimed_count:
             window_state = "claimed"
@@ -310,6 +316,8 @@ class RuntimeHealthService:
                     "pending_count": pending_count,
                     "claimed_count": claimed_count,
                     "failed_count": failed_count,
+                    "exhausted_count": exhausted_count,
+                    "manual_retry_required": exhausted_count > 0,
                     "oldest_pending_available": (
                         queue_details.get("oldest_pending_available") is True
                     ),
@@ -485,6 +493,7 @@ class RuntimeHealthService:
                 "pending_count": 0,
                 "claimed_count": 0,
                 "failed_count": 0,
+                "exhausted_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "last_processed_available": False,
@@ -503,6 +512,7 @@ class RuntimeHealthService:
                 "pending_count": 0,
                 "claimed_count": 0,
                 "failed_count": 0,
+                "exhausted_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "last_processed_available": False,
@@ -520,6 +530,7 @@ class RuntimeHealthService:
             "pending_count": self._nonnegative_int(queue.get("pending_count")),
             "claimed_count": self._nonnegative_int(queue.get("claimed_count")),
             "failed_count": self._nonnegative_int(queue.get("failed_count")),
+            "exhausted_count": self._nonnegative_int(queue.get("exhausted_count")),
             "oldest_pending_available": oldest_ms is not None,
             "oldest_pending_age_seconds": oldest_age,
             "last_processed_available": queue.get("last_processed_ms") is not None,

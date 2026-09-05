@@ -121,6 +121,29 @@ class ProjectMaintenanceService:
             raise RuntimeError("Knowledge storage is unavailable")
         return knowledge_store
 
+    async def retry_semantic_window(self, project_id: str, window_id: str):
+        """Explicitly resume one failed frozen semantic window.
+
+        This is an operator workflow, not a new ingestion path: the durable
+        window keeps its membership, policy snapshot, Context checkpoint, and
+        stage.  If the project runtime is loaded, wake its sole semantic owner
+        after the transaction makes the checkpoint eligible again.
+        """
+
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=False)
+            window = await self._require_knowledge_store().retry_project_semantic_window(
+                window_id=window_id,
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+            if window is None:
+                raise ValueError("Failed active semantic window is unavailable")
+            runtime = self._active_projects.get(project_id)
+            if runtime is not None:
+                runtime.signal_semantic_work()
+            return window
+
     @staticmethod
     def _validate_expected_domain_version(value: object) -> int:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:

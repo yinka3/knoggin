@@ -292,6 +292,48 @@ async def test_ingestion_health_reports_stopped_semantic_job_and_failed_work():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_ingestion_health_marks_exhausted_windows_for_manual_retry():
+    class Store:
+        async def get_semantic_window_health(self, **_kwargs):
+            return {
+                "pending_count": 1,
+                "claimed_count": 1,
+                "failed_count": 1,
+                "exhausted_count": 1,
+                "oldest_pending_ms": None,
+                "last_processed_ms": None,
+            }
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_job=object(),
+                    scheduler=FakeScheduler({"state": "running"}),
+                )
+            }
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (
+        await service.get_ingestion_health(
+            user_name="ada", project_id="project-a", session_id="session-a"
+        )
+    ).model_dump(mode="json")
+
+    assert payload["status"] == "degraded"
+    assert payload["details"]["semantic_windows"]["exhausted_count"] == 1
+    assert payload["details"]["semantic_windows"]["manual_retry_required"] is True
+    assert payload["details"]["progress"]["window_state"] == "exhausted"
+    assert any("manual retry required" in warning for warning in payload["warnings"])
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
     class FailingStore:
         async def get_semantic_window_health(self, **_kwargs):

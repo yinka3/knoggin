@@ -443,6 +443,21 @@ class KnowledgeStore:
             next_retry_at_ms=next_retry_at_ms,
         )
 
+    async def retry_project_semantic_window(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+    ) -> SemanticWindowRecord | None:
+        """Make one failed active window eligible for an operator retry."""
+
+        return await self._semantic_window_writer.retry_window(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
     async def commit_project_semantic_knowledge(self, build) -> SemanticCommitSummary:
         """Atomically reconcile a Context-committed window into Knowledge."""
 
@@ -503,6 +518,11 @@ class KnowledgeStore:
                 count(*) FILTER (WHERE stage <> 'completed') AS pending_count,
                 count(*) FILTER (WHERE stage = 'claimed') AS claimed_count,
                 count(*) FILTER (WHERE last_failure_at_ms IS NOT NULL) AS failed_count,
+                count(*) FILTER (
+                    WHERE stage <> 'completed'
+                      AND last_failure_at_ms IS NOT NULL
+                      AND next_retry_at_ms IS NULL
+                ) AS exhausted_count,
                 min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
                     FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
                 max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
@@ -518,6 +538,7 @@ class KnowledgeStore:
                 "pending_count",
                 "claimed_count",
                 "failed_count",
+                "exhausted_count",
                 "oldest_pending_ms",
                 "last_processed_ms",
             )

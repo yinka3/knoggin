@@ -443,6 +443,7 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
     context_writer = ProjectContextWriter(real_postgres_client)
     window_writer = SemanticWindowWriter(real_postgres_client)
     window_reader = SemanticWindowReader(real_postgres_client)
+    store = KnowledgeStore(real_postgres_client, object())
     await context_writer.ensure_context(user_name="ada", project_id="project-1")
     window = _window()
     assert (await window_writer.claim_window(window, _membership())).claimed
@@ -481,7 +482,7 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
         failure_code="temporary_failure",
         error_summary="retry later",
         failed_at_ms=1_000,
-        next_retry_at_ms=2_000,
+        next_retry_at_ms=None,
     )
 
     assert failed is not None
@@ -495,6 +496,36 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
             project_id="project-1",
         )
     ).stage is SemanticWindowStage.CONTEXT_COMMITTED
+    exhausted_health = await store.get_semantic_window_health(
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert exhausted_health["failed_count"] == 1
+    assert exhausted_health["exhausted_count"] == 1
+
+    retried = await window_writer.retry_window(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+
+    assert retried is not None
+    assert retried.window_id == window.window_id
+    assert retried.stage is SemanticWindowStage.CONTEXT_COMMITTED
+    assert retried.context_revision_id == revision_id
+    assert retried.attempt_count == 0
+    assert retried.last_failure_at_ms is None
+    assert retried.next_retry_at_ms is None
+    retried_health = await store.get_semantic_window_health(
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert retried_health["pending_count"] == 1
+    assert retried_health["claimed_count"] == 0
+    assert retried_health["failed_count"] == 0
+    assert retried_health["exhausted_count"] == 0
+    assert retried_health["oldest_pending_ms"] is not None
+    assert retried_health["last_processed_ms"] is None
 
 
 @pytest.mark.storage

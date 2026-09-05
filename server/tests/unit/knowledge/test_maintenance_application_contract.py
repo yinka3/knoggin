@@ -117,6 +117,42 @@ def _project_service(review: MaintenanceReview):
 
 
 @pytest.mark.no_network
+async def test_retrying_a_semantic_window_keeps_the_durable_window_and_wakes_its_owner():
+    service, _reviews = _project_service(_relationship_review())
+    retried = SimpleNamespace(window_id="window-1", stage="context_committed")
+    calls = []
+
+    class Store:
+        async def retry_project_semantic_window(self, **kwargs):
+            calls.append(kwargs)
+            return retried
+
+    class Runtime:
+        def __init__(self):
+            self.wakes = 0
+
+        def signal_semantic_work(self):
+            self.wakes += 1
+            return True
+
+    runtime = Runtime()
+    service.resources.knowledge_store = Store()
+    service._active_projects["project-1"] = runtime
+
+    result = await service.retry_semantic_window("project-1", "window-1")
+
+    assert result is retried
+    assert calls == [
+        {
+            "window_id": "window-1",
+            "user_name": "ada",
+            "project_id": "project-1",
+        }
+    ]
+    assert runtime.wakes == 1
+
+
+@pytest.mark.no_network
 async def test_applying_relationship_review_executes_plan_before_applied_status():
     service, reviews = _project_service(_relationship_review())
 

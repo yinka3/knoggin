@@ -251,6 +251,21 @@ class _SemanticEpisodeStore:
         )
         return self.window
 
+    async def retry_project_semantic_window(self, **kwargs):
+        assert str(self.window.window_id) == kwargs["window_id"]
+        self.window = self.window.model_validate(
+            self.window.model_dump()
+            | {
+                "attempt_count": 0,
+                "last_failure_stage": None,
+                "last_failure_code": None,
+                "last_failure_at_ms": None,
+                "last_error_summary": None,
+                "next_retry_at_ms": None,
+            }
+        )
+        return self.window
+
 
 class _ZeroEpisodeGenerator:
     def __init__(self):
@@ -364,4 +379,68 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
     assert retry.success is True
     assert len(generator.calls) == 2
     assert len(store.writes) == 1
+    assert store.writes[0]["window_id"] == str(selected.window.window_id)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    settings = IngestionSettings.model_validate(
+        {
+            "semantic_window_tokens": 1,
+            "semantic_window_retry": {
+                "max_attempts": 1,
+                "initial_backoff_seconds": 30,
+                "max_backoff_seconds": 30,
+            },
+        }
+    )
+    admission = SemanticWindowAdmission(
+        admission_store,
+        settings,
+        token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=domain,
+    )
+    assert selected is not None
+    store = _SemanticEpisodeStore(selected.window)
+    generator = _FailThenZeroEpisodeGenerator()
+
+    async def capture_domain():
+        return domain
+
+    job = ProjectSemanticJob(
+        admission,
+        store,
+        generator,
+        settings=settings,
+        capture_domain=capture_domain,
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    failed = await job.execute(context)
+
+    assert failed.success is False
+    assert store.window.attempt_count == 1
+    assert store.window.next_retry_at_ms is None
+    assert await job.should_run(context) is False
+
+    retried = await store.retry_project_semantic_window(
+        window_id=str(selected.window.window_id),
+        user_name="ada",
+        project_id="project-1",
+    )
+
+    assert retried.window_id == selected.window.window_id
+    assert retried.stage.value == "claimed"
+    assert retried.attempt_count == 0
+    assert await job.should_run(context) is True
+    completed = await job.execute(context)
+    assert completed.success is True
+    assert admission_store.claims == []
     assert store.writes[0]["window_id"] == str(selected.window.window_id)

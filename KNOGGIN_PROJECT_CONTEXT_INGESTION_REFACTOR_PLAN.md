@@ -1819,6 +1819,44 @@ Acceptance:
 - no documentation describes the deleted message-local path as current;
 - `git diff --check`, focused Ruff, compile, and applicable tests pass.
 
+#### Batch 10 completion record
+
+- **10.1:** Automatic retry exhaustion is now visible as `exhausted_count` and
+  `manual_retry_required` in bounded ingestion health. A local operator can use
+  `ProjectMaintenanceService.retry_semantic_window` to reset retry state for
+  one failed active window and wake its existing project semantic owner. The
+  operation preserves the frozen message membership, policy snapshot, durable
+  stage, and any committed Context revision. Failure-injection coverage keeps
+  the last durable checkpoint through Episode, Context, projection, VP-01,
+  VP-02, Knowledge commit, Episode enrichment, and independent maintenance
+  failures.
+- **10.2:** `test_project_semantic_runtime_flow.py` composes admission,
+  `ProjectSemanticJob`, Context, VP-01/VP-02 boundaries, semantic commit,
+  finalization, and maintenance with only model boundaries faked. It proves a
+  two-session window yields one Context revision, includes frozen assistant
+  source references, persists zero Episode output, and excludes rendered
+  agent-derived Context from Knowledge. Fresh-PostgreSQL contracts separately
+  cover atomic claim/membership, replacement retraction and provenance,
+  `CONTEXT.md` repair, oversized whole-exchange admission, per-session FIFO,
+  and project-deletion cleanup.
+- **10.3:** `server/PROJECT_SEMANTIC_OPERATIONS.md` records the sole owners,
+  durable checkpoints, 128K configurable admission setting and acceptable
+  whole-exchange overfill, restart/manual-retry procedure, bounded health
+  fields, and the Project Brief versus canonical Project Context distinction.
+  It documents no current message-local semantic path. There are no remaining
+  migration notes because this unreleased system has a single target-state
+  implementation. Real PostgreSQL contract checks ran locally; no unavailable
+  service check is being represented as a pass. Real GLiNER inference remains
+  deliberately deferred until the production weights are installed, as noted
+  in Batch 9 rather than claimed by this batch.
+
+Validation completed:
+
+- 55 focused unit, composed-runtime, and PostgreSQL contract tests passed,
+  including 20 fresh-PostgreSQL storage contracts;
+- Ruff and Python compilation passed on every touched Python path;
+- `git diff --check` passed.
+
 ---
 
 ## 7. Test and Validation Matrix

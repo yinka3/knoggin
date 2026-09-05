@@ -113,6 +113,9 @@ class _Store:
         self.enqueued = []
         self.maintenance_failures = []
         self.maintenance_completed = []
+        self.fail_commit = False
+        self.fail_enrichment = False
+        self.failures = []
 
     async def get_active_project_semantic_window(self, **_kwargs):
         return None if self.window.stage is SemanticWindowStage.COMPLETED else self.window
@@ -141,6 +144,8 @@ class _Store:
 
     async def commit_project_semantic_knowledge(self, build):
         assert build.entity_result is not None
+        if self.fail_commit:
+            raise OSError("Knowledge commit unavailable")
         self.commit_calls.append(build)
         self.window = self.window.model_validate(
             self.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
@@ -148,6 +153,8 @@ class _Store:
         return SimpleNamespace(resumed=False, relationships_written=0)
 
     async def enrich_project_semantic_window_episodes(self, **_kwargs):
+        if self.fail_enrichment:
+            raise OSError("Episode enrichment unavailable")
         self.enrich_calls += 1
         return {"entities": 0, "relationships": 0}
 
@@ -169,8 +176,30 @@ class _Store:
     async def complete_project_semantic_window_maintenance(self, **kwargs):
         self.maintenance_completed.append(kwargs)
 
-    async def record_project_semantic_window_failure(self, **_kwargs):
-        raise AssertionError("successful Knowledge/finalization must not record failure")
+    async def record_project_semantic_window_failure(self, **kwargs):
+        self.failures.append(kwargs)
+        self.window = self.window.model_validate(
+            self.window.model_dump()
+            | {
+                "attempt_count": self.window.attempt_count + 1,
+                "last_failure_stage": kwargs["failure_stage"],
+                "last_failure_code": kwargs["failure_code"],
+                "last_failure_at_ms": kwargs["failed_at_ms"],
+                "last_error_summary": kwargs["error_summary"],
+                "next_retry_at_ms": kwargs["next_retry_at_ms"],
+            }
+        )
+        return self.window
+
+
+class _FailingBuilder:
+    async def build(self, _build):
+        raise OSError("Entity extraction unavailable")
+
+
+class _FailingRelationships:
+    async def extract(self, _build):
+        raise OSError("Relationship extraction unavailable")
 
 
 @pytest.mark.unit
@@ -207,3 +236,73 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_maintenance_fail
     assert len(store.enqueued) == 1
     assert len(store.maintenance_failures) == 1
     assert store.maintenance_completed == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("builder", "relationships", "fail_commit", "failure_stage"),
+    [
+        (_FailingBuilder(), _Relationships(), False, "knowledge_reconciliation"),
+        (_Builder(), _FailingRelationships(), False, "knowledge_reconciliation"),
+        (_Builder(), _Relationships(), True, "knowledge_reconciliation"),
+    ],
+)
+async def test_knowledge_failures_keep_the_context_checkpoint_for_restart(
+    builder, relationships, fail_commit, failure_stage
+):
+    store = _Store()
+    store.fail_commit = fail_commit
+
+    async def capture_domain():
+        return _domain()
+
+    job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_entity_builder=builder,
+        context_relationship_extractor=relationships,
+        now_ms=lambda: 1_000,
+    )
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success is False
+    assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
+    assert store.window.context_revision_id == store.snapshot.revision_id
+    assert store.failures[0]["failure_stage"] == failure_stage
+    assert store.enrich_calls == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_restart():
+    store = _Store()
+    store.window = store.window.model_validate(
+        store.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
+    )
+    store.fail_enrichment = True
+
+    async def capture_domain():
+        return _domain()
+
+    job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_entity_builder=_Builder(),
+        context_relationship_extractor=_Relationships(),
+        now_ms=lambda: 1_000,
+    )
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success is False
+    assert store.window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
+    assert store.failures[0]["failure_stage"] == "episode_enrichment"
+    assert store.enqueued == []

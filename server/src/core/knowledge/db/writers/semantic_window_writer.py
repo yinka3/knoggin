@@ -279,6 +279,49 @@ class SemanticWindowWriter:
         except PsycopgError as exc:
             self._raise_storage_write("record_failure", exc)
 
+    async def retry_window(
+        self,
+        *,
+        window_id: UUID | str,
+        user_name: str,
+        project_id: str,
+    ) -> SemanticWindowRecord | None:
+        """Reset one failed active window for an explicit operator retry.
+
+        Membership, policy, stage, and every successful checkpoint remain
+        untouched.  Resetting the bounded automatic-attempt counter is what
+        makes an exhausted window eligible for a new bounded retry cycle.
+        """
+
+        user_name = require_scope_value(user_name, "user_name", "retry_window")
+        project_id = require_scope_value(project_id, "project_id", "retry_window")
+        window_id = self._uuid(window_id, "window_id")
+        try:
+            async with self.client.transaction() as cur:
+                await cur.execute(
+                    f"""
+                    UPDATE public.project_semantic_windows
+                    SET attempt_count = 0,
+                        last_failure_stage = NULL,
+                        last_failure_code = NULL,
+                        last_failure_at_ms = NULL,
+                        last_error_summary = NULL,
+                        next_retry_at_ms = NULL,
+                        updated_at = NOW()
+                    WHERE window_id = %s
+                      AND user_name = %s
+                      AND project_id = %s
+                      AND stage <> 'completed'
+                      AND last_failure_at_ms IS NOT NULL
+                    RETURNING {_WINDOW_COLUMNS}
+                    """,
+                    (window_id, user_name, project_id),
+                )
+                row = await cur.fetchone()
+                return None if row is None else SemanticWindowRecord.model_validate(row)
+        except PsycopgError as exc:
+            self._raise_storage_write("retry_window", exc)
+
     async def enqueue_maintenance(
         self,
         *,
