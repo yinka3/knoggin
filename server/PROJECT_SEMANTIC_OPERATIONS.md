@@ -88,3 +88,33 @@ assistant support resolves through the owning `message_source_refs` rows.
 
 VP-01 is the GLiNER2.5 entity boundary. VP-02 relationship extraction remains
 an LLM call and is intentionally separate from the VP-01 model path.
+
+## Evidence and maintenance ownership
+
+`EvidenceTraversalReader` is the sole cross-layer provenance reader. It follows
+the existing PostgreSQL ownership edges from message/source reference to Context
+block and relationship observation. `EvidenceService` applies project scope,
+stable ordering, deduplication, typed source locators, bounded excerpts, and the
+hard traversal ceilings: 128 observations, 256 Context blocks, 512 leaf nodes,
+and 1,024 edges. It never writes evidence or Context.
+
+Maintenance lists return stored reviews only. Review detail returns the stored,
+versioned evidence snapshot separately from current bounded evidence. Preview
+then separates direct canonical mutations from AGE/search rebuilds and live
+cache invalidation. Apply recomputes the evidence token under the project
+maintenance lock and rejects changed evidence before calling a mutation writer.
+
+Context reconciliation owns deterministic retirement when block support is
+replaced or deleted. Conflict and advisory maintenance is reserved for judgment
+over active independent observations; Context-linked observations may accompany
+a qualifying independent group but cannot create a review by themselves. Model
+packet contents are untrusted data, citations must name observations in the
+packet, and no model result applies a mutation without the existing review flow.
+
+Entity merge and rollback commit canonical PostgreSQL changes before rebuilding
+derived AGE projections. A failed rebuild records only the bounded
+`projection_repair_pending` marker. `repair_merge_projections()` reloads the
+durable merge audit and retries projections without repeating the canonical
+merge or rollback; runtime cache invalidation remains owned by `ProjectManager`.
+Engine health reports only the bounded pending-repair count and truncation state,
+never evidence content or raw failure messages.
