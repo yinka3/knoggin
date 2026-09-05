@@ -4,6 +4,12 @@ from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
 from common.schema.artifacts import ArtifactDraft, ArtifactReference, ArtifactRevision
+from common.schema.context import (
+    ContextProjectionState,
+    ContextRevisionOrigin,
+    ContextRevisionRecord,
+    ContextSnapshot,
+)
 from common.schema.episode.models import Episode, EpisodeCard, EpisodeCheckpoint
 from common.schema.ingestion.contracts import (
     EntityWrite,
@@ -13,12 +19,19 @@ from common.schema.ingestion.contracts import (
     MessageEntityRef,
     RelationshipWrite,
 )
+from common.schema.semantic_window import (
+    SemanticWindowClaimResult,
+    SemanticWindowMessage,
+    SemanticWindowRecord,
+    SemanticWindowStage,
+)
 from common.schema.source.references import (
     AssistantMessageWithSources,
     SourceConsulted,
     SourceReference,
     SourceReferenceCandidate,
 )
+from core.knowledge.context.models import ContextMaterialization
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
@@ -28,6 +41,11 @@ from core.knowledge.db.readers.episode_reader import EpisodeReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.message_reader import MessageReader
+from core.knowledge.db.readers.project_context_reader import ProjectContextReader
+from core.knowledge.db.readers.relationship_observation_reader import (
+    RelationshipObservationReader,
+)
+from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
 from core.knowledge.db.writers.entity_reclassification_writer import (
@@ -37,15 +55,22 @@ from core.knowledge.db.writers.entity_reclassification_writer import (
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
+    ExchangeClosure,
     IngestionClaim,
     MessageAcceptance,
     MessageLifecycleWriter,
 )
 from core.knowledge.db.writers.message_writer import MessageWriter
+from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.db.writers.relationship_reclassification_writer import (
     HistoricalRelationshipReclassificationResult,
     RelationshipReclassificationWriter,
 )
+from core.knowledge.db.writers.semantic_commit_writer import (
+    SemanticCommitSummary,
+    SemanticCommitWriter,
+)
+from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
@@ -81,6 +106,9 @@ class KnowledgeStore:
         )
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._artifact_writer = ArtifactWriter(self._postgres_client)
+        self._project_context_writer = ProjectContextWriter(self._postgres_client)
+        self._semantic_window_writer = SemanticWindowWriter(self._postgres_client)
+        self._semantic_commit_writer = SemanticCommitWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
@@ -88,6 +116,11 @@ class KnowledgeStore:
         self._knowledge_query_reader = KnowledgeQueryReader(self._postgres_client)
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._artifact_reader = ArtifactReader(self._postgres_client)
+        self._project_context_reader = ProjectContextReader(self._postgres_client)
+        self._relationship_observation_reader = RelationshipObservationReader(
+            self._postgres_client
+        )
+        self._semantic_window_reader = SemanticWindowReader(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._embedding_rebuilder = EmbeddingRebuilder(
             self._postgres_client,
@@ -144,6 +177,366 @@ class KnowledgeStore:
             project_id=project_id,
             session_id=session_id,
             batch_size=batch_size,
+        )
+
+    async def ensure_project_context(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> None:
+        """Initialize the project-owned Context root without creating a revision."""
+
+        await self._project_context_writer.ensure_context(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_current_project_context_revision(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> ContextRevisionRecord | None:
+        return await self._project_context_reader.get_current_revision(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_context_projection_state(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> ContextProjectionState | None:
+        return await self._project_context_reader.get_projection_state(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_context_snapshot(
+        self,
+        revision_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> ContextSnapshot | None:
+        return await self._project_context_reader.get_snapshot(
+            revision_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_context_revision_impact_block_ids(
+        self,
+        revision_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> frozenset:
+        return await self._project_context_reader.get_revision_impact_block_ids(
+            revision_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_context_block_supports(
+        self,
+        block_ids: list[str],
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> dict:
+        return await self._project_context_reader.get_block_supports(
+            block_ids,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_context_snapshot(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> ContextSnapshot | None:
+        """Reload a Context revision committed before its window checkpoint CAS."""
+
+        return await self._project_context_reader.get_window_snapshot(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def commit_project_context_revision(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        expected_parent_revision_id: str | None,
+        window_id: str | None,
+        origin: ContextRevisionOrigin,
+        domain_version: int,
+        edit_summary: str,
+        materialization: ContextMaterialization,
+    ) -> ContextSnapshot:
+        return await self._project_context_writer.commit_revision(
+            user_name=user_name,
+            project_id=project_id,
+            expected_parent_revision_id=expected_parent_revision_id,
+            window_id=window_id,
+            origin=origin,
+            domain_version=domain_version,
+            edit_summary=edit_summary,
+            materialization=materialization,
+        )
+
+    async def record_project_context_projection(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        revision_id: str,
+        projection_hash: str,
+    ) -> bool:
+        return await self._project_context_writer.record_projection(
+            user_name=user_name,
+            project_id=project_id,
+            revision_id=revision_id,
+            projection_hash=projection_hash,
+        )
+
+    async def claim_project_semantic_window(
+        self,
+        window: SemanticWindowRecord,
+        messages: list[SemanticWindowMessage],
+    ) -> SemanticWindowClaimResult:
+        return await self._semantic_window_writer.claim_window(window, messages)
+
+    async def get_project_semantic_window(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> SemanticWindowRecord | None:
+        return await self._semantic_window_reader.get_window(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_messages(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[SemanticWindowMessage]:
+        return await self._semantic_window_reader.get_window_messages(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_active_project_semantic_window(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> SemanticWindowRecord | None:
+        return await self._semantic_window_reader.get_active_window(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_evidence_messages(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        return await self._semantic_window_reader.get_window_evidence_messages(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_assistant_source_refs(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        """Load assistant-owned source refs from frozen window membership only."""
+
+        return await self._semantic_window_reader.get_window_assistant_source_refs(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_episode_result(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[Episode] | None:
+        episode_ids = await self._semantic_window_reader.get_window_episode_ids(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+        if episode_ids is None:
+            return None
+        episodes: list[Episode] = []
+        for episode_id in episode_ids:
+            episode = await self._episode_reader.get_project_episode(
+                episode_id,
+                user_name=user_name,
+                project_id=project_id,
+            )
+            if episode is None:
+                raise RuntimeError("Semantic window references an unavailable episode")
+            episodes.append(episode)
+        return episodes
+
+    async def write_project_semantic_window_episodes(
+        self,
+        *,
+        window_id: str,
+        episodes: list[Episode],
+        window_messages: list[dict],
+        user_name: str,
+        project_id: str,
+    ) -> bool:
+        return await self._episode_writer.write_project_semantic_window_episodes(
+            window_id=window_id,
+            episodes=episodes,
+            window_messages=window_messages,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def enrich_project_semantic_window_episodes(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+    ) -> dict[str, int]:
+        """Attach active Context-backed Knowledge links after semantic commit."""
+
+        return await self._episode_writer.enrich_project_semantic_window_episodes(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_unclaimed_project_semantic_exchange_rows(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        """Load whole canonical exchanges for project-level semantic admission."""
+
+        return await self._semantic_window_reader.get_unclaimed_project_exchange_rows(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def advance_project_semantic_window_stage(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+        expected_stage: SemanticWindowStage,
+        next_stage: SemanticWindowStage,
+        context_revision_id: str | None = None,
+    ) -> bool:
+        return await self._semantic_window_writer.advance_stage(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+            expected_stage=expected_stage,
+            next_stage=next_stage,
+            context_revision_id=context_revision_id,
+        )
+
+    async def record_project_semantic_window_failure(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+        expected_stage: SemanticWindowStage,
+        failure_stage: str,
+        failure_code: str,
+        error_summary: str,
+        failed_at_ms: int,
+        next_retry_at_ms: int | None,
+    ) -> SemanticWindowRecord | None:
+        return await self._semantic_window_writer.record_failure(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+            expected_stage=expected_stage,
+            failure_stage=failure_stage,
+            failure_code=failure_code,
+            error_summary=error_summary,
+            failed_at_ms=failed_at_ms,
+            next_retry_at_ms=next_retry_at_ms,
+        )
+
+    async def commit_project_semantic_knowledge(self, build) -> SemanticCommitSummary:
+        """Atomically reconcile a Context-committed window into Knowledge."""
+
+        return await self._semantic_commit_writer.commit(build)
+
+    async def enqueue_project_semantic_window_maintenance(
+        self, *, window_id: str, user_name: str, project_id: str
+    ) -> bool:
+        return await self._semantic_window_writer.enqueue_maintenance(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def record_project_semantic_window_maintenance_failure(
+        self, *, window_id: str, user_name: str, project_id: str, error_summary: str
+    ) -> None:
+        await self._semantic_window_writer.record_maintenance_failure(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+            error_summary=error_summary,
+        )
+
+    async def complete_project_semantic_window_maintenance(
+        self, *, window_id: str, user_name: str, project_id: str
+    ) -> None:
+        await self._semantic_window_writer.complete_maintenance(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_active_context_relationship_supports(
+        self,
+        relationship_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        return await self._relationship_observation_reader.get_active_context_supports(
+            relationship_id,
+            user_name=user_name,
+            project_id=project_id,
         )
 
     async def get_ingestion_queue_health(
@@ -220,25 +613,65 @@ class KnowledgeStore:
             max_attempts=max_attempts,
         )
 
-    async def save_assistant_message_with_source_refs(
+    async def finalize_assistant_exchange(
         self,
         message: Dict,
         candidates: List[SourceReferenceCandidate],
         *,
         readable_project_ids: List[str],
         artifact: ArtifactDraft | None = None,
-    ) -> List[SourceReference]:
-        """Persist one assistant message, sources, and artifact atomically."""
+    ) -> tuple[int, list[str], bool]:
+        """Commit one final assistant response and its exchange closure together.
+
+        The result is ``(assistant_message_id, source_ref_ids, created)``.
+        Retries of the same finalization return the original assistant instead
+        of creating a second answer.
+        """
 
         if message.get("role") != "assistant":
+            raise ValueError("Only assistant messages can finalize an exchange")
+        user_message_id = message.get("user_msg_id")
+        if not isinstance(user_message_id, int) or isinstance(user_message_id, bool):
+            raise ValueError("Assistant exchange finalization requires user_msg_id")
+        scope = ("user_name", "project_id", "session_id", "id")
+        missing = [name for name in scope if not message.get(name)]
+        if missing:
             raise ValueError(
-                "source references can only be saved for assistant messages"
+                "Assistant exchange finalization missing scope fields: "
+                + ", ".join(missing)
             )
-        if not candidates and artifact is None:
-            await self.save_message_logs([message])
-            return []
 
         async with self._postgres_client.transaction() as cur:
+            existing = await self._message_lifecycle_writer.prepare_assistant_exchange_finalization(
+                user_name=message["user_name"],
+                project_id=message["project_id"],
+                session_id=message["session_id"],
+                user_message_id=user_message_id,
+                cur=cur,
+            )
+            if existing is not None:
+                await cur.execute(
+                    """
+                    SELECT source_ref_id
+                    FROM public.message_source_refs
+                    WHERE project_id = %s
+                      AND session_id = %s
+                      AND message_id = %s
+                    ORDER BY created_at ASC, result_position ASC, source_ref_id ASC
+                    """,
+                    (
+                        message["project_id"],
+                        message["session_id"],
+                        existing.assistant_message_id,
+                    ),
+                )
+                rows = await cur.fetchall()
+                return (
+                    int(existing.assistant_message_id),
+                    [str(row["source_ref_id"]) for row in rows],
+                    False,
+                )
+
             await self._message_writer.save_message_logs([message], cur=cur)
             references = await self._source_reference_writer.write_for_assistant_message(
                 message["id"],
@@ -258,7 +691,45 @@ class KnowledgeStore:
                     session_id=message["session_id"],
                     cursor=cur,
                 )
-            return references
+            await self._message_lifecycle_writer.close_user_exchange(
+                user_name=message["user_name"],
+                project_id=message["project_id"],
+                session_id=message["session_id"],
+                user_message_id=user_message_id,
+                outcome="assistant_final",
+                closed_at_ms=int(message.get("sealed_at_ms") or 0),
+                cur=cur,
+            )
+            return (
+                int(message["id"]),
+                [
+                    str(reference.source_ref_id)
+                    for reference in references
+                    if getattr(reference, "source_ref_id", None)
+                ],
+                True,
+            )
+
+    async def close_user_exchange(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        user_message_id: int,
+        outcome: str,
+        closed_at_ms: int | None = None,
+    ) -> ExchangeClosure:
+        """Close a clarification, failure, cancellation, or user-only turn."""
+
+        return await self._message_lifecycle_writer.close_user_exchange(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            outcome=outcome,
+            closed_at_ms=closed_at_ms,
+        )
 
     async def get_project_artifact(
         self,

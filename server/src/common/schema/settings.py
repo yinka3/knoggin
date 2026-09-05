@@ -41,6 +41,20 @@ DEFAULT_SPARSE_CONTEXT_VERBS = [
 ]
 
 
+class SemanticWindowRetrySettings(ConfigModel):
+    """Bounded retry policy for durable project semantic windows."""
+
+    max_attempts: int = Field(3, ge=1, le=20)
+    initial_backoff_seconds: int = Field(30, ge=1, le=3_600)
+    max_backoff_seconds: int = Field(300, ge=1, le=86_400)
+
+    @model_validator(mode="after")
+    def validate_backoff_range(self):
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            raise ValueError("max_backoff_seconds must be >= initial_backoff_seconds")
+        return self
+
+
 class IngestionSettings(ConfigModel):
     batch_size: int = Field(8, ge=1, le=100)
     batch_debounce_seconds: float = Field(0.75, ge=0.0, le=10.0)
@@ -49,6 +63,13 @@ class IngestionSettings(ConfigModel):
     message_lifecycle_poll_seconds: float = Field(15.0, ge=1.0, le=300.0)
     ingestion_max_attempts: int = Field(3, ge=1, le=20)
     session_window: int = Field(24, ge=1)
+    # This is the sole user-configurable admission-size control for the new
+    # project-level semantic windows.  Idle flush and unavoidable whole-exchange
+    # overfill remain fixed runtime policy, not competing size knobs.
+    semantic_window_tokens: int = Field(128_000, ge=1, le=1_000_000)
+    semantic_window_retry: SemanticWindowRetrySettings = Field(
+        default_factory=SemanticWindowRetrySettings
+    )
 
 
 class DocumentIndexingSettings(ConfigModel):

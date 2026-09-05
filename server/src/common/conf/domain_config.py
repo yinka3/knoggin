@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 _NAME_PATTERN = re.compile(r"^[A-Z][A-Za-z0-9 _-]{1,39}$")
 _RELATIONSHIP_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{1,39}$")
+_CONTEXT_SECTION_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
 class DomainConfigError(ValueError):
@@ -79,6 +80,25 @@ class RelationshipDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextSectionDefinition:
+    """One ordered, model-visible section in the project Context document."""
+
+    key: str
+    title: str
+
+
+DEFAULT_CONTEXT_SECTIONS: tuple[ContextSectionDefinition, ...] = (
+    ContextSectionDefinition(key="current_state", title="Current State"),
+    ContextSectionDefinition(key="active_work", title="Active Work"),
+    ContextSectionDefinition(
+        key="decisions_and_constraints", title="Decisions and Constraints"
+    ),
+    ContextSectionDefinition(key="preferences", title="Preferences"),
+    ContextSectionDefinition(key="open_questions", title="Open Questions"),
+)
+
+
+@dataclass(frozen=True, slots=True)
 class DomainConfig:
     """Complete validated project configuration.
 
@@ -91,6 +111,9 @@ class DomainConfig:
     topics: tuple[TopicDefinition, ...]
     entity_types: tuple[EntityTypeDefinition, ...]
     relationships: tuple[RelationshipDefinition, ...] = ()
+    context_sections: tuple[ContextSectionDefinition, ...] = DEFAULT_CONTEXT_SECTIONS
+    extraction_guidance: str = ""
+    vp01_language: str = "en"
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "DomainConfig":
@@ -102,6 +125,9 @@ class DomainConfig:
             "topics",
             "entity_types",
             "relationships",
+            "context_sections",
+            "extraction_guidance",
+            "vp01_language",
         }
         if unknown_keys:
             raise DomainConfigError(
@@ -305,11 +331,70 @@ class DomainConfig:
                 )
             )
 
+        context_sections_payload = payload.get("context_sections")
+        if context_sections_payload is None:
+            context_sections = DEFAULT_CONTEXT_SECTIONS
+        else:
+            if isinstance(context_sections_payload, (str, bytes)) or not isinstance(
+                context_sections_payload, (list, tuple)
+            ):
+                raise DomainConfigError("context_sections must be a list of objects")
+            if not context_sections_payload:
+                raise DomainConfigError("context_sections must not be empty")
+            context_sections_list: list[ContextSectionDefinition] = []
+            section_keys: set[str] = set()
+            section_titles: set[str] = set()
+            for index, raw_section in enumerate(context_sections_payload):
+                if not isinstance(raw_section, Mapping):
+                    raise DomainConfigError(
+                        f"context_sections[{index}] must be an object"
+                    )
+                unknown_fields = set(raw_section) - {"key", "title"}
+                if unknown_fields:
+                    raise DomainConfigError(
+                        "Unknown fields for context section "
+                        f"{index}: {sorted(unknown_fields)!r}"
+                    )
+                key = _text(raw_section.get("key"), f"context_sections[{index}].key")
+                if not _CONTEXT_SECTION_KEY_PATTERN.fullmatch(key):
+                    raise DomainConfigError(
+                        "Context section key must be lower snake case: " f"{key!r}"
+                    )
+                title = _text(
+                    raw_section.get("title"), f"context_sections[{index}].title"
+                )
+                key_normalized = key.casefold()
+                title_normalized = title.casefold()
+                if key_normalized in section_keys:
+                    raise DomainConfigError(f"Duplicate context section key: {key!r}")
+                if title_normalized in section_titles:
+                    raise DomainConfigError(
+                        f"Duplicate normalized context section title: {title!r}"
+                    )
+                section_keys.add(key_normalized)
+                section_titles.add(title_normalized)
+                context_sections_list.append(
+                    ContextSectionDefinition(key=key, title=title)
+                )
+            context_sections = tuple(context_sections_list)
+
+        extraction_guidance = _text(
+            payload.get("extraction_guidance", ""),
+            "extraction_guidance",
+            required=False,
+        )
+        vp01_language = _text(payload.get("vp01_language", "en"), "vp01_language")
+        if vp01_language not in {"en", "multilingual"}:
+            raise DomainConfigError("vp01_language must be 'en' or 'multilingual'")
+
         return cls(
             version=version,
             topics=tuple(topics),
             entity_types=tuple(entity_types),
             relationships=tuple(relationships),
+            context_sections=context_sections,
+            extraction_guidance=extraction_guidance,
+            vp01_language=vp01_language,
         )
 
     def with_version(self, version: int) -> "DomainConfig":
@@ -320,6 +405,9 @@ class DomainConfig:
             topics=self.topics,
             entity_types=self.entity_types,
             relationships=self.relationships,
+            context_sections=self.context_sections,
+            extraction_guidance=self.extraction_guidance,
+            vp01_language=self.vp01_language,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -349,6 +437,12 @@ class DomainConfig:
                 }
                 for relationship in self.relationships
             },
+            "context_sections": [
+                {"key": section.key, "title": section.title}
+                for section in self.context_sections
+            ],
+            "extraction_guidance": self.extraction_guidance,
+            "vp01_language": self.vp01_language,
         }
 
     def compile(self) -> "CompiledDomain":
@@ -399,6 +493,12 @@ class DomainConfig:
                 }
             ),
             descriptions=_frozen_mapping(entity_descriptions),
+            context_sections=self.context_sections,
+            context_section_by_key=_frozen_mapping(
+                {section.key: section for section in self.context_sections}
+            ),
+            extraction_guidance=self.extraction_guidance,
+            vp01_language=self.vp01_language,
         )
 
 
@@ -420,6 +520,14 @@ class CompiledDomain:
     topic_descriptions: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    context_sections: tuple[ContextSectionDefinition, ...] = DEFAULT_CONTEXT_SECTIONS
+    context_section_by_key: Mapping[str, ContextSectionDefinition] = field(
+        default_factory=lambda: MappingProxyType(
+            {section.key: section for section in DEFAULT_CONTEXT_SECTIONS}
+        )
+    )
+    extraction_guidance: str = ""
+    vp01_language: str = "en"
 
     @classmethod
     def empty(cls, version: int = 0) -> "CompiledDomain":
@@ -438,6 +546,10 @@ class CompiledDomain:
             topic_aliases=_frozen_mapping({}),
             descriptions=_frozen_mapping({}),
             topic_descriptions=_frozen_mapping({}),
+            context_sections=DEFAULT_CONTEXT_SECTIONS,
+            context_section_by_key=_frozen_mapping(
+                {section.key: section for section in DEFAULT_CONTEXT_SECTIONS}
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -462,6 +574,12 @@ class CompiledDomain:
             "topic_aliases": dict(self.topic_aliases),
             "descriptions": dict(self.descriptions),
             "topic_descriptions": dict(self.topic_descriptions),
+            "context_sections": [
+                {"key": section.key, "title": section.title}
+                for section in self.context_sections
+            ],
+            "extraction_guidance": self.extraction_guidance,
+            "vp01_language": self.vp01_language,
         }
 
     @classmethod
@@ -479,6 +597,19 @@ class CompiledDomain:
             topic_aliases = dict(payload["topic_aliases"])
             descriptions = dict(payload["descriptions"])
             topic_descriptions = dict(payload.get("topic_descriptions", {}))
+            context_sections_payload = payload.get("context_sections")
+            if context_sections_payload is None:
+                context_sections = DEFAULT_CONTEXT_SECTIONS
+            else:
+                context_sections = tuple(
+                    ContextSectionDefinition(
+                        key=value["key"],
+                        title=value["title"],
+                    )
+                    for value in context_sections_payload
+                )
+            extraction_guidance = payload.get("extraction_guidance", "")
+            vp01_language = payload.get("vp01_language", "en")
             relationships = {
                 key: RelationshipDefinition(
                     name=value["name"],
@@ -494,6 +625,28 @@ class CompiledDomain:
 
         if not isinstance(version, int) or isinstance(version, bool) or version < 0:
             raise ValueError("CompiledDomain version must be a non-negative integer")
+        if (
+            not isinstance(extraction_guidance, str)
+            or not isinstance(vp01_language, str)
+            or vp01_language not in {"en", "multilingual"}
+        ):
+            raise ValueError("Invalid compiled Context configuration")
+        context_section_by_key: dict[str, ContextSectionDefinition] = {}
+        context_section_titles: set[str] = set()
+        for section in context_sections:
+            if (
+                not isinstance(section.key, str)
+                or not isinstance(section.title, str)
+                or not section.title.strip()
+                or not _CONTEXT_SECTION_KEY_PATTERN.fullmatch(section.key)
+            ):
+                raise ValueError("Invalid compiled Context section key")
+            if section.key in context_section_by_key or section.title.casefold() in context_section_titles:
+                raise ValueError("Duplicate compiled Context section")
+            context_section_by_key[section.key] = section
+            context_section_titles.add(section.title.casefold())
+        if not context_section_by_key:
+            raise ValueError("Compiled Context sections must not be empty")
         return cls(
             version=version,
             active_topics=active_topics,
@@ -514,6 +667,10 @@ class CompiledDomain:
             topic_aliases=_frozen_mapping(topic_aliases),
             descriptions=_frozen_mapping(descriptions),
             topic_descriptions=_frozen_mapping(topic_descriptions),
+            context_sections=context_sections,
+            context_section_by_key=_frozen_mapping(context_section_by_key),
+            extraction_guidance=extraction_guidance,
+            vp01_language=vp01_language,
         )
 
     @property
@@ -521,6 +678,13 @@ class CompiledDomain:
         """Explicit alias for callers that distinguish both description maps."""
 
         return self.descriptions
+
+    def context_section(self, key: str) -> ContextSectionDefinition | None:
+        """Resolve one configured Context section by its durable key."""
+
+        if not isinstance(key, str):
+            return None
+        return self.context_section_by_key.get(key.strip())
 
     def resolve_entity_type(self, label: str) -> str | None:
         if not isinstance(label, str):

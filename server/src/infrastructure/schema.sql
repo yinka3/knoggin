@@ -101,6 +101,40 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+CREATE FUNCTION public.enforce_context_block_entity_scope() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    block_user_name TEXT;
+BEGIN
+    SELECT project.user_name
+    INTO block_user_name
+    FROM public.project_context_blocks AS block
+    JOIN public.projects AS project ON project.project_id = block.project_id
+    WHERE block.block_id = NEW.block_id
+      AND block.project_id = NEW.project_id;
+    IF NOT FOUND OR NOT EXISTS (
+        SELECT 1
+        FROM public.entities AS entity
+        WHERE entity.entity_id = NEW.entity_id
+          AND entity.user_name = block_user_name
+          AND (
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts AS context
+                  WHERE context.project_id = NEW.project_id
+                    AND context.entity_id = entity.entity_id
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION
+            'context block entity must be visible to its project scope'
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
 SET default_tablespace = '';
 SET default_table_access_method = heap;
 CREATE TABLE public.aac_discussions (
@@ -500,9 +534,14 @@ CREATE TABLE public.messages (
     ingestion_last_failure_code text,
     ingestion_last_failure_at_ms bigint,
     ingestion_last_error_summary text,
+    exchange_state text DEFAULT 'open'::text NOT NULL,
+    exchange_outcome text,
+    exchange_closed_at_ms bigint,
     CONSTRAINT messages_ingestion_attempt_count_check CHECK ((ingestion_attempt_count >= 0)),
     CONSTRAINT messages_ingestion_state_check CHECK ((ingestion_state = ANY (ARRAY['waiting_for_seal'::text, 'ready'::text, 'claimed'::text, 'processed'::text, 'failed'::text, 'excluded'::text]))),
-    CONSTRAINT messages_lifecycle_state_check CHECK ((lifecycle_state = ANY (ARRAY['editable'::text, 'sealed'::text, 'superseded'::text])))
+    CONSTRAINT messages_lifecycle_state_check CHECK ((lifecycle_state = ANY (ARRAY['editable'::text, 'sealed'::text, 'superseded'::text]))),
+    CONSTRAINT messages_exchange_state_check CHECK ((exchange_state = ANY (ARRAY['open'::text, 'closed'::text]))),
+    CONSTRAINT messages_exchange_user_shape_check CHECK (((role = 'user'::text) AND (((exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)) OR ((exchange_state = 'closed'::text) AND (exchange_outcome = ANY (ARRAY['assistant_final'::text, 'clarification'::text, 'failed'::text, 'cancelled'::text, 'user_only'::text])) AND (exchange_closed_at_ms IS NOT NULL) AND (exchange_closed_at_ms >= 0)))) OR ((role <> 'user'::text) AND (exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)))
 );
 CREATE TABLE public.project_artifact_revisions (
     artifact_id uuid NOT NULL,
@@ -598,22 +637,174 @@ CREATE TABLE public.projects (
     CONSTRAINT projects_episode_window_size_check CHECK (((episode_window_size >= 8) AND (episode_window_size <= 72))),
     CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text, 'deleted'::text])))
 );
+CREATE TABLE public.project_contexts (
+    project_id text NOT NULL,
+    user_name text NOT NULL,
+    current_revision_id uuid,
+    projection_hash text,
+    projection_synced_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_contexts_projection_hash_check CHECK (((projection_hash IS NULL) OR (projection_hash ~ '^[0-9a-f]{64}$'::text)))
+);
+CREATE TABLE public.project_semantic_windows (
+    window_id uuid NOT NULL,
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    origin text DEFAULT 'conversation'::text NOT NULL,
+    stage text DEFAULT 'claimed'::text NOT NULL,
+    domain_version integer NOT NULL,
+    policy_snapshot jsonb NOT NULL,
+    source_token_count bigint DEFAULT 0 NOT NULL,
+    token_estimator text NOT NULL,
+    token_estimator_version text NOT NULL,
+    overfill_tokens bigint DEFAULT 0 NOT NULL,
+    overfill_ratio double precision DEFAULT 0 NOT NULL,
+    episode_result_recorded boolean DEFAULT false NOT NULL,
+    context_revision_id uuid,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    last_failure_stage text,
+    last_failure_code text,
+    last_failure_at_ms bigint,
+    last_error_summary text,
+    next_retry_at_ms bigint,
+    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT project_semantic_windows_attempt_count_check CHECK ((attempt_count >= 0)),
+    CONSTRAINT project_semantic_windows_domain_version_check CHECK ((domain_version >= 0)),
+    CONSTRAINT project_semantic_windows_failure_shape_check CHECK ((((last_failure_stage IS NULL) AND (last_failure_code IS NULL) AND (last_failure_at_ms IS NULL) AND (last_error_summary IS NULL)) OR ((last_failure_stage IS NOT NULL) AND (last_failure_code IS NOT NULL) AND (last_failure_at_ms IS NOT NULL) AND (last_error_summary IS NOT NULL)))),
+    CONSTRAINT project_semantic_windows_origin_check CHECK ((origin = ANY (ARRAY['conversation'::text, 'human_edit'::text]))),
+    CONSTRAINT project_semantic_windows_overfill_check CHECK (((overfill_tokens >= 0) AND (overfill_ratio >= (0)::double precision))),
+    CONSTRAINT project_semantic_windows_policy_snapshot_check CHECK ((jsonb_typeof(policy_snapshot) = 'object'::text)),
+    CONSTRAINT project_semantic_windows_source_token_count_check CHECK ((source_token_count >= 0)),
+    CONSTRAINT project_semantic_windows_stage_check CHECK ((stage = ANY (ARRAY['claimed'::text, 'context_committed'::text, 'knowledge_committed'::text, 'completed'::text]))),
+    CONSTRAINT project_semantic_windows_terminal_shape_check CHECK ((((stage = 'completed'::text) AND (completed_at IS NOT NULL)) OR ((stage <> 'completed'::text) AND (completed_at IS NULL)))),
+    CONSTRAINT project_semantic_windows_token_estimator_check CHECK (((btrim(token_estimator) <> ''::text) AND (btrim(token_estimator_version) <> ''::text)))
+);
+CREATE TABLE public.project_semantic_window_messages (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    message_id bigint NOT NULL,
+    session_id text NOT NULL,
+    exchange_user_message_id bigint NOT NULL,
+    role text NOT NULL,
+    ordinal integer NOT NULL,
+    CONSTRAINT project_semantic_window_messages_exchange_message_check CHECK ((exchange_user_message_id > 0)),
+    CONSTRAINT project_semantic_window_messages_ordinal_check CHECK ((ordinal >= 0)),
+    CONSTRAINT project_semantic_window_messages_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text])))
+);
+CREATE TABLE public.project_semantic_window_maintenance (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    last_error text,
+    enqueued_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT project_semantic_window_maintenance_attempt_count_check CHECK ((attempt_count >= 0)),
+    CONSTRAINT project_semantic_window_maintenance_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'completed'::text]))),
+    CONSTRAINT project_semantic_window_maintenance_terminal_shape_check CHECK ((((status = 'completed'::text) AND (completed_at IS NOT NULL)) OR ((status = 'pending'::text) AND (completed_at IS NULL))))
+);
+CREATE TABLE public.project_semantic_window_episodes (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    episode_id text NOT NULL,
+    ordinal integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_semantic_window_episodes_ordinal_check CHECK ((ordinal >= 0))
+);
+CREATE TABLE public.project_context_revisions (
+    revision_id uuid NOT NULL,
+    project_id text NOT NULL,
+    revision_number integer NOT NULL,
+    parent_revision_id uuid,
+    window_id uuid,
+    origin text NOT NULL,
+    domain_version integer NOT NULL,
+    edit_summary text DEFAULT ''::text NOT NULL,
+    content_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_context_revisions_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT project_context_revisions_domain_version_check CHECK ((domain_version >= 0)),
+    CONSTRAINT project_context_revisions_edit_summary_check CHECK ((length(edit_summary) <= 2000)),
+    CONSTRAINT project_context_revisions_origin_check CHECK ((origin = ANY (ARRAY['conversation'::text, 'human_edit'::text]))),
+    CONSTRAINT project_context_revisions_revision_number_check CHECK ((revision_number >= 1))
+);
+CREATE TABLE public.project_context_blocks (
+    block_id uuid NOT NULL,
+    project_id text NOT NULL,
+    section_key text NOT NULL,
+    markdown text NOT NULL,
+    content_hash text NOT NULL,
+    assertion_kind text NOT NULL,
+    supersedes_block_id uuid,
+    source_time_ms bigint,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_context_blocks_assertion_kind_check CHECK ((assertion_kind = ANY (ARRAY['user_asserted'::text, 'source_grounded'::text, 'agent_derived'::text, 'human_asserted'::text]))),
+    CONSTRAINT project_context_blocks_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT project_context_blocks_markdown_check CHECK (((length(btrim(markdown)) > 0) AND (length(markdown) <= 50000))),
+    CONSTRAINT project_context_blocks_section_key_check CHECK ((section_key ~ '^[a-z][a-z0-9_]{0,39}$'::text)),
+    CONSTRAINT project_context_blocks_source_time_check CHECK (((source_time_ms IS NULL) OR (source_time_ms >= 0)))
+);
+CREATE TABLE public.project_context_revision_blocks (
+    revision_id uuid NOT NULL,
+    project_id text NOT NULL,
+    block_id uuid NOT NULL,
+    ordinal integer NOT NULL,
+    CONSTRAINT project_context_revision_blocks_ordinal_check CHECK ((ordinal >= 0))
+);
+CREATE TABLE public.project_context_block_supports (
+    block_id uuid NOT NULL,
+    project_id text NOT NULL,
+    message_id bigint NOT NULL,
+    session_id text NOT NULL,
+    source_ref_id uuid,
+    support_kind text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_context_block_supports_kind_check CHECK ((support_kind = ANY (ARRAY['user_message'::text, 'assistant_message'::text, 'assistant_source'::text]))),
+    CONSTRAINT project_context_block_supports_source_shape_check CHECK ((((support_kind = 'assistant_source'::text) AND (source_ref_id IS NOT NULL)) OR ((support_kind <> 'assistant_source'::text) AND (source_ref_id IS NULL))))
+);
+CREATE TABLE public.project_context_revision_impact_blocks (
+    revision_id uuid NOT NULL,
+    project_id text NOT NULL,
+    block_id uuid NOT NULL
+);
+CREATE TABLE public.context_block_entities (
+    block_id uuid NOT NULL,
+    project_id text NOT NULL,
+    entity_id bigint NOT NULL,
+    mention_text text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT context_block_entities_mention_text_check CHECK ((btrim(mention_text) <> ''::text))
+);
+CREATE TABLE public.relationship_observation_blocks (
+    observation_id bigint NOT NULL,
+    project_id text NOT NULL,
+    block_id uuid NOT NULL
+);
 CREATE TABLE public.relationship_observations (
     observation_id bigint NOT NULL,
     relationship_id text,
     project_id text NOT NULL,
     user_name text NOT NULL,
-    session_id text NOT NULL,
-    message_id bigint NOT NULL,
+    session_id text,
+    message_id bigint,
+    semantic_window_id uuid,
     source_entity_id bigint NOT NULL,
     target_entity_id bigint NOT NULL,
     observed_relationship_label text NOT NULL,
     interpretation_source text DEFAULT 'observed'::text NOT NULL,
     context text,
     observed_at_ms bigint NOT NULL,
+    retired_at timestamp with time zone,
+    retired_reason text,
     CONSTRAINT relationship_observations_distinct_entities CHECK ((source_entity_id <> target_entity_id)),
+    CONSTRAINT relationship_observations_evidence_shape_check CHECK (((semantic_window_id IS NOT NULL) OR ((session_id IS NOT NULL) AND (message_id IS NOT NULL)))),
     CONSTRAINT relationship_observations_interpretation_source_check CHECK ((interpretation_source = ANY (ARRAY['observed'::text, 'domain'::text, 'review'::text]))),
-    CONSTRAINT relationship_observations_observed_relationship_label_check CHECK ((btrim(observed_relationship_label) <> ''::text))
+    CONSTRAINT relationship_observations_observed_relationship_label_check CHECK ((btrim(observed_relationship_label) <> ''::text)),
+    CONSTRAINT relationship_observations_retirement_shape_check CHECK ((((retired_at IS NULL) AND (retired_reason IS NULL)) OR ((retired_at IS NOT NULL) AND (btrim(retired_reason) <> ''::text))))
 );
 CREATE SEQUENCE public.relationship_observations_observation_id_seq
     START WITH 1
@@ -746,6 +937,8 @@ ALTER TABLE ONLY public.message_revisions
     ADD CONSTRAINT message_revisions_pkey PRIMARY KEY (user_name, session_id, message_id, revision);
 ALTER TABLE ONLY public.message_source_refs
     ADD CONSTRAINT message_source_refs_idempotency_key_key UNIQUE (idempotency_key);
+ALTER TABLE ONLY public.message_source_refs
+    ADD CONSTRAINT message_source_refs_id_message_scope_key UNIQUE (source_ref_id, message_id, project_id, session_id);
 ALTER TABLE public.message_source_refs
     ADD CONSTRAINT message_source_refs_locator_range_check CHECK (
 CASE (locator ->> 'kind'::text)
@@ -800,6 +993,48 @@ ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_id_project_key UNIQUE (document_id, project_id);
 ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_pkey PRIMARY KEY (document_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_pkey PRIMARY KEY (project_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_project_user_key UNIQUE (project_id, user_name);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_pkey PRIMARY KEY (revision_id);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_id_project_key UNIQUE (revision_id, project_id);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_project_number_key UNIQUE (project_id, revision_number);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_window_key UNIQUE (window_id);
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_pkey PRIMARY KEY (block_id);
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_id_project_key UNIQUE (block_id, project_id);
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_pkey PRIMARY KEY (revision_id, block_id);
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_ordinal_key UNIQUE (revision_id, ordinal);
+ALTER TABLE ONLY public.project_context_revision_impact_blocks
+    ADD CONSTRAINT project_context_revision_impact_blocks_pkey PRIMARY KEY (revision_id, block_id);
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_pkey PRIMARY KEY (window_id);
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_id_project_key UNIQUE (window_id, project_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_pkey PRIMARY KEY (window_id, message_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_message_key UNIQUE (message_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_ordinal_key UNIQUE (window_id, ordinal);
+ALTER TABLE ONLY public.project_semantic_window_maintenance
+    ADD CONSTRAINT project_semantic_window_maintenance_pkey PRIMARY KEY (window_id);
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_pkey PRIMARY KEY (window_id, episode_id);
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_ordinal_key UNIQUE (window_id, ordinal);
+ALTER TABLE ONLY public.context_block_entities
+    ADD CONSTRAINT context_block_entities_pkey PRIMARY KEY (block_id, entity_id);
+ALTER TABLE ONLY public.relationship_observation_blocks
+    ADD CONSTRAINT relationship_observation_blocks_pkey PRIMARY KEY (observation_id, block_id);
 ALTER TABLE ONLY public.project_entity_contexts
     ADD CONSTRAINT project_entity_contexts_pkey PRIMARY KEY (project_id, entity_id);
 ALTER TABLE ONLY public.project_read_scopes
@@ -811,7 +1046,11 @@ ALTER TABLE ONLY public.projects
 ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_pkey PRIMARY KEY (observation_id);
 ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_id_project_key UNIQUE (observation_id, project_id);
+ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_unique_evidence UNIQUE (project_id, user_name, session_id, message_id, source_entity_id, target_entity_id, observed_relationship_label);
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_unique_semantic_window_evidence UNIQUE (project_id, semantic_window_id, source_entity_id, target_entity_id, observed_relationship_label);
 ALTER TABLE ONLY public.relationships
     ADD CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id);
 ALTER TABLE ONLY public.relationships
@@ -834,6 +1073,7 @@ CREATE UNIQUE INDEX agents_one_default_per_user_idx ON public.agents USING btree
 CREATE INDEX document_chunks_document_idx ON public.document_chunks USING btree (document_id);
 CREATE INDEX document_chunks_embedding_idx ON public.document_chunks USING hnsw (embedding public.vector_cosine_ops);
 CREATE INDEX document_chunks_search_vector_idx ON public.document_chunks USING gin (search_vector);
+CREATE INDEX context_block_entities_entity_idx ON public.context_block_entities USING btree (project_id, entity_id);
 CREATE INDEX entities_embedding_idx ON public.entities USING hnsw (embedding public.vector_cosine_ops);
 CREATE INDEX entities_user_name_idx ON public.entities USING btree (user_name, canonical_name);
 CREATE INDEX entity_aliases_alias_idx ON public.entity_aliases USING btree (alias);
@@ -859,6 +1099,18 @@ CREATE UNIQUE INDEX messages_acceptance_key_idx ON public.messages USING btree (
 CREATE INDEX messages_ingestion_queue_idx ON public.messages USING btree (user_name, session_id, message_id) WHERE ((role = 'user'::text) AND (ingestion_state = ANY (ARRAY['waiting_for_seal'::text, 'ready'::text, 'claimed'::text])));
 CREATE INDEX messages_project_idx ON public.messages USING btree (user_name, project_id, message_id);
 CREATE INDEX messages_search_tsvector_idx ON public.messages USING gin (search_tsvector);
+CREATE INDEX project_context_blocks_project_section_idx ON public.project_context_blocks USING btree (project_id, section_key, created_at);
+CREATE INDEX project_context_revision_blocks_snapshot_idx ON public.project_context_revision_blocks USING btree (revision_id, ordinal);
+CREATE INDEX project_context_revision_impact_blocks_project_idx ON public.project_context_revision_impact_blocks USING btree (project_id, block_id);
+CREATE UNIQUE INDEX project_context_block_supports_without_source_unique_idx ON public.project_context_block_supports USING btree (block_id, message_id, session_id, support_kind) WHERE (source_ref_id IS NULL);
+CREATE UNIQUE INDEX project_context_block_supports_with_source_unique_idx ON public.project_context_block_supports USING btree (block_id, message_id, session_id, source_ref_id, support_kind) WHERE (source_ref_id IS NOT NULL);
+CREATE UNIQUE INDEX messages_one_assistant_per_exchange_idx ON public.messages USING btree (user_name, project_id, session_id, user_msg_id) WHERE (role = 'assistant'::text);
+CREATE INDEX project_context_revisions_project_created_idx ON public.project_context_revisions USING btree (project_id, revision_number DESC);
+CREATE INDEX project_semantic_window_messages_window_ordinal_idx ON public.project_semantic_window_messages USING btree (window_id, ordinal);
+CREATE INDEX project_semantic_window_maintenance_pending_idx ON public.project_semantic_window_maintenance USING btree (project_id, updated_at) WHERE (status = 'pending'::text);
+CREATE INDEX project_semantic_window_episodes_window_ordinal_idx ON public.project_semantic_window_episodes USING btree (window_id, ordinal);
+CREATE UNIQUE INDEX project_semantic_windows_one_active_per_project_idx ON public.project_semantic_windows USING btree (project_id) WHERE (stage <> 'completed'::text);
+CREATE INDEX project_semantic_windows_retry_idx ON public.project_semantic_windows USING btree (project_id, next_retry_at_ms) WHERE (stage <> 'completed'::text);
 CREATE INDEX project_artifacts_project_updated_idx ON public.project_artifacts USING btree (project_id, updated_at DESC);
 CREATE INDEX project_artifacts_session_updated_idx ON public.project_artifacts USING btree (session_id, updated_at DESC);
 CREATE INDEX project_documents_hash_idx ON public.project_documents USING btree (project_id, content_hash);
@@ -870,6 +1122,8 @@ CREATE INDEX project_entity_contexts_topic_idx ON public.project_entity_contexts
 CREATE INDEX relationship_observations_message_idx ON public.relationship_observations USING btree (project_id, user_name, session_id, message_id);
 CREATE INDEX relationship_observations_pattern_idx ON public.relationship_observations USING btree (project_id, user_name, interpretation_source, observed_relationship_label);
 CREATE INDEX relationship_observations_relationship_idx ON public.relationship_observations USING btree (relationship_id, project_id);
+CREATE INDEX relationship_observations_active_support_idx ON public.relationship_observations USING btree (project_id, relationship_id) WHERE (retired_at IS NULL);
+CREATE INDEX relationship_observation_blocks_block_idx ON public.relationship_observation_blocks USING btree (project_id, block_id, observation_id);
 CREATE INDEX relationships_entity_a_idx ON public.relationships USING btree (entity_a_id);
 CREATE INDEX relationships_entity_b_idx ON public.relationships USING btree (entity_b_id);
 CREATE INDEX relationships_pair_type_idx ON public.relationships USING btree (project_id, entity_a_id, entity_b_id, relationship_type);
@@ -878,6 +1132,7 @@ CREATE UNIQUE INDEX saved_web_links_project_url_idx ON public.saved_web_links US
 CREATE INDEX sessions_project_idx ON public.sessions USING btree (user_name, project_id, created_at);
 CREATE TRIGGER entities_identity_immutable_trigger BEFORE UPDATE ON public.entities FOR EACH ROW EXECUTE FUNCTION public.reject_entity_identity_mutation();
 CREATE TRIGGER message_entity_refs_scope_trigger BEFORE INSERT OR UPDATE OF message_id, entity_id ON public.message_entity_refs FOR EACH ROW EXECUTE FUNCTION public.enforce_message_entity_ref_scope();
+CREATE TRIGGER context_block_entities_scope_trigger BEFORE INSERT OR UPDATE OF block_id, project_id, entity_id ON public.context_block_entities FOR EACH ROW EXECUTE FUNCTION public.enforce_context_block_entity_scope();
 CREATE TRIGGER relationships_scope_trigger BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id ON public.relationships FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
 ALTER TABLE ONLY public.aac_insight_votes
     ADD CONSTRAINT aac_insight_votes_insight_id_fkey FOREIGN KEY (insight_id) REFERENCES public.aac_insights(insight_id) ON DELETE CASCADE;
@@ -947,6 +1202,54 @@ ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_session_project_fk FOREIGN KEY (session_id, project_id) REFERENCES public.sessions(session_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_current_revision_scope_fk FOREIGN KEY (current_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (current_revision_id);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_parent_scope_fk FOREIGN KEY (parent_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE SET NULL (window_id);
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_supersedes_scope_fk FOREIGN KEY (supersedes_block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_revision_scope_fk FOREIGN KEY (revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_revision_impact_blocks
+    ADD CONSTRAINT project_context_revision_impact_blocks_revision_scope_fk FOREIGN KEY (revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_revision_impact_blocks
+    ADD CONSTRAINT project_context_revision_impact_blocks_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_block_supports
+    ADD CONSTRAINT project_context_block_supports_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_block_supports
+    ADD CONSTRAINT project_context_block_supports_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_block_supports
+    ADD CONSTRAINT project_context_block_supports_source_scope_fk FOREIGN KEY (source_ref_id, message_id, project_id, session_id) REFERENCES public.message_source_refs(source_ref_id, message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.context_block_entities
+    ADD CONSTRAINT context_block_entities_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.context_block_entities
+    ADD CONSTRAINT context_block_entities_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_context_revision_scope_fk FOREIGN KEY (context_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (context_revision_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_exchange_scope_fk FOREIGN KEY (exchange_user_message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_semantic_window_maintenance
+    ADD CONSTRAINT project_semantic_window_maintenance_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_episode_scope_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.project_artifact_revisions
     ADD CONSTRAINT project_artifact_revisions_artifact_id_fkey FOREIGN KEY (artifact_id) REFERENCES public.project_artifacts(artifact_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_artifacts
@@ -970,11 +1273,17 @@ ALTER TABLE ONLY public.project_read_scopes
 ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_message_fk FOREIGN KEY (user_name, session_id, message_id, project_id) REFERENCES public.messages(user_name, session_id, message_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_semantic_window_scope_fk FOREIGN KEY (semantic_window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_relationship_fk FOREIGN KEY (relationship_id, project_id) REFERENCES public.relationships(relationship_id, project_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_source_entity_id_fkey FOREIGN KEY (source_entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_target_entity_id_fkey FOREIGN KEY (target_entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationship_observation_blocks
+    ADD CONSTRAINT relationship_observation_blocks_observation_scope_fk FOREIGN KEY (observation_id, project_id) REFERENCES public.relationship_observations(observation_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationship_observation_blocks
+    ADD CONSTRAINT relationship_observation_blocks_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.relationships
     ADD CONSTRAINT relationships_entity_a_id_fkey FOREIGN KEY (entity_a_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.relationships
