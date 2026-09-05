@@ -183,6 +183,37 @@ class FakeApplication:
         self.calls.append(("project_reviews", user_name, project_id))
         return [self._maintenance_review("project", project_id)]
 
+    async def get_project_maintenance_review(
+        self, *, user_name, project_id, review_id
+    ):
+        self.calls.append(("project_review_detail", user_name, project_id, review_id))
+        return {
+            "review": self._maintenance_review("project", project_id),
+            "stored_snapshot": {},
+            "current_evidence": [],
+            "unavailable_pointers": [],
+            "evidence_state": "current",
+        }
+
+    async def preview_project_maintenance_review(
+        self, *, user_name, project_id, review_id
+    ):
+        detail = await self.get_project_maintenance_review(
+            user_name=user_name, project_id=project_id, review_id=review_id
+        )
+        return {
+            "detail": detail,
+            "impact": {
+                "review_id": review_id,
+                "evidence_state_token": detail["stored_snapshot"].get(
+                    "state_token",
+                    "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e9f414c0cce5cfd4e3d7e1b",
+                ),
+                "impacts": [],
+                "no_applicable_impact": "No canonical mutation.",
+            },
+        }
+
     async def decide_project_maintenance_review(
         self, *, user_name, project_id, review_id, request
     ):
@@ -339,6 +370,14 @@ async def test_maintenance_routes_expose_review_decisions_and_rollback():
             "/v1/projects/project-1/maintenance/reviews",
             headers=headers,
         )
+        project_detail = await client.get(
+            "/v1/projects/project-1/maintenance/reviews/review-1",
+            headers=headers,
+        )
+        project_preview = await client.get(
+            "/v1/projects/project-1/maintenance/reviews/review-1/preview",
+            headers=headers,
+        )
         project_decision = await client.post(
             "/v1/projects/project-1/maintenance/reviews/review-2/decision",
             headers=headers,
@@ -358,6 +397,8 @@ async def test_maintenance_routes_expose_review_decisions_and_rollback():
     assert global_reviews.json()["reviews"][0]["review_id"] == "review-1"
     assert global_decision.json()["result"]["action"] == "apply"
     assert project_reviews.json()["reviews"][0]["project_id"] == "project-1"
+    assert project_detail.json()["evidence_state"] == "current"
+    assert project_preview.json()["impact"]["review_id"] == "review-1"
     assert project_decision.json()["result"]["action"] == "dismiss"
     assert preview.json()["result"]["safe_mutation_ids"] == [1]
     assert rollback.json()["result"]["applied_mutation_ids"] == [1, 2]
@@ -365,6 +406,8 @@ async def test_maintenance_routes_expose_review_decisions_and_rollback():
         "global_reviews",
         "global_review_decision",
         "project_reviews",
+        "project_review_detail",
+        "project_review_detail",
         "project_review_decision",
         "rollback_preview",
         "rollback",

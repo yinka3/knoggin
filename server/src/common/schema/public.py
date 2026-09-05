@@ -28,6 +28,8 @@ from common.exceptions import (
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
 from common.schema.document import DocumentSelection
+from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
+from common.schema.maintenance import MaintenanceImpactPreview
 from common.schema.source.references import SourceConsulted
 
 PUBLIC_CONTRACT_VERSION = "1"
@@ -213,6 +215,19 @@ class MaintenanceReviewResponse(PublicModel):
 
 class MaintenanceReviewListResponse(PublicModel):
     reviews: tuple[MaintenanceReviewResponse, ...]
+
+
+class MaintenanceReviewDetailResponse(PublicModel):
+    review: MaintenanceReviewResponse
+    stored_snapshot: EvidenceSnapshot
+    current_evidence: tuple[EvidenceBundle, ...] = ()
+    unavailable_pointers: tuple[EvidencePointer, ...] = ()
+    evidence_state: Literal["current", "changed", "partially_unavailable"]
+
+
+class MaintenanceReviewPreviewResponse(PublicModel):
+    detail: MaintenanceReviewDetailResponse
+    impact: MaintenanceImpactPreview
 
 
 class MaintenanceReviewDecisionRequest(PublicModel):

@@ -50,6 +50,7 @@ class RuntimeHealthService:
         """Return dependency and lifecycle health for the running engine."""
 
         postgres = await self._probe_postgres()
+        projection_repair = await self._read_maintenance_projection_repair()
         active_project_count = self._active_project_count()
         active_session_count = self._active_session_count()
         failures = [
@@ -74,6 +75,8 @@ class RuntimeHealthService:
             name for name, available in subsystems.items() if not available
         ]
         warnings = [f"{name} probe failed" for name in failures]
+        if projection_repair.get("pending_count", 0):
+            warnings.append("Maintenance projection repair is pending")
         warnings.extend(
             f"{name.replace('_', ' ')} is unavailable"
             for name in unavailable_subsystems
@@ -90,7 +93,12 @@ class RuntimeHealthService:
         ):
             status = HealthStatus.FAILED
             summary = "Core runtime dependencies are unavailable"
-        elif failures or unavailable_subsystems or self._closing:
+        elif (
+            failures
+            or unavailable_subsystems
+            or self._closing
+            or projection_repair.get("pending_count", 0)
+        ):
             status = HealthStatus.DEGRADED
             summary = "Runtime is operating with degraded dependencies"
         else:
@@ -117,9 +125,32 @@ class RuntimeHealthService:
                 "loaded_project_count": active_project_count,
                 "active_runtime_session_count": active_session_count,
                 "subsystems": subsystems,
+                "maintenance_projection_repair": projection_repair,
             },
             warnings=warnings,
         )
+
+    async def _read_maintenance_projection_repair(self) -> dict[str, Any]:
+        service = getattr(self.projects, "entity_maintenance_service", None)
+        read_health = getattr(service, "projection_repair_health", None)
+        if not callable(read_health):
+            return {"available": False, "pending_count": 0, "truncated": False}
+        value, error = await self._bounded_read(read_health)
+        if error is not None or not isinstance(value, Mapping):
+            return {
+                "available": False,
+                "pending_count": 0,
+                "truncated": False,
+                "read_status": error or "invalid",
+            }
+        return {
+            "available": True,
+            "pending_count": self._nonnegative_int_or_none(
+                value.get("pending_count")
+            )
+            or 0,
+            "truncated": value.get("truncated") is True,
+        }
 
     async def get_resource_health(
         self,

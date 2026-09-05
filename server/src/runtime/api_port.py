@@ -25,6 +25,8 @@ from common.schema.public import (
     DocumentFocusResponse,
     EntityMergeRollbackRequest,
     MaintenanceReviewDecisionRequest,
+    MaintenanceReviewDetailResponse,
+    MaintenanceReviewPreviewResponse,
     MaintenanceReviewResponse,
     MessageDeltaEvent,
     ProjectResponse,
@@ -275,6 +277,47 @@ class ApplicationRuntimePort:
             project_id
         )
         return [self._maintenance_review_response(review) for review in reviews]
+
+    async def get_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+    ) -> MaintenanceReviewDetailResponse:
+        self._require_user(user_name)
+        detail = await self.runtime.projects.maintenance_service.get_maintenance_review_detail(
+            project_id, review_id
+        )
+        return MaintenanceReviewDetailResponse(
+            review=self._maintenance_review_response(detail.review),
+            stored_snapshot=detail.stored_snapshot,
+            current_evidence=detail.current_evidence,
+            unavailable_pointers=detail.unavailable_pointers,
+            evidence_state=detail.evidence_state,
+        )
+
+    async def preview_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+    ) -> MaintenanceReviewPreviewResponse:
+        self._require_user(user_name)
+        detail, impact = await self.runtime.projects.maintenance_service.preview_maintenance_review(
+            project_id, review_id
+        )
+        return MaintenanceReviewPreviewResponse(
+            detail=MaintenanceReviewDetailResponse(
+                review=self._maintenance_review_response(detail.review),
+                stored_snapshot=detail.stored_snapshot,
+                current_evidence=detail.current_evidence,
+                unavailable_pointers=detail.unavailable_pointers,
+                evidence_state=detail.evidence_state,
+            ),
+            impact=impact,
+        )
 
     async def decide_project_maintenance_review(
         self,

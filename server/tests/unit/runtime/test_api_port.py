@@ -15,7 +15,12 @@ from common.schema.public import (
     StartRunRequest,
     validate_public_stream,
 )
-from core.knowledge.maintenance_reviews import EntityMergePlan, MaintenanceReview
+from core.knowledge.maintenance_impact import MaintenanceImpactPlanner
+from core.knowledge.maintenance_reviews import (
+    EntityMergePlan,
+    MaintenanceReview,
+    MaintenanceReviewDetail,
+)
 from runtime.api_port import ApplicationRuntimePort
 
 
@@ -159,6 +164,26 @@ class FakeProjects:
             {"operation": "list_project_reviews", "project_id": project_id}
         )
         return [self._review(scope="project", project_id=project_id)]
+
+    async def get_maintenance_review_detail(self, project_id, review_id):
+        self.calls.append(
+            {
+                "operation": "get_project_review",
+                "project_id": project_id,
+                "review_id": review_id,
+            }
+        )
+        review = self._review(scope="project", project_id=project_id)
+        return MaintenanceReviewDetail(
+            review=review,
+            stored_snapshot=review.evidence_snapshot,
+            evidence_state="current",
+        )
+
+    async def preview_maintenance_review(self, project_id, review_id):
+        detail = await self.get_maintenance_review_detail(project_id, review_id)
+        self.calls[-1]["operation"] = "preview_project_review"
+        return detail, MaintenanceImpactPlanner.preview(detail.review)
 
     async def transition_maintenance_review(
         self, project_id, review_id, **kwargs
@@ -401,6 +426,12 @@ async def test_runtime_port_routes_maintenance_through_project_owner(port):
         user_name="ada",
         project_id="project-1",
     )
+    detail = await application.get_project_maintenance_review(
+        user_name="ada", project_id="project-1", review_id="review-1"
+    )
+    impact = await application.preview_project_maintenance_review(
+        user_name="ada", project_id="project-1", review_id="review-1"
+    )
     dismissed = await application.decide_project_maintenance_review(
         user_name="ada",
         project_id="project-1",
@@ -420,6 +451,8 @@ async def test_runtime_port_routes_maintenance_through_project_owner(port):
     assert reviews[0].scope == "user-global"
     assert applied == {"merge_id": "merge-1", "review_id": "review-1"}
     assert project_reviews[0].project_id == "project-1"
+    assert detail.evidence_state == "current"
+    assert impact.impact.review_id == "review-1"
     assert dismissed["review"]["status"] == "dismissed"
     assert preview["safe_mutation_ids"] == [1]
     assert rollback["rolled_back"] is True
@@ -431,6 +464,8 @@ async def test_runtime_port_routes_maintenance_through_project_owner(port):
         "list_global_reviews",
         "apply_global_review",
         "list_project_reviews",
+        "get_project_review",
+        "preview_project_review",
         "decide_project_review",
         "preview_rollback",
         "rollback",

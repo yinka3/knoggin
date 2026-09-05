@@ -39,7 +39,9 @@ from common.schema.public import (
     EntityMergeRollbackRequest,
     MaintenanceOperationResponse,
     MaintenanceReviewDecisionRequest,
+    MaintenanceReviewDetailResponse,
     MaintenanceReviewListResponse,
+    MaintenanceReviewPreviewResponse,
     MaintenanceReviewResponse,
     ProjectResponse,
     PromoteSourceRequest,
@@ -162,6 +164,22 @@ class ApplicationPort(Protocol):
         *,
         user_name: str,
         project_id: str,
+    ) -> Any: ...
+
+    async def get_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+    ) -> Any: ...
+
+    async def preview_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
     ) -> Any: ...
 
     async def decide_project_maintenance_review(
@@ -712,6 +730,42 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
                 project_id=project_id,
                 review_id=review_id,
                 request=body,
+            )
+        )
+
+    @app.get(
+        "/v1/projects/{project_id}/maintenance/reviews/{review_id}",
+        response_model=MaintenanceReviewDetailResponse,
+    )
+    async def get_project_maintenance_review(
+        project_id: str = Path(min_length=1),
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewDetailResponse:
+        return MaintenanceReviewDetailResponse.model_validate(
+            await _call(
+                port.get_project_maintenance_review,
+                user_name=user_name,
+                project_id=project_id,
+                review_id=review_id,
+            )
+        )
+
+    @app.get(
+        "/v1/projects/{project_id}/maintenance/reviews/{review_id}/preview",
+        response_model=MaintenanceReviewPreviewResponse,
+    )
+    async def preview_project_maintenance_review(
+        project_id: str = Path(min_length=1),
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewPreviewResponse:
+        return MaintenanceReviewPreviewResponse.model_validate(
+            await _call(
+                port.preview_project_maintenance_review,
+                user_name=user_name,
+                project_id=project_id,
+                review_id=review_id,
             )
         )
 

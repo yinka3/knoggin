@@ -169,6 +169,32 @@ async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_engine_health_exposes_only_bounded_projection_repair_state():
+    class Maintenance:
+        async def projection_repair_health(self):
+            return {"pending_count": 2, "truncated": False, "secret": "hidden"}
+
+    service = RuntimeHealthService(
+        resources=resources(),
+        projects=SimpleNamespace(
+            active_projects={}, entity_maintenance_service=Maintenance()
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (await service.get_engine_health()).model_dump(mode="json")
+
+    assert payload["status"] == "degraded"
+    assert payload["details"]["maintenance_projection_repair"] == {
+        "available": True,
+        "pending_count": 2,
+        "truncated": False,
+    }
+    assert "secret" not in json.dumps(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_failed_dependency_probes_are_bounded_and_redacted():
     service = RuntimeHealthService(
         resources=resources(postgres=FakePostgres(fail=True)),
