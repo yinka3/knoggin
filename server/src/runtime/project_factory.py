@@ -33,6 +33,7 @@ from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
+from infrastructure.job.base import JobContext
 from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import ReadyRuntimeResources, RuntimeResources
@@ -140,6 +141,10 @@ class ProjectRuntimeFactory:
         runtime.project_semantic_job = project_semantic_job
 
         try:
+            await project_semantic_job.synchronize_context_file(
+                JobContext(user_name=self.user_name, project_id=project_id),
+                allow_user_edit=True,
+            )
             await runtime.document_service.indexer.start()
             self._register_background_jobs(
                 runtime,

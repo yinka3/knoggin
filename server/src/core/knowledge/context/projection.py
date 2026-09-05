@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
+from loguru import logger
+
 from common.conf.domain_config import CompiledDomain
 from common.schema.context import (
     AssertionKind,
@@ -122,16 +124,32 @@ class ContextProjection:
                 projection_hash=generated_hash,
             )
             return ContextProjectionResult(snapshot=snapshot, changed=False)
-        if state.projection_hash is None:
-            if current is not None:
-                raise ContextProjectionConflictError(
-                    "CONTEXT.md exists without a known generated projection"
-                )
-        elif current_hash != state.projection_hash:
+        if current is not None and state.projection_revision_id == snapshot.revision_id:
             raise ContextProjectionConflictError(
                 "CONTEXT.md has user edits and cannot be overwritten by reconciliation"
             )
-        self._write_file(generated.encode("utf-8"), expected_hash=current_hash)
+        known_stale_hashes = {
+            projection_hash
+            for projection_hash in (
+                state.projection_hash,
+                state.projection_pending_hash,
+            )
+            if projection_hash is not None
+        }
+        if current is not None and current_hash not in known_stale_hashes:
+            raise ContextProjectionConflictError(
+                "CONTEXT.md is not a known stale projection and cannot be overwritten"
+            )
+        try:
+            self._write_file(generated.encode("utf-8"), expected_hash=current_hash)
+        except Exception as exc:
+            await self._record_projection_failure(
+                user_name=user_name,
+                project_id=project_id,
+                revision_id=snapshot.revision_id,
+                exc=exc,
+            )
+            raise
         await self._record_projection_or_conflict(
             user_name=user_name,
             project_id=project_id,
@@ -139,6 +157,81 @@ class ContextProjection:
             projection_hash=generated_hash,
         )
         return ContextProjectionResult(snapshot=snapshot, changed=True)
+
+    async def synchronize(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        domain: CompiledDomain,
+        allow_user_edit: bool,
+    ) -> ContextProjectionResult:
+        """Import one recognized local edit or repair the canonical projection.
+
+        The caller serializes this operation with semantic admission.  A user
+        edit is accepted only when it is based on the exact projection of the
+        current revision; all other non-generated files remain conflicts.
+        """
+
+        await self._writer.ensure_context(user_name=user_name, project_id=project_id)
+        state = await self._reader.get_projection_state(
+            user_name=user_name,
+            project_id=project_id,
+        )
+        if state is None or state.current_revision_id is None:
+            if self._read_file_or_none() is None or not allow_user_edit:
+                return ContextProjectionResult(snapshot=None, changed=False)
+            return await self.import_user_edit(
+                user_name=user_name,
+                project_id=project_id,
+                domain=domain,
+            )
+        snapshot = await self._reader.get_snapshot(
+            state.current_revision_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+        if snapshot is None:
+            raise RuntimeError("current Context revision cannot be materialized")
+        raw = self._read_file_or_none()
+        generated_hash = _hash(render_context_markdown(snapshot, domain).encode("utf-8"))
+        if (
+            allow_user_edit
+            and raw is not None
+            and _hash(raw) != generated_hash
+            and state.projection_revision_id == snapshot.revision_id
+            and state.projection_hash == generated_hash
+        ):
+            return await self.import_user_edit(
+                user_name=user_name,
+                project_id=project_id,
+                domain=domain,
+            )
+        return await self.reconcile(
+            user_name=user_name,
+            project_id=project_id,
+            domain=domain,
+        )
+
+    async def record_sync_failure(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        exc: Exception,
+    ) -> None:
+        """Record a synchronization failure against whichever revision is current."""
+
+        state = await self._reader.get_projection_state(
+            user_name=user_name,
+            project_id=project_id,
+        )
+        await self._record_projection_failure(
+            user_name=user_name,
+            project_id=project_id,
+            revision_id=(None if state is None else state.current_revision_id),
+            exc=exc,
+        )
 
     async def import_user_edit(
         self,
@@ -176,23 +269,15 @@ class ContextProjection:
             if snapshot is None:
                 raise RuntimeError("current Context revision cannot be materialized")
             generated_hash = _hash(render_context_markdown(snapshot, domain).encode("utf-8"))
-            if state.projection_hash not in {None, generated_hash}:
+            if (
+                state.projection_revision_id != snapshot.revision_id
+                or state.projection_hash != generated_hash
+            ):
                 raise ContextProjectionConflictError(
-                    "CONTEXT.md is stale relative to the current database revision"
+                    "CONTEXT.md is stale relative to the current Context revision"
                 )
             if raw_hash == generated_hash:
-                if state.projection_hash is None:
-                    await self._record_projection_or_conflict(
-                        user_name=user_name,
-                        project_id=project_id,
-                        snapshot=snapshot,
-                        projection_hash=generated_hash,
-                    )
                 return ContextProjectionResult(snapshot=snapshot, changed=False)
-            if state.projection_hash is None:
-                raise ContextProjectionConflictError(
-                    "CONTEXT.md was not generated from the current database revision"
-                )
 
         parsed = _parse_markdown(raw.decode("utf-8"), domain, snapshot)
         materialization = _materialize_human_edit(snapshot, parsed, domain, project_id)
@@ -247,11 +332,22 @@ class ContextProjection:
             edit_summary=edit_summary,
             materialization=materialization,
             new_human_edit_window=window,
+            accepted_projection_hash=raw_hash,
         )
         generated = render_context_markdown(committed, domain).encode("utf-8")
         # The DB commit is intentionally not rolled back if this guarded write
-        # fails: reconcile will repair it after any conflicting user edit is resolved.
-        self._write_file(generated, expected_hash=raw_hash)
+        # fails: the accepted source hash lets a later reconciliation repair it
+        # without mistaking the already-imported edit for a new mutation.
+        try:
+            self._write_file(generated, expected_hash=raw_hash)
+        except Exception as exc:
+            await self._record_projection_failure(
+                user_name=user_name,
+                project_id=project_id,
+                revision_id=committed.revision_id,
+                exc=exc,
+            )
+            raise
         await self._record_projection_or_conflict(
             user_name=user_name,
             project_id=project_id,
@@ -297,9 +393,36 @@ class ContextProjection:
             revision_id=snapshot.revision_id,
             projection_hash=projection_hash,
         ):
-            raise ContextProjectionConflictError(
-                "Context changed while its file projection was being recorded"
+            if not await self._writer.record_stale_projection(
+                user_name=user_name,
+                project_id=project_id,
+                revision_id=snapshot.revision_id,
+                projection_hash=projection_hash,
+            ):
+                raise ContextProjectionConflictError(
+                    "Context changed while its file projection was being recorded"
+                )
+
+    async def _record_projection_failure(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        revision_id: UUID | None,
+        exc: Exception,
+    ) -> None:
+        """Persist a bounded retry diagnostic while preserving the original error."""
+
+        try:
+            await self._writer.record_projection_failure(
+                user_name=user_name,
+                project_id=project_id,
+                revision_id=revision_id,
+                failure_code=type(exc).__name__,
+                failure_summary=str(exc)[:2_000] or type(exc).__name__,
             )
+        except Exception as record_exc:
+            logger.warning("Context projection failure could not be recorded: {}", record_exc)
 
 
 def _parse_markdown(

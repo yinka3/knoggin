@@ -85,6 +85,7 @@ class ProjectContextWriter:
         edit_summary: str,
         materialization: ContextMaterialization,
         new_human_edit_window: SemanticWindowRecord | None = None,
+        accepted_projection_hash: str | None = None,
     ) -> ContextSnapshot:
         """Publish one full snapshot while holding the project's Context root lock.
 
@@ -109,6 +110,10 @@ class ProjectContextWriter:
             raise TypeError("materialization must be a ContextMaterialization")
         if any(block.project_id != project_id for block in materialization.blocks):
             raise ValueError("Context materialization blocks must belong to its project")
+        if accepted_projection_hash is not None and not self._is_hash(accepted_projection_hash):
+            raise ValueError("accepted_projection_hash must be a SHA-256 hex digest")
+        if accepted_projection_hash is not None and new_human_edit_window is None:
+            raise ValueError("accepted_projection_hash is only valid for a human edit")
         if new_human_edit_window is not None:
             if (
                 not isinstance(new_human_edit_window, SemanticWindowRecord)
@@ -132,7 +137,6 @@ class ProjectContextWriter:
                 if root is None:
                     raise ValueError("Project is unavailable while committing Context")
                 current_revision_id = root["current_revision_id"]
-
                 if new_human_edit_window is not None:
                     await self._create_human_edit_window(cur, new_human_edit_window)
                 if window_id is not None:
@@ -246,6 +250,16 @@ class ProjectContextWriter:
 
                 revision_id = uuid4()
                 revision_number = 1 if current_revision_id is None else int(root["revision_number"]) + 1
+                pending_projection_hash = (
+                    accepted_projection_hash
+                    if accepted_projection_hash is not None
+                    else root["projection_hash"]
+                )
+                pending_projection_revision_id = (
+                    revision_id
+                    if accepted_projection_hash is not None
+                    else root["projection_revision_id"]
+                )
                 await cur.execute(
                     """
                     INSERT INTO public.project_context_revisions (
@@ -290,10 +304,22 @@ class ProjectContextWriter:
                 await cur.execute(
                     """
                     UPDATE public.project_contexts
-                    SET current_revision_id = %s, updated_at = NOW()
+                    SET current_revision_id = %s,
+                        projection_pending_revision_id = %s,
+                        projection_pending_hash = %s,
+                        projection_failure_code = NULL,
+                        projection_failure_summary = NULL,
+                        projection_failure_at = NULL,
+                        updated_at = NOW()
                     WHERE project_id = %s AND user_name = %s
                     """,
-                    (revision_id, project_id, user_name),
+                    (
+                        revision_id,
+                        pending_projection_revision_id,
+                        pending_projection_hash,
+                        project_id,
+                        user_name,
+                    ),
                 )
                 if new_human_edit_window is not None:
                     await self._mark_human_edit_context_committed(
@@ -335,18 +361,156 @@ class ProjectContextWriter:
                 await cur.execute(
                     """
                     UPDATE public.project_contexts
-                    SET projection_hash = %s, projection_synced_at = NOW(), updated_at = NOW()
+                    SET projection_revision_id = %s,
+                        projection_hash = %s,
+                        projection_pending_revision_id = NULL,
+                        projection_pending_hash = NULL,
+                        projection_failure_code = NULL,
+                        projection_failure_summary = NULL,
+                        projection_failure_at = NULL,
+                        projection_synced_at = NOW(),
+                        updated_at = NOW()
                     WHERE user_name = %s
                       AND project_id = %s
                       AND current_revision_id = %s
                     RETURNING project_id
                     """,
-                    (projection_hash, user_name, project_id, revision_id),
+                    (revision_id, projection_hash, user_name, project_id, revision_id),
                 )
                 return await cur.fetchone() is not None
         except PsycopgError as exc:
             raise StorageWriteError(
                 "record_context_projection",
+                details={"error_type": type(exc).__name__},
+            ) from exc
+
+    async def record_stale_projection(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        revision_id: UUID | str,
+        projection_hash: str,
+    ) -> bool:
+        """Remember a written projection when a newer revision wins the CAS.
+
+        A guarded file write can complete just before another Context revision
+        advances the root.  The file is then a known stale projection, not a
+        user edit.  Revision ordering prevents an older racing writer from
+        replacing the newest pending-repair candidate.
+        """
+
+        user_name = require_scope_value(
+            user_name, "user_name", "record_stale_context_projection"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "record_stale_context_projection"
+        )
+        revision_id = self._uuid(revision_id, "revision_id")
+        if not self._is_hash(projection_hash):
+            raise ValueError("projection_hash must be a SHA-256 hex digest")
+        try:
+            async with self.client.transaction() as cur:
+                await cur.execute(
+                    """
+                    SELECT
+                        context.current_revision_id,
+                        projected.revision_number AS projection_revision_number,
+                        pending.revision_number AS pending_revision_number,
+                        candidate.revision_number AS candidate_revision_number
+                    FROM public.project_contexts AS context
+                    JOIN public.project_context_revisions AS candidate
+                      ON candidate.revision_id = %s
+                     AND candidate.project_id = context.project_id
+                    LEFT JOIN public.project_context_revisions AS projected
+                      ON projected.revision_id = context.projection_revision_id
+                     AND projected.project_id = context.project_id
+                    LEFT JOIN public.project_context_revisions AS pending
+                      ON pending.revision_id = context.projection_pending_revision_id
+                     AND pending.project_id = context.project_id
+                    WHERE context.user_name = %s AND context.project_id = %s
+                    FOR UPDATE OF context
+                    """,
+                    (revision_id, user_name, project_id),
+                )
+                root = await cur.fetchone()
+                if root is None:
+                    return False
+                if root["current_revision_id"] == revision_id:
+                    return True
+                known_revisions = (
+                    root["projection_revision_number"],
+                    root["pending_revision_number"],
+                )
+                highest_known_revision = max(
+                    (number for number in known_revisions if number is not None),
+                    default=0,
+                )
+                if int(root["candidate_revision_number"]) < highest_known_revision:
+                    return True
+                await cur.execute(
+                    """
+                    UPDATE public.project_contexts
+                    SET projection_pending_revision_id = %s,
+                        projection_pending_hash = %s,
+                        updated_at = NOW()
+                    WHERE user_name = %s AND project_id = %s
+                    """,
+                    (revision_id, projection_hash, user_name, project_id),
+                )
+                return True
+        except PsycopgError as exc:
+            raise StorageWriteError(
+                "record_stale_context_projection",
+                details={"error_type": type(exc).__name__},
+            ) from exc
+
+    async def record_projection_failure(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        revision_id: UUID | str | None,
+        failure_code: str,
+        failure_summary: str,
+    ) -> bool:
+        """Persist one bounded projection diagnostic for the current revision."""
+
+        user_name = require_scope_value(
+            user_name, "user_name", "record_context_projection_failure"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "record_context_projection_failure"
+        )
+        revision_id = self._optional_uuid(revision_id, "revision_id")
+        failure_code = self._text(failure_code, "failure_code")[:120]
+        failure_summary = self._text(failure_summary, "failure_summary")[:2_000]
+        try:
+            async with self.client.transaction() as cur:
+                await cur.execute(
+                    """
+                    UPDATE public.project_contexts
+                    SET projection_failure_code = %s,
+                        projection_failure_summary = %s,
+                        projection_failure_at = NOW(),
+                        updated_at = NOW()
+                    WHERE user_name = %s
+                      AND project_id = %s
+                      AND current_revision_id IS NOT DISTINCT FROM %s
+                    RETURNING project_id
+                    """,
+                    (
+                        failure_code,
+                        failure_summary,
+                        user_name,
+                        project_id,
+                        revision_id,
+                    ),
+                )
+                return await cur.fetchone() is not None
+        except PsycopgError as exc:
+            raise StorageWriteError(
+                "record_context_projection_failure",
                 details={"error_type": type(exc).__name__},
             ) from exc
 
@@ -363,7 +527,11 @@ class ProjectContextWriter:
         )
         await cur.execute(
             """
-            SELECT context.current_revision_id, revision.revision_number
+            SELECT
+                context.current_revision_id,
+                context.projection_hash,
+                context.projection_revision_id,
+                revision.revision_number
             FROM public.project_contexts AS context
             LEFT JOIN public.project_context_revisions AS revision
               ON revision.revision_id = context.current_revision_id
@@ -660,3 +828,17 @@ class ProjectContextWriter:
     @classmethod
     def _optional_uuid(cls, value: UUID | str | None, field: str) -> UUID | None:
         return None if value is None else cls._uuid(value, field)
+
+    @staticmethod
+    def _is_hash(value: str) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value)
+        )
+
+    @staticmethod
+    def _text(value: str, field: str) -> str:
+        if not isinstance(value, str) or not (normalized := value.strip()):
+            raise ValueError(f"{field} must be non-blank text")
+        return normalized

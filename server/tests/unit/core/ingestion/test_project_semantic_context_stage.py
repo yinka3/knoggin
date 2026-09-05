@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -19,9 +20,11 @@ from common.schema.semantic_window import (
 from common.schema.settings import IngestionSettings
 from core.ingestion.project_semantic_job import ProjectSemanticJob
 from core.knowledge.context.models import ContextRevisionConflictError
+from core.knowledge.context.projection import ContextProjectionResult
 from core.knowledge.context.render import apply_context_edits, context_block_hash
 from core.knowledge.context.updater import ContextUpdateResult
 from infrastructure.job.base import JobContext
+from infrastructure.job.scheduler import Scheduler
 
 
 def _domain():
@@ -208,10 +211,44 @@ class _NoopUpdater(_Updater):
 class _FailingProjection:
     def __init__(self):
         self.calls = 0
+        self.failures = []
 
-    async def reconcile(self, **_kwargs):
+    async def synchronize(self, **_kwargs):
         self.calls += 1
         raise OSError("local projection temporarily unavailable")
+
+    async def record_sync_failure(self, **kwargs):
+        self.failures.append(kwargs)
+
+
+class _IdleAdmission:
+    def update_settings(self, _settings):
+        pass
+
+    async def select(self, **_kwargs):
+        return None
+
+    async def claim_next(self, **_kwargs):
+        return None
+
+
+class _IdleStore:
+    async def get_active_project_semantic_window(self, **_kwargs):
+        return None
+
+
+class _RecordingProjection:
+    def __init__(self):
+        self.called = asyncio.Event()
+        self.allow_user_edit = None
+
+    async def synchronize(self, **kwargs):
+        self.allow_user_edit = kwargs["allow_user_edit"]
+        self.called.set()
+        return ContextProjectionResult(snapshot=None, changed=False)
+
+    async def record_sync_failure(self, **_kwargs):
+        raise AssertionError("the idle synchronization should not fail")
 
 
 def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
@@ -248,6 +285,35 @@ async def test_context_stage_commits_then_checkpoints_even_if_file_projection_ne
     assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
     assert store.window.context_revision_id == store.current_snapshot.revision_id
     assert projection.calls == 1
+    assert projection.failures[0]["exc"].args == ("local projection temporarily unavailable",)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
+    projection = _RecordingProjection()
+
+    async def capture_domain():
+        return _domain()
+
+    job = ProjectSemanticJob(
+        _IdleAdmission(),
+        _IdleStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_projection=projection,
+    )
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.register(job)
+
+    await scheduler.start()
+    try:
+        await asyncio.wait_for(projection.called.wait(), timeout=1)
+    finally:
+        await scheduler.stop()
+
+    assert projection.allow_user_edit is True
 
 
 @pytest.mark.unit

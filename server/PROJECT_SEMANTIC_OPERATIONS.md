@@ -17,9 +17,9 @@ stage for that project:
 | Admission | `SemanticWindowAdmission` plus `SemanticWindowWriter` | one frozen window, its exact message membership, domain/policy snapshots, and token accounting |
 | Episode | `ProjectSemanticJob` | the Episode result, including an explicit empty result |
 | Context | `ProjectSemanticJob` and `ProjectContextWriter` | immutable Context revision and `context_revision_id` stage checkpoint |
-| File projection | `ContextProjection` | a best-effort `CONTEXT.md` projection of the committed PostgreSQL revision |
+| File projection/import | `ProjectSemanticJob` through `ContextProjection` | controlled local edit import or repair of the committed PostgreSQL revision |
 | VP-01 / VP-02 and Knowledge | `ProjectSemanticJob` plus `SemanticCommitWriter` | atomic entity/relationship reconciliation and `knowledge_committed` |
-| Finalization | `ProjectSemanticJob` | Episode enrichment, terminal `completed`, then separately retryable maintenance |
+| Finalization | `ProjectSemanticJob` | idempotent Episode enrichment, then terminal `completed` |
 
 There is no message-local semantic worker or message-local checkpoint path.
 Window membership makes message records immutable evidence for that window;
@@ -32,6 +32,14 @@ The job always reads the active durable window before considering admission. A
 restart therefore resumes its recorded stage and never selects its messages
 again. If the Context revision was committed before a process or projection
 failure, that revision is reused; the Context model is not called again.
+
+`ProjectRuntimeFactory` performs Context-file synchronization before starting
+the project scheduler. The same sole semantic job synchronizes before it admits
+a conversation window and on its 30-second scheduler cadence. A valid edit
+based on the current generated projection creates exactly one `human_edit`
+window; a missing or known-stale projection is regenerated from PostgreSQL. A
+malformed, stale, or concurrently changed file is preserved and recorded as a
+bounded projection diagnostic rather than overwritten.
 
 Automatic retries use `developer_settings.ingestion.semantic_window_retry`:
 `max_attempts` (default 3), `initial_backoff_seconds` (default 30), and
@@ -57,6 +65,8 @@ Project Context is the evolving, revisioned semantic state. PostgreSQL Context
 revisions are canonical. `CONTEXT.md` is an editable local projection: a
 structured human edit produces a human-authored revision and a reconciliation
 window; a missing or known-stale generated file is repaired from PostgreSQL.
+Generic Agent and document tools cannot read, edit, or index it. Context
+synchronization never treats its own generated file as a new user edit.
 Only source-grounded, user-asserted, and human-asserted Context blocks enter
 Knowledge. Agent-derived blocks still render in Project Context but are not
 entity or relationship input.

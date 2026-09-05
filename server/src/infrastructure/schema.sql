@@ -622,11 +622,19 @@ CREATE TABLE public.project_contexts (
     project_id text NOT NULL,
     user_name text NOT NULL,
     current_revision_id uuid,
+    projection_revision_id uuid,
     projection_hash text,
+    projection_pending_revision_id uuid,
+    projection_pending_hash text,
+    projection_failure_code text,
+    projection_failure_summary text,
+    projection_failure_at timestamp with time zone,
     projection_synced_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT project_contexts_projection_hash_check CHECK (((projection_hash IS NULL) OR (projection_hash ~ '^[0-9a-f]{64}$'::text)))
+    CONSTRAINT project_contexts_projection_failure_shape_check CHECK (((projection_failure_code IS NULL) = (projection_failure_summary IS NULL))),
+    CONSTRAINT project_contexts_projection_hash_check CHECK (((projection_hash IS NULL) OR (projection_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT project_contexts_projection_pending_hash_check CHECK (((projection_pending_hash IS NULL) OR (projection_pending_hash ~ '^[0-9a-f]{64}$'::text)))
 );
 CREATE TABLE public.project_semantic_windows (
     window_id uuid NOT NULL,
@@ -674,19 +682,6 @@ CREATE TABLE public.project_semantic_window_messages (
     CONSTRAINT project_semantic_window_messages_exchange_message_check CHECK ((exchange_user_message_id > 0)),
     CONSTRAINT project_semantic_window_messages_ordinal_check CHECK ((ordinal >= 0)),
     CONSTRAINT project_semantic_window_messages_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text])))
-);
-CREATE TABLE public.project_semantic_window_maintenance (
-    window_id uuid NOT NULL,
-    project_id text NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL,
-    attempt_count integer DEFAULT 0 NOT NULL,
-    last_error text,
-    enqueued_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
-    CONSTRAINT project_semantic_window_maintenance_attempt_count_check CHECK ((attempt_count >= 0)),
-    CONSTRAINT project_semantic_window_maintenance_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'completed'::text]))),
-    CONSTRAINT project_semantic_window_maintenance_terminal_shape_check CHECK ((((status = 'completed'::text) AND (completed_at IS NOT NULL)) OR ((status = 'pending'::text) AND (completed_at IS NULL))))
 );
 CREATE TABLE public.project_semantic_window_episodes (
     window_id uuid NOT NULL,
@@ -1001,8 +996,6 @@ ALTER TABLE ONLY public.project_semantic_window_messages
     ADD CONSTRAINT project_semantic_window_messages_message_key UNIQUE (message_id);
 ALTER TABLE ONLY public.project_semantic_window_messages
     ADD CONSTRAINT project_semantic_window_messages_ordinal_key UNIQUE (window_id, ordinal);
-ALTER TABLE ONLY public.project_semantic_window_maintenance
-    ADD CONSTRAINT project_semantic_window_maintenance_pkey PRIMARY KEY (window_id);
 ALTER TABLE ONLY public.project_semantic_window_episodes
     ADD CONSTRAINT project_semantic_window_episodes_pkey PRIMARY KEY (window_id, episode_id);
 ALTER TABLE ONLY public.project_semantic_window_episodes
@@ -1080,7 +1073,6 @@ CREATE UNIQUE INDEX project_context_block_supports_with_source_unique_idx ON pub
 CREATE UNIQUE INDEX messages_one_assistant_per_exchange_idx ON public.messages USING btree (user_name, project_id, session_id, user_msg_id) WHERE (role = 'assistant'::text);
 CREATE INDEX project_context_revisions_project_created_idx ON public.project_context_revisions USING btree (project_id, revision_number DESC);
 CREATE INDEX project_semantic_window_messages_window_ordinal_idx ON public.project_semantic_window_messages USING btree (window_id, ordinal);
-CREATE INDEX project_semantic_window_maintenance_pending_idx ON public.project_semantic_window_maintenance USING btree (project_id, updated_at) WHERE (status = 'pending'::text);
 CREATE INDEX project_semantic_window_episodes_window_ordinal_idx ON public.project_semantic_window_episodes USING btree (window_id, ordinal);
 CREATE UNIQUE INDEX project_semantic_windows_one_active_per_project_idx ON public.project_semantic_windows USING btree (project_id) WHERE (stage <> 'completed'::text);
 CREATE INDEX project_semantic_windows_retry_idx ON public.project_semantic_windows USING btree (project_id, next_retry_at_ms) WHERE (stage <> 'completed'::text);
@@ -1174,6 +1166,10 @@ ALTER TABLE ONLY public.project_contexts
     ADD CONSTRAINT project_contexts_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_contexts
     ADD CONSTRAINT project_contexts_current_revision_scope_fk FOREIGN KEY (current_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (current_revision_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_projection_revision_scope_fk FOREIGN KEY (projection_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (projection_revision_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_projection_pending_revision_scope_fk FOREIGN KEY (projection_pending_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (projection_pending_revision_id);
 ALTER TABLE ONLY public.project_context_revisions
     ADD CONSTRAINT project_context_revisions_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_context_revisions
@@ -1212,8 +1208,6 @@ ALTER TABLE ONLY public.project_semantic_window_messages
     ADD CONSTRAINT project_semantic_window_messages_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_semantic_window_messages
     ADD CONSTRAINT project_semantic_window_messages_exchange_scope_fk FOREIGN KEY (exchange_user_message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE RESTRICT;
-ALTER TABLE ONLY public.project_semantic_window_maintenance
-    ADD CONSTRAINT project_semantic_window_maintenance_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_semantic_window_episodes
     ADD CONSTRAINT project_semantic_window_episodes_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_semantic_window_episodes

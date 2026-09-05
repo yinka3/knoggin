@@ -283,42 +283,6 @@ async def test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_suppor
         expected_stage=SemanticWindowStage.KNOWLEDGE_COMMITTED,
         next_stage=SemanticWindowStage.COMPLETED,
     )
-    assert await window_writer.enqueue_maintenance(
-        window_id=first_window.window_id,
-        user_name="ada",
-        project_id="project-1",
-    )
-    await window_writer.record_maintenance_failure(
-        window_id=first_window.window_id,
-        user_name="ada",
-        project_id="project-1",
-        error_summary="maintenance unavailable",
-    )
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT status, attempt_count, last_error
-        FROM public.project_semantic_window_maintenance
-        WHERE window_id = %s
-        """,
-        (first_window.window_id,),
-    ) == {
-        "status": "pending",
-        "attempt_count": 1,
-        "last_error": "maintenance unavailable",
-    }
-    await window_writer.complete_maintenance(
-        window_id=first_window.window_id,
-        user_name="ada",
-        project_id="project-1",
-    )
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT status, last_error
-        FROM public.project_semantic_window_maintenance
-        WHERE window_id = %s
-        """,
-        (first_window.window_id,),
-    ) == {"status": "completed", "last_error": None}
     old_observation = await real_postgres_client.fetch_one(
         """
         SELECT observation_id, relationship_id

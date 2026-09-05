@@ -22,7 +22,7 @@ from core.ingestion.policy import IngestionPolicy
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.knowledge.context.models import ContextMaterialization
-from core.knowledge.context.projection import ContextProjection
+from core.knowledge.context.projection import ContextProjection, ContextProjectionResult
 from core.knowledge.context.render import context_document_hash
 from core.knowledge.context.updater import ContextUpdater
 from core.knowledge.episodes.generator import EpisodeGenerator
@@ -109,18 +109,6 @@ class SemanticEpisodeStore(Protocol):
         self, *, window_id: str, user_name: str, project_id: str
     ) -> dict[str, int]: ...
 
-    async def enqueue_project_semantic_window_maintenance(
-        self, *, window_id: str, user_name: str, project_id: str
-    ) -> bool: ...
-
-    async def record_project_semantic_window_maintenance_failure(
-        self, *, window_id: str, user_name: str, project_id: str, error_summary: str
-    ) -> None: ...
-
-    async def complete_project_semantic_window_maintenance(
-        self, *, window_id: str, user_name: str, project_id: str
-    ) -> None: ...
-
     async def record_project_semantic_window_failure(
         self,
         *,
@@ -144,6 +132,8 @@ class ProjectSemanticJob(BaseJob):
     """
 
     enabled = True
+    cadence_seconds = 30
+    run_immediately_on_first_check = True
 
     def __init__(
         self,
@@ -158,18 +148,12 @@ class ProjectSemanticJob(BaseJob):
         context_projection: ContextProjection | None = None,
         context_entity_builder: ContextEntityBuildService | None = None,
         context_relationship_extractor: ContextRelationshipExtractor | None = None,
-        post_completion_maintenance: Callable[[SemanticWindowRecord], Awaitable[None]]
-        | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not callable(capture_domain):
             raise TypeError("ProjectSemanticJob requires a domain snapshot callback")
         if capture_ingestion_policy is not None and not callable(capture_ingestion_policy):
             raise TypeError("capture_ingestion_policy must be callable")
-        if post_completion_maintenance is not None and not callable(
-            post_completion_maintenance
-        ):
-            raise TypeError("post_completion_maintenance must be callable")
         if not isinstance(settings, IngestionSettings):
             raise TypeError("ProjectSemanticJob requires IngestionSettings")
         self.admission = admission
@@ -179,7 +163,6 @@ class ProjectSemanticJob(BaseJob):
         self._context_projection = context_projection
         self._context_entity_builder = context_entity_builder
         self._context_relationship_extractor = context_relationship_extractor
-        self._post_completion_maintenance = post_completion_maintenance
         self._capture_domain = capture_domain
         self._capture_ingestion_policy = capture_ingestion_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
@@ -226,6 +209,14 @@ class ProjectSemanticJob(BaseJob):
             project_id=ctx.project_id,
         )
         if window is None:
+            await self.synchronize_context_file(ctx, allow_user_edit=True)
+            window = await self.knowledge_store.get_active_project_semantic_window(
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+            )
+        elif window.stage is not SemanticWindowStage.CLAIMED:
+            await self.synchronize_context_file(ctx, allow_user_edit=False)
+        if window is None:
             domain = await self._capture_domain()
             ingestion_policy = (
                 None
@@ -250,6 +241,32 @@ class ProjectSemanticJob(BaseJob):
         if self._finalization_is_due(window):
             return await self._execute_finalization_stage(window, ctx)
         return JobResult(success=True, summary="No semantic window stage is due")
+
+    async def synchronize_context_file(
+        self,
+        ctx: JobContext,
+        *,
+        allow_user_edit: bool,
+    ) -> ContextProjectionResult | None:
+        """Run the sole project-owned Context file synchronization boundary."""
+
+        if self._context_projection is None:
+            return None
+        try:
+            return await self._context_projection.synchronize(
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                domain=await self._capture_domain(),
+                allow_user_edit=allow_user_edit,
+            )
+        except Exception as exc:
+            await self._context_projection.record_sync_failure(
+                user_name=ctx.user_name,
+                project_id=ctx.project_id,
+                exc=exc,
+            )
+            logger.warning("Context file synchronization is pending repair: {}", exc)
+            return None
 
     async def _execute_episode_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
@@ -570,7 +587,6 @@ class ProjectSemanticJob(BaseJob):
                 )
                 if current is not None:
                     raise RuntimeError("Semantic completion checkpoint changed unexpectedly")
-            await self._record_post_completion_maintenance(window, ctx)
             return JobResult(
                 success=True,
                 summary=(
@@ -587,47 +603,6 @@ class ProjectSemanticJob(BaseJob):
                 failure_stage="episode_enrichment",
             )
             return JobResult(success=False, summary="Semantic finalization stage failed")
-
-    async def _record_post_completion_maintenance(
-        self, window: SemanticWindowRecord, ctx: JobContext
-    ) -> None:
-        """Queue independent maintenance only after semantic completion is durable."""
-
-        try:
-            await self.knowledge_store.enqueue_project_semantic_window_maintenance(
-                window_id=str(window.window_id),
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
-        except Exception as exc:
-            # Completion is terminal. A later maintenance pass can enqueue the
-            # work without replaying Context, VP-02, or Knowledge reconciliation.
-            logger.warning("Post-completion maintenance enqueue is pending repair: {}", exc)
-            return
-        if self._post_completion_maintenance is None:
-            return
-        try:
-            await self._post_completion_maintenance(window)
-        except Exception as exc:
-            logger.warning("Post-completion maintenance failed: {}", exc)
-            try:
-                await self.knowledge_store.record_project_semantic_window_maintenance_failure(
-                    window_id=str(window.window_id),
-                    user_name=ctx.user_name,
-                    project_id=ctx.project_id,
-                    error_summary=str(exc)[:2_000] or type(exc).__name__,
-                )
-            except Exception as record_exc:
-                logger.warning("Maintenance failure record is pending repair: {}", record_exc)
-            return
-        try:
-            await self.knowledge_store.complete_project_semantic_window_maintenance(
-                window_id=str(window.window_id),
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
-        except Exception as exc:
-            logger.warning("Maintenance completion record is pending repair: {}", exc)
 
     @staticmethod
     def _frozen_domain(window: SemanticWindowRecord) -> CompiledDomain:
@@ -665,16 +640,7 @@ class ProjectSemanticJob(BaseJob):
                 raise RuntimeError("Context checkpoint changed before it could be recorded")
         if self._context_projection is None:
             return
-        try:
-            await self._context_projection.reconcile(
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-                domain=self._frozen_domain(window),
-            )
-        except Exception as exc:
-            # The DB revision is canonical. A later reconciliation repairs a
-            # missing/stale file without replaying the Context model call.
-            logger.warning("Context projection is pending repair: {}", exc)
+        await self.synchronize_context_file(ctx, allow_user_edit=False)
 
     async def _record_failure(
         self,

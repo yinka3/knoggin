@@ -1,7 +1,6 @@
 """Context-first VP-01, entity-resolution, and shadow-evaluation contracts."""
 
 import re
-from dataclasses import asdict
 from uuid import uuid4
 
 import pytest
@@ -25,7 +24,6 @@ from common.schema.settings import EntityResolutionSettings, TextProcessorSettin
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.context_entity_build import (
     ContextEntityBuildService,
-    ContextEntityShadowEvaluator,
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.text_processor import TextProcessor
@@ -500,40 +498,6 @@ async def test_context_result_keeps_block_associations_separate_from_message_ref
         (11, 701)
     ]
     assert result.pending_entity_writes[701].canonical_name == "Acme Labs"
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
-async def test_shadow_evaluation_reads_finished_results_without_mutating_knowledge():
-    compiled_domain = domain()
-    current = block("Acme is selected.")
-    semantic_build = build(
-        blocks=(current,),
-        compiled_domain=compiled_domain,
-        supports={current.block_id: (support(current.block_id, 11),)},
-        message_texts={11: "Acme is selected."},
-    )
-    vp01 = FakeVP01(
-        [VP01EntitySpan(text="Acme", label="company", start=0, end=4)]
-    )
-
-    async def allocate():
-        return 701
-
-    await ContextEntityBuildService(
-        processor=processor(vp01),
-        resolver=resolver(),
-        allocate_entity_id=allocate,
-    ).build(semantic_build)
-    trace = ContextEntityShadowEvaluator().compare(
-        semantic_build,
-        legacy_mentions=[(11, "Acme", "Company", "Work")],
-        legacy_entity_ids=[88],
-    )
-
-    assert trace.context_entity_ids == (701,)
-    assert trace.legacy_entity_ids == (88,)
-    assert "Acme" not in repr(asdict(trace))
 
 
 @pytest.mark.unit

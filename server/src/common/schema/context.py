@@ -155,10 +155,18 @@ class ContextProjectionState(ConfigModel):
 
     project_id: str = Field(min_length=1)
     current_revision_id: UUID | None = None
+    projection_revision_id: UUID | None = None
     projection_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    projection_pending_revision_id: UUID | None = None
+    projection_pending_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    projection_failure_code: str | None = Field(default=None, max_length=120)
+    projection_failure_summary: str | None = Field(default=None, max_length=2_000)
 
 
 class ContextEditBase(ConfigModel):

@@ -338,10 +338,9 @@ class EntityResolver:
     ) -> Dict[str, Any]:
         """Resolve typed Context-block mentions without manufacturing message refs.
 
-        The old message-local resolver remains only for the still-authoritative
-        legacy pipeline until Batch 8.  Context-first callers use this boundary:
-        block associations are returned independently, and literal message
-        evidence is deliberately left to the result assembler.
+        Context-first callers use this boundary: block associations are returned
+        independently, and literal message evidence is deliberately left to the
+        result assembler.
         """
 
         if any(not isinstance(mention, ContextBlockMention) for mention in mentions):

@@ -608,6 +608,24 @@ async def test_context_scope_snapshot_and_project_deletion_cascade(real_postgres
     with pytest.raises(ForeignKeyViolation):
         await real_postgres_client.execute(
             """
+            UPDATE public.project_contexts
+            SET projection_revision_id = %s
+            WHERE project_id = 'project-1' AND user_name = 'ada'
+            """,
+            (project_two_revision_id,),
+        )
+    with pytest.raises(ForeignKeyViolation):
+        await real_postgres_client.execute(
+            """
+            UPDATE public.project_contexts
+            SET projection_pending_revision_id = %s
+            WHERE project_id = 'project-1' AND user_name = 'ada'
+            """,
+            (project_two_revision_id,),
+        )
+    with pytest.raises(ForeignKeyViolation):
+        await real_postgres_client.execute(
+            """
             INSERT INTO public.project_context_revision_blocks (
                 revision_id, project_id, block_id, ordinal
             ) VALUES (%s, 'project-2', %s, 0)
@@ -754,6 +772,81 @@ async def test_context_revision_writer_serializes_children_and_rejects_invalid_s
     assert (
         await reader.get_current_revision(user_name="ada", project_id="project-1")
     ).revision_id == current.revision_id
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_stale_projection_checkpoint_keeps_the_newest_written_revision(
+    real_postgres_client,
+):
+    """An older racing projection cannot hide a newer safely-stale file."""
+
+    await _seed_messages(real_postgres_client)
+    writer = ProjectContextWriter(real_postgres_client)
+    reader = ProjectContextReader(real_postgres_client)
+    initial_block = _context_block("Initial Context.")
+    initial = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Initial Context",
+        materialization=_materialization(initial_block),
+    )
+    assert await writer.record_projection(
+        user_name="ada",
+        project_id="project-1",
+        revision_id=initial.revision_id,
+        projection_hash="1" * 64,
+    )
+
+    async def commit_child(parent, markdown: str):
+        block = _context_block(markdown)
+        return await writer.commit_revision(
+            user_name="ada",
+            project_id="project-1",
+            expected_parent_revision_id=parent.revision_id,
+            window_id=None,
+            origin=ContextRevisionOrigin.CONVERSATION,
+            domain_version=1,
+            edit_summary="Later Context",
+            materialization=ContextMaterialization(
+                blocks=(*parent.blocks, block),
+                content_hash=context_document_hash((*parent.blocks, block), _domain()),
+                new_block_ids=frozenset({block.block_id}),
+            ),
+        )
+
+    second = await commit_child(initial, "Second Context.")
+    third = await commit_child(second, "Third Context.")
+    await commit_child(third, "Fourth Context.")
+
+    assert await writer.record_stale_projection(
+        user_name="ada",
+        project_id="project-1",
+        revision_id=second.revision_id,
+        projection_hash="2" * 64,
+    )
+    assert await writer.record_stale_projection(
+        user_name="ada",
+        project_id="project-1",
+        revision_id=third.revision_id,
+        projection_hash="3" * 64,
+    )
+    assert await writer.record_stale_projection(
+        user_name="ada",
+        project_id="project-1",
+        revision_id=second.revision_id,
+        projection_hash="2" * 64,
+    )
+
+    state = await reader.get_projection_state(user_name="ada", project_id="project-1")
+    assert state is not None
+    assert state.projection_pending_revision_id == third.revision_id
+    assert state.projection_pending_hash == "3" * 64
 
 
 @pytest.mark.storage
@@ -1035,6 +1128,31 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
     assert current.revision_number == 2
     assert current.parent_revision_id == initial.revision_id
     assert filesystem.read_bytes("CONTEXT.md") != previous_file
+    failed_state = await reader.get_projection_state(user_name="ada", project_id="project-1")
+    assert failed_state is not None
+    assert failed_state.projection_failure_code == "OSError"
+    assert failed_state.projection_pending_hash == hashlib.sha256(
+        filesystem.read_bytes("CONTEXT.md")
+    ).hexdigest()
+
+    repaired = await ContextProjection(
+        reader=reader,
+        writer=writer,
+        filesystem=filesystem,
+    ).synchronize(
+        user_name="ada",
+        project_id="project-1",
+        domain=_domain(),
+        allow_user_edit=False,
+    )
+    assert repaired.changed
+    repaired_state = await reader.get_projection_state(
+        user_name="ada", project_id="project-1"
+    )
+    assert repaired_state is not None
+    assert repaired_state.projection_revision_id == current.revision_id
+    assert repaired_state.projection_pending_hash is None
+    assert repaired_state.projection_failure_code is None
 
 
 @pytest.mark.storage

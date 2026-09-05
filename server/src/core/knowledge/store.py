@@ -463,34 +463,6 @@ class KnowledgeStore:
 
         return await self._semantic_commit_writer.commit(build)
 
-    async def enqueue_project_semantic_window_maintenance(
-        self, *, window_id: str, user_name: str, project_id: str
-    ) -> bool:
-        return await self._semantic_window_writer.enqueue_maintenance(
-            window_id=window_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def record_project_semantic_window_maintenance_failure(
-        self, *, window_id: str, user_name: str, project_id: str, error_summary: str
-    ) -> None:
-        await self._semantic_window_writer.record_maintenance_failure(
-            window_id=window_id,
-            user_name=user_name,
-            project_id=project_id,
-            error_summary=error_summary,
-        )
-
-    async def complete_project_semantic_window_maintenance(
-        self, *, window_id: str, user_name: str, project_id: str
-    ) -> None:
-        await self._semantic_window_writer.complete_maintenance(
-            window_id=window_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
     async def get_active_context_relationship_supports(
         self,
         relationship_id: str,

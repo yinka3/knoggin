@@ -63,7 +63,15 @@ class ProjectContextReader:
         user_name, project_id = self._scope(user_name, project_id, "get_projection_state")
         row = await self.client.fetch_one(
             """
-            SELECT project_id, current_revision_id, projection_hash
+            SELECT
+                project_id,
+                current_revision_id,
+                projection_revision_id,
+                projection_hash,
+                projection_pending_revision_id,
+                projection_pending_hash,
+                projection_failure_code,
+                projection_failure_summary
             FROM public.project_contexts
             WHERE user_name = %s AND project_id = %s
             """,

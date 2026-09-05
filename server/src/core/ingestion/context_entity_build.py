@@ -1,11 +1,9 @@
-"""Assembly and non-writing comparison for Context-first entity extraction."""
+"""Assembly for Context-first entity extraction."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from uuid import UUID
+from collections.abc import Mapping
 
 from common.schema.ingestion.contracts import (
     ContextEntityResult,
@@ -111,52 +109,3 @@ class ContextEntityBuildService:
             issues=semantic_build.issues,
         )
         return assemble_context_entity_result(semantic_build, resolution)
-
-
-@dataclass(frozen=True, slots=True)
-class ContextEntityShadowTrace:
-    """Temporary comparison output containing identifiers and counts only."""
-
-    window_id: UUID
-    context_revision_id: UUID
-    context_candidate_count: int
-    legacy_candidate_count: int
-    context_entity_ids: tuple[int, ...]
-    legacy_entity_ids: tuple[int, ...]
-    context_block_association_count: int
-    context_message_ref_count: int
-
-
-class ContextEntityShadowEvaluator:
-    """Compare frozen outputs only; it has no storage or allocator dependency."""
-
-    def compare(
-        self,
-        build: SemanticWindowBuild,
-        *,
-        legacy_mentions: Iterable[object],
-        legacy_entity_ids: Iterable[int],
-    ) -> ContextEntityShadowTrace:
-        if not isinstance(build, SemanticWindowBuild):
-            raise TypeError("Context shadow evaluation requires a SemanticWindowBuild")
-        if build.entity_result is None:
-            raise ValueError("Context shadow evaluation requires an assembled entity result")
-        legacy_mentions = tuple(legacy_mentions)
-        legacy_entity_ids = tuple(legacy_entity_ids)
-        if any(
-            not isinstance(entity_id, int) or isinstance(entity_id, bool) or entity_id <= 0
-            for entity_id in legacy_entity_ids
-        ):
-            raise ValueError("Legacy shadow entity IDs must be positive integers")
-        return ContextEntityShadowTrace(
-            window_id=build.window_id,
-            context_revision_id=build.context.revision_id,
-            context_candidate_count=len(build.mentions),
-            legacy_candidate_count=len(legacy_mentions),
-            context_entity_ids=build.entity_result.entity_ids,
-            legacy_entity_ids=legacy_entity_ids,
-            context_block_association_count=len(
-                build.entity_result.block_entity_associations
-            ),
-            context_message_ref_count=len(build.entity_result.message_entity_refs),
-        )

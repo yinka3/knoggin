@@ -110,9 +110,6 @@ class _Store:
         )
         self.commit_calls = []
         self.enrich_calls = 0
-        self.enqueued = []
-        self.maintenance_failures = []
-        self.maintenance_completed = []
         self.fail_commit = False
         self.fail_enrichment = False
         self.failures = []
@@ -166,16 +163,6 @@ class _Store:
         )
         return True
 
-    async def enqueue_project_semantic_window_maintenance(self, **kwargs):
-        self.enqueued.append(kwargs)
-        return True
-
-    async def record_project_semantic_window_maintenance_failure(self, **kwargs):
-        self.maintenance_failures.append(kwargs)
-
-    async def complete_project_semantic_window_maintenance(self, **kwargs):
-        self.maintenance_completed.append(kwargs)
-
     async def record_project_semantic_window_failure(self, **kwargs):
         self.failures.append(kwargs)
         self.window = self.window.model_validate(
@@ -204,11 +191,8 @@ class _FailingRelationships:
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_knowledge_commit_precedes_episode_enrichment_and_maintenance_failure_is_separate():
+async def test_knowledge_commit_precedes_episode_enrichment_and_completes_terminally():
     store = _Store()
-
-    async def failed_maintenance(_window):
-        raise OSError("maintenance unavailable")
 
     async def capture_domain():
         return _domain()
@@ -221,7 +205,6 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_maintenance_fail
         capture_domain=capture_domain,
         context_entity_builder=_Builder(),
         context_relationship_extractor=_Relationships(),
-        post_completion_maintenance=failed_maintenance,
     )
     ctx = JobContext(user_name="ada", project_id="project-1")
 
@@ -233,9 +216,6 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_maintenance_fail
     assert len(store.commit_calls) == 1
     assert store.enrich_calls == 1
     assert store.window.stage is SemanticWindowStage.COMPLETED
-    assert len(store.enqueued) == 1
-    assert len(store.maintenance_failures) == 1
-    assert store.maintenance_completed == []
 
 
 @pytest.mark.unit
@@ -305,4 +285,3 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
     assert result.success is False
     assert store.window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
     assert store.failures[0]["failure_stage"] == "episode_enrichment"
-    assert store.enqueued == []

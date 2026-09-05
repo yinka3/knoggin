@@ -13,8 +13,9 @@ Implementation progress:
   Context/window storage ports are in place and covered by focused real
   PostgreSQL contracts.
 - Batch 2 — complete: deterministic Context materialization, atomic revision
-  publication, controlled `CONTEXT.md` projection/import, and document/workspace
-  reservation are in place and covered by focused unit and PostgreSQL contracts.
+  publication, controlled `CONTEXT.md` projection/import, and
+  document/workspace reservation are in place. Batch 11 assigned the existing
+  project semantic owner the missing import and projection-repair lifecycle.
 - Batch 3 — complete: assistant/user exchanges now close durably and
   idempotently; whole exchanges are admitted into frozen project windows under
   the configurable 128K policy; and a disabled project semantic job owns the
@@ -35,23 +36,39 @@ Implementation progress:
   GLiNER2.5 receives only typed domain labels/descriptions; evidence and exact
   policy state reload durably, but no live Knowledge mutation occurs until
   Batch 7's single reconciliation transaction.
-- Batch 7 — complete: Context-native VP-02 now uses only configured LLM calls
+- Batch 7 — complete:
+  Context-native VP-02 now uses only configured LLM calls
   over current eligible block versions. One atomic reconciliation transaction
   validates the frozen window/revision, retracts stale block-backed evidence,
   updates SQL and AGE graph state, and advances `context_committed` to
-  `knowledge_committed`. Episode enrichment, completion, and separately
-  retryable maintenance recording are durable. The semantic runtime remains
-  disabled until Batch 8 cutover.
+  `knowledge_committed`. Episode enrichment and completion are durable. The
+  semantic-window maintenance row/callback had no production consumer and was
+  removed in Batch 11. The semantic runtime remains disabled until Batch 8
+  cutover.
 - Batch 8 — complete: Agent reads the committed database Context directly;
   the enabled project semantic job is the sole normal owner; and the old
   per-session message-local worker, claims, checkpoints, and provenance shape
   are deleted.
-- Batch 9 — complete: routine Context replacement now retires evidence with an
+- Batch 9 — implementation and production-checkpoint smoke benchmark complete:
+  routine Context replacement now retires evidence with an
   audit rather than a review and retired evidence cannot seed conflict
   discovery. Runtime uses the blank spaCy English tokenizer for alias matching,
   without downloading or loading `en_core_web_md`. The GLiNER2.5-only VP-01
   benchmark has frozen Context fixtures, quality/resource gates, and no
-  fallback path; VP-02 remains LLM-only. Batch 10 remains pending.
+  fallback path; VP-02 remains LLM-only. The production English checkpoint was
+  loaded and measured on CPU at the production `0.85` threshold on 2026-09-05.
+  Broader representative-corpus quality evaluation remains a release gate
+  because the frozen smoke set contains only three cases.
+- Batch 10 — complete with its Batch 11 repair record: recovery/provenance
+  coverage now identifies the real PostgreSQL contracts separately from the
+  production-job composition test; it makes no claim that a fake store proves
+  storage behavior.
+- Batch 11 — implementation complete; final PostgreSQL revalidation is blocked
+  by the current Codex execution limit. The project semantic job now owns Context-file
+  synchronization, the unused semantic-maintenance queue and shadow scaffolding
+  are deleted, and real PostgreSQL composition covers controlled edit import and
+  projection recovery. The final record below distinguishes previously-passed
+  real-storage coverage from the two new assertions that still need that rerun.
 
 This document supersedes the earlier exploratory version. Choices described as
 **locked** are the target behavior. Explicit exclusions are outside this
@@ -1393,10 +1410,10 @@ Acceptance:
   message supporting a cited block contains the resolved mention literally;
   broad Context support cannot fan an entity out to unrelated messages.
 - **6.3:** Entity/alias writes, block associations, and validated message refs
-  assemble in memory as `ContextEntityResult`. The shadow evaluator accepts
-  already-finished Context and legacy outputs and emits only IDs and counts;
-  it has no store, writer, or allocator dependency. Batch 7 remains the sole
-  owner of live Knowledge reconciliation and stage advancement.
+  assemble in memory as `ContextEntityResult`. The temporary shadow evaluator
+  was removed in Batch 11 because Batch 8 deleted the compared legacy path.
+  Batch 7 remains the sole owner of live Knowledge reconciliation and stage
+  advancement.
 
 Validation completed:
 
@@ -1526,13 +1543,14 @@ Acceptance:
   rebuilds the AGE projection in that transaction; and checkpoints
   `knowledge_committed` idempotently.
 - Episode enrichment runs only after that checkpoint and is idempotent by
-  window/Episode identity. A window with zero Episodes still completes. After
-  completion, `project_semantic_window_maintenance` records an independent
-  pending item; a maintenance failure updates that item without reopening or
-  rolling back the semantic window.
-- Validation passed: 60 focused unit tests; 15 fresh-schema PostgreSQL Context,
-  semantic-commit, retraction, rollback, and maintenance-contract tests; plus
-  touched-path Ruff, compilation, and whitespace checks.
+  window/Episode identity. A window with zero Episodes still completes. Batch
+  11 deleted the unconsumed semantic-window maintenance queue; completion is
+  terminal and existing real ambiguity/review maintenance remains separate.
+- Validation passed at the original Batch 7 checkpoint: 60 focused unit tests;
+  15 fresh-schema PostgreSQL Context, semantic-commit, retraction, rollback,
+  and then-current maintenance-contract tests; plus touched-path Ruff,
+  compilation, and whitespace checks. Batch 11 revalidated terminal completion
+  after deleting the obsolete queue.
 
 ### Batch 8 — Production cutover and deletion of old ownership — complete
 
@@ -1746,6 +1764,30 @@ Validation completed:
 - Ruff, Python compilation, dependency-lock refresh, trained-model removal
   scan, and `git diff --check` passed.
 
+Real production-checkpoint smoke benchmark completed on 2026-09-05:
+
+- checkpoint: `fastino/gliner2.5-base-v1`, `gliner2==2.0.0`, CPU;
+- production threshold: `0.85`;
+- frozen cases: 3 total, containing 2 expected positive spans and 1 negative;
+- exact-span precision/recall: `1.00 / 1.00` across six consecutive passes;
+- five post-warmup passes averaged `60.59 ms` per fixture; the slowest measured
+  post-warmup fixture was `64.19 ms`;
+- first online load, including download, took `34.72 s`; cached offline load
+  took `9.39 s`;
+- checkpoint cache size was approximately `747 MiB`; measured process peak-RSS
+  growth during cached model load was approximately `2.20 GiB` (`2,311,884
+  KiB`), while these short post-load inferences did not raise the high-water
+  mark further;
+- model loading emitted GLiNER's legacy checkpoint-metadata normalization warning
+  and fell back from unsupported SDPA attention to eager attention;
+- VP-01 fallback count remained zero and VP-02 was not invoked.
+
+This proves that the configured English checkpoint exists, loads through the
+production adapter, returns compatible spans, and is viable on the tested local
+CPU. It does **not** establish production-quality precision/recall from only two
+positive examples. A larger domain-diverse Context corpus is still required
+before treating the `0.90` quality gates as statistically meaningful.
+
 ### Batch 10 — Recovery, end-to-end validation, and documentation
 
 **Depends on:** Batch 8; include Batch 9 results if completed.
@@ -1821,24 +1863,22 @@ Acceptance:
 
 #### Batch 10 completion record
 
-- **10.1:** Automatic retry exhaustion is now visible as `exhausted_count` and
+- **10.1:** Automatic retry exhaustion is visible as `exhausted_count` and
   `manual_retry_required` in bounded ingestion health. A local operator can use
   `ProjectMaintenanceService.retry_semantic_window` to reset retry state for
   one failed active window and wake its existing project semantic owner. The
   operation preserves the frozen message membership, policy snapshot, durable
-  stage, and any committed Context revision. Failure-injection coverage keeps
-  the last durable checkpoint through Episode, Context, projection, VP-01,
-  VP-02, Knowledge commit, Episode enrichment, and independent maintenance
-  failures.
-- **10.2:** `test_project_semantic_runtime_flow.py` composes admission,
-  `ProjectSemanticJob`, Context, VP-01/VP-02 boundaries, semantic commit,
-  finalization, and maintenance with only model boundaries faked. It proves a
-  two-session window yields one Context revision, includes frozen assistant
-  source references, persists zero Episode output, and excludes rendered
-  agent-derived Context from Knowledge. Fresh-PostgreSQL contracts separately
-  cover atomic claim/membership, replacement retraction and provenance,
-  `CONTEXT.md` repair, oversized whole-exchange admission, per-session FIFO,
-  and project-deletion cleanup.
+  stage, and any committed Context revision. The original claim about an
+  independent semantic-window maintenance failure was removed in Batch 11
+  because that queue had no consumer and no durable work payload.
+- **10.2:** The former `_FlowStore` test was deleted in Batch 11. Its relevant
+  production behavior is now split by boundary: the real-PostgreSQL
+  `test_project_semantic_job_uses_real_storage_for_agent_derived_context`
+  composes `ProjectSemanticJob`, `KnowledgeStore`, Context revision publication,
+  controlled local-edit admission, semantic reconciliation, and finalization
+  while faking only model results. The specific persistence/provenance cases
+  remain in fresh-PostgreSQL contracts; the Batch 11 matrix below names each
+  test rather than presenting a fake state machine as an end-to-end proof.
 - **10.3:** `server/PROJECT_SEMANTIC_OPERATIONS.md` records the sole owners,
   durable checkpoints, 128K configurable admission setting and acceptable
   whole-exchange overfill, restart/manual-retry procedure, bounded health
@@ -1848,7 +1888,9 @@ Acceptance:
   implementation. Real PostgreSQL contract checks ran locally; no unavailable
   service check is being represented as a pass. Real GLiNER inference remains
   deliberately deferred until the production weights are installed, as noted
-  in Batch 9 rather than claimed by this batch.
+  in Batch 9 rather than claimed by this batch. Batch 11 adds the exact
+  startup/admission/cadence Context-sync behavior and terminal-completion
+  semantics after the unused queue deletion.
 
 Validation completed:
 
@@ -1856,6 +1898,226 @@ Validation completed:
   including 20 fresh-PostgreSQL storage contracts;
 - Ruff and Python compilation passed on every touched Python path;
 - `git diff --check` passed.
+
+---
+
+### Batch 11 — Production integration repair and completion-proof cleanup
+
+**Depends on:** Batches 2, 7, 8, and 10.
+
+**Purpose:** Close the gaps found by the post-Batch-10 audit without adding a
+second ingestion owner, a public Context mutation API, or compatibility code for
+the deleted message-local pipeline.
+
+#### Commit 11.1 — Make Context file synchronization production-owned
+
+Files expected to change:
+
+- `server/src/core/knowledge/context/projection.py`
+- `server/src/core/ingestion/project_semantic_job.py`
+- `server/src/runtime/project_factory.py`
+- focused projection, semantic-job, and runtime-composition tests
+- `server/PROJECT_SEMANTIC_OPERATIONS.md`
+
+Work:
+
+- give the existing project semantic owner one explicit Context-file
+  synchronization operation that distinguishes:
+  - a missing or stale generated projection, which is rewritten from PostgreSQL;
+  - a valid user edit based on the recorded projection hash, which is imported
+    as a `human_edit` revision and empty-message `context_committed` window;
+  - a conflicting or unrecognized file, which is preserved and reported rather
+    than overwritten;
+- run synchronization when a project runtime starts, before admitting a new
+  conversation window, and from the scheduler's normal bounded polling path so
+  edits made while a project remains loaded are eventually observed;
+- keep PostgreSQL canonical and keep generic Agent/document tools unable to
+  mutate or index `CONTEXT.md`;
+- serialize synchronization with semantic admission so a file edit and a chat
+  window cannot create competing active windows;
+- after a committed Context projection write fails, leave a durable/bounded
+  diagnostic signal that causes the same synchronization owner to retry without
+  rerunning Episode generation or the Context LLM call;
+- avoid a filesystem watcher, new public API, or second background worker unless
+  existing scheduler polling cannot satisfy the bounded retry contract.
+
+Acceptance:
+
+- editing `CONTEXT.md` through the local filesystem while the project is loaded
+  eventually creates exactly one `human_edit` revision and resumes from
+  `context_committed`;
+- a restart imports a valid pending user edit before admitting later chat
+  evidence;
+- a failed post-commit projection is repaired automatically on a later scheduler
+  pass and does not regenerate committed Context;
+- an unchanged generated file causes no revision or semantic-window churn;
+- stale/conflicting edits preserve both the canonical revision and file bytes
+  and surface a bounded diagnostic;
+- concurrency tests prove at most one active semantic window and no duplicate
+  human-edit revision.
+
+#### Commit 11.2 — Remove the unused semantic-maintenance queue
+
+Files expected to change:
+
+- `server/src/core/ingestion/project_semantic_job.py`
+- `server/src/core/knowledge/store.py`
+- semantic-window reader/writer ports and implementations
+- `server/src/infrastructure/schema.sql`
+- related unit and PostgreSQL contract tests
+- semantic operations documentation
+
+Work:
+
+- delete `project_semantic_window_maintenance`, its indexes, store/writer
+  methods, optional `post_completion_maintenance` callback, and tests that only
+  prove rows can be written;
+- keep semantic completion terminal after idempotent Episode enrichment;
+- retain the existing real entity/relationship maintenance services for actual
+  ambiguity, contradiction, review, and detachment work;
+- do not introduce a generic maintenance consumer until there is a concrete
+  maintenance payload and a real caller that needs it;
+- update stage comments and diagnostics so they no longer promise a nonexistent
+  later maintenance pass.
+
+Acceptance:
+
+- semantic finalization has one direct, testable terminal path;
+- no schema object, protocol method, callback, test fake, or documentation
+  references semantic-window maintenance;
+- existing ambiguity/review maintenance behavior is unchanged;
+- a fresh schema and project deletion both pass without the removed table.
+
+#### Commit 11.3 — Replace migration scaffolding and misleading completion claims
+
+Files expected to change:
+
+- `server/src/core/ingestion/context_entity_build.py`
+- `server/src/core/knowledge/entity/resolver.py`
+- `server/tests/integration/ingestion/test_project_semantic_postgres_flow.py`
+- runtime/storage integration and PostgreSQL contract tests
+- this plan's Batch 6, 9, and 10 completion records
+
+Work:
+
+- delete `ContextEntityShadowTrace`, `ContextEntityShadowEvaluator`, and their
+  test now that the compared legacy path no longer exists;
+- remove stale comments that describe the pre-Batch-8 pipeline as current;
+- replace the large state-machine `_FlowStore` with a test composed through the
+  real `ProjectSemanticJob` and real `KnowledgeStore` against fresh PostgreSQL,
+  faking only model results and other genuinely external service boundaries;
+  keep the runtime factory responsible solely for constructing that same job and
+  invoking its startup synchronization boundary;
+- keep focused unit tests for combinatorial edge cases, but do not label them
+  end-to-end tests;
+- map each of the ten Batch 10 provenance/recovery scenarios to its exact test
+  and identify whether it uses real PostgreSQL, runtime composition, or an
+  isolated unit boundary;
+- correct completion records to state what was actually executed; preserve the
+  dated real-checkpoint smoke results separately from the still-required broad
+  representative-corpus quality evaluation.
+
+Acceptance:
+
+- production-job composition tests do not reimplement storage stage
+  transitions;
+- the ten Batch 10 scenarios have an auditable test-to-requirement matrix. A
+  persistence claim runs against fresh PostgreSQL; deterministic admission
+  selection remains a focused unit test paired with its claim/storage contract;
+- source defects are not hidden by weakening assertions or changing fixtures to
+  mimic incorrect behavior;
+- no production symbol or comment refers to the deleted legacy extraction path;
+- documentation distinguishes the completed real-checkpoint smoke benchmark
+  from the deferred representative-corpus quality gate.
+
+#### Batch 10 scenario evidence matrix after Batch 11
+
+| Required scenario | Exact coverage | Boundary |
+| --- | --- | --- |
+| 1. Context and relationship are added | `test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_support` | fresh PostgreSQL semantic commit |
+| 2. A later Context replacement retracts old support | `test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_support` | fresh PostgreSQL semantic commit |
+| 3. Two sessions contribute to one Context revision | `test_project_semantic_job_uses_real_storage_for_agent_derived_context` | real `ProjectSemanticJob` + `KnowledgeStore` + PostgreSQL |
+| 4. A blocked session does not starve another | `test_open_or_editable_turn_blocks_only_its_own_session_fifo_stream` | deterministic admission unit; claim serialization is separately PostgreSQL-covered |
+| 5. Assistant-cited support resolves through source refs | `test_context_source_catalog_reads_only_frozen_assistant_owned_refs` and `test_source_grounded_blocks_require_assistant_source_handles_and_keep_owner` | PostgreSQL catalog + typed updater unit |
+| 6. Agent-derived Context renders but bypasses Knowledge | `test_project_semantic_job_uses_real_storage_for_agent_derived_context` | real job/storage composition |
+| 7. Zero Episode output completes | `test_project_semantic_job_uses_real_storage_for_agent_derived_context` | real job/storage composition |
+| 8. An oversized exchange remains one logical window | `test_single_exchange_larger_than_target_is_isolated_with_good_overfill` | deterministic admission unit |
+| 9. A stale `CONTEXT.md` is repaired from PostgreSQL | `test_projection_write_failure_keeps_the_committed_context_revision` | fresh PostgreSQL Context/projection contract |
+| 10. Project deletion removes Context/window evidence | `test_context_scope_snapshot_and_project_deletion_cascade` and `test_project_deletion_removes_episode_graph_search_and_source_aggregates` | fresh PostgreSQL deletion contracts |
+
+The prior `_FlowStore` test was deliberately removed: it represented durable
+state transitions in a fake and therefore cannot be evidence for a storage
+scenario. The matrix does not inflate the deterministic admission units into
+runtime/storage integration tests.
+
+#### Commit 11.4 — Final repair audit
+
+Work:
+
+- search for every removed maintenance/shadow symbol and every claim that
+  projection repair is merely "pending";
+- run focused unit and runtime-composition tests;
+- run all fresh-PostgreSQL Context, semantic-window, reconciliation, recovery,
+  and project-deletion contracts;
+- run the complete service-free suite;
+- run Ruff, Python compilation/import checks, architecture checks, dependency
+  consistency checks, and `git diff --check`;
+- inspect the final diff for unnecessary abstractions, duplicate owners,
+  compatibility shims, and test-only production code.
+
+Acceptance:
+
+- Batch 11 completion is not recorded until the production callers—not only
+  helper methods—exercise Context import and projection recovery;
+- no pending semantic-maintenance row can be created;
+- one project semantic job remains the sole owner of admission and stage
+  progression;
+- the plan's status and completion records match the commands and environments
+  actually validated;
+- the completed GLiNER smoke results remain reproducible, while broader quality
+  claims remain pending until the representative fixture corpus exists.
+
+#### Batch 11 implementation record
+
+- **11.1:** `ProjectRuntimeFactory` synchronizes `CONTEXT.md` before it starts
+  document work or the scheduler. `ProjectSemanticJob` synchronizes before
+  admission and on an immediate, 30-second scheduler cadence. It imports only
+  an edit based on the exact current generated projection; otherwise it repairs
+  a missing/known-stale generated file or preserves the conflicting bytes with
+  a bounded diagnostic. A valid edit creates one `human_edit`,
+  `context_committed` window, which the normal job then progresses.
+- Projection checkpoints now distinguish the last successful projection from a
+  safely pending file hash and its revision ordering. If a newer Context
+  revision wins after an older guarded file write, the older file stays a known
+  stale candidate; an even older racing writer cannot hide a newer candidate.
+  Both recorded revision IDs are project-scoped foreign keys.
+- **11.2:** The unconsumed `project_semantic_window_maintenance` schema object,
+  writer/store methods, callback, test fake, documentation, and terminal-stage
+  branch are deleted. Episode enrichment remains idempotent and `completed` is
+  now the direct terminal state. Existing ambiguity/review maintenance is not
+  changed.
+- **11.3:** `ContextEntityShadowTrace` and
+  `ContextEntityShadowEvaluator` are deleted with the already-deleted legacy
+  comparator. The misleading fake-storage flow test is replaced by the real
+  PostgreSQL production-job composition test named in the matrix above. The
+  operations guide and earlier completion records now state those boundaries
+  accurately.
+
+Validation recorded so far:
+
+- 34 focused unit/runtime tests pass after the final scheduler and runtime-start
+  coverage was added; Ruff and Python compilation pass on every touched path.
+- Earlier in this batch, before the two final real-PostgreSQL assertions were
+  added, 29 focused unit/composition tests and 20 fresh-schema Context,
+  semantic-commit, and deletion contracts passed against the local Docker
+  PostgreSQL service.
+- The current execution environment rejected the requested final PostgreSQL
+  rerun for a Codex usage-limit reason. Do not mark Batch 11 validation complete
+  until that exact focused PostgreSQL command is rerun.
+- The broad service-free suite did not produce a terminal result within bounded
+  local runs. It reached 74% before the full local-model smoke path; excluding
+  it reached 87% before a separate pre-existing slow workspace/runtime segment.
+  Neither path overlaps Batch 11, but neither is represented as passing.
 
 ---
 
@@ -1928,7 +2190,8 @@ The refactor is complete only when all of the following are true:
 2. One project-scoped owner admits complete exchanges across sessions.
 3. Episodes and Context consume the same frozen window.
 4. PostgreSQL is the single authority for current Context.
-5. `CONTEXT.md` is a recoverable projection and cannot self-ingest.
+5. `CONTEXT.md` is automatically repaired from PostgreSQL, and valid local user
+   edits enter exactly once through the controlled importer without self-ingestion.
 6. `PROJECT.md` remains user-owned and semantically distinct.
 7. Context updates are structured, revisioned, and provenance-validated.
 8. Unsupported assistant prose cannot silently become Knowledge.
@@ -1940,7 +2203,8 @@ The refactor is complete only when all of the following are true:
 14. Restart resumes without regenerating committed Context.
 15. The old per-session worker, `session_text`, independent Episode window, and
     single-message relationship source contract are deleted.
-16. Maintenance handles unresolved ambiguity rather than routine state changes.
+16. Existing maintenance handles concrete unresolved ambiguity rather than
+    routine state changes; no payload-free semantic maintenance queue remains.
 17. VP-01 uses GLiNER2.5 with compiled entity descriptions as typed guidance.
 18. VP-02 remains an LLM call and does not use GLiNER relation features.
 
