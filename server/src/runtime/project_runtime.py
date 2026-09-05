@@ -1,16 +1,17 @@
 import asyncio
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
 from common.scoping import require_scope_value, require_visible_project_ids
 from core.ingestion.text_processor import TextProcessor
+from core.ingestion.vp01 import VP01EntityExtractor
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.project.domain_config_store import DomainActivation, DomainConfigStore
 from infrastructure.background_work import BackgroundWorkCoordinator
-from infrastructure.job.scheduler import EpisodeScheduler
+from infrastructure.job.scheduler import Scheduler
 
 
 class ProjectRuntime:
@@ -24,7 +25,7 @@ class ProjectRuntime:
         entities: EntityResolver,
         knowledge_retrieval: Any,
         text_processor: TextProcessor,
-        scheduler: EpisodeScheduler,
+        scheduler: Scheduler,
         user_name: str,
         readable_project_ids: list[str],
         domain_config: DomainConfig,
@@ -32,6 +33,7 @@ class ProjectRuntime:
         domain_config_store: DomainConfigStore,
         ingestion_pipeline: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
+        get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
     ):
         self.project_id = require_scope_value(
             project_id,
@@ -51,6 +53,9 @@ class ProjectRuntime:
         self.user_name = user_name
         self.ingestion_pipeline = ingestion_pipeline
         self.background_work = background_work
+        if get_vp01 is not None and not callable(get_vp01):
+            raise TypeError("ProjectRuntime get_vp01 must be callable")
+        self._get_vp01 = get_vp01
         self.domain_config_store = domain_config_store
         self.domain_config = domain_config
         self.compiled_domain: CompiledDomain = domain_config.compile()
@@ -58,11 +63,20 @@ class ProjectRuntime:
         self.document_service = document_service
 
         self.episode_job: Optional[Any] = None
+        self.project_semantic_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._closed = False
 
     def add_config_unsubscriber(self, unsubscribe):
         self.config_unsubscribers.append(unsubscribe)
+
+    def signal_semantic_work(self) -> bool:
+        """Expose one project-owned wake edge to every attached session."""
+
+        if self.project_semantic_job is None or self.scheduler is None:
+            return False
+        wake = getattr(self.scheduler, "wake", None)
+        return bool(wake()) if callable(wake) else False
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""
@@ -137,6 +151,7 @@ class ProjectRuntime:
                 )
             self.domain_config = config
             self.compiled_domain = config.compile()
+            await self._select_vp01(self.compiled_domain)
             self._install_compiled_domain(self.compiled_domain)
         return config
 
@@ -147,6 +162,15 @@ class ProjectRuntime:
             setter = getattr(component, "set_compiled_domain", None)
             if setter is not None:
                 setter(compiled_domain)
+
+    async def _select_vp01(self, compiled_domain: CompiledDomain) -> None:
+        """Align the live adapter with an explicitly switched domain language."""
+
+        if self._get_vp01 is None:
+            return
+        self.text_processor.set_vp01(
+            await self._get_vp01(compiled_domain.vp01_language)
+        )
 
     async def capture_domain(self) -> CompiledDomain:
         """Return a stable domain snapshot for one admitted runtime operation."""
@@ -177,5 +201,6 @@ class ProjectRuntime:
             )
             self.domain_config = activation.config
             self.compiled_domain = activation.compiled
+            await self._select_vp01(activation.compiled)
             self._install_compiled_domain(activation.compiled)
             return activation

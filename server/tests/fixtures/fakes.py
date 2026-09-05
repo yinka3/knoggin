@@ -427,6 +427,7 @@ class FakeKnowledgeStore:
         self.embedding_rebuild_calls = []
         self.reset_claimed_ingestion_calls = []
         self.accepted_message_ids = {}
+        self.closed_exchanges = []
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -485,11 +486,16 @@ class FakeKnowledgeStore:
         )
         return []
 
-    async def save_assistant_message_with_source_refs(
+    async def finalize_assistant_exchange(
         self, message, candidates, *, readable_project_ids, artifact=None
     ):
+        del readable_project_ids, artifact
         self.saved_message_logs.append([message])
-        return list(candidates)
+        return message["id"], [], True
+
+    async def close_user_exchange(self, **kwargs):
+        self.closed_exchanges.append(kwargs)
+        return None
 
     async def get_recent_project_messages(
         self, user_name, project_id, limit, before_message_id=None
@@ -996,7 +1002,7 @@ class FakeResources:
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None
-    gliner: Any = None
+    vp01: Any = None
     spacy: Any = None
 
 class FakeScheduler:

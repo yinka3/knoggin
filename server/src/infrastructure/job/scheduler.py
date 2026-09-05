@@ -51,6 +51,7 @@ class Scheduler:
         self._last_successful_runs: dict[str, float] = {}
         self._job_runs: dict[str, dict[str, object]] = {}
         self._recent_outcomes: deque[dict[str, object]] = deque(maxlen=20)
+        self._wake_event = asyncio.Event()
 
     @property
     def running(self) -> bool:
@@ -71,6 +72,18 @@ class Scheduler:
         self._jobs[job.name] = job
         logger.info(f"Registered job: {job.name}")
         return self
+
+    def wake(self) -> bool:
+        """Request a prompt check without making the event authoritative.
+
+        Polling remains the recovery path when a local wake is missed.  The
+        durable stores still decide whether any job is actually due.
+        """
+
+        if not self._is_running or self._admissions_closed:
+            return False
+        self._wake_event.set()
+        return True
 
     def _capture_job_policy(self) -> ScheduledJobPolicy:
         timeout = self.JOB_EXECUTION_TIMEOUT
@@ -171,7 +184,14 @@ class Scheduler:
     async def _monitor_loop(self) -> None:
         while self._is_running:
             try:
-                await asyncio.sleep(self.CHECK_INTERVAL)
+                try:
+                    await asyncio.wait_for(
+                        self._wake_event.wait(),
+                        timeout=self.CHECK_INTERVAL,
+                    )
+                except TimeoutError:
+                    pass
+                self._wake_event.clear()
                 await self._check_jobs()
             except asyncio.CancelledError:
                 raise
@@ -503,19 +523,3 @@ class Scheduler:
             self._finish_job_run(job_name, "cancelled")
         if self._running_tasks.get(job_name) is task:
             del self._running_tasks[job_name]
-
-
-class EpisodeScheduler(Scheduler):
-    """Project-scoped runner for the single Episode maintenance job.
-
-    Project runtimes no longer register a general maintenance job set.  This
-    narrow entrypoint keeps the scheduling mechanics (cadence, timeout, and
-    bounded background admission) while making the only supported project
-    trigger explicit at the composition boundary.
-    """
-
-    def register_episode(self, job: BaseJob) -> "EpisodeScheduler":
-        if job.name != "episode":
-            raise ValueError("EpisodeScheduler accepts only the 'episode' job")
-        super().register(job)
-        return self

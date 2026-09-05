@@ -12,10 +12,18 @@ from common.scoping import (
     require_scope_value,
     require_visible_project_ids,
 )
+from core.ingestion.context_entity_build import ContextEntityBuildService
 from core.ingestion.pipeline import IngestionPipeline
+from core.ingestion.project_semantic_job import ProjectSemanticJob
+from core.ingestion.relationship_extractor import ContextRelationshipExtractor
+from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
+from core.knowledge.context.projection import ContextProjection
+from core.knowledge.context.updater import ContextUpdater
 from core.knowledge.db.readers.document_reader import DocumentReader
+from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
+from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.documents import (
     DocumentIndexer,
     DocumentIndexPolicy,
@@ -23,10 +31,11 @@ from core.knowledge.documents import (
     ProjectFilesystemFactory,
 )
 from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
-from infrastructure.job.scheduler import EpisodeScheduler
+from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import ReadyRuntimeResources, RuntimeResources
 
@@ -101,10 +110,11 @@ class ProjectRuntimeFactory:
                 get_known_aliases=entities.get_known_aliases,
                 get_alias_version=entities.get_alias_version,
                 get_profile=entities.get_profile,
-                gliner=resources.gliner,
+                vp01=await resources.get_vp01(compiled_domain.vp01_language),
                 spacy=resources.spacy,
                 settings=self.dev_settings.nlp_pipeline,
                 model_work=resources.model_work,
+                get_vp01=resources.get_vp01,
             ),
         )
         ingestion_pipeline = IngestionPipeline(
@@ -123,7 +133,7 @@ class ProjectRuntimeFactory:
             ),
             sparse_context_verbs=entity_settings.sparse_context_verbs,
         )
-        scheduler = EpisodeScheduler(
+        scheduler = Scheduler(
             self.user_name,
             project_id,
             background_work=resources.background_work,
@@ -146,9 +156,12 @@ class ProjectRuntimeFactory:
             domain_config_store=domain_store,
             ingestion_pipeline=ingestion_pipeline,
             background_work=resources.background_work,
+            get_vp01=resources.get_vp01,
         )
         episode_job = self._create_episode_job(project_id, resources=resources)
         runtime.episode_job = episode_job
+        project_semantic_job = self._create_project_semantic_job(runtime, resources=resources)
+        runtime.project_semantic_job = project_semantic_job
 
         try:
             await runtime.document_service.indexer.start()
@@ -157,6 +170,7 @@ class ProjectRuntimeFactory:
                 entities=entities,
                 processor=ingestion_pipeline,
                 episode_job=episode_job,
+                project_semantic_job=project_semantic_job,
                 resources=resources,
             )
             await scheduler.start()
@@ -239,6 +253,57 @@ class ProjectRuntimeFactory:
             ),
         )
 
+    def _create_project_semantic_job(
+        self,
+        runtime: ProjectRuntime,
+        *,
+        resources: ReadyRuntimeResources | None = None,
+    ) -> ProjectSemanticJob:
+        resources = resources or cast(ReadyRuntimeResources, self.resources)
+        token_counter = getattr(resources.llm_service, "count_tokens", None)
+        if not callable(token_counter):
+            raise RuntimeError("LLM service must provide count_tokens for semantic windows")
+        admission = SemanticWindowAdmission(
+            resources.knowledge_store,
+            self.dev_settings.ingestion,
+            token_counter=token_counter,
+            episode_settings=self.dev_settings.jobs.episode,
+        )
+        episode_generator = EpisodeGenerator(
+            resources.knowledge_store,
+            llm=resources.llm_service,
+            embedding_service=resources.embedding,
+        )
+        context_filesystem = ProjectFilesystemFactory(
+            ConfigManager.get().config.developer_settings.documents.project_library_root
+        ).for_project(runtime.project_id)
+        context_projection = ContextProjection(
+            reader=ProjectContextReader(resources.postgres),
+            writer=ProjectContextWriter(resources.postgres),
+            filesystem=context_filesystem,
+            capture_ingestion_policy=runtime.ingestion_pipeline.capture_policy,
+        )
+        return ProjectSemanticJob(
+            admission,
+            resources.knowledge_store,
+            episode_generator,
+            settings=self.dev_settings.ingestion,
+            capture_domain=runtime.capture_domain,
+            capture_ingestion_policy=runtime.ingestion_pipeline.capture_policy,
+            context_updater=ContextUpdater(llm=resources.llm_service),
+            context_projection=context_projection,
+            context_entity_builder=ContextEntityBuildService(
+                processor=runtime.text_processor,
+                resolver=runtime.entities,
+                allocate_entity_id=resources.knowledge_store.allocate_entity_id,
+            ),
+            context_relationship_extractor=ContextRelationshipExtractor(
+                user_name=self.user_name,
+                llm=resources.llm_service,
+                entities=runtime.entities,
+            ),
+        )
+
     def _register_background_jobs(
         self,
         runtime: ProjectRuntime,
@@ -246,6 +311,7 @@ class ProjectRuntimeFactory:
         entities: EntityResolver,
         processor: IngestionPipeline,
         episode_job: EpisodeJob,
+        project_semantic_job: ProjectSemanticJob | None = None,
         resources: ReadyRuntimeResources | None = None,
     ) -> None:
         scheduler = runtime.scheduler
@@ -267,10 +333,24 @@ class ProjectRuntimeFactory:
                 "developer_settings.nlp_pipeline",
             )
         )
-        scheduler.register_episode(episode_job)
+        scheduler.register(episode_job)
         runtime.add_config_unsubscriber(
             config_manager.subscribe(
                 episode_job.update_settings,
                 "developer_settings.jobs.episode",
             )
         )
+        if project_semantic_job is not None:
+            scheduler.register(project_semantic_job)
+            runtime.add_config_unsubscriber(
+                config_manager.subscribe(
+                    project_semantic_job.update_settings,
+                    "developer_settings.ingestion",
+                )
+            )
+            runtime.add_config_unsubscriber(
+                config_manager.subscribe(
+                    project_semantic_job.update_episode_settings,
+                    "developer_settings.jobs.episode",
+                )
+            )

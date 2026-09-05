@@ -29,6 +29,17 @@ class MessageAcceptance:
 
 
 @dataclass(frozen=True, slots=True)
+class ExchangeClosure:
+    """The durable terminal state of one canonical user exchange."""
+
+    user_message_id: int
+    outcome: str
+    closed_at_ms: int
+    assistant_message_id: int | None = None
+    already_closed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class IngestionFrontier:
     """The last durable message included in a stable maintenance boundary."""
 
@@ -161,6 +172,212 @@ class MessageLifecycleWriter:
                 ),
             )
         return MessageAcceptance(message_id=inserted_id, created=True)
+
+    async def prepare_assistant_exchange_finalization(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        user_message_id: int,
+        cur,
+    ) -> ExchangeClosure | None:
+        """Lock one user exchange before an atomic assistant finalization.
+
+        A previous successful finalization is returned instead of writing a
+        second assistant message.  A different terminal outcome is never
+        overwritten: callers must preserve the first durable evidence.
+        """
+
+        await cur.execute(
+            """
+            SELECT message_id, exchange_state, exchange_outcome,
+                   exchange_closed_at_ms
+            FROM public.messages
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND message_id = %s
+              AND role = 'user'
+            FOR UPDATE
+            """,
+            (user_name, project_id, session_id, user_message_id),
+        )
+        user_row = await cur.fetchone()
+        if user_row is None:
+            raise ValueError("Cannot finalize an unavailable user exchange")
+        if user_row["exchange_state"] == "open":
+            return None
+        if user_row["exchange_outcome"] != "assistant_final":
+            raise ValueError(
+                "Cannot add an assistant response to an exchange already closed as "
+                f"{user_row['exchange_outcome']}"
+            )
+
+        await cur.execute(
+            """
+            SELECT message_id
+            FROM public.messages
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND user_msg_id = %s
+              AND role = 'assistant'
+            """,
+            (user_name, project_id, session_id, user_message_id),
+        )
+        assistant_row = await cur.fetchone()
+        if assistant_row is None:
+            raise RuntimeError("Closed assistant exchange is missing its assistant row")
+        return ExchangeClosure(
+            user_message_id=user_message_id,
+            outcome="assistant_final",
+            closed_at_ms=int(user_row["exchange_closed_at_ms"]),
+            assistant_message_id=int(assistant_row["message_id"]),
+            already_closed=True,
+        )
+
+    async def close_user_exchange(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        user_message_id: int,
+        outcome: str,
+        closed_at_ms: int | None = None,
+        cur=None,
+    ) -> ExchangeClosure:
+        """Seal and close a user exchange exactly once.
+
+        Closing also makes a formerly editable user revision eligible for the
+        legacy ingestion worker during the transition.  It deliberately does
+        not alter an already claimed or processed legacy row.
+        """
+
+        valid_outcomes = {
+            "assistant_final",
+            "clarification",
+            "failed",
+            "cancelled",
+            "user_only",
+        }
+        if outcome not in valid_outcomes:
+            raise ValueError("Invalid exchange outcome")
+        closed_at_ms = self._now_ms() if closed_at_ms is None else closed_at_ms
+        if (
+            not isinstance(closed_at_ms, int)
+            or isinstance(closed_at_ms, bool)
+            or closed_at_ms < 0
+        ):
+            raise ValueError("closed_at_ms must be a non-negative integer")
+
+        if cur is None:
+            async with self.client.transaction() as transaction_cursor:
+                return await self.close_user_exchange(
+                    user_name=user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                    user_message_id=user_message_id,
+                    outcome=outcome,
+                    closed_at_ms=closed_at_ms,
+                    cur=transaction_cursor,
+                )
+
+        await cur.execute(
+            """
+            SELECT message_id, exchange_state, exchange_outcome,
+                   exchange_closed_at_ms
+            FROM public.messages
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND message_id = %s
+              AND role = 'user'
+            FOR UPDATE
+            """,
+            (user_name, project_id, session_id, user_message_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise ValueError("Cannot close an unavailable user exchange")
+        if row["exchange_state"] == "closed":
+            if row["exchange_outcome"] != outcome:
+                raise ValueError(
+                    "User exchange is already closed as "
+                    f"{row['exchange_outcome']}, not {outcome}"
+                )
+            assistant_message_id = None
+            if outcome == "assistant_final":
+                await cur.execute(
+                    """
+                    SELECT message_id
+                    FROM public.messages
+                    WHERE user_name = %s
+                      AND project_id = %s
+                      AND session_id = %s
+                      AND user_msg_id = %s
+                      AND role = 'assistant'
+                    """,
+                    (user_name, project_id, session_id, user_message_id),
+                )
+                assistant = await cur.fetchone()
+                if assistant is None:
+                    raise RuntimeError(
+                        "Closed assistant exchange is missing its assistant row"
+                    )
+                assistant_message_id = int(assistant["message_id"])
+            return ExchangeClosure(
+                user_message_id=user_message_id,
+                outcome=outcome,
+                closed_at_ms=int(row["exchange_closed_at_ms"]),
+                assistant_message_id=assistant_message_id,
+                already_closed=True,
+            )
+
+        await cur.execute(
+            """
+            UPDATE public.messages
+            SET lifecycle_state = 'sealed',
+                editable_until_ms = NULL,
+                sealed_at_ms = COALESCE(sealed_at_ms, %s),
+                ingestion_state = CASE
+                    WHEN ingestion_state = 'waiting_for_seal' THEN 'ready'
+                    ELSE ingestion_state
+                END,
+                ingestion_not_before_ms = CASE
+                    WHEN ingestion_state = 'waiting_for_seal' THEN %s
+                    ELSE ingestion_not_before_ms
+                END,
+                exchange_state = 'closed',
+                exchange_outcome = %s,
+                exchange_closed_at_ms = %s
+            WHERE user_name = %s
+              AND project_id = %s
+              AND session_id = %s
+              AND message_id = %s
+              AND role = 'user'
+              AND exchange_state = 'open'
+            RETURNING message_id
+            """,
+            (
+                closed_at_ms,
+                closed_at_ms,
+                outcome,
+                closed_at_ms,
+                user_name,
+                project_id,
+                session_id,
+                user_message_id,
+            ),
+        )
+        if await cur.fetchone() is None:
+            raise RuntimeError("User exchange closure was lost")
+        return ExchangeClosure(
+            user_message_id=user_message_id,
+            outcome=outcome,
+            closed_at_ms=closed_at_ms,
+        )
 
     async def edit_user_message(
         self,

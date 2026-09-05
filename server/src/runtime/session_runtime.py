@@ -15,7 +15,7 @@ from common.schema.artifacts import ArtifactDraft
 from common.schema.document import DocumentFocus
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
-from common.schema.source.references import SourceReference, SourceReferenceCandidate
+from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import (
     fetch_conversation_turns,
 )
@@ -208,7 +208,7 @@ class SessionRuntime:
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Execute one already-persisted, exclusively admitted run."""
 
-        outcome = "failed"
+        exchange_outcome = "failed"
         task = asyncio.current_task()
         if task is None:
             await self._release_agent_run(None)
@@ -262,23 +262,23 @@ class SessionRuntime:
                     response["assistant_message_id"] = commit["message_id"]
                     response["source_ref_ids"] = commit["source_ref_ids"]
                     event = {"event": "response", "data": response}
-                    outcome = "completed"
+                    exchange_outcome = "assistant_final"
                 elif event["event"] == "clarification":
-                    outcome = "awaiting_input"
+                    exchange_outcome = "clarification"
                 elif event["event"] == "error":
-                    outcome = "failed"
+                    exchange_outcome = "failed"
                 yield event
 
-            if not response_seen and outcome == "failed":
+            if not response_seen and exchange_outcome == "failed":
                 logger.error(
                     "Agent stream ended without a final response for session {}",
                     self.session_id,
                 )
         except asyncio.CancelledError:
-            outcome = "cancelled"
+            exchange_outcome = "cancelled"
             raise
         except Exception:
-            outcome = "failed"
+            exchange_outcome = "failed"
             logger.exception(
                 "Canonical agent turn failed for session {}", self.session_id
             )
@@ -289,7 +289,23 @@ class SessionRuntime:
                 },
             }
         finally:
-            await self._release_agent_run(task)
+            try:
+                if exchange_outcome != "assistant_final":
+                    await self._close_user_exchange(
+                        accepted.id,
+                        outcome=exchange_outcome,
+                    )
+            except Exception:
+                # Never replace the original stream failure or cancellation with
+                # cleanup noise.  The durable close operation is idempotent and
+                # each future attempt can safely retry the same outcome.
+                logger.exception(
+                    "Failed to close {} exchange for session {}",
+                    exchange_outcome,
+                    self.session_id,
+                )
+            finally:
+                await self._release_agent_run(task)
 
     async def _release_agent_run(self, task: Optional[asyncio.Task]) -> None:
         async with self._agent_run_lock:
@@ -405,48 +421,22 @@ class SessionRuntime:
 
         timestamp = self._normalize_timestamp(timestamp)
         message_id = await self.knowledge_store.allocate_message_id()
-        try:
-            source_references = await self._persist_assistant_message_log(
-                message_id,
-                content,
-                timestamp,
-                metadata=metadata,
-                user_msg_id=user_msg_id,
-                source_candidates=source_candidates,
-                artifact=artifact,
-            )
-        except Exception:
-            try:
-                await self._delete_conversation_message(message_id)
-            except Exception as cleanup_exc:
-                logger.error(
-                    "Failed to remove assistant message after persistence "
-                    f"failure for message {message_id}: {cleanup_exc}"
-                )
-            raise
+        if user_msg_id is None:
+            raise ValueError("Assistant turns must be linked to a user exchange")
+        persisted_message_id, source_ref_ids = await self._persist_assistant_message_log(
+            message_id,
+            content,
+            timestamp,
+            metadata=metadata,
+            user_msg_id=user_msg_id,
+            source_candidates=source_candidates,
+            artifact=artifact,
+        )
+        self._signal_exchange_closed()
         return {
-            "message_id": message_id,
-            "source_ref_ids": [
-                reference.source_ref_id
-                for reference in source_references
-                if getattr(reference, "source_ref_id", None)
-            ],
+            "message_id": persisted_message_id,
+            "source_ref_ids": source_ref_ids,
         }
-
-    async def _delete_conversation_message(self, message_id: int) -> None:
-        """Remove one staged canonical message after persistence failure."""
-        query = (
-            "DELETE FROM public.messages WHERE user_name = %(user_name)s "
-            "AND session_id = %(session_id)s AND message_id = %(message_id)s"
-        )
-        await self.resources.postgres.execute(
-            query,
-            {
-                "user_name": self.user_name,
-                "session_id": self.session_id,
-                "message_id": message_id,
-            },
-        )
 
     async def _persist_assistant_message_log(
         self,
@@ -457,8 +447,8 @@ class SessionRuntime:
         user_msg_id: Optional[int] = None,
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
         artifact: ArtifactDraft | None = None,
-    ) -> List[SourceReference]:
-        """Write an assistant message log, raising after bounded retries."""
+    ) -> tuple[int, list[str]]:
+        """Atomically persist an assistant response and close its user exchange."""
         max_retries = 3
 
         for attempt in range(max_retries):
@@ -480,25 +470,17 @@ class SessionRuntime:
                     }
                 ]
 
-                if source_candidates or artifact is not None:
-                    if self.project is None:
-                        raise RuntimeError("Session project runtime is unavailable")
-                    save = self.knowledge_store.save_assistant_message_with_source_refs
-                    kwargs = {
-                        "readable_project_ids": self.project.readable_project_ids,
-                    }
-                    # Keep the existing source-only fake/store contract usable;
-                    # the new field is sent only when an artifact exists.
-                    if artifact is not None:
-                        kwargs["artifact"] = artifact
-                    return await save(
+                if self.project is None:
+                    raise RuntimeError("Session project runtime is unavailable")
+                persisted_id, source_ref_ids, _created = (
+                    await self.knowledge_store.finalize_assistant_exchange(
                         agent_msg_batch[0],
                         source_candidates or [],
-                        **kwargs,
+                        readable_project_ids=self.project.readable_project_ids,
+                        artifact=artifact,
                     )
-                else:
-                    await self.knowledge_store.save_message_logs(agent_msg_batch)
-                    return []
+                )
+                return persisted_id, source_ref_ids
 
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -514,6 +496,47 @@ class SessionRuntime:
                         f"{message_id} after {max_retries} attempts: {e}"
                     )
                     raise
+
+    async def close_user_only_turn(self, user_message_id: int) -> None:
+        """Explicitly close a canonical user-only exchange for non-agent callers."""
+
+        await self._close_user_exchange(user_message_id, outcome="user_only")
+
+    async def _close_user_exchange(self, user_message_id: int, *, outcome: str) -> None:
+        """Close one terminal non-assistant path before waking its project owner."""
+
+        if not isinstance(user_message_id, int) or user_message_id <= 0:
+            raise ValueError("user_message_id must be positive")
+        closed_at_ms = int(get_now().timestamp() * 1000)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await self.knowledge_store.close_user_exchange(
+                    user_name=self.user_name,
+                    project_id=self.project_id,
+                    session_id=self.session_id,
+                    user_message_id=user_message_id,
+                    outcome=outcome,
+                    closed_at_ms=closed_at_ms,
+                )
+                self._signal_exchange_closed()
+                return
+            except Exception:
+                if attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+    def _signal_exchange_closed(self) -> None:
+        """Wake both transition paths; durable storage remains authoritative."""
+
+        signal_semantic_work = getattr(self.project, "signal_semantic_work", None)
+        if callable(signal_semantic_work):
+            signal_semantic_work()
+        # Batch 8 removes this legacy per-session worker signal.  Until then,
+        # closure makes a waiting user row ready and this edge avoids polling
+        # latency in the current ingestion pipeline.
+        if self.ingestion_worker is not None:
+            self.ingestion_worker.signal()
 
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None

@@ -285,3 +285,62 @@ async def test_scheduler_health_snapshot_has_no_lease_state(monkeypatch):
     assert "lease_seconds" not in snapshot["active_jobs"][0]
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_wake_runs_a_due_job_without_waiting_for_the_poll_interval(monkeypatch):
+    capture_events(monkeypatch)
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.CHECK_INTERVAL = 60
+    job = ControlledJob(due=False)
+    scheduler.register(job)
+
+    await scheduler.start()
+    assert job.should_run_calls == 1
+    job.due = True
+    assert scheduler.wake() is True
+    await asyncio.wait_for(job.started.wait(), timeout=1)
+
+    assert job.should_run_calls >= 2
+    await scheduler.stop()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_polling_recovers_a_due_job_when_no_wake_arrives(monkeypatch):
+    capture_events(monkeypatch)
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.CHECK_INTERVAL = 0.01
+    job = ControlledJob(due=False)
+    scheduler.register(job)
+
+    await scheduler.start()
+    job.due = True
+    await asyncio.wait_for(job.started.wait(), timeout=1)
+
+    assert job.should_run_calls >= 2
+    await scheduler.stop()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_repeated_project_semantic_wakes_coalesce_to_one_running_job(monkeypatch):
+    capture_events(monkeypatch)
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.CHECK_INTERVAL = 60
+    release = asyncio.Event()
+    job = ControlledJob(name="project_semantic", due=False, blocker=release)
+    scheduler.register(job)
+
+    await scheduler.start()
+    job.due = True
+    assert scheduler.wake() is True
+    assert scheduler.wake() is True
+    await asyncio.wait_for(job.started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert job.execute_calls == 1
+    release.set()
+    await asyncio.wait_for(job.finished.wait(), timeout=1)
+    await scheduler.stop()

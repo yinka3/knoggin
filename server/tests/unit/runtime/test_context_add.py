@@ -218,7 +218,7 @@ async def test_open_run_persists_a_durable_acceptance_key(context):
 async def test_context_assistant_turn_uses_canonical_message_sequence(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
-    await ctx.add_assistant_turn("hello from assistant", timestamp)
+    await ctx.add_assistant_turn("hello from assistant", timestamp, user_msg_id=1)
 
     assert resources.knowledge_store.saved_message_logs == [
         [
@@ -231,7 +231,7 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
                 "project_id": "project-1",
                     "timestamp": timestamp.timestamp() * 1000,
                     "metadata": {},
-                    "user_msg_id": None,
+                    "user_msg_id": 1,
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
                     "ingestion_state": "excluded",
@@ -242,21 +242,47 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_exchange_closure_wakes_the_shared_project_owner_and_legacy_worker(
+    context,
+):
+    ctx, _resources = context
+    project_wakes = 0
+
+    def signal_semantic_work():
+        nonlocal project_wakes
+        project_wakes += 1
+        return True
+
+    ctx.project.signal_semantic_work = signal_semantic_work
+    await ctx.add_assistant_turn(
+        "hello from assistant",
+        datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc),
+        user_msg_id=1,
+    )
+
+    assert project_wakes == 1
+    assert ctx.ingestion_worker.signaled == 1
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_context_assistant_turn_persists_source_candidates_with_message(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def save_atomically(message, candidates, *, readable_project_ids):
+    async def save_atomically(message, candidates, *, readable_project_ids, artifact=None):
+        del artifact
         calls.append((message, candidates, readable_project_ids))
-        return []
+        return message["id"], [], True
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = save_atomically
+    resources.knowledge_store.finalize_assistant_exchange = save_atomically
 
     await ctx.add_assistant_turn(
         "hello from assistant",
         timestamp,
+        user_msg_id=1,
         source_candidates=[candidate],
     )
 
@@ -271,7 +297,7 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
                 "project_id": "project-1",
                     "timestamp": timestamp.timestamp() * 1000,
                     "metadata": {},
-                    "user_msg_id": None,
+                    "user_msg_id": 1,
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
                     "ingestion_state": "excluded",
@@ -294,17 +320,18 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def fail_once_then_save(message, candidates, *, readable_project_ids):
+    async def fail_once_then_save(message, candidates, *, readable_project_ids, artifact=None):
         del readable_project_ids
+        del artifact
         calls.append((message, candidates))
         if len(calls) == 1:
             raise ConnectionError("temporary transaction failure")
-        return []
+        return message["id"], [], True
 
     async def skip_retry_delay(_delay):
         return None
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = (
+    resources.knowledge_store.finalize_assistant_exchange = (
         fail_once_then_save
     )
     monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
@@ -312,6 +339,7 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     await ctx.add_assistant_turn(
         "hello from assistant",
         timestamp,
+        user_msg_id=1,
         source_candidates=[candidate],
     )
 
@@ -330,8 +358,9 @@ async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     attempts = 0
 
-    async def fail_atomically(_message, _candidates, *, readable_project_ids):
+    async def fail_atomically(_message, _candidates, *, readable_project_ids, artifact=None):
         del readable_project_ids
+        del artifact
         nonlocal attempts
         attempts += 1
         raise ConnectionError("source reference write failed")
@@ -339,13 +368,14 @@ async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
     async def skip_retry_delay(_delay):
         return None
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = fail_atomically
+    resources.knowledge_store.finalize_assistant_exchange = fail_atomically
     monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
 
     with pytest.raises(ConnectionError, match="source reference write failed"):
         await ctx.add_assistant_turn(
             "failed assistant response",
             timestamp,
+            user_msg_id=1,
             source_candidates=[_pasted_source_candidate()],
         )
 
@@ -363,7 +393,9 @@ async def test_context_assistant_turn_failure_removes_staged_message_and_raises(
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     attempts = 0
 
-    async def fail_save(messages):
+    async def fail_save(_message, _candidates, *, readable_project_ids, artifact=None):
+        del readable_project_ids
+        del artifact
         nonlocal attempts
         attempts += 1
         raise ConnectionError("Postgres unavailable")
@@ -371,14 +403,16 @@ async def test_context_assistant_turn_failure_removes_staged_message_and_raises(
     async def skip_retry_delay(delay):
         return None
 
-    monkeypatch.setattr(resources.knowledge_store, "save_message_logs", fail_save)
+    monkeypatch.setattr(resources.knowledge_store, "finalize_assistant_exchange", fail_save)
     monkeypatch.setattr(
         "runtime.session_runtime.asyncio.sleep",
         skip_retry_delay,
     )
 
     with pytest.raises(ConnectionError, match="Postgres unavailable"):
-        await ctx.add_assistant_turn("failed assistant response", timestamp)
+        await ctx.add_assistant_turn(
+            "failed assistant response", timestamp, user_msg_id=1
+        )
 
     assert attempts == 3
 
@@ -397,12 +431,13 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         history_calls.append((limit, up_to_msg_id))
         return [{"role": "assistant", "content": "A prior durable answer."}]
 
-    async def persist_assistant(message, candidates, *, readable_project_ids):
+    async def persist_assistant(message, candidates, *, readable_project_ids, artifact=None):
+        del artifact
         nonlocal persisted
         source_handoffs.append((message, candidates, readable_project_ids))
         resources.knowledge_store.saved_message_logs.append([message])
         persisted = True
-        return candidates
+        return message["id"], [], True
 
     async def handler(kwargs):
         candidate = _pasted_source_candidate().model_copy(
@@ -415,7 +450,7 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         )
 
     ctx.get_conversation_context = history
-    resources.knowledge_store.save_assistant_message_with_source_refs = (
+    resources.knowledge_store.finalize_assistant_exchange = (
         persist_assistant
     )
     orchestrator = _FakeTurnOrchestrator(handler)
@@ -467,7 +502,7 @@ async def test_run_agent_stream_persists_artifact_with_assistant_completion(cont
             (message, candidates, readable_project_ids, artifact)
         )
         resources.knowledge_store.saved_message_logs.append([message])
-        return []
+        return message["id"], [], True
 
     async def handler(_kwargs):
         yield _response_event(
@@ -475,7 +510,7 @@ async def test_run_agent_stream_persists_artifact_with_assistant_completion(cont
             artifact=artifact.model_dump(mode="json"),
         )
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = (
+    resources.knowledge_store.finalize_assistant_exchange = (
         persist_assistant
     )
     events = await _collect_turn(
