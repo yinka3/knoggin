@@ -211,14 +211,10 @@ class _NoopUpdater(_Updater):
 class _FailingProjection:
     def __init__(self):
         self.calls = 0
-        self.failures = []
 
     async def synchronize(self, **_kwargs):
         self.calls += 1
         raise OSError("local projection temporarily unavailable")
-
-    async def record_sync_failure(self, **kwargs):
-        self.failures.append(kwargs)
 
 
 class _IdleAdmission:
@@ -246,9 +242,6 @@ class _RecordingProjection:
         self.allow_user_edit = kwargs["allow_user_edit"]
         self.called.set()
         return ContextProjectionResult(snapshot=None, changed=False)
-
-    async def record_sync_failure(self, **_kwargs):
-        raise AssertionError("the idle synchronization should not fail")
 
 
 def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
@@ -285,7 +278,6 @@ async def test_context_stage_commits_then_checkpoints_even_if_file_projection_ne
     assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
     assert store.window.context_revision_id == store.current_snapshot.revision_id
     assert projection.calls == 1
-    assert projection.failures[0]["exc"].args == ("local projection temporarily unavailable",)
 
 
 @pytest.mark.unit

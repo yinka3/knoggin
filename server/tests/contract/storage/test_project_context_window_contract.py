@@ -1120,8 +1120,11 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
         filesystem=FailingFilesystem(),
     )
     with pytest.raises(OSError, match="disk unavailable"):
-        await failed_projection.import_user_edit(
-            user_name="ada", project_id="project-1", domain=_domain()
+        await failed_projection.synchronize(
+            user_name="ada",
+            project_id="project-1",
+            domain=_domain(),
+            allow_user_edit=True,
         )
     current = await reader.get_current_revision(user_name="ada", project_id="project-1")
     assert current is not None

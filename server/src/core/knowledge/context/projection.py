@@ -140,16 +140,7 @@ class ContextProjection:
             raise ContextProjectionConflictError(
                 "CONTEXT.md is not a known stale projection and cannot be overwritten"
             )
-        try:
-            self._write_file(generated.encode("utf-8"), expected_hash=current_hash)
-        except Exception as exc:
-            await self._record_projection_failure(
-                user_name=user_name,
-                project_id=project_id,
-                revision_id=snapshot.revision_id,
-                exc=exc,
-            )
-            raise
+        self._write_file(generated.encode("utf-8"), expected_hash=current_hash)
         await self._record_projection_or_conflict(
             user_name=user_name,
             project_id=project_id,
@@ -173,65 +164,70 @@ class ContextProjection:
         current revision; all other non-generated files remain conflicts.
         """
 
-        await self._writer.ensure_context(user_name=user_name, project_id=project_id)
-        state = await self._reader.get_projection_state(
-            user_name=user_name,
-            project_id=project_id,
-        )
-        if state is None or state.current_revision_id is None:
-            if self._read_file_or_none() is None or not allow_user_edit:
-                return ContextProjectionResult(snapshot=None, changed=False)
-            return await self.import_user_edit(
+        state = None
+        try:
+            await self._writer.ensure_context(
+                user_name=user_name,
+                project_id=project_id,
+            )
+            state = await self._reader.get_projection_state(
+                user_name=user_name,
+                project_id=project_id,
+            )
+            if state is None or state.current_revision_id is None:
+                if self._read_file_or_none() is None or not allow_user_edit:
+                    return ContextProjectionResult(snapshot=None, changed=False)
+                return await self.import_user_edit(
+                    user_name=user_name,
+                    project_id=project_id,
+                    domain=domain,
+                )
+            snapshot = await self._reader.get_snapshot(
+                state.current_revision_id,
+                user_name=user_name,
+                project_id=project_id,
+            )
+            if snapshot is None:
+                raise RuntimeError("current Context revision cannot be materialized")
+            raw = self._read_file_or_none()
+            generated_hash = _hash(render_context_markdown(snapshot, domain).encode("utf-8"))
+            if (
+                allow_user_edit
+                and raw is not None
+                and _hash(raw) != generated_hash
+                and state.projection_revision_id == snapshot.revision_id
+                and state.projection_hash == generated_hash
+            ):
+                return await self.import_user_edit(
+                    user_name=user_name,
+                    project_id=project_id,
+                    domain=domain,
+                )
+            return await self.reconcile(
                 user_name=user_name,
                 project_id=project_id,
                 domain=domain,
             )
-        snapshot = await self._reader.get_snapshot(
-            state.current_revision_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-        if snapshot is None:
-            raise RuntimeError("current Context revision cannot be materialized")
-        raw = self._read_file_or_none()
-        generated_hash = _hash(render_context_markdown(snapshot, domain).encode("utf-8"))
-        if (
-            allow_user_edit
-            and raw is not None
-            and _hash(raw) != generated_hash
-            and state.projection_revision_id == snapshot.revision_id
-            and state.projection_hash == generated_hash
-        ):
-            return await self.import_user_edit(
+        except Exception as exc:
+            current_state = state
+            try:
+                current_state = await self._reader.get_projection_state(
+                    user_name=user_name,
+                    project_id=project_id,
+                )
+            except Exception:
+                pass
+            await self._record_projection_failure(
                 user_name=user_name,
                 project_id=project_id,
-                domain=domain,
+                revision_id=(
+                    None
+                    if current_state is None
+                    else current_state.current_revision_id
+                ),
+                exc=exc,
             )
-        return await self.reconcile(
-            user_name=user_name,
-            project_id=project_id,
-            domain=domain,
-        )
-
-    async def record_sync_failure(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        exc: Exception,
-    ) -> None:
-        """Record a synchronization failure against whichever revision is current."""
-
-        state = await self._reader.get_projection_state(
-            user_name=user_name,
-            project_id=project_id,
-        )
-        await self._record_projection_failure(
-            user_name=user_name,
-            project_id=project_id,
-            revision_id=(None if state is None else state.current_revision_id),
-            exc=exc,
-        )
+            raise
 
     async def import_user_edit(
         self,
@@ -338,16 +334,7 @@ class ContextProjection:
         # The DB commit is intentionally not rolled back if this guarded write
         # fails: the accepted source hash lets a later reconciliation repair it
         # without mistaking the already-imported edit for a new mutation.
-        try:
-            self._write_file(generated, expected_hash=raw_hash)
-        except Exception as exc:
-            await self._record_projection_failure(
-                user_name=user_name,
-                project_id=project_id,
-                revision_id=committed.revision_id,
-                exc=exc,
-            )
-            raise
+        self._write_file(generated, expected_hash=raw_hash)
         await self._record_projection_or_conflict(
             user_name=user_name,
             project_id=project_id,

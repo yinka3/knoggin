@@ -71,7 +71,8 @@ class ProjectContextReader:
                 projection_pending_revision_id,
                 projection_pending_hash,
                 projection_failure_code,
-                projection_failure_summary
+                projection_failure_summary,
+                projection_failure_at
             FROM public.project_contexts
             WHERE user_name = %s AND project_id = %s
             """,

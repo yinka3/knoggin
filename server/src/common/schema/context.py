@@ -8,6 +8,7 @@ later batches.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
@@ -167,6 +168,7 @@ class ContextProjectionState(ConfigModel):
     )
     projection_failure_code: str | None = Field(default=None, max_length=120)
     projection_failure_summary: str | None = Field(default=None, max_length=2_000)
+    projection_failure_at: datetime | None = None
 
 
 class ContextEditBase(ConfigModel):

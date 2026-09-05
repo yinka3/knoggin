@@ -1,8 +1,10 @@
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 
+from common.utils.time_utils import get_now
 from core.health.service import RuntimeHealthService
 
 
@@ -356,6 +358,60 @@ async def test_ingestion_health_marks_exhausted_windows_for_manual_retry():
     assert payload["details"]["semantic_windows"]["manual_retry_required"] is True
     assert payload["details"]["progress"]["window_state"] == "exhausted"
     assert any("manual retry required" in warning for warning in payload["warnings"])
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_ingestion_health_surfaces_bounded_context_projection_failure():
+    class Store:
+        async def get_semantic_window_health(self, **_kwargs):
+            return {
+                "pending_count": 0,
+                "claimed_count": 0,
+                "failed_count": 0,
+                "exhausted_count": 0,
+                "oldest_pending_ms": None,
+                "last_processed_ms": None,
+            }
+
+        async def get_project_context_projection_state(self, **_kwargs):
+            return SimpleNamespace(
+                projection_failure_code="ContextProjectionConflictError",
+                projection_failure_summary="must not be exposed",
+                projection_failure_at=get_now() - timedelta(seconds=5),
+                projection_pending_revision_id="private-revision-id",
+            )
+
+    resource_set = resources()
+    resource_set.knowledge_store = Store()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_job=object(),
+                    scheduler=FakeScheduler({"state": "running"}),
+                )
+            }
+        ),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (
+        await service.get_ingestion_health(
+            user_name="ada", project_id="project-a", session_id="session-a"
+        )
+    ).model_dump(mode="json")
+
+    projection = payload["details"]["context_projection"]
+    assert payload["status"] == "degraded"
+    assert projection["available"] is True
+    assert projection["failed"] is True
+    assert projection["failure_code"] == "ContextProjectionConflictError"
+    assert projection["failure_age_seconds"] >= 5
+    assert projection["repair_pending"] is True
+    assert "must not be exposed" not in json.dumps(payload)
+    assert "private-revision-id" not in json.dumps(payload)
 
 
 @pytest.mark.unit

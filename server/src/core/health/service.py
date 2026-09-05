@@ -239,8 +239,8 @@ class RuntimeHealthService:
     ) -> HealthSnapshot:
         """Return bounded project semantic-job and durable-window health.
 
-        This reads only the durable window aggregate. It never claims work,
-        wakes a job, or returns message identifiers or payloads.
+        This reads only bounded durable window and Context projection state. It
+        never claims work, wakes a job, or returns identifiers or payloads.
         """
 
         warnings: list[str] = []
@@ -256,6 +256,11 @@ class RuntimeHealthService:
             project_id=project_id,
         )
         warnings.extend(queue_details.pop("warnings", []))
+        projection_details = await self._read_context_projection_health(
+            user_name=user_name,
+            project_id=project_id,
+        )
+        warnings.extend(projection_details.pop("warnings", []))
 
         queue_available = queue_details.get("queue_available") is True
         pending_count = self._nonnegative_int(queue_details.get("pending_count"))
@@ -265,6 +270,7 @@ class RuntimeHealthService:
         consecutive_failures = self._nonnegative_int(
             scheduler_snapshot.get("recent_failed_jobs")
         )
+        projection_failed = projection_details.get("failed") is True
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
         scheduler_state = scheduler_snapshot.get("state")
@@ -289,6 +295,8 @@ class RuntimeHealthService:
             warnings.append("semantic windows exhausted automatic retries; manual retry required")
         if consecutive_failures:
             warnings.append("semantic scheduler has recent failures")
+        if projection_failed:
+            warnings.append("Context projection has a recorded synchronization failure")
         if scheduler_state in {"not_registered", "stopped"}:
             warnings.append("project semantic job is not running")
 
@@ -302,6 +310,8 @@ class RuntimeHealthService:
             or failed_count
             or exhausted_count
             or consecutive_failures
+            or projection_failed
+            or projection_details.get("read_failed") is True
         ):
             status = HealthStatus.DEGRADED
             summary = "Semantic processing is operating with degraded health"
@@ -354,6 +364,15 @@ class RuntimeHealthService:
                     ),
                     "oldest_pending_age_seconds": oldest_age,
                     "delay_state": delay_state,
+                },
+                "context_projection": {
+                    "available": projection_details.get("available") is True,
+                    "failed": projection_failed,
+                    "failure_code": projection_details.get("failure_code"),
+                    "failure_age_seconds": projection_details.get(
+                        "failure_age_seconds"
+                    ),
+                    "repair_pending": projection_details.get("repair_pending") is True,
                 },
                 "progress": {
                     "last_processed_available": (
@@ -567,6 +586,54 @@ class RuntimeHealthService:
             "last_processed_available": queue.get("last_processed_ms") is not None,
         }
 
+    async def _read_context_projection_health(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> dict[str, Any]:
+        """Read a redacted projection diagnostic without Context/file contents."""
+
+        store = getattr(self.resources, "knowledge_store", None)
+        read_projection = getattr(store, "get_project_context_projection_state", None)
+        if not callable(read_projection):
+            return {"available": False, "read_failed": False, "warnings": []}
+        state, error = await self._bounded_read(
+            lambda: read_projection(user_name=user_name, project_id=project_id)
+        )
+        if error is not None:
+            return {
+                "available": False,
+                "read_failed": True,
+                "warnings": ["PostgreSQL Context projection metrics are unavailable"],
+            }
+        if state is None:
+            return {
+                "available": True,
+                "read_failed": False,
+                "failed": False,
+                "repair_pending": False,
+                "warnings": [],
+            }
+        failure_code = getattr(state, "projection_failure_code", None)
+        failure_at = getattr(state, "projection_failure_at", None)
+        if isinstance(state, Mapping):
+            failure_code = state.get("projection_failure_code")
+            failure_at = state.get("projection_failure_at")
+            pending_revision = state.get("projection_pending_revision_id")
+        else:
+            pending_revision = getattr(state, "projection_pending_revision_id", None)
+        bounded_code = failure_code[:120] if isinstance(failure_code, str) else None
+        return {
+            "available": True,
+            "read_failed": False,
+            "failed": bounded_code is not None,
+            "failure_code": bounded_code,
+            "failure_age_seconds": self._timestamp_age_seconds(failure_at),
+            "repair_pending": pending_revision is not None,
+            "warnings": [],
+        }
+
     async def _bounded_read(
         self, operation: Callable[[], Any]
     ) -> tuple[Any, str | None]:
@@ -587,6 +654,20 @@ class RuntimeHealthService:
         if not isinstance(value, str):
             return None
         timestamp = parse_iso_time(value)
+        if timestamp is None:
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=get_now().tzinfo)
+        return max((get_now() - timestamp).total_seconds(), 0.0)
+
+    @staticmethod
+    def _timestamp_age_seconds(value: Any) -> float | None:
+        if isinstance(value, datetime):
+            timestamp = value
+        elif isinstance(value, str):
+            timestamp = parse_iso_time(value)
+        else:
+            return None
         if timestamp is None:
             return None
         if timestamp.tzinfo is None:

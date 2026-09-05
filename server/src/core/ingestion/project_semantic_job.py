@@ -260,11 +260,6 @@ class ProjectSemanticJob(BaseJob):
                 allow_user_edit=allow_user_edit,
             )
         except Exception as exc:
-            await self._context_projection.record_sync_failure(
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-                exc=exc,
-            )
             logger.warning("Context file synchronization is pending repair: {}", exc)
             return None
 
