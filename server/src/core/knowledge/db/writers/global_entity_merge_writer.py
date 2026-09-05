@@ -134,7 +134,7 @@ class GlobalEntityMergeWriter:
                 active_cur,
                 """
                 SELECT observation_id, relationship_id, project_id, user_name,
-                       session_id, message_id, source_entity_id, target_entity_id,
+                       semantic_window_id, source_entity_id, target_entity_id,
                        observed_relationship_label, interpretation_source, context,
                        observed_at_ms
                 FROM public.relationship_observations
@@ -612,16 +612,14 @@ class GlobalEntityMergeWriter:
                     new_target = new_b if int(observation["target_entity_id"]) == retired_id else int(observation["target_entity_id"])
                     await active_cur.execute(
                         """SELECT observation_id FROM public.relationship_observations
-                           WHERE project_id = %s AND user_name = %s AND session_id = %s
-                             AND message_id = %s AND source_entity_id = %s
+                           WHERE project_id = %s AND semantic_window_id = %s
+                             AND source_entity_id = %s
                              AND target_entity_id = %s
                              AND observed_relationship_label = %s
                              AND observation_id <> %s""",
                         (
                             observation["project_id"],
-                            observation["user_name"],
-                            observation["session_id"],
-                            observation["message_id"],
+                            observation["semantic_window_id"],
                             new_source,
                             new_target,
                             observation["observed_relationship_label"],
@@ -900,7 +898,7 @@ class GlobalEntityMergeWriter:
             return await self._fetch_one(
                 cur,
                 """SELECT observation_id, relationship_id, project_id, user_name,
-                          session_id, message_id, source_entity_id, target_entity_id,
+                          semantic_window_id, source_entity_id, target_entity_id,
                           observed_relationship_label, interpretation_source, context,
                           observed_at_ms
                    FROM public.relationship_observations WHERE observation_id = %s""",

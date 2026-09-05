@@ -94,7 +94,6 @@ def test_document_runtime_uses_typed_settings_and_shared_explicit_dependencies(
     factory = ProjectRuntimeFactory(
         resources=resources,
         user_name="ada",
-        episode_window_size_provider=lambda _project_id: 8,
     )
     monkeypatch.setattr(
         "runtime.project_factory.ConfigManager.get",
@@ -126,12 +125,11 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
     factory = ProjectRuntimeFactory(
         resources=resources,
         user_name="ada",
-        episode_window_size_provider=lambda _project_id: 8,
     )
     project_state = RecordingProjectRuntime()
     entities = RecordingEntities()
     processor = RecordingProcessor()
-    episode = RecordingJob("episode")
+    semantic = RecordingJob("project_semantic")
 
     monkeypatch.setattr(
         "runtime.project_factory.ConfigManager.get",
@@ -141,16 +139,17 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         project_state,
         entities=entities,
         processor=processor,
-        episode_job=episode,
+        project_semantic_job=semantic,
     )
 
-    assert list(project_state.scheduler._jobs) == ["episode"]
+    assert list(project_state.scheduler._jobs) == ["project_semantic"]
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
+        "developer_settings.ingestion",
         "developer_settings.jobs.episode",
     ]
-    assert len(project_state.unsubscribers) == 3
+    assert len(project_state.unsubscribers) == 4
 
 
 @pytest.mark.runtime
@@ -166,15 +165,11 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         executor=object(),
         embedding=object(),
     )
-    factory = ProjectRuntimeFactory(
-        resources=resources,
-        user_name="ada",
-        episode_window_size_provider=lambda _project_id: 8,
-    )
+    factory = ProjectRuntimeFactory(resources=resources, user_name="ada")
     state = RecordingProjectRuntime()
     entities = RecordingEntities()
     processor = RecordingProcessor()
-    episode = RecordingJob("episode")
+    semantic = RecordingJob("project_semantic")
 
     monkeypatch.setattr(
         "runtime.project_factory.ConfigManager.get",
@@ -184,17 +179,18 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         state,
         entities=entities,
         processor=processor,
-        episode_job=episode,
+        project_semantic_job=semantic,
     )
 
     marker = object()
     config_manager.emit("developer_settings.entity_resolution", marker)
     config_manager.emit("developer_settings.nlp_pipeline", marker)
+    config_manager.emit("developer_settings.ingestion", marker)
     config_manager.emit("developer_settings.jobs.episode", marker)
 
     assert entities.updates[-1] is marker
-    assert processor.updates[-2:] == [marker, marker]
-    assert episode.updates[-1] is marker
+    assert processor.updates[-1] is marker
+    assert semantic.updates[-2:] == [marker, marker]
 
 
 @pytest.mark.runtime
@@ -206,12 +202,10 @@ async def test_project_semantic_job_is_registered_with_its_settings(
     factory = ProjectRuntimeFactory(
         resources=SimpleNamespace(),
         user_name="ada",
-        episode_window_size_provider=lambda _project_id: 8,
     )
     state = RecordingProjectRuntime()
     entities = RecordingEntities()
     processor = RecordingProcessor()
-    episode = RecordingJob("episode")
     semantic = RecordingJob("project_semantic")
     monkeypatch.setattr(
         "runtime.project_factory.ConfigManager.get",
@@ -222,15 +216,13 @@ async def test_project_semantic_job_is_registered_with_its_settings(
         state,
         entities=entities,
         processor=processor,
-        episode_job=episode,
         project_semantic_job=semantic,
     )
 
-    assert list(state.scheduler._jobs) == ["episode", "project_semantic"]
+    assert list(state.scheduler._jobs) == ["project_semantic"]
     assert [path for _, path in config_manager.subscriptions] == [
         "developer_settings.entity_resolution",
         "developer_settings.nlp_pipeline",
-        "developer_settings.jobs.episode",
         "developer_settings.ingestion",
         "developer_settings.jobs.episode",
     ]

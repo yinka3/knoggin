@@ -1,17 +1,16 @@
 import pytest
 
-from common.schema.ingestion.contracts import ExecutionScope
-from infrastructure.work_record import WorkRecord, WorkStatus
+from infrastructure.work_record import WorkRecord, WorkScope, WorkStatus
 
 
 def _work() -> WorkRecord:
-    return WorkRecord.for_ingestion(
-        ExecutionScope(
+    return WorkRecord.for_semantic_window(
+        WorkScope(
             user_name="ada",
             project_id="project-1",
             session_id="session-1",
         ),
-        [7],
+        "window-7",
     )
 
 

@@ -139,11 +139,11 @@ class SemanticEpisodeStore(Protocol):
 class ProjectSemanticJob(BaseJob):
     """Claim, narrate, and durably reconcile one project Context window.
 
-    Normal runtime registration remains disabled until Batch 8. When enabled,
-    the stage sequence is strict: Episode -> Context -> Knowledge -> completed.
+    The production semantic owner runs one strict durable sequence:
+    Episode -> Context -> Knowledge -> completed.
     """
 
-    enabled = False
+    enabled = True
 
     def __init__(
         self,

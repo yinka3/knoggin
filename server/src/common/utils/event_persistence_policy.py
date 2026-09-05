@@ -28,16 +28,6 @@ CONTENT_KEYS = frozenset(
 
 APPROVED_EVENTS = frozenset(
     {
-        ("pipeline", "graph_write_failed"),
-        ("pipeline", "buffer_invalid_entries"),
-        ("pipeline", "drain_complete"),
-        ("pipeline", "local_reference_resolution_failed"),
-        ("job", "maintenance_deferred"),
-        ("job", "episode_processed"),
-        ("job", "episode_processing_failed"),
-        ("job", "episode_validation_failed"),
-        ("job", "local_reference_resolution_failed"),
-        ("job", "episodes_write_failed"),
         ("job", "failed"),
         ("job", "timeout"),
         ("agent", "episode_retrieval_completed"),

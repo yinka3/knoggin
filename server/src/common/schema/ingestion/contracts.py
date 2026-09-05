@@ -1,28 +1,13 @@
-"""Typed contracts for ingestion and graph-persistence handoffs."""
+"""Typed contracts for Context-first semantic processing."""
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    model_validator,
-)
+from pydantic import BaseModel, Field
 
 from common.conf.relationship_config import normalize_observed_relationship
-from common.schema.immutable import FrozenDict
-
-
-class ExecutionScope(BaseModel):
-    """Execution scope for engine work and serialized batch diagnostics."""
-
-    model_config = ConfigDict(frozen=True)
-    user_name: str
-    session_id: str
-    project_id: Optional[str] = None
 
 
 class ValidationIssue(BaseModel):
@@ -60,57 +45,6 @@ class ExtractionTrace(BaseModel):
     user_relationships_accepted: int = 0
     user_relationships_rejected: int = 0
     fallbacks: List[Dict[str, str]] = Field(default_factory=list)
-
-
-class RelationshipObservation(BaseModel):
-    """One validated relationship observation before durable endpoint resolution."""
-
-    message_id: int = Field(..., gt=0)
-    entity_a_name: str = Field(..., min_length=1)
-    entity_b_name: str = Field(..., min_length=1)
-    relationship_type: str = Field(..., min_length=1)
-    observed_label: Optional[str] = None
-    canonical_type: Optional[str] = None
-    interpretation_source: Literal["observed", "domain", "review"] | None = None
-    domain_status: Literal["recognized", "unrecognized"] = "unrecognized"
-    source_type: Optional[str] = None
-    target_type: Optional[str] = None
-    symmetric: bool = False
-    domain_version: int = Field(0, ge=0)
-    context: Optional[str] = None
-    identity_rooted: bool = False
-
-    @model_validator(mode="after")
-    def normalize_relationship_fields(self):
-        observed = normalize_observed_relationship(
-            self.observed_label or self.relationship_type
-        )
-        self.observed_label = observed
-        if self.canonical_type is not None:
-            self.canonical_type = self.canonical_type.strip()
-            if not self.canonical_type:
-                self.canonical_type = None
-        self.relationship_type = self.canonical_type or observed
-        self.domain_status = (
-            "recognized" if self.canonical_type is not None else "unrecognized"
-        )
-        self.interpretation_source = (
-            self.interpretation_source
-            or ("domain" if self.canonical_type is not None else "observed")
-        )
-        return self
-
-    @property
-    def source_entity_name(self) -> str:
-        """Directional source alias for the relationship contract."""
-
-        return self.entity_a_name
-
-    @property
-    def target_entity_name(self) -> str:
-        """Directional target alias for the relationship contract."""
-
-        return self.entity_b_name
 
 
 def normalize_relationship_type(value: object) -> str:
@@ -231,83 +165,11 @@ class EntityWrite:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class RelationshipWrite:
-    """Typed relationship payload intended for graph persistence."""
-
-    entity_a_id: int
-    entity_b_id: int
-    relationship_type: str
-    message_id: int
-    context: Optional[str] = None
-    observed_label: Optional[str] = None
-    canonical_type: Optional[str] = None
-    interpretation_source: Literal["observed", "domain", "review"] | None = None
-    domain_status: Literal["recognized", "unrecognized"] = "unrecognized"
-    source_type: Optional[str] = None
-    target_type: Optional[str] = None
-    symmetric: bool = False
-    domain_version: int = 0
-
-    def __post_init__(self) -> None:
-        _require_positive_id(self.entity_a_id, "RelationshipWrite.entity_a_id")
-        _require_positive_id(self.entity_b_id, "RelationshipWrite.entity_b_id")
-        if self.entity_a_id == self.entity_b_id:
-            raise ValueError("RelationshipWrite requires distinct positive entity IDs")
-        _require_positive_id(self.message_id, "RelationshipWrite.message_id")
-        if self.symmetric:
-            entity_a_id, entity_b_id = sorted((self.entity_a_id, self.entity_b_id))
-            object.__setattr__(self, "entity_a_id", entity_a_id)
-            object.__setattr__(self, "entity_b_id", entity_b_id)
-        object.__setattr__(
-            self,
-            "relationship_type",
-            normalize_relationship_type(self.relationship_type),
-        )
-        observed = self.observed_label or self.relationship_type
-        object.__setattr__(
-            self,
-            "observed_label",
-            normalize_observed_relationship(observed),
-        )
-        if self.canonical_type is not None:
-            canonical = self.canonical_type.strip()
-            object.__setattr__(self, "canonical_type", canonical or None)
-        if self.canonical_type is not None:
-            object.__setattr__(self, "domain_status", "recognized")
-        else:
-            object.__setattr__(self, "domain_status", "unrecognized")
-        object.__setattr__(
-            self,
-            "interpretation_source",
-            self.interpretation_source
-            or ("domain" if self.canonical_type is not None else "observed"),
-        )
-        if not isinstance(self.domain_version, int) or isinstance(self.domain_version, bool) or self.domain_version < 0:
-            raise ValueError("RelationshipWrite.domain_version must be a non-negative integer")
-        if self.context is not None:
-            if not isinstance(self.context, str):
-                raise ValueError("RelationshipWrite.context must be a string or None")
-            object.__setattr__(self, "context", self.context.strip() or None)
-
-    @property
-    def source_entity_id(self) -> int:
-        """Directional source alias used by the domain relationship contract."""
-
-        return self.entity_a_id
-
-    @property
-    def target_entity_id(self) -> int:
-        """Directional target alias used by the domain relationship contract."""
-
-        return self.entity_b_id
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
 class ContextRelationshipWrite:
     """One Context-grounded relationship observation ready for reconciliation.
 
-    Unlike the legacy ``RelationshipWrite``, its evidence is one or more
-    immutable Context block versions, never a single message or session.
+    Its evidence is one or more immutable Context block versions, never a
+    single message or session.
     """
 
     support_block_ids: tuple[UUID, ...]
@@ -537,156 +399,3 @@ class ContextEntityResult:
             for reference in self.message_entity_refs
         ):
             raise ValueError("Context message refs must reference resolved entities")
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class MessageSourceTime:
-    """Canonical source time for one message claimed by an ingestion commit."""
-
-    message_id: int
-    timestamp_ms: int | None
-
-    def __post_init__(self) -> None:
-        _require_positive_id(self.message_id, "MessageSourceTime.message_id")
-        if self.timestamp_ms is not None and (
-            not isinstance(self.timestamp_ms, int)
-            or isinstance(self.timestamp_ms, bool)
-        ):
-            raise ValueError("MessageSourceTime.timestamp_ms must be an integer or None")
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class AliasUpdate:
-    """Aliases to persist for a canonical entity."""
-
-    entity_id: int
-    aliases: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        _require_positive_id(self.entity_id, "AliasUpdate.entity_id")
-        if not isinstance(self.aliases, tuple):
-            raise ValueError("AliasUpdate.aliases must be a tuple of strings")
-        object.__setattr__(
-            self,
-            "aliases",
-            tuple(
-                _require_nonblank_text(alias, "AliasUpdate.aliases entry")
-                for alias in self.aliases
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class IngestionCommit:
-    """The complete durable change set for one claimed ingestion batch."""
-
-    scope: ExecutionScope
-    batch_id: str
-    message_ids: tuple[int, ...]
-    source_message_times: tuple[MessageSourceTime, ...]
-    entity_writes: tuple[EntityWrite, ...] = ()
-    alias_updates: tuple[AliasUpdate, ...] = ()
-    message_entity_refs: tuple[MessageEntityRef, ...] = ()
-    relationship_writes: tuple[RelationshipWrite, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.scope, ExecutionScope):
-            raise TypeError("IngestionCommit.scope must be an ExecutionScope")
-        if not self.scope.project_id:
-            raise ValueError("IngestionCommit requires a project-scoped execution")
-        object.__setattr__(
-            self,
-            "batch_id",
-            _require_nonblank_text(self.batch_id, "IngestionCommit.batch_id"),
-        )
-        if not isinstance(self.message_ids, tuple):
-            raise ValueError("IngestionCommit.message_ids must be a tuple")
-        message_ids = tuple(
-            _require_positive_id(message_id, "IngestionCommit.message_ids entry")
-            for message_id in self.message_ids
-        )
-        if not message_ids or len(message_ids) != len(set(message_ids)):
-            raise ValueError("IngestionCommit requires unique claimed message IDs")
-        object.__setattr__(self, "message_ids", tuple(sorted(message_ids)))
-
-        if not isinstance(self.source_message_times, tuple) or not all(
-            isinstance(source_time, MessageSourceTime)
-            for source_time in self.source_message_times
-        ):
-            raise TypeError(
-                "IngestionCommit.source_message_times must contain "
-                "MessageSourceTime instances"
-            )
-        source_ids = tuple(
-            source_time.message_id for source_time in self.source_message_times
-        )
-        if len(source_ids) != len(set(source_ids)) or set(source_ids) != set(message_ids):
-            raise ValueError(
-                "IngestionCommit source message times must cover each claimed message"
-            )
-
-        for field_name, values, expected_type in (
-            ("entity_writes", self.entity_writes, EntityWrite),
-            ("alias_updates", self.alias_updates, AliasUpdate),
-            ("message_entity_refs", self.message_entity_refs, MessageEntityRef),
-            ("relationship_writes", self.relationship_writes, RelationshipWrite),
-        ):
-            if not isinstance(values, tuple) or not all(
-                isinstance(value, expected_type) for value in values
-            ):
-                raise TypeError(
-                    f"IngestionCommit.{field_name} must contain "
-                    f"{expected_type.__name__} instances"
-                )
-
-        claimed_ids = set(message_ids)
-        evidence_ids = {
-            reference.message_id for reference in self.message_entity_refs
-        } | {relationship.message_id for relationship in self.relationship_writes}
-        if not evidence_ids.issubset(claimed_ids):
-            raise ValueError(
-                "IngestionCommit evidence must belong to claimed messages"
-            )
-        timestamps_by_message_id = {
-            source_time.message_id: source_time.timestamp_ms
-            for source_time in self.source_message_times
-        }
-        if any(
-            timestamps_by_message_id[relationship.message_id] is None
-            for relationship in self.relationship_writes
-        ):
-            raise ValueError(
-                "IngestionCommit relationship evidence requires a source timestamp"
-            )
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class SkippedRelationship:
-    """Relationship observation skipped before graph persistence."""
-
-    entity_a: Optional[str] = None
-    entity_b: Optional[str] = None
-    message_id: int
-    reason: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        _require_positive_id(self.message_id, "SkippedRelationship.message_id")
-        object.__setattr__(
-            self,
-            "reason",
-            _require_nonblank_text(self.reason, "SkippedRelationship.reason"),
-        )
-        object.__setattr__(self, "metadata", FrozenDict(self.metadata))
-
-
-@dataclass(slots=True)
-class GraphWriteSummary:
-    """Counts from executing a graph mutation plan."""
-
-    entities_written: int = 0
-    relationships_written: int = 0
-    aliases_updated: int = 0
-    dirty_entities_marked: int = 0
-    zombies_filtered: int = 0
-    relationships_skipped: int = 0

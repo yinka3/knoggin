@@ -42,7 +42,6 @@ def make_project_state(
     postgres=None,
     embedding=None,
     domain_config=None,
-    ingestion_pipeline=None,
     background_work=None,
     entities=None,
     text_processor=None,
@@ -74,6 +73,5 @@ def make_project_state(
         readable_project_ids=[project_id],
         document_service=document_service,
         domain_config_store=DomainConfigStore(postgres),
-        ingestion_pipeline=ingestion_pipeline,
         background_work=background_work,
     )

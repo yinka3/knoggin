@@ -340,9 +340,6 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
     assert result[0].entities == []
     assert result[0].relationships == []
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-1'"
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
         "SELECT stage, episode_result_recorded FROM project_semantic_windows WHERE window_id = %s",
         (window.window_id,),
     ) == {"stage": "claimed", "episode_result_recorded": True}

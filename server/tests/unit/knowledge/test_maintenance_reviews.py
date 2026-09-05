@@ -99,7 +99,7 @@ def test_advisory_tracks_observation_ids_for_invalidation():
         [
             {
                 "observation_id": 11,
-                "message_id": 101,
+                "semantic_window_id": "window-1",
                 "observed_relationship_label": "works at",
                 "source_type": "Person",
                 "target_type": "Company",
@@ -109,7 +109,7 @@ def test_advisory_tracks_observation_ids_for_invalidation():
             },
             {
                 "observation_id": 12,
-                "message_id": 102,
+                "semantic_window_id": "window-1",
                 "observed_relationship_label": "works at",
                 "source_type": "Person",
                 "target_type": "Company",
@@ -119,7 +119,7 @@ def test_advisory_tracks_observation_ids_for_invalidation():
             },
             {
                 "observation_id": 13,
-                "message_id": 103,
+                "semantic_window_id": "window-2",
                 "observed_relationship_label": "works at",
                 "source_type": "Person",
                 "target_type": "Company",

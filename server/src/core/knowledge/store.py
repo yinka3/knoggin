@@ -10,15 +10,7 @@ from common.schema.context import (
     ContextRevisionRecord,
     ContextSnapshot,
 )
-from common.schema.episode.models import Episode, EpisodeCard, EpisodeCheckpoint
-from common.schema.ingestion.contracts import (
-    EntityWrite,
-    ExecutionScope,
-    GraphWriteSummary,
-    IngestionCommit,
-    MessageEntityRef,
-    RelationshipWrite,
-)
+from common.schema.episode.models import Episode, EpisodeCard
 from common.schema.semantic_window import (
     SemanticWindowClaimResult,
     SemanticWindowMessage,
@@ -56,7 +48,6 @@ from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
     ExchangeClosure,
-    IngestionClaim,
     MessageAcceptance,
     MessageLifecycleWriter,
 )
@@ -136,47 +127,6 @@ class KnowledgeStore:
     ) -> MessageAcceptance:
         return await self._message_lifecycle_writer.create_editable_user_message(
             message, edit_window_seconds=edit_window_seconds
-        )
-
-    async def seal_due_user_messages(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> List[int]:
-        return await self._message_lifecycle_writer.seal_due_user_messages(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def reset_claimed_ingestion(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> List[int]:
-        return await self._message_lifecycle_writer.reset_claimed_ingestion(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def claim_next_ingestion_batch(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        batch_size: int,
-    ) -> IngestionClaim | None:
-        return await self._message_lifecycle_writer.claim_next_batch(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            batch_size=batch_size,
         )
 
     async def ensure_project_context(
@@ -539,28 +489,28 @@ class KnowledgeStore:
             project_id=project_id,
         )
 
-    async def get_ingestion_queue_health(
+    async def get_semantic_window_health(
         self,
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
     ) -> Dict[str, int | None]:
-        """Return bounded PostgreSQL queue counters without exposing messages."""
+        """Return project semantic-window health without exposing messages."""
 
         row = await self._postgres_client.fetch_one(
             """
             SELECT
-                count(*) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS pending_count,
-                count(*) FILTER (WHERE ingestion_state = 'claimed') AS claimed_count,
-                count(*) FILTER (WHERE ingestion_state = 'failed') AS failed_count,
-                min(timestamp_ms) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS oldest_pending_ms,
-                max(timestamp_ms) FILTER (WHERE ingestion_state = 'processed') AS last_processed_ms
-            FROM public.messages
-            WHERE user_name = %s AND project_id = %s AND session_id = %s
-              AND role = 'user'
+                count(*) FILTER (WHERE stage <> 'completed') AS pending_count,
+                count(*) FILTER (WHERE stage = 'claimed') AS claimed_count,
+                count(*) FILTER (WHERE last_failure_at_ms IS NOT NULL) AS failed_count,
+                min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
+                    FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
+                max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
+                    AS last_processed_ms
+            FROM public.project_semantic_windows
+            WHERE user_name = %s AND project_id = %s
             """,
-            (user_name, project_id, session_id),
+            (user_name, project_id),
         )
         return {
             key: row.get(key) if row else None
@@ -572,46 +522,6 @@ class KnowledgeStore:
                 "last_processed_ms",
             )
         }
-
-    async def release_ingestion_claim(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        batch_id: str,
-    ) -> None:
-        await self._message_lifecycle_writer.release_ingestion_claim(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            batch_id=batch_id,
-        )
-
-    async def fail_ingestion_claim(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        batch_id: str,
-        failure_stage: str,
-        failure_code: str,
-        error_summary: str,
-        retryable: bool,
-        max_attempts: int,
-    ) -> bool:
-        return await self._message_lifecycle_writer.fail_ingestion_claim(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            batch_id=batch_id,
-            failure_stage=failure_stage,
-            failure_code=failure_code,
-            error_summary=error_summary,
-            retryable=retryable,
-            max_attempts=max_attempts,
-        )
 
     async def finalize_assistant_exchange(
         self,
@@ -862,43 +772,11 @@ class KnowledgeStore:
     async def allocate_message_id(self) -> int:
         return await self._id_allocator.allocate_message_id()
 
-    async def write_batch(
-        self,
-        entities: List[EntityWrite],
-        relationships: List[RelationshipWrite],
-        *,
-        message_entity_refs: Optional[List[MessageEntityRef]] = None,
-        source_message_times=None,
-        scope: ExecutionScope,
-    ) -> bool:
-        return await self._graph_writer.write_batch(
-            entities,
-            relationships,
-            message_entity_refs=message_entity_refs or (),
-            source_message_times=source_message_times or (),
-            scope=scope,
-        )
-
-    async def commit_ingestion(self, commit: IngestionCommit) -> GraphWriteSummary:
-        return await self._graph_writer.commit_ingestion(commit)
-
     async def get_project_episode_source_refs(
         self, episode_id: str, *, user_name: str, project_id: str
     ) -> List[SourceConsulted]:
         return await self._source_reference_reader.get_project_episode_source_refs(
             episode_id, user_name=user_name, project_id=project_id
-        )
-
-    async def write_project_episode_window(
-        self,
-        episodes: List[Episode],
-        window_messages: List[Dict],
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> bool:
-        return await self._episode_writer.write_project_episode_window(
-            episodes, window_messages, user_name=user_name, project_id=project_id
         )
 
     async def edit_episode(
@@ -920,52 +798,6 @@ class KnowledgeStore:
             new_developments=new_developments,
             updates=updates,
             unresolved=unresolved,
-        )
-
-    async def get_episode_checkpoint(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> EpisodeCheckpoint:
-        return await self._episode_reader.get_episode_checkpoint(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def get_next_episode_window(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        checkpoint: EpisodeCheckpoint,
-        message_count: int,
-    ) -> List[Dict]:
-        return await self._episode_reader.get_next_episode_window(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            checkpoint=checkpoint,
-            message_count=message_count,
-        )
-
-    async def get_next_project_episode_window(
-        self, *, user_name: str, project_id: str, message_count: int
-    ) -> List[Dict]:
-        return await self._episode_reader.get_next_project_episode_window(
-            user_name=user_name, project_id=project_id, message_count=message_count
-        )
-
-    async def has_ready_project_episode_window(
-        self, *, user_name: str, project_id: str, message_count: int
-    ) -> bool:
-        return await self._episode_reader.has_ready_project_episode_window(
-            user_name=user_name,
-            project_id=project_id,
-            message_count=message_count,
         )
 
     async def get_project_episode(

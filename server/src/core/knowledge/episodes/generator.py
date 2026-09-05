@@ -7,7 +7,7 @@ result is persisted.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol, TypeVar
 
 from loguru import logger
 
@@ -15,21 +15,56 @@ from common.schema.episode.generation import (
     LLMEpisodeConsolidation,
     LLMEpisodeWindowDecision,
 )
-from common.schema.episode.models import EpisodeNarrativeLimitError
+from common.schema.episode.models import Episode, EpisodeNarrativeLimitError
 from common.utils.diagnostic_context import diagnostic_scope
 from core.knowledge.episodes.build import ProjectEpisodeBuild
 from core.knowledge.episodes.embedding import build_episode_embedding_text
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
-from core.knowledge.episodes.ports import (
-    EmbeddingEncoder,
-    EpisodeStore,
-    StructuredGenerator,
-)
 from core.knowledge.episodes.prompts import (
     get_episode_consolidation_prompt,
     get_episode_generation_prompt,
     get_episode_narrative_repair_prompt,
 )
+
+ResponseT = TypeVar("ResponseT")
+
+
+class EpisodeStore(Protocol):
+    """The only durable reads needed to generate one semantic-window episode."""
+
+    async def get_nearby_project_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_ids: list[str],
+        before_message_id: int,
+        before_timestamp_ms: int | None,
+        limit: int,
+    ) -> list[Episode]: ...
+
+    async def get_project_episode_source_messages(
+        self,
+        episode_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict[str, Any]]: ...
+
+
+class StructuredGenerator(Protocol):
+    async def generate_structured(
+        self,
+        *,
+        response_model: type[ResponseT],
+        system: str,
+        user: str,
+        temperature: float = 1.0,
+    ) -> ResponseT: ...
+
+
+class EmbeddingEncoder(Protocol):
+    async def encode(self, texts: list[str]) -> list[list[float]]: ...
 
 
 class EpisodeGenerator:

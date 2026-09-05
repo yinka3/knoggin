@@ -171,7 +171,6 @@ def processor(vp01):
         return None
 
     result = TextProcessor(
-        llm=object(),
         get_known_aliases=lambda: {},
         get_alias_version=lambda: 0,
         get_profile=no_profile,
@@ -333,7 +332,6 @@ async def test_context_known_aliases_run_before_the_gliner25_pass():
         )
 
     text_processor = TextProcessor(
-        llm=object(),
         get_known_aliases=lambda: {"Acme": 701},
         get_alias_version=lambda: 1,
         get_profile=get_profile,

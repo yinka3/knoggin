@@ -75,7 +75,7 @@ async def test_materializing_pending_advisory_opens_observation_backed_review():
         occurrence_count=3,
         distinct_source_entities=2,
         distinct_target_entities=2,
-        message_ids=(1, 2, 3),
+        semantic_window_ids=("window-1", "window-2"),
         observation_ids=(11, 12, 13),
         first_observed_ms=1,
         last_observed_ms=3,
@@ -95,3 +95,7 @@ async def test_materializing_pending_advisory_opens_observation_backed_review():
         {"kind": "observation", "id": "13"},
     ]
     assert opened["expected_state"] == {"domain_version": 4}
+    assert opened["evidence_snapshot"]["semantic_window_ids"] == [
+        "window-1",
+        "window-2",
+    ]

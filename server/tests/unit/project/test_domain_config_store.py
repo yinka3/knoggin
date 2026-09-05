@@ -132,25 +132,12 @@ async def test_project_state_load_and_activation_replace_runtime_snapshot():
                 previous_version=2,
             )
 
-    class Receiver:
-        def __init__(self):
-            self.snapshots = []
-
-        def set_compiled_domain(self, snapshot):
-            self.snapshots.append(snapshot)
-
     state = make_project_state()
-    pipeline_receiver = Receiver()
-    batch_receiver = Receiver()
-    state.text_processor = pipeline_receiver
-    state.ingestion_pipeline = batch_receiver
     state.domain_config_store = Store()
 
     await state.load_domain_config()
     captured_before = await state.capture_domain()
     assert captured_before.version == 2
-    assert pipeline_receiver.snapshots == [captured_before]
-    assert batch_receiver.snapshots == [captured_before]
 
     result = await state.activate_domain_config(
         make_domain(),
@@ -160,5 +147,3 @@ async def test_project_state_load_and_activation_replace_runtime_snapshot():
     assert result.config.version == 3
     assert state.domain_config.version == 3
     assert (await state.capture_domain()).version == 3
-    assert pipeline_receiver.snapshots[-1].version == 3
-    assert batch_receiver.snapshots[-1].version == 3

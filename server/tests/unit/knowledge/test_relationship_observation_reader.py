@@ -7,14 +7,13 @@ from core.knowledge.relationship_advisories import AdvisoryThresholds
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
-def observation_row(message_id, source_entity_id, target_entity_id):
+def observation_row(observation_id, source_entity_id, target_entity_id):
     return {
-        "observation_id": message_id,
+        "observation_id": observation_id,
         "relationship_id": f"project:{source_entity_id}:{target_entity_id}:deploys to",
         "user_name": "alice",
         "project_id": "project",
-        "session_id": "session",
-        "message_id": message_id,
+        "semantic_window_id": f"window-{(observation_id + 1) // 2}",
         "source_entity_id": source_entity_id,
         "target_entity_id": target_entity_id,
         "source_type": "Project",
@@ -24,7 +23,7 @@ def observation_row(message_id, source_entity_id, target_entity_id):
         "domain_status": "unrecognized",
         "confidence": 0.8,
         "context": "deployment context",
-        "observed_at_ms": message_id * 100,
+        "observed_at_ms": observation_id * 100,
     }
 
 

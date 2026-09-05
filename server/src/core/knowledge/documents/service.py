@@ -361,7 +361,7 @@ class DocumentService:
             "truncated": character_truncated or requested_end < len(lines),
         }
 
-    async def read_project_context(self) -> Optional[str]:
+    async def read_project_brief(self) -> Optional[str]:
         """Read the user-owned ``PROJECT.md`` brief without waiting for indexing.
 
         The engine-maintained ``CONTEXT.md`` projection is deliberately handled

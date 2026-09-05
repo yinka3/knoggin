@@ -334,14 +334,6 @@ CREATE TABLE public.episode_messages (
     attached_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT episode_messages_message_position_check CHECK ((message_position >= 0))
 );
-CREATE TABLE public.episode_processing_checkpoints (
-    project_id text NOT NULL,
-    session_id text NOT NULL,
-    last_evaluated_message_id bigint DEFAULT 0 NOT NULL,
-    last_evaluated_timestamp_ms bigint,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT episode_processing_checkpoints_last_evaluated_message_id_check CHECK ((last_evaluated_message_id >= 0))
-);
 CREATE TABLE public.episode_relationships (
     episode_id text NOT NULL,
     project_id text NOT NULL,
@@ -525,20 +517,9 @@ CREATE TABLE public.messages (
     selected_revision integer DEFAULT 1 NOT NULL,
     replaces_message_id bigint,
     superseded_at_ms bigint,
-    ingestion_state text DEFAULT 'excluded'::text NOT NULL,
-    ingestion_not_before_ms bigint,
-    ingestion_claim_id text,
-    ingestion_claimed_at_ms bigint,
-    ingestion_attempt_count integer DEFAULT 0 NOT NULL,
-    ingestion_last_failure_stage text,
-    ingestion_last_failure_code text,
-    ingestion_last_failure_at_ms bigint,
-    ingestion_last_error_summary text,
     exchange_state text DEFAULT 'open'::text NOT NULL,
     exchange_outcome text,
     exchange_closed_at_ms bigint,
-    CONSTRAINT messages_ingestion_attempt_count_check CHECK ((ingestion_attempt_count >= 0)),
-    CONSTRAINT messages_ingestion_state_check CHECK ((ingestion_state = ANY (ARRAY['waiting_for_seal'::text, 'ready'::text, 'claimed'::text, 'processed'::text, 'failed'::text, 'excluded'::text]))),
     CONSTRAINT messages_lifecycle_state_check CHECK ((lifecycle_state = ANY (ARRAY['editable'::text, 'sealed'::text, 'superseded'::text]))),
     CONSTRAINT messages_exchange_state_check CHECK ((exchange_state = ANY (ARRAY['open'::text, 'closed'::text]))),
     CONSTRAINT messages_exchange_user_shape_check CHECK (((role = 'user'::text) AND (((exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)) OR ((exchange_state = 'closed'::text) AND (exchange_outcome = ANY (ARRAY['assistant_final'::text, 'clarification'::text, 'failed'::text, 'cancelled'::text, 'user_only'::text])) AND (exchange_closed_at_ms IS NOT NULL) AND (exchange_closed_at_ms >= 0)))) OR ((role <> 'user'::text) AND (exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)))
@@ -789,9 +770,7 @@ CREATE TABLE public.relationship_observations (
     relationship_id text,
     project_id text NOT NULL,
     user_name text NOT NULL,
-    session_id text,
-    message_id bigint,
-    semantic_window_id uuid,
+    semantic_window_id uuid NOT NULL,
     source_entity_id bigint NOT NULL,
     target_entity_id bigint NOT NULL,
     observed_relationship_label text NOT NULL,
@@ -801,7 +780,6 @@ CREATE TABLE public.relationship_observations (
     retired_at timestamp with time zone,
     retired_reason text,
     CONSTRAINT relationship_observations_distinct_entities CHECK ((source_entity_id <> target_entity_id)),
-    CONSTRAINT relationship_observations_evidence_shape_check CHECK (((semantic_window_id IS NOT NULL) OR ((session_id IS NOT NULL) AND (message_id IS NOT NULL)))),
     CONSTRAINT relationship_observations_interpretation_source_check CHECK ((interpretation_source = ANY (ARRAY['observed'::text, 'domain'::text, 'review'::text]))),
     CONSTRAINT relationship_observations_observed_relationship_label_check CHECK ((btrim(observed_relationship_label) <> ''::text)),
     CONSTRAINT relationship_observations_retirement_shape_check CHECK ((((retired_at IS NULL) AND (retired_reason IS NULL)) OR ((retired_at IS NOT NULL) AND (btrim(retired_reason) <> ''::text))))
@@ -905,8 +883,6 @@ ALTER TABLE ONLY public.episode_messages
     ADD CONSTRAINT episode_messages_episode_id_message_position_key UNIQUE (episode_id, message_position);
 ALTER TABLE ONLY public.episode_messages
     ADD CONSTRAINT episode_messages_pkey PRIMARY KEY (episode_id, message_id);
-ALTER TABLE ONLY public.episode_processing_checkpoints
-    ADD CONSTRAINT episode_processing_checkpoints_pkey PRIMARY KEY (project_id, session_id);
 ALTER TABLE ONLY public.episode_relationships
     ADD CONSTRAINT episode_relationships_pkey PRIMARY KEY (episode_id, relationship_id);
 ALTER TABLE ONLY public.episodes
@@ -1048,8 +1024,6 @@ ALTER TABLE ONLY public.relationship_observations
 ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_id_project_key UNIQUE (observation_id, project_id);
 ALTER TABLE ONLY public.relationship_observations
-    ADD CONSTRAINT relationship_observations_unique_evidence UNIQUE (project_id, user_name, session_id, message_id, source_entity_id, target_entity_id, observed_relationship_label);
-ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_unique_semantic_window_evidence UNIQUE (project_id, semantic_window_id, source_entity_id, target_entity_id, observed_relationship_label);
 ALTER TABLE ONLY public.relationships
     ADD CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id);
@@ -1096,7 +1070,6 @@ CREATE INDEX message_entity_refs_entity_idx ON public.message_entity_refs USING 
 CREATE INDEX message_source_refs_episode_lookup_idx ON public.message_source_refs USING btree (project_id, session_id, message_id, created_at);
 CREATE INDEX message_source_refs_message_scope_idx ON public.message_source_refs USING btree (message_id, project_id, session_id);
 CREATE UNIQUE INDEX messages_acceptance_key_idx ON public.messages USING btree (user_name, session_id, acceptance_key) WHERE (acceptance_key IS NOT NULL);
-CREATE INDEX messages_ingestion_queue_idx ON public.messages USING btree (user_name, session_id, message_id) WHERE ((role = 'user'::text) AND (ingestion_state = ANY (ARRAY['waiting_for_seal'::text, 'ready'::text, 'claimed'::text])));
 CREATE INDEX messages_project_idx ON public.messages USING btree (user_name, project_id, message_id);
 CREATE INDEX messages_search_tsvector_idx ON public.messages USING gin (search_tsvector);
 CREATE INDEX project_context_blocks_project_section_idx ON public.project_context_blocks USING btree (project_id, section_key, created_at);
@@ -1119,7 +1092,6 @@ CREATE INDEX project_documents_project_idx ON public.project_documents USING btr
 CREATE INDEX project_entity_contexts_activity_idx ON public.project_entity_contexts USING btree (project_id, last_mentioned_ms DESC NULLS LAST);
 CREATE INDEX project_entity_contexts_entity_idx ON public.project_entity_contexts USING btree (user_name, entity_id);
 CREATE INDEX project_entity_contexts_topic_idx ON public.project_entity_contexts USING btree (project_id, topic);
-CREATE INDEX relationship_observations_message_idx ON public.relationship_observations USING btree (project_id, user_name, session_id, message_id);
 CREATE INDEX relationship_observations_pattern_idx ON public.relationship_observations USING btree (project_id, user_name, interpretation_source, observed_relationship_label);
 CREATE INDEX relationship_observations_relationship_idx ON public.relationship_observations USING btree (relationship_id, project_id);
 CREATE INDEX relationship_observations_active_support_idx ON public.relationship_observations USING btree (project_id, relationship_id) WHERE (retired_at IS NULL);
@@ -1162,10 +1134,6 @@ ALTER TABLE ONLY public.episode_messages
     ADD CONSTRAINT episode_messages_episode_scope_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.episode_messages
     ADD CONSTRAINT episode_messages_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.episode_processing_checkpoints
-    ADD CONSTRAINT episode_processing_checkpoints_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.episode_processing_checkpoints
-    ADD CONSTRAINT episode_processing_checkpoints_session_project_fk FOREIGN KEY (session_id, project_id) REFERENCES public.sessions(session_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.episode_relationships
     ADD CONSTRAINT episode_relationships_episode_project_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.episode_relationships
@@ -1271,9 +1239,7 @@ ALTER TABLE ONLY public.project_read_scopes
 ALTER TABLE ONLY public.project_read_scopes
     ADD CONSTRAINT project_read_scopes_readable_project_id_fkey FOREIGN KEY (readable_project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.relationship_observations
-    ADD CONSTRAINT relationship_observations_message_fk FOREIGN KEY (user_name, session_id, message_id, project_id) REFERENCES public.messages(user_name, session_id, message_id, project_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.relationship_observations
-    ADD CONSTRAINT relationship_observations_semantic_window_scope_fk FOREIGN KEY (semantic_window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE RESTRICT;
+    ADD CONSTRAINT relationship_observations_semantic_window_scope_fk FOREIGN KEY (semantic_window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.relationship_observations
     ADD CONSTRAINT relationship_observations_relationship_fk FOREIGN KEY (relationship_id, project_id) REFERENCES public.relationships(relationship_id, project_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.relationship_observations

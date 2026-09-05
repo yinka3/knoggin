@@ -425,7 +425,6 @@ class FakeKnowledgeStore:
         self.next_entity_id = 2
         self.next_message_id = 1
         self.embedding_rebuild_calls = []
-        self.reset_claimed_ingestion_calls = []
         self.accepted_message_ids = {}
         self.closed_exchanges = []
 
@@ -469,22 +468,11 @@ class FakeKnowledgeStore:
         row = {
             **message,
             "lifecycle_state": "editable",
-            "ingestion_state": "waiting_for_seal",
             "edit_window_seconds": edit_window_seconds,
         }
         self.saved_message_logs.append([row])
         self.accepted_message_ids[acceptance_key] = message["id"]
         return MessageAcceptance(message_id=message["id"], created=True)
-
-    async def reset_claimed_ingestion(self, *, user_name, project_id, session_id):
-        self.reset_claimed_ingestion_calls.append(
-            {
-                "user_name": user_name,
-                "project_id": project_id,
-                "session_id": session_id,
-            }
-        )
-        return []
 
     async def finalize_assistant_exchange(
         self, message, candidates, *, readable_project_ids, artifact=None
@@ -842,16 +830,6 @@ class FakePostgresClient:
                     row[field] = value
             return
 
-        if "update public.messages" in normalized and "ingestion_state = 'excluded'" in normalized:
-            for row in self.messages:
-                if (
-                    row.get("user_name") == params.get("user_name")
-                    and row.get("session_id") == params.get("session_id")
-                    and row.get("ingestion_state") != "processed"
-                ):
-                    row["ingestion_state"] = "excluded"
-            return
-
         if "delete from public.messages" in normalized:
             self.messages = [
                 row
@@ -1018,18 +996,6 @@ class FakeScheduler:
     async def stop(self):
         self.running = False
         self.stopped += 1
-
-class FakeIngestionWorker:
-    def __init__(self):
-        self.signaled = 0
-        self.stopped = 0
-
-    def signal(self):
-        self.signaled += 1
-
-    async def stop(self):
-        self.stopped += 1
-
 
 class FakeSession:
     def __init__(self, session_id="session-1", project_id="project-1"):

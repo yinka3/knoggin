@@ -53,7 +53,7 @@ async def test_native_project_context_is_readable_before_indexing_and_searchable
 
     created = await document_service.create_project_file(PROJECT_FILE_PATH, content)
     assert created["relative_path"] == PROJECT_FILE_PATH
-    assert await document_service.read_project_context() == content
+    assert await document_service.read_project_brief() == content
 
     await document_service.index_document(document_id=postgres.rows[0]["document_id"])
 

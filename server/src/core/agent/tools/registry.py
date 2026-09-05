@@ -18,6 +18,7 @@ from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools, create_web_page_http_client
 from core.agent.tools.workspace import ProjectFileTools
+from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.entity.resolver import EntityResolver
@@ -474,6 +475,7 @@ class Tools(
         self.readable_project_ids = entities.readable_project_ids
         self.compiled_domain = compiled_domain
         self.document_service = document_service
+        self.project_context_reader = ProjectContextReader(postgres)
         self.document_focus = document_focus
         self.search_cfg = search_config or {}
         self.agent_id = agent_id or "AGENT_IDENTITY"

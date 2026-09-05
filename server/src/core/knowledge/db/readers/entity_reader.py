@@ -828,23 +828,21 @@ class EntityReader:
             relationship.relationship_id,
             relationship.relationship_type,
             relationship."symmetric",
-            COUNT(observation.observation_id)::INTEGER AS observation_count,
-            COUNT(DISTINCT observation.message_id)::INTEGER AS evidence_message_count,
+            COUNT(DISTINCT observation.observation_id)::INTEGER AS observation_count,
+            COUNT(DISTINCT support.message_id)::INTEGER AS evidence_message_count,
             COALESCE(
-                jsonb_agg(
+                jsonb_agg(DISTINCT
                     jsonb_build_object(
                         'project_id', observation.project_id,
                         'user_name', observation.user_name,
-                        'session_id', observation.session_id,
-                        'message_id', observation.message_id
+                        'session_id', support.session_id,
+                        'message_id', support.message_id
                     )
-                    ORDER BY observation.observed_at_ms DESC,
-                             observation.observation_id DESC
                 ) FILTER (WHERE observation.observation_id IS NOT NULL),
                 '[]'::jsonb
             ) AS evidence_refs,
             COALESCE(
-                jsonb_agg(
+                jsonb_agg(DISTINCT
                     jsonb_build_object(
                         'observation_id', observation.observation_id,
                         'observed_relationship_label', observation.observed_relationship_label,
@@ -852,8 +850,6 @@ class EntityReader:
                         'observed_at_ms', observation.observed_at_ms,
                         'context', left(COALESCE(observation.context, ''), 600)
                     )
-                    ORDER BY observation.observed_at_ms DESC,
-                             observation.observation_id DESC
                 ) FILTER (WHERE observation.observation_id IS NOT NULL),
                 '[]'::jsonb
             ) AS observation_refs,
@@ -871,6 +867,12 @@ class EntityReader:
         LEFT JOIN relationship_observations observation
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
+        LEFT JOIN relationship_observation_blocks observation_block
+          ON observation_block.observation_id = observation.observation_id
+         AND observation_block.project_id = observation.project_id
+        LEFT JOIN project_context_block_supports support
+          ON support.block_id = observation_block.block_id
+         AND support.project_id = observation_block.project_id
         WHERE (
               relationship.entity_a_id = ANY(%s)
               OR relationship.entity_b_id = ANY(%s)

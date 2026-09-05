@@ -3,13 +3,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from common.schema.ingestion.contracts import ExecutionScope
 from infrastructure.model_work import (
     ModelWorkCoordinator,
     ModelWorkPriority,
     ModelWorkRejected,
 )
-from infrastructure.work_record import WorkRecord, WorkStatus
+from infrastructure.work_record import WorkRecord, WorkScope, WorkStatus
 
 
 @pytest.fixture
@@ -124,10 +123,10 @@ async def test_model_work_cancelling_a_queued_caller_does_not_run_or_leak(model_
 
 @pytest.mark.no_network
 async def test_model_work_records_terminal_state_and_parent_summary(model_work):
-    scope = ExecutionScope(
+    scope = WorkScope(
         user_name="ada", project_id="project-1", session_id="session-1"
     )
-    parent = WorkRecord.for_ingestion(scope, [1])
+    parent = WorkRecord.for_semantic_window(scope, "window-1")
     child = WorkRecord.for_model_operation("embedding", scope, parent_id=parent.id)
 
     result = await model_work.submit(

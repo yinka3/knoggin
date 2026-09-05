@@ -21,10 +21,6 @@ from common.utils.core_utils import (
 )
 from common.utils.events import emit
 from common.utils.time_utils import get_now, parse_iso_time_or_now
-from core.ingestion.batch import IngestionBatch
-from core.ingestion.graph_commit import write_ingestion_batch_to_graph
-from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.worker import IngestionWorker
 from core.knowledge.documents import DocumentService
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -35,9 +31,8 @@ class SessionRuntime:
     SessionRuntime represents one loaded, in-memory user session.
 
     It serves as the root orchestration point for a session, binding together user
-    state, background ingestion workers, and dynamic configuration. It deliberately
-    holds references to the ingestion pipeline (`IngestionPipeline`, `IngestionWorker`)
-    so it can gracefully orchestrate the shutdown of all asynchronous session tasks.
+    state and dynamic configuration. Semantic processing is owned solely by the
+    project runtime's durable semantic-window job.
 
     Initialization and wiring logic is encapsulated in SessionRuntimeFactory to decouple
     the construction of these services from the state container itself.
@@ -72,8 +67,6 @@ class SessionRuntime:
         self.project_id = project_id
         self.project = project
 
-        self.ingestion_pipeline: Optional[IngestionPipeline] = None
-        self.ingestion_worker: Optional[IngestionWorker] = None
         self.config_unsubscribers: List = []
         self._agent_run_lock = asyncio.Lock()
         self._shutdown_lock = asyncio.Lock()
@@ -161,10 +154,10 @@ class SessionRuntime:
         not allocate or persist a user message.
         """
 
-        self._require_message_ingestion_ready()
         async with self._agent_run_lock:
             if self._closed or self._agent_runs_closed:
                 raise RuntimeError("Session is shutting down")
+            self._require_message_ingestion_ready()
             if self._agent_run_reserved:
                 raise SessionBusyError()
             self._agent_run_reserved = True
@@ -190,7 +183,10 @@ class SessionRuntime:
         )
 
     def _require_message_ingestion_ready(self) -> None:
-        if not self.project.scheduler or not self.ingestion_worker:
+        if (
+            not getattr(self.project, "scheduler", None)
+            or getattr(self.project, "project_semantic_job", None) is None
+        ):
             raise RuntimeError("Session is not fully initialized for message ingestion")
 
     async def _run_admitted_agent_stream(
@@ -369,16 +365,11 @@ class SessionRuntime:
 
         acceptance = await self._persist_user_turn(msg, acceptance_key=acceptance_key)
         msg.id = acceptance.message_id
-        if not acceptance.created:
-            # The original writer may have committed just before its local
-            # worker wake failed.  A duplicate request is always safe to use
-            # as another wake-up edge because the durable queue is canonical.
-            self.ingestion_worker.signal()
-            return msg, False
-
-        self.ingestion_worker.signal()
-
-        return msg, True
+        if acceptance.created:
+            # An editable message is not semantic evidence until its exchange
+            # closes; the closure path owns the project-wide wake edge.
+            return msg, True
+        return msg, False
 
     @staticmethod
     def _normalize_timestamp(timestamp: datetime) -> datetime:
@@ -466,8 +457,7 @@ class SessionRuntime:
                         "user_msg_id": user_msg_id,
                         "lifecycle_state": "sealed",
                         "sealed_at_ms": int(timestamp.timestamp() * 1000),
-                        "ingestion_state": "excluded",
-                    }
+            }
                 ]
 
                 if self.project is None:
@@ -527,16 +517,11 @@ class SessionRuntime:
                 await asyncio.sleep(0.5 * (attempt + 1))
 
     def _signal_exchange_closed(self) -> None:
-        """Wake both transition paths; durable storage remains authoritative."""
+        """Wake the sole project semantic owner; durable storage is authoritative."""
 
         signal_semantic_work = getattr(self.project, "signal_semantic_work", None)
         if callable(signal_semantic_work):
             signal_semantic_work()
-        # Batch 8 removes this legacy per-session worker signal.  Until then,
-        # closure makes a waiting user row ready and this edge avoids polling
-        # latency in the current ingestion pipeline.
-        if self.ingestion_worker is not None:
-            self.ingestion_worker.signal()
 
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None
@@ -566,15 +551,6 @@ class SessionRuntime:
 
         return results
 
-    async def _write_to_graph_callback(
-        self, batch: IngestionBatch
-    ):
-        return await write_ingestion_batch_to_graph(
-            batch,
-            knowledge_store=self.knowledge_store,
-            entities=self.project.entities,
-        )
-
     async def shutdown(self) -> None:
         """Stop all session-owned work without skipping later cleanup phases."""
 
@@ -591,13 +567,6 @@ class SessionRuntime:
             except Exception as exc:
                 logger.exception("Failed to cancel agent run for session {}", self.session_id)
                 failures.append(exc)
-
-            if self.ingestion_worker is not None:
-                try:
-                    await self.ingestion_worker.stop()
-                except Exception as exc:
-                    logger.exception("Failed to stop worker for session {}", self.session_id)
-                    failures.append(exc)
 
             unsubscribers, self.config_unsubscribers = self.config_unsubscribers, []
             for unsubscribe in unsubscribers:

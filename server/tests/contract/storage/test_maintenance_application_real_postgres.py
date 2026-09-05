@@ -126,11 +126,11 @@ async def test_project_review_application_reinterprets_before_marking_applied(
         """
         INSERT INTO public.messages (
             user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, lifecycle_state, ingestion_state
+            timestamp_ms, lifecycle_state
         )
         VALUES (
             'ada', 'session-1', 101, 'project-1', 'user', 'Ada met Augusta.',
-            1000, 'sealed', 'processed'
+            1000, 'sealed'
         )
         """
     )
@@ -145,15 +145,28 @@ async def test_project_review_application_reinterprets_before_marking_applied(
         """,
         (relationship_id,),
     )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_windows (
+            window_id, user_name, project_id, origin, stage, domain_version,
+            policy_snapshot, source_token_count, token_estimator,
+            token_estimator_version, completed_at
+        )
+        VALUES (
+            '11111111-1111-4111-8111-111111111111', 'ada', 'project-1',
+            'conversation', 'completed', 1, '{}'::jsonb, 0, 'test', 'v1', now()
+        )
+        """
+    )
     observation = await real_postgres_client.fetch_one(
         """
         INSERT INTO public.relationship_observations (
-            relationship_id, project_id, user_name, session_id, message_id,
+            relationship_id, project_id, user_name, semantic_window_id,
             source_entity_id, target_entity_id, observed_relationship_label,
             observed_at_ms
         )
         VALUES (
-            %s, 'project-1', 'ada', 'session-1', 101,
+            %s, 'project-1', 'ada', '11111111-1111-4111-8111-111111111111',
             2, 3, 'related to', 1000
         )
         RETURNING observation_id

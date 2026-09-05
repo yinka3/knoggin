@@ -23,174 +23,6 @@ async def _seed_session(client, session_id: str) -> None:
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_real_postgres_resets_startup_claims_and_claims_a_partial_fifo_batch(
-    real_postgres_client,
-):
-    """A fresh runtime releases only its own claims, then resumes FIFO work."""
-
-    await _seed_session(real_postgres_client, "session-1")
-    await _seed_session(real_postgres_client, "session-2")
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.messages (
-            user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, lifecycle_state, ingestion_state,
-            ingestion_not_before_ms, ingestion_claim_id, ingestion_claimed_at_ms
-        ) VALUES
-            ('ada', 'session-1', 101, 'project-1', 'user', 'first', 101,
-             'sealed', 'claimed', 0, 'abandoned-session-1', 0),
-            ('ada', 'session-1', 102, 'project-1', 'user', 'second', 102,
-             'sealed', 'claimed', 0, 'abandoned-session-1', 0),
-            ('ada', 'session-2', 201, 'project-1', 'user', 'other scope', 201,
-             'sealed', 'claimed', 0, 'abandoned-session-2', 0)
-        """
-    )
-    lifecycle = MessageLifecycleWriter(
-        real_postgres_client,
-        MessageWriter(real_postgres_client),
-    )
-
-    reset = await lifecycle.reset_claimed_ingestion(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert reset == [101, 102]
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT ingestion_claim_id
-        FROM public.messages
-        WHERE session_id = 'session-2' AND message_id = 201
-        """
-    ) == {"ingestion_claim_id": "abandoned-session-2"}
-
-    claim = await lifecycle.claim_next_batch(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        batch_size=8,
-    )
-
-    assert claim is not None
-    assert [message["id"] for message in claim.messages] == [101, 102]
-    assert claim.batch_id != "abandoned-session-1"
-    assert await real_postgres_client.fetch_all(
-        """
-        SELECT message_id, ingestion_state, ingestion_claim_id
-        FROM public.messages
-        WHERE session_id = 'session-1'
-        ORDER BY message_id
-        """
-    ) == [
-        {
-            "message_id": 101,
-            "ingestion_state": "claimed",
-            "ingestion_claim_id": claim.batch_id,
-        },
-        {
-            "message_id": 102,
-            "ingestion_state": "claimed",
-            "ingestion_claim_id": claim.batch_id,
-        },
-    ]
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_real_postgres_ingestion_failure_metadata_blocks_and_retries(
-    real_postgres_client,
-):
-    await _seed_session(real_postgres_client, "session-1")
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.messages (
-            user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, lifecycle_state, ingestion_state, ingestion_not_before_ms,
-            ingestion_claim_id, ingestion_attempt_count
-        ) VALUES (
-            'ada', 'session-1', 101, 'project-1', 'user', 'first', 101,
-            'sealed', 'claimed', 0, 'claim-1', 1
-        )
-        """
-    )
-    lifecycle = MessageLifecycleWriter(
-        real_postgres_client,
-        MessageWriter(real_postgres_client),
-    )
-
-    terminal = await lifecycle.fail_ingestion_claim(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        batch_id="claim-1",
-        failure_stage="model",
-        failure_code="llm_provider_error",
-        error_summary="provider temporarily unavailable",
-        retryable=True,
-        max_attempts=3,
-    )
-
-    assert terminal is False
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT ingestion_state, ingestion_attempt_count,
-               ingestion_last_failure_stage, ingestion_last_failure_code,
-               ingestion_last_error_summary
-        FROM public.messages
-        WHERE message_id = 101
-        """
-    ) == {
-        "ingestion_state": "ready",
-        "ingestion_attempt_count": 2,
-        "ingestion_last_failure_stage": "model",
-        "ingestion_last_failure_code": "llm_provider_error",
-        "ingestion_last_error_summary": "provider temporarily unavailable",
-    }
-
-    claim = await lifecycle.claim_next_batch(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        batch_size=8,
-    )
-    assert claim is not None
-
-    terminal = await lifecycle.fail_ingestion_claim(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        batch_id=claim.batch_id,
-        failure_stage="model",
-        failure_code="llm_provider_error",
-        error_summary="provider temporarily unavailable",
-        retryable=True,
-        max_attempts=3,
-    )
-    assert terminal is True
-    assert await lifecycle.retry_failed_ingestion(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        message_ids=[101],
-    ) == [101]
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT ingestion_state, ingestion_attempt_count, ingestion_last_failure_code
-        FROM public.messages
-        WHERE message_id = 101
-        """
-    ) == {
-        "ingestion_state": "ready",
-        "ingestion_attempt_count": 3,
-        "ingestion_last_failure_code": "llm_provider_error",
-    }
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
 async def test_real_postgres_accepts_concurrent_user_message_request_once(
     real_postgres_client,
 ):
@@ -295,7 +127,6 @@ async def test_real_postgres_final_assistant_response_and_exchange_close_are_ato
         "user_msg_id": 501,
         "lifecycle_state": "sealed",
         "sealed_at_ms": 2_000,
-        "ingestion_state": "excluded",
     }
 
     persisted_id, source_ref_ids, created = await store.finalize_assistant_exchange(
@@ -321,7 +152,7 @@ async def test_real_postgres_final_assistant_response_and_exchange_close_are_ato
     assert await real_postgres_client.fetch_one(
         """
         SELECT lifecycle_state, exchange_state, exchange_outcome,
-               exchange_closed_at_ms, ingestion_state
+               exchange_closed_at_ms
         FROM public.messages
         WHERE message_id = 501
         """
@@ -330,7 +161,6 @@ async def test_real_postgres_final_assistant_response_and_exchange_close_are_ato
         "exchange_state": "closed",
         "exchange_outcome": "assistant_final",
         "exchange_closed_at_ms": 2_000,
-        "ingestion_state": "ready",
     }
     assert await real_postgres_client.fetch_all(
         """

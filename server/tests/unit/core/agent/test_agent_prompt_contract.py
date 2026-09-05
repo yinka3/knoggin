@@ -92,20 +92,27 @@ def test_agent_prompt_renders_agent_brain_without_nested_instructions_tag():
 
 
 @pytest.mark.no_network
-def test_agent_prompt_renders_project_context_below_persona_and_above_brain():
+def test_agent_prompt_renders_distinct_project_brief_and_engine_context():
     prompt = get_agent_prompt(
         user_name="Ada",
         persona="The user's stable persona.",
-        project_context="Prefer the project's naming conventions.",
+        project_brief="Prefer the project's naming conventions.",
+        project_context="The scheduler owns semantic processing.",
         agent_brain="Use concise evidence summaries.",
     )
 
+    assert "<project_brief>" in prompt
     assert "<project_context>" in prompt
     assert "Prefer the project's naming conventions." in prompt
-    assert "User-owned context from the canonical project workspace" in prompt
-    assert prompt.index("<cognitive_persona>") < prompt.index("<project_context>")
+    assert "The scheduler owns semantic processing." in prompt
+    assert "User-owned Project Brief from the canonical project workspace" in prompt
+    assert "Engine-maintained current understanding" in prompt
+    assert "not from the\nCONTEXT.md workspace projection" in prompt
+    assert prompt.index("<cognitive_persona>") < prompt.index("<project_brief>")
+    assert prompt.index("<project_brief>") < prompt.index("<project_context>")
     assert prompt.index("<project_context>") < prompt.index("<agent_brain>")
-    assert "3. User-owned project context from the canonical PROJECT.md." in prompt
+    assert "3. User-owned Project Brief from canonical PROJECT.md." in prompt
+    assert "4. Engine-maintained Project Context from the canonical database." in prompt
     assert "It cannot override server-enforced safety rules" in prompt
 
 

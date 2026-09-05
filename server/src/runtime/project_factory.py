@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import Any, Callable, cast
+from typing import cast
 
 from common.conf.manager import ConfigManager
 from common.scoping import (
@@ -13,7 +13,6 @@ from common.scoping import (
     require_visible_project_ids,
 )
 from core.ingestion.context_entity_build import ContextEntityBuildService
-from core.ingestion.pipeline import IngestionPipeline
 from core.ingestion.project_semantic_job import ProjectSemanticJob
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
@@ -32,7 +31,6 @@ from core.knowledge.documents import (
 )
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.generator import EpisodeGenerator
-from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
 from infrastructure.job.scheduler import Scheduler
@@ -48,11 +46,9 @@ class ProjectRuntimeFactory:
         *,
         resources: RuntimeResources,
         user_name: str,
-        episode_window_size_provider: Callable[[str], Any],
     ) -> None:
         self.resources = resources
         self.user_name = user_name
-        self._episode_window_size_provider = episode_window_size_provider
 
     @property
     def dev_settings(self):
@@ -106,7 +102,6 @@ class ProjectRuntimeFactory:
             resources.executor,
             partial(
                 TextProcessor,
-                llm=resources.llm_service,
                 get_known_aliases=entities.get_known_aliases,
                 get_alias_version=entities.get_alias_version,
                 get_profile=entities.get_profile,
@@ -116,22 +111,6 @@ class ProjectRuntimeFactory:
                 model_work=resources.model_work,
                 get_vp01=resources.get_vp01,
             ),
-        )
-        ingestion_pipeline = IngestionPipeline(
-            project_id=project_id,
-            llm=resources.llm_service,
-            entities=entities,
-            processor=text_processor,
-            knowledge_store=resources.knowledge_store,
-            cpu_executor=resources.executor,
-            user_name=self.user_name,
-            compiled_domain=compiled_domain,
-            get_next_ent_id=resources.knowledge_store.allocate_entity_id,
-            resolution_threshold=entity_settings.resolution_threshold,
-            common_word_frequency_threshold=(
-                entity_settings.common_word_frequency_threshold
-            ),
-            sparse_context_verbs=entity_settings.sparse_context_verbs,
         )
         scheduler = Scheduler(
             self.user_name,
@@ -154,12 +133,9 @@ class ProjectRuntimeFactory:
             domain_config=domain_config,
             document_service=document_service,
             domain_config_store=domain_store,
-            ingestion_pipeline=ingestion_pipeline,
             background_work=resources.background_work,
             get_vp01=resources.get_vp01,
         )
-        episode_job = self._create_episode_job(project_id, resources=resources)
-        runtime.episode_job = episode_job
         project_semantic_job = self._create_project_semantic_job(runtime, resources=resources)
         runtime.project_semantic_job = project_semantic_job
 
@@ -168,8 +144,7 @@ class ProjectRuntimeFactory:
             self._register_background_jobs(
                 runtime,
                 entities=entities,
-                processor=ingestion_pipeline,
-                episode_job=episode_job,
+                processor=text_processor,
                 project_semantic_job=project_semantic_job,
                 resources=resources,
             )
@@ -236,23 +211,6 @@ class ProjectRuntimeFactory:
                 f"entity ID {IDENTITY_ENTITY_ID}"
             )
 
-    def _create_episode_job(
-        self,
-        project_id: str,
-        *,
-        resources: ReadyRuntimeResources | None = None,
-    ) -> EpisodeJob:
-        resources = resources or cast(ReadyRuntimeResources, self.resources)
-        return EpisodeJob(
-            knowledge_store=resources.knowledge_store,
-            settings=self.dev_settings.jobs.episode,
-            llm=resources.llm_service,
-            embedding_service=resources.embedding,
-            episode_window_size_provider=lambda: self._episode_window_size_provider(
-                project_id
-            ),
-        )
-
     def _create_project_semantic_job(
         self,
         runtime: ProjectRuntime,
@@ -281,7 +239,7 @@ class ProjectRuntimeFactory:
             reader=ProjectContextReader(resources.postgres),
             writer=ProjectContextWriter(resources.postgres),
             filesystem=context_filesystem,
-            capture_ingestion_policy=runtime.ingestion_pipeline.capture_policy,
+            capture_ingestion_policy=runtime.capture_ingestion_policy,
         )
         return ProjectSemanticJob(
             admission,
@@ -289,7 +247,7 @@ class ProjectRuntimeFactory:
             episode_generator,
             settings=self.dev_settings.ingestion,
             capture_domain=runtime.capture_domain,
-            capture_ingestion_policy=runtime.ingestion_pipeline.capture_policy,
+            capture_ingestion_policy=runtime.capture_ingestion_policy,
             context_updater=ContextUpdater(llm=resources.llm_service),
             context_projection=context_projection,
             context_entity_builder=ContextEntityBuildService(
@@ -309,8 +267,7 @@ class ProjectRuntimeFactory:
         runtime: ProjectRuntime,
         *,
         entities: EntityResolver,
-        processor: IngestionPipeline,
-        episode_job: EpisodeJob,
+        processor: TextProcessor,
         project_semantic_job: ProjectSemanticJob | None = None,
         resources: ReadyRuntimeResources | None = None,
     ) -> None:
@@ -319,7 +276,6 @@ class ProjectRuntimeFactory:
 
         def update_entity_resolution(settings):
             entities.update_settings(settings)
-            processor.update_settings(settings)
 
         runtime.add_config_unsubscriber(
             config_manager.subscribe(
@@ -331,13 +287,6 @@ class ProjectRuntimeFactory:
             config_manager.subscribe(
                 processor.update_settings,
                 "developer_settings.nlp_pipeline",
-            )
-        )
-        scheduler.register(episode_job)
-        runtime.add_config_unsubscriber(
-            config_manager.subscribe(
-                episode_job.update_settings,
-                "developer_settings.jobs.episode",
             )
         )
         if project_semantic_job is not None:

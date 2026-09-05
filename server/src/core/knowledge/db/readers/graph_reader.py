@@ -119,8 +119,8 @@ class GraphReader:
                     json_build_object(
                         'project_id', project_id,
                         'user_name', user_name,
-                        'session_id', session_id,
-                        'message_id', message_id
+                        'semantic_window_id', semantic_window_id,
+                        'observation_id', observation_id
                     )
                     ORDER BY observed_at_ms, observation_id
                 ) AS evidence_refs

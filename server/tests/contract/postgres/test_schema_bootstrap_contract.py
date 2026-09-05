@@ -100,14 +100,12 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
             "AND table_name = 'relationship_observations' "
             "AND column_name = 'confidence'"
         ) is None
-        ingestion_state_constraint = await client.fetch_one(
-            "SELECT pg_get_constraintdef(oid) AS definition "
-            "FROM pg_constraint "
-            "WHERE connamespace = 'public'::regnamespace "
-            "AND conname = 'messages_ingestion_state_check'"
-        )
-        assert "'failed'::text" in ingestion_state_constraint["definition"]
-        assert "'blocked'::text" not in ingestion_state_constraint["definition"]
+        assert await client.fetch_one(
+            "SELECT 1 AS present FROM information_schema.columns "
+            "WHERE table_schema = 'public' "
+            "AND table_name = 'messages' "
+            "AND column_name = 'ingestion_state'"
+        ) is None
         tables = await client.fetch_all(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = 'public' ORDER BY table_name"

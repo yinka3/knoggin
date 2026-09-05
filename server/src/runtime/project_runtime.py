@@ -4,7 +4,10 @@ from typing import Any, Awaitable, Callable, Optional
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
+from common.conf.manager import ConfigManager
+from common.schema.settings import TextProcessorSettings
 from common.scoping import require_scope_value, require_visible_project_ids
+from core.ingestion.policy import IngestionPolicy
 from core.ingestion.text_processor import TextProcessor
 from core.ingestion.vp01 import VP01EntityExtractor
 from core.knowledge.documents import DocumentService
@@ -31,7 +34,6 @@ class ProjectRuntime:
         domain_config: DomainConfig,
         document_service: DocumentService,
         domain_config_store: DomainConfigStore,
-        ingestion_pipeline: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
         get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
     ):
@@ -51,7 +53,6 @@ class ProjectRuntime:
         self.text_processor = text_processor
         self.scheduler = scheduler
         self.user_name = user_name
-        self.ingestion_pipeline = ingestion_pipeline
         self.background_work = background_work
         if get_vp01 is not None and not callable(get_vp01):
             raise TypeError("ProjectRuntime get_vp01 must be callable")
@@ -62,7 +63,6 @@ class ProjectRuntime:
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
 
-        self.episode_job: Optional[Any] = None
         self.project_semantic_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._closed = False
@@ -152,16 +152,20 @@ class ProjectRuntime:
             self.domain_config = config
             self.compiled_domain = config.compile()
             await self._select_vp01(self.compiled_domain)
-            self._install_compiled_domain(self.compiled_domain)
         return config
 
-    def _install_compiled_domain(self, compiled_domain: CompiledDomain) -> None:
-        """Fan one immutable domain snapshot into future ingestion admission."""
+    def capture_ingestion_policy(self) -> IngestionPolicy:
+        """Freeze the live Context-entity policy for one semantic window."""
 
-        for component in (self.ingestion_pipeline, self.text_processor):
-            setter = getattr(component, "set_compiled_domain", None)
-            if setter is not None:
-                setter(compiled_domain)
+        settings = ConfigManager.get().config.developer_settings
+        return IngestionPolicy.capture(
+            text_processor=TextProcessorSettings(
+                gliner_threshold=self.text_processor.gliner_threshold,
+                llm_ner=self.text_processor.llm_ner,
+            ),
+            entity_resolution=settings.entity_resolution,
+            compiled_domain=self.compiled_domain,
+        )
 
     async def _select_vp01(self, compiled_domain: CompiledDomain) -> None:
         """Align the live adapter with an explicitly switched domain language."""
@@ -202,5 +206,4 @@ class ProjectRuntime:
             self.domain_config = activation.config
             self.compiled_domain = activation.compiled
             await self._select_vp01(activation.compiled)
-            self._install_compiled_domain(activation.compiled)
             return activation

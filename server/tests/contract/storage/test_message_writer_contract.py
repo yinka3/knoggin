@@ -19,10 +19,6 @@ MESSAGE_SQL_PARAMS = (
     1,
     None,
     None,
-    "excluded",
-    None,
-    None,
-    None,
 )
 
 

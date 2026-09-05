@@ -571,7 +571,7 @@ class EntityMaintenanceService:
         user_name: str | None = None,
         cur=None,
     ) -> dict[str, dict[str, Any]]:
-        """Capture stable ingestion boundaries for the affected projects."""
+        """Capture completed semantic-window boundaries for affected projects."""
 
         actor = user_name or self.user_name
         if not actor:
@@ -583,15 +583,28 @@ class EntityMaintenanceService:
                 await active_cur.execute(
                     """
                     SELECT
-                        count(*) FILTER (WHERE ingestion_state IN
-                            ('waiting_for_seal', 'ready', 'claimed')) AS pending_count,
-                        COALESCE(max(message_id) FILTER (WHERE ingestion_state IN
-                            ('processed', 'failed', 'excluded')), 0) AS frontier_message_id,
-                        max(timestamp_ms) FILTER (WHERE ingestion_state IN
-                            ('processed', 'failed', 'excluded')) AS frontier_timestamp_ms
-                    FROM public.messages
-                    WHERE user_name = %s AND project_id = %s
-                      AND role = 'user' AND lifecycle_state <> 'superseded'
+                        count(*) FILTER (
+                            WHERE message.exchange_state = 'closed'
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM public.project_semantic_window_messages membership
+                                  JOIN public.project_semantic_windows semantic_window
+                                    ON semantic_window.window_id = membership.window_id
+                                   AND semantic_window.project_id = membership.project_id
+                                  WHERE membership.exchange_user_message_id = message.message_id
+                                    AND membership.project_id = message.project_id
+                                    AND semantic_window.stage = 'completed'
+                              )
+                        ) AS pending_count,
+                        COALESCE(max(message.message_id) FILTER (
+                            WHERE message.exchange_state = 'closed'
+                        ), 0) AS frontier_message_id,
+                        max(message.timestamp_ms) FILTER (
+                            WHERE message.exchange_state = 'closed'
+                        ) AS frontier_timestamp_ms
+                    FROM public.messages AS message
+                    WHERE message.user_name = %s AND message.project_id = %s
+                      AND message.role = 'user' AND message.lifecycle_state <> 'superseded'
                     """,
                     (actor, project_id),
                 )
@@ -599,7 +612,7 @@ class EntityMaintenanceService:
                 pending = int(row["pending_count"] or 0)
                 if pending:
                     raise RuntimeError(
-                        f"project {project_id} has {pending} pending ingestion messages"
+                        f"project {project_id} has {pending} exchanges pending semantic completion"
                     )
                 message_id = int(row["frontier_message_id"] or 0)
                 timestamp_ms = row["frontier_timestamp_ms"]
@@ -633,7 +646,7 @@ class EntityMaintenanceService:
         user_name: str | None = None,
         cur=None,
     ) -> bool:
-        """Return false when ingestion advanced or live work appeared."""
+        """Return false when semantic work advanced or live work appeared."""
 
         actor = user_name or self.user_name
         if not actor:
@@ -641,15 +654,28 @@ class EntityMaintenanceService:
         for project_id, frontier in frontiers.items():
             query = """
                 SELECT
-                    count(*) FILTER (WHERE ingestion_state IN
-                        ('waiting_for_seal', 'ready', 'claimed')) AS pending_count,
-                    COALESCE(max(message_id) FILTER (WHERE ingestion_state IN
-                        ('processed', 'failed', 'excluded')), 0) AS frontier_message_id,
-                    max(timestamp_ms) FILTER (WHERE ingestion_state IN
-                        ('processed', 'failed', 'excluded')) AS frontier_timestamp_ms
-                FROM public.messages
-                WHERE user_name = %s AND project_id = %s
-                  AND role = 'user' AND lifecycle_state <> 'superseded'
+                    count(*) FILTER (
+                        WHERE message.exchange_state = 'closed'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM public.project_semantic_window_messages membership
+                              JOIN public.project_semantic_windows semantic_window
+                                ON semantic_window.window_id = membership.window_id
+                               AND semantic_window.project_id = membership.project_id
+                              WHERE membership.exchange_user_message_id = message.message_id
+                                AND membership.project_id = message.project_id
+                                AND semantic_window.stage = 'completed'
+                          )
+                    ) AS pending_count,
+                    COALESCE(max(message.message_id) FILTER (
+                        WHERE message.exchange_state = 'closed'
+                    ), 0) AS frontier_message_id,
+                    max(message.timestamp_ms) FILTER (
+                        WHERE message.exchange_state = 'closed'
+                    ) AS frontier_timestamp_ms
+                FROM public.messages AS message
+                WHERE message.user_name = %s AND message.project_id = %s
+                  AND message.role = 'user' AND message.lifecycle_state <> 'superseded'
                 """
             if cur is None:
                 row = await self.postgres.fetch_one(query, (actor, project_id))

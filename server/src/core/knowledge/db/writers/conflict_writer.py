@@ -184,7 +184,7 @@ class ConflictWriter:
         cur=None,
     ) -> list[dict[str, Any]]:
         query = """
-            SELECT observation_id, message_id, session_id, source_entity_id,
+            SELECT observation_id, semantic_window_id, source_entity_id,
                    target_entity_id, observed_relationship_label,
                    relationship_id, interpretation_source, context, observed_at_ms
             FROM public.relationship_observations

@@ -80,9 +80,9 @@ def resources(*, postgres=None):
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_ingestion_health_prefers_durable_postgres_queue_state():
+async def test_ingestion_health_prefers_durable_semantic_window_state():
     class Store:
-        async def get_ingestion_queue_health(self, **_kwargs):
+        async def get_semantic_window_health(self, **_kwargs):
             return {
                 "pending_count": 2,
                 "claimed_count": 1,
@@ -95,14 +95,15 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
     resource_set.knowledge_store = Store()
     service = RuntimeHealthService(
         resources=resource_set,
-        projects=SimpleNamespace(active_projects={}),
-        sessions=SessionRuntimeReader(
-            {
-                    "session-a": SimpleNamespace(
-                        project_id="project-a", ingestion_worker=FakeWorker()
-                    )
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_job=object(),
+                    scheduler=FakeScheduler({"state": "running"}),
+                )
             }
         ),
+        sessions=SessionRuntimeReader({}),
     )
 
     payload = (
@@ -111,25 +112,10 @@ async def test_ingestion_health_prefers_durable_postgres_queue_state():
         )
     ).model_dump(mode="json")
 
-    assert payload["details"]["queue"]["pending_count"] == 2
-    assert payload["details"]["queue"]["claimed_count"] == 1
-    assert payload["details"]["queue"]["available"] is True
+    assert payload["details"]["semantic_windows"]["pending_count"] == 2
+    assert payload["details"]["semantic_windows"]["claimed_count"] == 1
+    assert payload["details"]["semantic_windows"]["available"] is True
     assert "postgres" not in payload["details"]
-
-
-class FakeWorker:
-    def __init__(self, state="running", *, timeout=10.0, failures=0):
-        self.state = state
-        self.timeout = timeout
-        self.failures = failures
-
-    def health_snapshot(self):
-        return {
-            "state": self.state,
-            "current_batch_size": 0,
-            "consecutive_failures": self.failures,
-            "batch_timeout_seconds": self.timeout,
-        }
 
 
 class FakeScheduler:
@@ -140,6 +126,8 @@ class FakeScheduler:
     def snapshot_for_health(self):
         self.calls += 1
         return dict(self.snapshot)
+
+    health_snapshot = snapshot_for_health
 
 
 class FakeDocumentService:
@@ -223,9 +211,9 @@ async def test_resource_health_projects_current_queue_without_other_project_ids(
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_ingestion_health_reports_durable_queue_delay():
+async def test_ingestion_health_reports_pending_semantic_windows():
     class Store:
-        async def get_ingestion_queue_health(self, **_kwargs):
+        async def get_semantic_window_health(self, **_kwargs):
             return {
                 "pending_count": 1,
                 "claimed_count": 0,
@@ -238,14 +226,15 @@ async def test_ingestion_health_reports_durable_queue_delay():
     resource_set.knowledge_store = Store()
     service = RuntimeHealthService(
         resources=resource_set,
-            projects=SimpleNamespace(active_projects={}),
-            sessions=SessionRuntimeReader(
-                {
-                    "session-a": SimpleNamespace(
-                        project_id="project-a", ingestion_worker=FakeWorker()
-                    )
-                }
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_job=object(),
+                    scheduler=FakeScheduler({"state": "running"}),
+                )
+            }
         ),
+        sessions=SessionRuntimeReader({}),
     )
 
     payload = (
@@ -254,19 +243,19 @@ async def test_ingestion_health_reports_durable_queue_delay():
         )
     ).model_dump(mode="json")
 
-    assert payload["status"] == "degraded"
-    assert payload["activity"] == "delayed"
-    assert payload["details"]["queue"]["pending_count"] == 1
-    assert payload["details"]["queue"]["delay_state"] == "delayed"
-    assert payload["details"]["progress"]["message_state"] == "pending"
+    assert payload["status"] == "healthy"
+    assert payload["activity"] == "busy"
+    assert payload["details"]["semantic_windows"]["pending_count"] == 1
+    assert payload["details"]["semantic_windows"]["delay_state"] == "unknown"
+    assert payload["details"]["progress"]["window_state"] == "pending"
     assert "postgres" not in payload["details"]
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_ingestion_health_reports_paused_worker_and_failed_work():
+async def test_ingestion_health_reports_stopped_semantic_job_and_failed_work():
     class Store:
-        async def get_ingestion_queue_health(self, **_kwargs):
+        async def get_semantic_window_health(self, **_kwargs):
             return {
                 "pending_count": 0,
                 "claimed_count": 1,
@@ -279,14 +268,15 @@ async def test_ingestion_health_reports_paused_worker_and_failed_work():
     resource_set.knowledge_store = Store()
     service = RuntimeHealthService(
         resources=resource_set,
-        projects=SimpleNamespace(active_projects={}),
-        sessions=SessionRuntimeReader(
-            {
-                "session-a": SimpleNamespace(
-                    project_id="project-a", ingestion_worker=FakeWorker("paused")
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_job=object(),
+                    scheduler=FakeScheduler({"state": "stopped"}),
                 )
             }
         ),
+        sessions=SessionRuntimeReader({}),
     )
 
     payload = (
@@ -296,29 +286,30 @@ async def test_ingestion_health_reports_paused_worker_and_failed_work():
     ).model_dump(mode="json")
 
     assert payload["status"] == "degraded"
-    assert payload["details"]["queue"]["failed_count"] == 2
-    assert payload["details"]["progress"]["message_state"] == "failed"
+    assert payload["details"]["semantic_windows"]["failed_count"] == 2
+    assert payload["details"]["progress"]["window_state"] == "failed"
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
     class FailingStore:
-        async def get_ingestion_queue_health(self, **_kwargs):
+        async def get_semantic_window_health(self, **_kwargs):
             raise RuntimeError("postgresql://secret")
 
     resource_set = resources()
     resource_set.knowledge_store = FailingStore()
     service = RuntimeHealthService(
         resources=resource_set,
-        projects=SimpleNamespace(active_projects={}),
-        sessions=SessionRuntimeReader(
-            {
-                "session-a": SimpleNamespace(
-                    project_id="project-a", ingestion_worker=FakeWorker()
+        projects=SimpleNamespace(
+            active_projects={
+                "project-a": SimpleNamespace(
+                    project_semantic_job=object(),
+                    scheduler=FakeScheduler({"state": "running"}),
                 )
             }
         ),
+        sessions=SessionRuntimeReader({}),
     )
 
     payload = (
@@ -328,8 +319,8 @@ async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
     ).model_dump(mode="json")
 
     assert payload["status"] == "degraded"
-    assert payload["details"]["queue"]["available"] is False
-    assert payload["details"]["queue"]["pending_count"] == 0
+    assert payload["details"]["semantic_windows"]["available"] is False
+    assert payload["details"]["semantic_windows"]["pending_count"] == 0
     assert "postgresql://" not in json.dumps(payload)
 
 

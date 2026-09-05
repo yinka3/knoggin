@@ -10,7 +10,7 @@ from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import fetch_conversation_turns
 from runtime.session_runtime import SessionRuntime
 from tests.fixtures.factories import make_project_state
-from tests.fixtures.fakes import FakeConfigValue, FakeIngestionWorker, FakeResources
+from tests.fixtures.fakes import FakeConfigValue, FakeResources
 
 
 def _pasted_source_candidate():
@@ -68,7 +68,7 @@ async def _collect_turn(ctx, message, orchestrator):
 
 
 def _runtime(resources, *, session_id="session-1", project_id="project-1"):
-    return SessionRuntime(
+    runtime = SessionRuntime(
         "ada",
         resources,
         session_id=session_id,
@@ -78,13 +78,14 @@ def _runtime(resources, *, session_id="session-1", project_id="project-1"):
         agent_id=None,
         enabled_tools=None,
     )
+    runtime.project.project_semantic_job = object()
+    return runtime
 
 
 @pytest.fixture
 def context(monkeypatch):
     resources = FakeResources()
     ctx = _runtime(resources)
-    ctx.ingestion_worker = FakeIngestionWorker()
     monkeypatch.setattr(
         SessionRuntime,
         "current_config",
@@ -98,6 +99,7 @@ def context(monkeypatch):
 async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
     resources = FakeResources()
     ctx = _runtime(resources)
+    ctx.project.project_semantic_job = None
 
     with pytest.raises(RuntimeError, match="not fully initialized"):
         await ctx.open_agent_run_stream(Message(content="hello"))
@@ -123,7 +125,7 @@ async def test_conversation_history_can_exclude_the_current_first_message():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_open_run_persists_editable_turn_and_signals_worker(context):
+async def test_open_run_persists_editable_turn_without_waking_semantic_work(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
@@ -131,7 +133,6 @@ async def test_open_run_persists_editable_turn_and_signals_worker(context):
         Message(content="  hello world  ", timestamp=timestamp)
     )
 
-    assert ctx.ingestion_worker.signaled == 1
     assert resources.knowledge_store.saved_message_logs == [
         [
             {
@@ -148,7 +149,6 @@ async def test_open_run_persists_editable_turn_and_signals_worker(context):
                     "content:4922391fe82054bfa5ad28b1e1a03bf0077f12fc578a324f37ca7263209dc0bf"
                 ),
                 "lifecycle_state": "editable",
-                "ingestion_state": "waiting_for_seal",
                 "edit_window_seconds": 600,
             }
         ]
@@ -162,7 +162,6 @@ async def test_open_run_uses_durable_message_acceptance(context):
 
     await ctx.open_agent_run_stream(Message(content="durable only"))
 
-    assert ctx.ingestion_worker.signaled == 1
 
 
 @pytest.mark.runtime
@@ -175,7 +174,6 @@ async def test_overlapping_run_is_rejected_before_second_message_persists(contex
     with pytest.raises(SessionBusyError):
         await ctx.open_agent_run_stream(Message(content="second", timestamp=timestamp))
 
-    assert ctx.ingestion_worker.signaled == 1
     assert len(resources.knowledge_store.saved_message_logs) == 1
 
 
@@ -201,7 +199,6 @@ async def test_open_run_retries_after_durable_acceptance_write_failure(context, 
 
     await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
 
-    assert ctx.ingestion_worker.signaled == 1
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_open_run_persists_a_durable_acceptance_key(context):
@@ -234,7 +231,6 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
                     "user_msg_id": 1,
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
-                    "ingestion_state": "excluded",
                 }
         ]
     ]
@@ -242,7 +238,7 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_exchange_closure_wakes_the_shared_project_owner_and_legacy_worker(
+async def test_exchange_closure_wakes_the_shared_project_owner(
     context,
 ):
     ctx, _resources = context
@@ -261,7 +257,6 @@ async def test_exchange_closure_wakes_the_shared_project_owner_and_legacy_worker
     )
 
     assert project_wakes == 1
-    assert ctx.ingestion_worker.signaled == 1
 
 
 @pytest.mark.runtime
@@ -300,7 +295,6 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
                     "user_msg_id": 1,
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
-                    "ingestion_state": "excluded",
             },
             [candidate],
             ["project-1"],
@@ -645,7 +639,6 @@ async def test_cancelling_one_session_run_does_not_cancel_another(context):
     ctx, _ = context
     other_resources = FakeResources()
     other = _runtime(other_resources, session_id="session-2", project_id="project-2")
-    other.ingestion_worker = FakeIngestionWorker()
 
     first_started = asyncio.Event()
     second_started = asyncio.Event()

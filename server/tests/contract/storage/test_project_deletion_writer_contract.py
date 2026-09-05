@@ -247,18 +247,35 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         )
         await cur.execute(
             """
+            INSERT INTO project_semantic_windows (
+                window_id, user_name, project_id, origin, stage, domain_version,
+                policy_snapshot, source_token_count, token_estimator,
+                token_estimator_version, completed_at
+            ) VALUES
+                (
+                    '11111111-1111-4111-8111-111111111111', 'ada', 'project-1',
+                    'conversation', 'completed', 1, '{}'::jsonb, 0, 'test', 'v1', now()
+                ),
+                (
+                    '22222222-2222-4222-8222-222222222222', 'ada', 'project-2',
+                    'conversation', 'completed', 1, '{}'::jsonb, 0, 'test', 'v1', now()
+                )
+            """
+        )
+        await cur.execute(
+            """
             INSERT INTO relationship_observations (
-                relationship_id, project_id, user_name, session_id, message_id,
+                relationship_id, project_id, user_name, semantic_window_id,
                 source_entity_id, target_entity_id, observed_relationship_label,
                 observed_at_ms
             ) VALUES
                 (
-                    'project-1:42:43:related', 'project-1', 'ada', 'session-1',
-                    101, 42, 43, 'related to', 1000
+                    'project-1:42:43:related', 'project-1', 'ada',
+                    '11111111-1111-4111-8111-111111111111', 42, 43, 'related to', 1000
                 ),
                 (
-                    'project-2:52:53:related', 'project-2', 'ada', 'session-2',
-                    201, 52, 53, 'related to', 2000
+                    'project-2:52:53:related', 'project-2', 'ada',
+                    '22222222-2222-4222-8222-222222222222', 52, 53, 'related to', 2000
                 )
             """
         )
@@ -306,13 +323,6 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             ) VALUES
                 ('episode-1', 'project-1', 'project-1:42:43:related', 1),
                 ('episode-2', 'project-2', 'project-2:52:53:related', 1)
-            """
-        )
-        await cur.execute(
-            """
-            INSERT INTO episode_processing_checkpoints (
-                project_id, session_id, last_evaluated_message_id
-            ) VALUES ('project-1', 'session-1', 101), ('project-2', 'session-2', 201)
             """
         )
         await cur.execute(
@@ -398,7 +408,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "episode_messages": "SELECT count(*) AS count FROM episode_messages WHERE project_id = 'project-1'",
         "episode_entities": "SELECT count(*) AS count FROM episode_entities WHERE project_id = 'project-1'",
         "episode_relationships": "SELECT count(*) AS count FROM episode_relationships WHERE project_id = 'project-1'",
-        "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-1'",
+        "semantic_windows": "SELECT count(*) AS count FROM project_semantic_windows WHERE project_id = 'project-1'",
         "contexts": "SELECT count(*) AS count FROM project_entity_contexts WHERE project_id = 'project-1'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-1'",
         "relationship_observations": "SELECT count(*) AS count FROM relationship_observations WHERE project_id = 'project-1'",
@@ -446,7 +456,7 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         "episode_messages": "SELECT count(*) AS count FROM episode_messages WHERE project_id = 'project-2'",
         "episode_entities": "SELECT count(*) AS count FROM episode_entities WHERE project_id = 'project-2'",
         "episode_relationships": "SELECT count(*) AS count FROM episode_relationships WHERE project_id = 'project-2'",
-        "checkpoints": "SELECT count(*) AS count FROM episode_processing_checkpoints WHERE project_id = 'project-2'",
+        "semantic_windows": "SELECT count(*) AS count FROM project_semantic_windows WHERE project_id = 'project-2'",
         "contexts": "SELECT count(*) AS count FROM project_entity_contexts WHERE project_id = 'project-2'",
         "relationships": "SELECT count(*) AS count FROM relationships WHERE project_id = 'project-2'",
         "relationship_observations": "SELECT count(*) AS count FROM relationship_observations WHERE project_id = 'project-2'",

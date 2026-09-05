@@ -11,8 +11,8 @@ def make_event(**overrides) -> InternalEvent:
     data = {
         "ts": "2026-06-29T12:00:00Z",
         "scope_id": "project-1",
-        "component": "pipeline",
-        "event": "graph_write_failed",
+        "component": "job",
+        "event": "failed",
         "data": {},
     }
     data.update(overrides)
@@ -42,7 +42,7 @@ def test_policy_normalizes_approved_event_and_drops_raw_content():
             "project_id": "project-1",
             "session_id": "session-1",
             "msg_ids": [1, 2],
-            "stage": "graph_write",
+            "stage": "semantic_knowledge",
             "error": "x" * 250,
             "prompt": "raw prompt must not be logged",
             "messages": [{"content": "raw message must not be logged"}],
@@ -51,7 +51,7 @@ def test_policy_normalizes_approved_event_and_drops_raw_content():
 
     assert record is not None
     assert record["label"] == "RECOVERY"
-    assert record["event"] == "pipeline.graph_write_failed"
+    assert record["event"] == "job.failed"
     assert record["user"] == "ada"
     assert record["message_ids"] == "1,2"
     assert record["error"].endswith("...")
@@ -79,10 +79,10 @@ def test_policy_rejects_disallowed_and_verbose_events():
     )
 
 
-def test_policy_allows_candidate_failure_events_with_safe_fields_only():
+def test_policy_allows_job_failure_events_with_safe_fields_only():
     record = normalize_coordination_event(make_event(
         component="job",
-        event="episodes_write_failed",
+        event="failed",
         data={
             "entity_id": 42,
             "episode_count": 3,
@@ -93,7 +93,7 @@ def test_policy_allows_candidate_failure_events_with_safe_fields_only():
     ))
 
     assert record is not None
-    assert record["event"] == "job.episodes_write_failed"
+    assert record["event"] == "job.failed"
     assert record["entity_id"] == 42
     assert record["episode_count"] == 3
     assert record["failed_episode_ids"] == "episode-1,episode-2"
@@ -168,14 +168,14 @@ def test_policy_normalizes_scheduler_failure_name_to_job_field():
 def test_logfmt_quotes_values_without_breaking_searchable_keys():
     line = format_logfmt(
         {
-            "event": "job.episode_processed",
+            "event": "job.failed",
             "label": "RECOVERY",
             "reason": "profile refined",
             "path": 'value "quoted"',
         }
     )
 
-    assert "event=job.episode_processed" in line
+    assert "event=job.failed" in line
     assert "label=RECOVERY" in line
     assert 'reason="profile refined"' in line
     assert 'path="value \\"quoted\\""' in line
@@ -193,8 +193,8 @@ def test_coordination_log_writes_when_enabled_and_skips_when_disabled(tmp_path):
         )
     )
 
-    log.write({"event": "job.episode_processed", "label": "RECOVERY"})
-    assert "event=job.episode_processed label=RECOVERY" in path.read_text()
+    log.write({"event": "job.failed", "label": "RECOVERY"})
+    assert "event=job.failed label=RECOVERY" in path.read_text()
 
     disabled_path = tmp_path / "disabled.log"
     log.configure(
@@ -205,7 +205,7 @@ def test_coordination_log_writes_when_enabled_and_skips_when_disabled(tmp_path):
             rotation_mb=10,
         )
     )
-    log.write({"event": "job.episode_processed", "label": "RECOVERY"})
+    log.write({"event": "job.failed", "label": "RECOVERY"})
     assert not disabled_path.exists()
 
 
@@ -222,7 +222,7 @@ def test_coordination_log_write_failure_does_not_raise(monkeypatch):
         lambda **_kwargs: BrokenLogger(),
     )
 
-    log.write({"event": "job.episode_processed", "label": "RECOVERY"})
+    log.write({"event": "job.failed", "label": "RECOVERY"})
 
 
 @pytest.mark.no_network
@@ -240,7 +240,7 @@ async def test_engine_emitter_persists_approved_events(
     await emitter.emit(
         "project-1",
         "job",
-        "episode_processed",
+        "failed",
         {
             "user_name": "ada",
             "project_id": "project-1",
@@ -255,7 +255,7 @@ async def test_engine_emitter_persists_approved_events(
             "label": "RECOVERY",
             "retention": "recovery",
             "component": "job",
-            "event": "job.episode_processed",
+            "event": "job.failed",
             "user": "ada",
             "project_id": "project-1",
             "source_message_count": 2,

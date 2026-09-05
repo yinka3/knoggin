@@ -9,11 +9,6 @@ import pytest
 from common.schema.primitives import Message
 from core.knowledge.store import KnowledgeStore
 from runtime.session_runtime import SessionRuntime as Session
-from tests.integration.ingestion.test_server_flow import (
-    _DeterministicEmbeddingService,
-    _session,
-    _SignalCounter,
-)
 
 
 def _configure_context(monkeypatch) -> None:
@@ -43,12 +38,25 @@ def _configure_context(monkeypatch) -> None:
     )
 
 
+def _session(resources, *, user_name, project_id, session_id):
+    return Session(
+        user_name,
+        resources,
+        session_id=session_id,
+        project_id=project_id,
+        project=SimpleNamespace(scheduler=object(), project_semantic_job=object()),
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
+
+
 def _context(scope, *, postgres):
-    store = KnowledgeStore(postgres, _DeterministicEmbeddingService())
+    store = KnowledgeStore(postgres, object())
     resources = SimpleNamespace(
         postgres=postgres,
         knowledge_store=store,
-        embedding=_DeterministicEmbeddingService(),
+        embedding=object(),
     )
     context = _session(
         resources,
@@ -56,7 +64,6 @@ def _context(scope, *, postgres):
         project_id=scope["project_id"],
         session_id=scope["session_id"],
     )
-    context.ingestion_worker = _SignalCounter()
     return context
 
 
@@ -106,46 +113,6 @@ async def test_real_concurrent_identical_submissions_are_accepted_once(
     assert await _message_rows(scope) == [
         {"message_id": results[0].id, "content": "same concurrent submission"}
     ]
-
-
-@pytest.mark.integration
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.no_network
-async def test_real_local_wake_failure_keeps_durable_acceptance_for_retry(
-    real_server_scope, monkeypatch
-):
-    """A durable PostgreSQL write survives a local worker wake failure."""
-
-    _configure_context(monkeypatch)
-    scope = real_server_scope
-    context = _context(scope, postgres=scope["postgres"])
-    timestamp = datetime(2026, 8, 1, 16, 1, tzinfo=timezone.utc)
-    original_signal = context.ingestion_worker.signal
-    calls = 0
-
-    def fail_once():
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("simulated local wake outage")
-        original_signal()
-
-    monkeypatch.setattr(context.ingestion_worker, "signal", fail_once)
-    message = Message(content="signal retry", timestamp=timestamp)
-
-    with pytest.raises(RuntimeError, match="local wake outage"):
-        await _accept_user_turn(context, message)
-
-    assert await _message_rows(scope) == [
-        {"message_id": message.id, "content": "signal retry"}
-    ]
-
-    retried = await _accept_user_turn(
-        context, Message(content="signal retry", timestamp=timestamp)
-    )
-    assert retried.id == message.id
-    assert context.ingestion_worker.calls == 1
 
 
 @pytest.mark.integration
@@ -202,7 +169,6 @@ async def test_real_restart_reuses_durable_acceptance(
     assert await _message_rows(scope) == [
         {"message_id": retried.id, "content": "restart durable acceptance"}
     ]
-    assert restarted.ingestion_worker.calls == 1
 
 
 @pytest.mark.integration

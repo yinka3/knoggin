@@ -147,8 +147,7 @@ class ConflictDiscoveryReader:
             SELECT
                 observation.observation_id,
                 observation.relationship_id,
-                observation.message_id,
-                observation.session_id,
+                observation.semantic_window_id,
                 observation.source_entity_id,
                 source.canonical_name AS source_entity_name,
                 observation.target_entity_id,

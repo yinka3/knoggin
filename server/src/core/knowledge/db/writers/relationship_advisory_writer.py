@@ -31,11 +31,10 @@ class RelationshipAdvisoryWriter:
     ) -> None:
         if advisory.disposition != "pending":
             return
-        evidence_refs = (
-            [{"kind": "observation", "id": str(item)} for item in advisory.observation_ids]
-            if advisory.observation_ids
-            else [{"kind": "message", "id": str(item)} for item in advisory.message_ids]
-        )
+        evidence_refs = [
+            {"kind": "observation", "id": str(item)}
+            for item in advisory.observation_ids
+        ]
         existing = await self.reviews.get_by_key(
             user_name=user_name,
             project_id=project_id,
@@ -67,7 +66,7 @@ class RelationshipAdvisoryWriter:
                 "source_type": advisory.source_type,
                 "target_type": advisory.target_type,
                 "occurrence_count": advisory.occurrence_count,
-                "message_ids": list(advisory.message_ids),
+                "semantic_window_ids": list(advisory.semantic_window_ids),
                 "observation_ids": list(advisory.observation_ids),
             },
             reasoning=(

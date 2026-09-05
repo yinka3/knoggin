@@ -206,23 +206,23 @@ class RuntimeHealthService:
         project_id: str,
         session_id: str,
     ) -> HealthSnapshot:
-        """Return bounded worker and PostgreSQL ingestion-queue health.
+        """Return bounded project semantic-job and durable-window health.
 
-        This reads only the durable queue aggregate. It never claims work,
-        wakes a worker, or returns message identifiers or payloads.
+        This reads only the durable window aggregate. It never claims work,
+        wakes a job, or returns message identifiers or payloads.
         """
 
         warnings: list[str] = []
-        worker = self._session_worker(project_id, session_id)
-        worker_snapshot = self._component_snapshot(
-            worker,
+        project = self._project_state(project_id)
+        semantic_job = getattr(project, "project_semantic_job", None)
+        scheduler_snapshot = self._component_snapshot(
+            getattr(project, "scheduler", None),
             "health_snapshot",
             warnings,
         )
-        queue_details = await self._read_ingestion_queue_health(
+        queue_details = await self._read_semantic_window_health(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
         )
         warnings.extend(queue_details.pop("warnings", []))
 
@@ -231,103 +231,81 @@ class RuntimeHealthService:
         claimed_count = self._nonnegative_int(queue_details.get("claimed_count"))
         failed_count = self._nonnegative_int(queue_details.get("failed_count"))
         consecutive_failures = self._nonnegative_int(
-            worker_snapshot.get("consecutive_failures")
+            scheduler_snapshot.get("recent_failed_jobs")
         )
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
-        timeout = worker_snapshot.get("batch_timeout_seconds")
-        timeout_seconds = (
-            float(timeout)
-            if isinstance(timeout, (int, float))
-            and not isinstance(timeout, bool)
-            and timeout > 0
-            else None
-        )
-        current_batch_age = self._age_seconds(
-            worker_snapshot.get("current_batch_started_at")
-        )
-        worker_state = worker_snapshot.get("state")
-        if worker_state in {"failed", "paused"}:
-            delay_state = "stalled"
-        elif (
-            self._nonnegative_int(worker_snapshot.get("current_batch_size"))
-            and current_batch_age is not None
-            and timeout_seconds is not None
-            and current_batch_age > timeout_seconds
+        scheduler_state = scheduler_snapshot.get("state")
+        if semantic_job is None:
+            scheduler_state = "not_registered"
+        if scheduler_state == "stopped" or self._nonnegative_int(
+            scheduler_snapshot.get("stalled_jobs")
         ):
             delay_state = "stalled"
-        elif (
-            isinstance(oldest_age, (int, float))
-            and timeout_seconds is not None
-            and oldest_age > timeout_seconds
-        ):
-            delay_state = "delayed"
         elif pending_count:
             delay_state = "unknown"
         else:
             delay_state = "on_time"
 
         if delay_state == "stalled":
-            warnings.append("pending ingestion work is stalled")
+            warnings.append("pending semantic work is stalled")
         elif delay_state == "delayed":
-            warnings.append("pending ingestion work is delayed")
+            warnings.append("pending semantic work is delayed")
         if failed_count:
-            warnings.append("ingestion queue has failed work")
+            warnings.append("semantic windows have recorded failures")
         if consecutive_failures:
-            warnings.append("ingestion worker has consecutive failures")
-        if worker_state in {"not_started", "stopped"}:
-            warnings.append("ingestion worker is not running")
-        elif worker_state == "failed":
-            warnings.append("ingestion worker has failed")
-        elif worker_state == "paused":
-            warnings.append("ingestion worker is paused pending repair and resume")
+            warnings.append("semantic scheduler has recent failures")
+        if scheduler_state in {"not_registered", "stopped"}:
+            warnings.append("project semantic job is not running")
 
-        if worker_state == "failed":
+        if scheduler_state == "not_registered":
             status = HealthStatus.FAILED
-            summary = "Ingestion worker has failed"
+            summary = "Project semantic job is unavailable"
         elif (
             not queue_available
-            or worker_state != "running"
+            or scheduler_state != "running"
             or delay_state in {"delayed", "stalled"}
             or failed_count
             or consecutive_failures
         ):
             status = HealthStatus.DEGRADED
-            summary = "Ingestion is operating with degraded health"
+            summary = "Semantic processing is operating with degraded health"
         else:
             status = HealthStatus.HEALTHY
-            summary = "Ingestion is healthy"
+            summary = "Semantic processing is healthy"
 
         if delay_state in {"delayed", "stalled"} or not queue_available:
             activity = HealthActivity.DELAYED
         elif (
             pending_count
             or claimed_count
-            or self._nonnegative_int(worker_snapshot.get("current_batch_size"))
-            or worker_state == "draining"
+            or self._nonnegative_int(scheduler_snapshot.get("running_jobs"))
         ):
             activity = HealthActivity.BUSY
         else:
             activity = HealthActivity.IDLE
 
         if failed_count:
-            message_state = "failed"
+            window_state = "failed"
         elif claimed_count:
-            message_state = "claimed"
+            window_state = "claimed"
         elif pending_count:
-            message_state = "pending"
+            window_state = "pending"
         elif queue_details.get("last_processed_available"):
-            message_state = "processed"
+            window_state = "completed"
         else:
-            message_state = "unknown"
+            window_state = "unknown"
 
         return HealthSnapshot(
             status=status,
             activity=activity,
             summary=summary,
             details={
-                "worker": worker_snapshot,
-                "queue": {
+                "semantic_job": {
+                    "registered": semantic_job is not None,
+                    "scheduler": scheduler_snapshot,
+                },
+                "semantic_windows": {
                     "available": queue_available,
                     "pending_count": pending_count,
                     "claimed_count": claimed_count,
@@ -342,7 +320,7 @@ class RuntimeHealthService:
                     "last_processed_available": (
                         queue_details.get("last_processed_available") is True
                     ),
-                    "message_state": message_state,
+                    "window_state": window_state,
                 },
             },
             warnings=warnings,
@@ -467,18 +445,6 @@ class RuntimeHealthService:
             warnings=warnings,
         )
 
-    def _session_worker(self, project_id: str, session_id: str) -> Any:
-        """Find the current session's worker without traversing other sessions."""
-
-        try:
-            reader = getattr(self.sessions, "get_runtime_session", None)
-            context = reader(session_id) if callable(reader) else None
-        except (AttributeError, TypeError):
-            return None
-        if context is None or getattr(context, "project_id", None) != project_id:
-            return None
-        return getattr(context, "ingestion_worker", None)
-
     def _project_state(self, project_id: str) -> Any:
         projects = getattr(self.projects, "active_projects", None)
         try:
@@ -502,21 +468,20 @@ class RuntimeHealthService:
             return None, error
         return self._nonnegative_int_or_none(value), None
 
-    async def _read_ingestion_queue_health(
+    async def _read_semantic_window_health(
         self,
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
     ) -> dict[str, Any]:
-        """Read the canonical PostgreSQL queue aggregate without message payloads."""
+        """Read canonical project semantic-window health without message payloads."""
 
         store = getattr(self.resources, "knowledge_store", None)
-        read_queue_health = getattr(store, "get_ingestion_queue_health", None)
+        read_queue_health = getattr(store, "get_semantic_window_health", None)
         if not callable(read_queue_health):
             return {
                 "queue_available": False,
-                "warnings": ["PostgreSQL ingestion metrics are unavailable"],
+                "warnings": ["PostgreSQL semantic-window metrics are unavailable"],
                 "pending_count": 0,
                 "claimed_count": 0,
                 "failed_count": 0,
@@ -529,13 +494,12 @@ class RuntimeHealthService:
             lambda: read_queue_health(
                 user_name=user_name,
                 project_id=project_id,
-                session_id=session_id,
             )
         )
         if error is not None or not isinstance(queue, Mapping):
             return {
                 "queue_available": False,
-                "warnings": ["PostgreSQL ingestion metrics are unavailable"],
+                "warnings": ["PostgreSQL semantic-window metrics are unavailable"],
                 "pending_count": 0,
                 "claimed_count": 0,
                 "failed_count": 0,

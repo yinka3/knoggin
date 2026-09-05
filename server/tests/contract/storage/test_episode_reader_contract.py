@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from common.schema.episode.models import EpisodeCheckpoint
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -332,104 +331,6 @@ async def test_episode_reader_expands_source_messages_in_episode_order():
         "project-1",
         "session-1",
     )
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_returns_initial_checkpoint_before_any_episode_work():
-    client = RecordingPostgresClient(
-        fetch_one_results=[{"message_id": 0, "last_evaluated_timestamp_ms": None}]
-    )
-    reader = EpisodeReader(client)
-
-    checkpoint = await reader.get_episode_checkpoint(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert checkpoint == EpisodeCheckpoint()
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "LEFT JOIN episode_processing_checkpoints" in query
-    assert params == ("ada", "project-1", "session-1")
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_requires_a_complete_eligible_window():
-    client = RecordingPostgresClient(
-        fetch_all_results=[
-            [
-                {
-                    "user_message_id": 11,
-                    "user_content": "First complete message.",
-                    "user_timestamp_ms": 1700000000000,
-                    "assistant_message_id": 12,
-                    "assistant_content": "Second complete message.",
-                    "assistant_timestamp_ms": 1700000001000,
-                },
-            ]
-        ]
-    )
-    reader = EpisodeReader(client)
-
-    messages = await reader.get_next_episode_window(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        checkpoint=EpisodeCheckpoint(
-            last_evaluated_message_id=10,
-            last_evaluated_timestamp_ms=1700000000000,
-        ),
-        message_count=2,
-    )
-
-    assert [message["message_id"] for message in messages] == [11, 12]
-    assert messages[1]["user_msg_id"] == 11
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "JOIN messages AS assistant_message" in query
-    assert "user_message.ingestion_state = 'processed'" in query
-    assert "assistant_message.ingestion_state = 'excluded'" in query
-    assert "episode_eligible" not in query
-    assert "ORDER BY user_message.timestamp_ms ASC NULLS LAST" in query
-    assert "user_message.timestamp_ms > %s" in query
-    assert params == (
-        "ada",
-        "project-1",
-        "session-1",
-        10,
-        1700000000000,
-        1700000000000,
-        1700000000000,
-        1700000000000,
-        10,
-        1700000000000,
-        10,
-        10,
-        1,
-    )
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_rejects_window_with_ineligible_message():
-    client = RecordingPostgresClient(
-        fetch_all_results=[[]]
-    )
-    reader = EpisodeReader(client)
-
-    messages = await reader.get_next_episode_window(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        checkpoint=EpisodeCheckpoint(
-            last_evaluated_message_id=10,
-            last_evaluated_timestamp_ms=1700000000000,
-        ),
-        message_count=2,
-    )
-
-    assert messages == []
 
 
 @pytest.mark.storage

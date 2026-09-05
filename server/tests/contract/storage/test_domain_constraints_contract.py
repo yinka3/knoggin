@@ -1,5 +1,5 @@
 import pytest
-from psycopg.errors import CheckViolation, ForeignKeyViolation
+from psycopg.errors import CheckViolation
 
 
 async def _seed_scoped_graph(client) -> None:
@@ -70,12 +70,13 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
         await real_postgres_client.execute(
             """
             INSERT INTO relationship_observations (
-                relationship_id, project_id, user_name, session_id, message_id,
+                relationship_id, project_id, user_name, semantic_window_id,
                 source_entity_id, target_entity_id, observed_relationship_label,
                 interpretation_source, observed_at_ms
             )
             VALUES (
-                'project-1:1:2:knows', 'project-1', 'ada', 'session-1', 101,
+                'project-1:1:2:knows', 'project-1', 'ada',
+                '11111111-1111-4111-8111-111111111111',
                 1, 2, 'knows', 'invalid', 1
             )
             """
@@ -105,7 +106,7 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_domain_constraints_enforce_attachment_and_checkpoint_scope(
+async def test_domain_constraints_enforce_message_entity_attachment_scope(
     real_postgres_client,
 ):
     await _seed_scoped_graph(real_postgres_client)
@@ -121,13 +122,6 @@ async def test_domain_constraints_enforce_attachment_and_checkpoint_scope(
             """
             INSERT INTO message_entity_refs (message_id, entity_id)
             VALUES (101, 4)
-            """
-        )
-    with pytest.raises(ForeignKeyViolation):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO episode_processing_checkpoints (project_id, session_id)
-            VALUES ('project-2', 'session-1')
             """
         )
 

@@ -42,8 +42,10 @@ Implementation progress:
   `knowledge_committed`. Episode enrichment, completion, and separately
   retryable maintenance recording are durable. The semantic runtime remains
   disabled until Batch 8 cutover.
-- Batches 8–10 remain pending. Do not enable the new semantic runtime writer
-  before their cutover and deletion boundaries are implemented.
+- Batch 8 — complete: Agent reads the committed database Context directly;
+  the enabled project semantic job is the sole normal owner; and the old
+  per-session message-local worker, claims, checkpoints, and provenance shape
+  are deleted. Batches 9–10 remain pending follow-on work.
 
 This document supersedes the earlier exploratory version. Choices described as
 **locked** are the target behavior. Explicit exclusions are outside this
@@ -1526,7 +1528,7 @@ Acceptance:
   semantic-commit, retraction, rollback, and maintenance-contract tests; plus
   touched-path Ruff, compilation, and whitespace checks.
 
-### Batch 8 — Production cutover and deletion of old ownership
+### Batch 8 — Production cutover and deletion of old ownership — complete
 
 **Depends on:** Batches 1-7 and accepted shadow/evaluation results.
 
@@ -1599,6 +1601,41 @@ Acceptance:
 - schema has one semantic checkpoint model;
 - no compatibility adapter preserves the old path;
 - focused and service-free suites pass.
+
+#### Batch 8 completion record
+
+- **8.1:** `AgentExecutor` loads the latest committed Context snapshot through
+  the canonical database reader and renders it with a deterministic 24,000
+  character bound. `PROJECT.md` is presented separately as the user-owned
+  Project Brief; `CONTEXT.md` is never read as runtime authority, so a stale,
+  missing, or unprojected file cannot change Agent input.
+- **8.2:** `ProjectSemanticJob` is enabled as the one normal semantic owner.
+  `ProjectRuntimeFactory` registers it with the project scheduler, while
+  `SessionRuntimeFactory` creates only session-local runtime shells. Exchange
+  closure wakes the shared project job; acceptance no longer creates, signals,
+  resets, or shuts down a session-local semantic worker.
+- **8.3:** Deleted the old worker, pipeline, graph-commit helper, message batch,
+  Episode job/checkpoint ports, message claim APIs, and obsolete test fixtures.
+  The bootstrap schema no longer contains `messages.ingestion_*`,
+  `episode_processing_checkpoints`, or single-message relationship-observation
+  provenance. Relationship observations now belong to a semantic window and
+  Context block support; window deletion cascades that derived evidence during
+  project deletion. No compatibility adapter preserves the old writer path.
+- Runtime health reports the project semantic job and durable semantic-window
+  aggregate rather than a session worker or message queue. Maintenance frontiers
+  wait for closed exchanges to appear in completed semantic windows.
+
+Validation completed:
+
+- 100 focused unit/runtime/semantic-stage tests passed;
+- 1,056 service-free tests passed, with 79 PostgreSQL/Redis tests deliberately
+  deselected;
+- 45 fresh-schema PostgreSQL contracts passed for bootstrap, lifecycle,
+  Context/window, provenance, reconciliation, Episode, maintenance, and
+  project deletion behavior;
+- 12 fresh-schema integration tests passed for durable acceptance, document
+  provenance, workspace health, and the project semantic runtime boundary;
+- Ruff, Python compilation, dead-path scans, and `git diff --check` passed.
 
 ### Batch 9 — Maintenance and local-model simplification
 

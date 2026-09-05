@@ -8,10 +8,7 @@ from enum import StrEnum
 from typing import Any, Optional, assert_never
 from uuid import uuid4
 
-from common.schema.ingestion.contracts import (
-    ExecutionScope,
-    ValidationIssue,
-)
+from common.schema.ingestion.contracts import ValidationIssue
 from common.utils.time_utils import get_now
 
 
@@ -23,6 +20,15 @@ class WorkStatus(StrEnum):
     DEFERRED = "deferred"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkScope:
+    """The project/session identity carried by runtime work telemetry."""
+
+    user_name: str
+    project_id: Optional[str]
+    session_id: Optional[str]
 
 
 @dataclass(slots=True)
@@ -55,12 +61,14 @@ class WorkRecord:
     issues: list[ValidationIssue] = field(default_factory=list)
 
     @classmethod
-    def for_ingestion(
-        cls, scope: ExecutionScope, message_ids: list[int], priority: int = 100
+    def for_semantic_window(
+        cls, scope: WorkScope, window_id: str, priority: int = 100
     ) -> "WorkRecord":
+        if not isinstance(window_id, str) or not window_id.strip():
+            raise ValueError("window_id must be a non-empty string")
         return cls(
             id=uuid4().hex,
-            kind="message_batch",
+            kind="semantic_window",
             user_name=scope.user_name,
             project_id=scope.project_id,
             session_id=scope.session_id,
@@ -70,37 +78,15 @@ class WorkRecord:
             expected_llm_calls=2,
             expected_embedding_calls=1,
             graph_write_expected=True,
-            stage="message_batch",
-            metadata={"message_ids": list(message_ids), "batch_size": len(message_ids)},
-        )
-
-    @classmethod
-    def for_graph_write(
-        cls,
-        scope: ExecutionScope,
-        *,
-        batch_id: Optional[str] = None,
-        priority: int = 90,
-    ) -> "WorkRecord":
-        metadata = {"batch_work_unit_id": batch_id} if batch_id else {}
-        return cls(
-            id=uuid4().hex,
-            kind="graph_write",
-            user_name=scope.user_name,
-            project_id=scope.project_id,
-            session_id=scope.session_id,
-            parent_id=batch_id,
-            priority=priority,
-            graph_write_expected=True,
-            stage="graph_write",
-            metadata=metadata,
+            stage="semantic_window",
+            metadata={"semantic_window_id": window_id},
         )
 
     @classmethod
     def for_model_operation(
         cls,
         kind: str,
-        scope: ExecutionScope,
+        scope: WorkScope,
         *,
         parent_id: Optional[str] = None,
         priority: int = 100,
@@ -121,17 +107,17 @@ class WorkRecord:
         )
 
     @property
-    def scope(self) -> ExecutionScope:
-        return ExecutionScope(
+    def scope(self) -> WorkScope:
+        return WorkScope(
             user_name=self.user_name,
             project_id=self.project_id,
             session_id=self.session_id,
         )
 
     @scope.setter
-    def scope(self, value: ExecutionScope) -> None:
-        if not isinstance(value, ExecutionScope):
-            raise TypeError("WorkRecord.scope must be an ExecutionScope")
+    def scope(self, value: WorkScope) -> None:
+        if not isinstance(value, WorkScope):
+            raise TypeError("WorkRecord.scope must be a WorkScope")
         self.user_name = value.user_name
         self.project_id = value.project_id
         self.session_id = value.session_id

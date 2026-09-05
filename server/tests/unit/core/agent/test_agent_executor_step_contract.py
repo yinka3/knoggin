@@ -1,10 +1,18 @@
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
+from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMProviderError
 from common.schema.agent.research import resolve_research_profile
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
+from common.schema.context import (
+    AssertionKind,
+    ContextBlockRecord,
+    ContextRevisionOrigin,
+    ContextSnapshot,
+)
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
@@ -50,32 +58,79 @@ def make_executor(llm, *, research_profile=None):
 
 
 @pytest.mark.no_network
-async def test_executor_loads_missing_or_unreadable_project_context_non_fatally():
+async def test_executor_loads_missing_or_unreadable_project_brief_non_fatally():
     executor = make_executor(StreamingLLM())
-    assert await executor._load_project_context() == ""
+    assert await executor._load_project_brief() == ""
 
     async def fail_reader():
         raise RuntimeError("workspace unavailable")
 
     executor.tools.document_service = SimpleNamespace(
-        read_project_context=fail_reader
+        read_project_brief=fail_reader
     )
-    assert await executor._load_project_context() == ""
+    assert await executor._load_project_brief() == ""
 
 
 @pytest.mark.no_network
-async def test_executor_loads_canonical_project_context_directly():
+async def test_executor_loads_user_owned_project_brief_directly():
     executor = make_executor(StreamingLLM())
 
     async def read_context():
         return "# Project\nUse the repository conventions."
 
     executor.tools.document_service = SimpleNamespace(
-        read_project_context=read_context
+        read_project_brief=read_context
     )
-    assert await executor._load_project_context() == (
+    assert await executor._load_project_brief() == (
         "# Project\nUse the repository conventions."
     )
+
+
+@pytest.mark.no_network
+async def test_executor_renders_current_context_from_the_canonical_reader_only():
+    executor = make_executor(StreamingLLM())
+    revision_id = uuid4()
+    block = ContextBlockRecord(
+        block_id=uuid4(),
+        project_id="project-1",
+        section_key="current_state",
+        markdown="The semantic owner is project-scoped.",
+        content_hash="a" * 64,
+        assertion_kind=AssertionKind.USER_ASSERTED,
+    )
+    snapshot = ContextSnapshot(
+        revision_id=revision_id,
+        project_id="project-1",
+        revision_number=1,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        content_hash="b" * 64,
+        blocks=[block],
+    )
+
+    class Reader:
+        async def get_current_revision(self, **kwargs):
+            assert kwargs == {"user_name": "ada", "project_id": "project-1"}
+            return SimpleNamespace(revision_id=revision_id)
+
+        async def get_snapshot(self, value, **kwargs):
+            assert value == revision_id
+            assert kwargs == {"user_name": "ada", "project_id": "project-1"}
+            return snapshot
+
+    async def projection_is_not_an_authoritative_read():
+        raise AssertionError("CONTEXT.md projection must not be read by the agent")
+
+    executor.tools.project_context_reader = Reader()
+    executor.tools.compiled_domain = DomainConfig.from_mapping({"version": 1}).compile()
+    executor.tools.document_service = SimpleNamespace(
+        read_project_brief=projection_is_not_an_authoritative_read
+    )
+
+    rendered = await executor._load_project_context()
+
+    assert "# Project Context" in rendered
+    assert "The semantic owner is project-scoped." in rendered
 
 
 @pytest.mark.no_network

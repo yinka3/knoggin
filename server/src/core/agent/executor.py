@@ -51,9 +51,11 @@ from core.agent.tools.registry import (
     get_tool_definition,
     install_tool_runtime,
 )
+from core.knowledge.context.render import canonical_context_markdown
 from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
+MAX_PROJECT_CONTEXT_CHARS = 24_000
 PUBLIC_AGENT_FAILURE_MESSAGE = "The agent couldn't complete this request. Please try again."
 
 
@@ -161,6 +163,7 @@ class AgentExecutor:
             getattr(self.tools, "document_focus", None),
             getattr(self.ctx, "document_selection_context", None),
         )
+        project_brief = await self._load_project_brief()
         project_context = await self._load_project_context()
 
         last_result = None
@@ -218,6 +221,7 @@ class AgentExecutor:
                 documents_context,
                 document_focus_context,
                 last_result,
+                project_brief=project_brief,
                 project_context=project_context,
             ):
                 event_type = event["event"]
@@ -413,6 +417,7 @@ class AgentExecutor:
         documents_context: str,
         document_focus_context: str,
         last_result: Optional[List[Dict]],
+        project_brief: str = "",
         project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
@@ -430,6 +435,7 @@ class AgentExecutor:
             documents_context=documents_context,
             document_focus_context=document_focus_context,
             agent_brain=self.ctx.brain,
+            project_brief=project_brief,
             project_context=project_context,
             runtime_instructions=runtime_instructions,
             is_community=self.ctx.is_community,
@@ -479,10 +485,10 @@ class AgentExecutor:
                 },
             }
 
-    async def _load_project_context(self) -> str:
-        """Load canonical project context without making it a run blocker."""
+    async def _load_project_brief(self) -> str:
+        """Load the user-owned PROJECT.md brief without making a run block."""
         document_service = getattr(self.tools, "document_service", None)
-        reader = getattr(document_service, "read_project_context", None)
+        reader = getattr(document_service, "read_project_brief", None)
         if reader is None:
             return ""
         try:
@@ -491,13 +497,46 @@ class AgentExecutor:
             return ""
         except Exception as exc:
             logger.warning(
-                "AgentExecutor: project context unavailable ({})",
+                "AgentExecutor: Project Brief unavailable ({})",
                 type(exc).__name__,
             )
             return ""
         if not isinstance(content, str):
             return ""
         return content
+
+    async def _load_project_context(self) -> str:
+        """Render bounded current Context from canonical storage only."""
+
+        reader = getattr(self.tools, "project_context_reader", None)
+        domain = getattr(self.tools, "compiled_domain", None)
+        if reader is None or domain is None:
+            return ""
+        try:
+            revision = await reader.get_current_revision(
+                user_name=self.ctx.user_name,
+                project_id=self.ctx.project_id,
+            )
+            if revision is None:
+                return ""
+            snapshot = await reader.get_snapshot(
+                revision.revision_id,
+                user_name=self.ctx.user_name,
+                project_id=self.ctx.project_id,
+            )
+            if snapshot is None or not snapshot.blocks:
+                return ""
+            rendered = canonical_context_markdown(snapshot.blocks, domain)
+        except Exception as exc:
+            logger.warning(
+                "AgentExecutor: canonical Project Context unavailable ({})",
+                type(exc).__name__,
+            )
+            return ""
+        if len(rendered) <= MAX_PROJECT_CONTEXT_CHARS:
+            return rendered
+        marker = "\n\n[Project Context truncated at the deterministic prompt limit.]\n"
+        return rendered[: MAX_PROJECT_CONTEXT_CHARS - len(marker)].rstrip() + marker
 
     def _parse_tool_calls(
         self,

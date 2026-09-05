@@ -72,13 +72,6 @@ class RelationshipEpisode(BaseModel):
     source_message_count: int = Field(0, ge=0)
 
 
-class EpisodeCheckpoint(BaseModel):
-    """Chronological cursor for episode processing within one session."""
-
-    last_evaluated_message_id: int = Field(0, ge=0)
-    last_evaluated_timestamp_ms: Optional[int] = None
-
-
 class Episode(EpisodeNarrative):
     """A complete episodic memory and its source-linked graph context."""
 

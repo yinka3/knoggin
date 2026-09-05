@@ -92,7 +92,6 @@ class ProjectManager:
         self.project_factory = ProjectRuntimeFactory(
             resources=resources,
             user_name=user_name,
-            episode_window_size_provider=self.get_episode_window_size,
         )
         self.pg = resources.postgres
         self._filesystem_factory = filesystem_factory or ProjectFilesystemFactory(

@@ -1,8 +1,6 @@
 import pytest
 
-from core.knowledge.db.writers.message_lifecycle_writer import (
-    MessageLifecycleWriter,
-)
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.maintenance_reviews import (
     EntityContextMergeChoice,
     EntityMergePlan,
@@ -12,13 +10,9 @@ from core.knowledge.maintenance_reviews import (
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
-class _MessageWriter:
-    pass
-
-
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_terminal_ingestion_failure_is_included_in_stable_frontier():
+async def test_completed_semantic_windows_define_the_stable_frontier():
     client = RecordingPostgresClient(
         fetch_one_results=[
             {
@@ -29,19 +23,22 @@ async def test_terminal_ingestion_failure_is_included_in_stable_frontier():
         ]
     )
 
-    frontier = await MessageLifecycleWriter(
-        client, _MessageWriter()
-    ).get_stable_ingestion_frontier(user_name="ada", project_id="project-1")
+    frontier = await EntityMaintenanceService(client, "ada").capture_frontier(
+        ["project-1"]
+    )
 
-    assert frontier is not None
-    assert frontier.message_id == 42
-    assert frontier.timestamp_ms == 1234
-    assert frontier.token
+    assert frontier["project-1"] == {
+        "project_id": "project-1",
+        "message_id": 42,
+        "timestamp_ms": 1234,
+        "token": EntityMaintenanceService._frontier_token(42, 1234),
+    }
+    assert "project_semantic_windows" in client.calls[0][1]
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_live_ingestion_work_blocks_stable_frontier():
+async def test_uncompleted_semantic_work_blocks_stable_frontier():
     client = RecordingPostgresClient(
         fetch_one_results=[
             {
@@ -52,12 +49,8 @@ async def test_live_ingestion_work_blocks_stable_frontier():
         ]
     )
 
-    assert (
-        await MessageLifecycleWriter(
-            client, _MessageWriter()
-        ).get_stable_ingestion_frontier(user_name="ada", project_id="project-1")
-        is None
-    )
+    with pytest.raises(RuntimeError, match="pending semantic completion"):
+        await EntityMaintenanceService(client, "ada").capture_frontier(["project-1"])
 
 
 @pytest.mark.storage

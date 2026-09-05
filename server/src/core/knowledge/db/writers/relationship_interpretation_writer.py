@@ -274,8 +274,14 @@ class RelationshipInterpretationWriter:
             FROM public.episode_messages episode_message
             JOIN public.relationship_observations observation
               ON observation.project_id = episode_message.project_id
-             AND observation.session_id = episode_message.session_id
-             AND observation.message_id = episode_message.message_id
+            JOIN public.relationship_observation_blocks observation_block
+              ON observation_block.observation_id = observation.observation_id
+             AND observation_block.project_id = observation.project_id
+            JOIN public.project_context_block_supports support
+              ON support.block_id = observation_block.block_id
+             AND support.project_id = observation_block.project_id
+             AND support.session_id = episode_message.session_id
+             AND support.message_id = episode_message.message_id
             WHERE episode_message.project_id = %s
               AND observation.observation_id = ANY(%s)
             """,
@@ -299,8 +305,14 @@ class RelationshipInterpretationWriter:
             FROM public.episode_messages episode_message
             JOIN public.relationship_observations observation
               ON observation.project_id = episode_message.project_id
-             AND observation.session_id = episode_message.session_id
-             AND observation.message_id = episode_message.message_id
+            JOIN public.relationship_observation_blocks observation_block
+              ON observation_block.observation_id = observation.observation_id
+             AND observation_block.project_id = observation.project_id
+            JOIN public.project_context_block_supports support
+              ON support.block_id = observation_block.block_id
+             AND support.project_id = observation_block.project_id
+             AND support.session_id = episode_message.session_id
+             AND support.message_id = episode_message.message_id
             WHERE episode_message.project_id = %s
               AND episode_message.episode_id IN (
                   SELECT episode_id FROM affected_maintenance_episodes

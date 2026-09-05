@@ -16,14 +16,109 @@ from runtime.api_port import ApplicationRuntimePort
 from runtime.session_runtime import SessionRuntime as Session
 from tests.fixtures.documents import build_docx_bytes, build_pdf_bytes, build_png_bytes
 from tests.fixtures.factories import make_domain_config
-from tests.integration.ingestion.test_server_flow import (
-    _DeterministicDocumentAgentLLM,
-    _DeterministicEmbeddingService,
-    _session,
-    _SignalCounter,
-    _StaticAgentManager,
-    _StaticSessionManager,
-)
+
+
+class _DeterministicEmbeddingService:
+    async def encode(self, texts):
+        assert len(texts) == 1
+        return [[0.25] * 1024]
+
+    async def encode_single(self, _text):
+        return [0.25] * 1024
+
+
+class _DeterministicDocumentAgentLLM:
+    agent_model = "architect"
+    extraction_model = "librarian"
+
+    def __init__(self):
+        self.steps = [
+            (
+                "search_documents",
+                '{"query": "violet launch phrase", "limit": 1}',
+                "document-search-1",
+            ),
+            (
+                "submit_answer",
+                '{"content": "The document records the violet launch phrase."}',
+                "answer-1",
+            ),
+            (
+                "submit_answer",
+                '{"content": "The document records the violet launch phrase."}',
+                "answer-2",
+            ),
+        ]
+
+    async def stream_with_tools(self, **_kwargs):
+        name, arguments, call_id = self.steps.pop(0)
+        yield {
+            "event": "tool_calls",
+            "data": {
+                "content": f"Calling {name}",
+                "calls": [{"name": name, "arguments": arguments, "id": call_id}],
+            },
+        }
+        yield {
+            "event": "step_completed",
+            "data": {
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                    "approximate": False,
+                }
+            },
+        }
+
+    def count_tokens(self, text):
+        return len(text.split())
+
+    async def generate_text(self, **_kwargs):
+        return "The document records the violet launch phrase."
+
+
+class _StaticAgentManager:
+    def __init__(self, config: AgentConfig):
+        self._config = config
+
+    async def get_default_agent_id(self) -> str:
+        return self._config.id
+
+    async def get_agent(self, agent_id: str) -> AgentConfig | None:
+        return self._config if agent_id == self._config.id else None
+
+    async def mark_turn_completed(self, agent_id: str) -> bool:
+        return agent_id == self._config.id
+
+
+class _StaticSessionManager:
+    def __init__(self, session: Session):
+        self.user_name = session.user_name
+        self._session = session
+
+    async def get_or_resume_session(self, session_id: str) -> Session | None:
+        return self._session if session_id == self._session.session_id else None
+
+
+def _session(resources, *, user_name, project_id, session_id):
+    project = SimpleNamespace(
+        scheduler=object(),
+        project_semantic_job=object(),
+        record_session_activity=lambda: asyncio.sleep(0),
+        signal_semantic_work=lambda: True,
+        readable_project_ids=[project_id],
+    )
+    return Session(
+        user_name,
+        resources,
+        session_id=session_id,
+        project_id=project_id,
+        project=project,
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
 
 
 def _runtime_document_cases():
@@ -180,14 +275,15 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     )
     context.project = SimpleNamespace(
         scheduler=object(),
+        project_semantic_job=object(),
         record_session_activity=lambda: asyncio.sleep(0),
+        signal_semantic_work=lambda: True,
         readable_project_ids=[scope["project_id"]],
         entities=resolver,
         compiled_domain=make_domain_config().compile(),
         knowledge_retrieval=retrieval,
     )
     context.document_service = documents
-    context.ingestion_worker = _SignalCounter()
 
     agent = AgentConfig(
         id="format-document-agent",
