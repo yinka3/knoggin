@@ -23,6 +23,7 @@ from core.knowledge.documents import (
     storage as storage_module,
 )
 from core.knowledge.documents.constants import document_extension
+from core.project.project_files import CONTEXT_FILE_PATH
 from infrastructure.background_work import BackgroundWorkRejected
 
 
@@ -981,6 +982,32 @@ async def test_native_project_file_operations_reconcile_the_document_catalog(
         row["relative_path"] == "notes/draft.md" and row["status"] == "deleted"
         for row in postgres.rows
     )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_controlled_context_file_is_hidden_from_workspace_and_document_discovery(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes(CONTEXT_FILE_PATH, b"# Project Context\n")
+
+    reconciled = await service.reconcile_project_files()
+
+    assert reconciled == {"created": 0, "changed": 0, "deleted": 0, "excluded": 1}
+    assert all(row["relative_path"] != CONTEXT_FILE_PATH for row in postgres.rows)
+    assert CONTEXT_FILE_PATH not in {
+        row["relative_path"] for row in await service.list_project_files()
+    }
+    with pytest.raises(PermissionError, match="controlled Context importer"):
+        await service.read_project_file(CONTEXT_FILE_PATH)
+    with pytest.raises(PermissionError, match="controlled Context importer"):
+        await service.add_document(
+            content=b"# Project Context\n",
+            original_name=CONTEXT_FILE_PATH,
+        )
 
 
 @pytest.mark.storage

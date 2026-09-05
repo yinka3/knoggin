@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from core.knowledge.documents.scanning import normalize_relative_path
-from core.project.project_files import PROJECT_FILE_PATH
+from core.project.project_files import (
+    CONTEXT_FILE_PATH,
+    PROJECT_FILE_PATH,
+    is_controlled_context_file,
+)
 
 PROJECT_FILE_TOOL_MAX_PATH_LENGTH = 512
 PROJECT_FILE_TOOL_MAX_CONTENT_CHARACTERS = 20_000
@@ -29,6 +33,10 @@ def _editable_path(path: str) -> str:
         raise PermissionError(
             "PROJECT.md is user-owned and cannot be changed through ordinary "
             "project-file tools"
+        )
+    if is_controlled_context_file(normalized):
+        raise PermissionError(
+            f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
         )
     return normalized
 
@@ -80,6 +88,10 @@ class ProjectFileTools:
         if self.document_service is None:
             return self._files_unavailable()
         normalized_path = _normalize_tool_path(path)
+        if is_controlled_context_file(normalized_path):
+            raise PermissionError(
+                f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
+            )
         if not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1:
             raise ValueError("start_line must be a positive integer")
         if end_line is not None and (

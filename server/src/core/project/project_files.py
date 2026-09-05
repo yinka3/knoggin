@@ -3,6 +3,13 @@
 from typing import Optional
 
 PROJECT_FILE_PATH = "PROJECT.md"
+CONTEXT_FILE_PATH = "CONTEXT.md"
+
+
+def is_controlled_context_file(path: str) -> bool:
+    """Whether a normalized workspace path is the engine-owned Context file."""
+
+    return isinstance(path, str) and path.casefold() == CONTEXT_FILE_PATH.casefold()
 
 
 def build_project_markdown(name: str, description: Optional[str] = None) -> str:

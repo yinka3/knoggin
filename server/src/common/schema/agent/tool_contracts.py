@@ -951,7 +951,8 @@ TOOL_SCHEMAS = [
             "description": (
                 "Read a bounded line and character slice from one file in the "
                 "current project's local folder. PROJECT.md is readable "
-                "but remains user-owned."
+                "but remains user-owned; controlled CONTEXT.md is unavailable "
+                "through ordinary workspace tools."
             ),
             "parameters": {
                 "type": "object",
@@ -992,7 +993,7 @@ TOOL_SCHEMAS = [
             "description": (
                 "Create a non-empty bounded artifact in the current project's "
                 "local project folder. Ordinary agent tools cannot create or edit "
-                "the user-owned PROJECT.md."
+                "the user-owned PROJECT.md or controlled CONTEXT.md."
             ),
             "parameters": {
                 "type": "object",
@@ -1023,7 +1024,8 @@ TOOL_SCHEMAS = [
             "description": (
                 "Replace a project file using optimistic "
                 "concurrency. The supplied SHA-256 content hash must still be "
-                "current; PROJECT.md cannot be changed by this ordinary tool."
+                "current; PROJECT.md and controlled CONTEXT.md cannot be changed "
+                "by this ordinary tool."
             ),
             "parameters": {
                 "type": "object",
@@ -1059,8 +1061,8 @@ TOOL_SCHEMAS = [
             "name": "append_file",
             "description": (
                 "Append bounded UTF-8 content to a project file "
-                "using an expected SHA-256 content hash. PROJECT.md cannot be "
-                "changed by this ordinary tool."
+                "using an expected SHA-256 content hash. PROJECT.md and controlled "
+                "CONTEXT.md cannot be changed by this ordinary tool."
             ),
             "parameters": {
                 "type": "object",
@@ -1094,7 +1096,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "move_file",
-            "description": "Move one current-project file to an unused relative path using its current SHA-256 hash.",
+            "description": "Move one non-reserved current-project file to an unused relative path using its current SHA-256 hash.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1112,7 +1114,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "Delete one current-project file only when its SHA-256 hash is current.",
+            "description": "Delete one non-reserved current-project file only when its SHA-256 hash is current.",
             "parameters": {
                 "type": "object",
                 "properties": {

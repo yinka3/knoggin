@@ -31,7 +31,11 @@ from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.services.embedding_service import EmbeddingService
-from core.project.project_files import PROJECT_FILE_PATH
+from core.project.project_files import (
+    CONTEXT_FILE_PATH,
+    PROJECT_FILE_PATH,
+    is_controlled_context_file,
+)
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.postgres_client import PostgresClient
 
@@ -190,6 +194,8 @@ class DocumentService:
                 "project filesystem reconciliation exceeds the "
                 f"{_RECONCILIATION_MAX_FILES}-file safety limit"
             )
+        reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
+        paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
         settings = await self.get_scan_settings()
         entries: list[FolderUploadEntry] = []
         for path in paths:
@@ -257,7 +263,7 @@ class DocumentService:
             "created": created,
             "changed": changed,
             "deleted": deleted,
-            "excluded": preview.summary.excluded_count,
+            "excluded": preview.summary.excluded_count + len(reserved_paths),
         }
 
     async def list_project_files(
@@ -276,6 +282,9 @@ class DocumentService:
         if path_prefix is not None and path_prefix.strip() not in {"", "."}:
             normalized_prefix = normalize_relative_path(path_prefix, path_prefix).rstrip("/")
         files = await self._run_blocking(lambda: list(filesystem.iter_files()))
+        files = [
+            file for file in files if not is_controlled_context_file(file.relative_path)
+        ]
         if normalized_prefix is not None:
             files = [
                 file
@@ -324,6 +333,7 @@ class DocumentService:
         if filesystem is None:
             raise RuntimeError("No local project filesystem is configured")
         normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
         content = await self._run_blocking(filesystem.read_bytes, normalized_path)
         try:
             text = content.decode("utf-8")
@@ -352,7 +362,11 @@ class DocumentService:
         }
 
     async def read_project_context(self) -> Optional[str]:
-        """Read the canonical project context file without waiting for indexing."""
+        """Read the user-owned ``PROJECT.md`` brief without waiting for indexing.
+
+        The engine-maintained ``CONTEXT.md`` projection is deliberately handled
+        by the controlled Context component instead of this generic file API.
+        """
         try:
             return (await self.read_project_file(PROJECT_FILE_PATH))["content"]
         except FileNotFoundError:
@@ -363,6 +377,7 @@ class DocumentService:
         payload = self._validate_project_file_content(path, content)
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
         await self._run_blocking(filesystem.write_bytes, normalized_path, payload)
         await self.reconcile_project_files()
         return await self.read_project_file(normalized_path)
@@ -378,6 +393,7 @@ class DocumentService:
         payload = self._validate_project_file_content(path, content)
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
         await self._run_blocking(
             filesystem.write_bytes,
             normalized_path,
@@ -400,6 +416,7 @@ class DocumentService:
             raise ValueError("content must not be empty")
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
         current = await self._run_blocking(filesystem.read_bytes, normalized_path)
         payload = current + content.encode("utf-8")
         self._validate_project_file_bytes(normalized_path, payload)
@@ -424,6 +441,8 @@ class DocumentService:
         filesystem = self._require_filesystem()
         source = normalize_relative_path(source_path, source_path)
         destination = normalize_relative_path(destination_path, destination_path)
+        self._require_unreserved_context_path(source)
+        self._require_unreserved_context_path(destination)
         self._validate_project_file_extension(destination)
         await self._run_blocking(
             filesystem.move_file,
@@ -443,6 +462,7 @@ class DocumentService:
         """Delete one project file and reconcile the durable catalog tombstone."""
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
         deleted = await self._run_blocking(
             filesystem.delete_file,
             normalized_path,
@@ -481,6 +501,7 @@ class DocumentService:
         return payload
 
     def _validate_project_file_bytes(self, path: str, content: bytes) -> None:
+        self._require_unreserved_context_path(normalize_relative_path(path, path))
         self._validate_project_file_extension(path)
         if len(content) > MAX_DOCUMENT_SIZE:
             raise ValueError("document exceeds the 50 MB size limit")
@@ -941,6 +962,10 @@ class DocumentService:
             normalized_selected.sort()
         if not normalized_selected:
             raise ValueError("folder preview contains no eligible documents")
+        if any(is_controlled_context_file(path) for path in normalized_selected):
+            raise PermissionError(
+                f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
+            )
 
         entry_content = {
             normalize_relative_path(
@@ -1055,6 +1080,7 @@ class DocumentService:
                 f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
         normalized_path = normalize_relative_path(relative_path, original_name)
+        self._require_unreserved_context_path(normalized_path)
         document_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
@@ -1104,6 +1130,13 @@ class DocumentService:
             "updated_at": created_at,
             "chunk_count": 0,
         }
+
+    @staticmethod
+    def _require_unreserved_context_path(path: str) -> None:
+        if is_controlled_context_file(path):
+            raise PermissionError(
+                f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
+            )
 
     async def index_document(
         self,
