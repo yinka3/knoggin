@@ -276,6 +276,9 @@ def build_relationship_advisories(
                 "target_entities": set(),
                 "first_observed_ms": None,
                 "last_observed_ms": None,
+                "independent_occurrences": 0,
+                "independent_windows": set(),
+                "independent_entities": set(),
             },
         )
         group["occurrences"] += 1
@@ -289,6 +292,13 @@ def build_relationship_advisories(
             group["source_entities"].add(int(source_id))
         if target_id is not None:
             group["target_entities"].add(int(target_id))
+        if row.get("evidence_origin", "independent") == "independent":
+            group["independent_occurrences"] += 1
+            group["independent_windows"].add(str(row["semantic_window_id"]))
+            if source_id is not None:
+                group["independent_entities"].add(int(source_id))
+            if target_id is not None:
+                group["independent_entities"].add(int(target_id))
         observed_ms = row.get("observed_at_ms")
         if observed_ms is not None:
             observed_ms = int(observed_ms)
@@ -304,11 +314,10 @@ def build_relationship_advisories(
     advisories = []
     for key, group in groups.items():
         occurrence_count = group["occurrences"]
-        distinct_entities = len(group["source_entities"] | group["target_entities"])
         if (
-            occurrence_count < thresholds.min_occurrences
-            or distinct_entities < thresholds.min_distinct_entities
-            or len(group["semantic_window_ids"]) < thresholds.min_distinct_windows
+            group["independent_occurrences"] < thresholds.min_occurrences
+            or len(group["independent_entities"]) < thresholds.min_distinct_entities
+            or len(group["independent_windows"]) < thresholds.min_distinct_windows
         ):
             continue
         advisories.append(

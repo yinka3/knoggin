@@ -204,6 +204,18 @@ class ProjectManager:
             )
             return result
 
+    async def repair_global_entity_merge_projections(self, merge_id: str) -> dict:
+        """Retry merge-derived projections without repeating canonical writes."""
+
+        async with self.maintenance_service.lock:
+            result = await self.entity_maintenance_service.repair_merge_projections(
+                merge_id
+            )
+            result["runtime_cache_invalidations"] = self._invalidate_entity_caches(
+                result
+            )
+            return result
+
     async def start(self) -> None:
         """Start application-owned maintenance triggers."""
         if self._closed:

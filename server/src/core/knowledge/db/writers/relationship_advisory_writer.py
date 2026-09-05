@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from common.schema.evidence import EvidenceSnapshot
 from common.scoping import require_scope_value
 from core.knowledge.db.writers.maintenance_review_writer import (
     MaintenanceReviewWriter,
@@ -28,13 +29,15 @@ class RelationshipAdvisoryWriter:
         project_id: str,
         advisory: RelationshipAdvisory,
         domain_version: int | None = None,
+        evidence_snapshot: EvidenceSnapshot | None = None,
     ) -> None:
         if advisory.disposition != "pending":
             return
         evidence_refs = [
-            {"kind": "observation", "id": str(item)}
+            {"kind": "relationship_observation", "identifier": str(item)}
             for item in advisory.observation_ids
         ]
+        snapshot = evidence_snapshot or EvidenceSnapshot()
         existing = await self.reviews.get_by_key(
             user_name=user_name,
             project_id=project_id,
@@ -43,9 +46,13 @@ class RelationshipAdvisoryWriter:
         )
         if existing is not None and existing.status == "open":
             existing_refs = {
-                (ref.kind, ref.id) for ref in existing.evidence_refs
+                (ref.kind, ref.identifier) for ref in existing.evidence_refs
             }
-            if existing_refs != {(ref["kind"], ref["id"]) for ref in evidence_refs}:
+            if (
+                existing_refs
+                != {(ref["kind"], ref["identifier"]) for ref in evidence_refs}
+                or existing.evidence_snapshot.state_token != snapshot.state_token
+            ):
                 await self.reviews.transition(
                     existing.review_id,
                     user_name=user_name,
@@ -61,14 +68,7 @@ class RelationshipAdvisoryWriter:
             kind="relationship_advisory",
             dedupe_key=advisory.pattern_key,
             evidence_refs=evidence_refs,
-            evidence_snapshot={
-                "observed_label": advisory.observed_label,
-                "source_type": advisory.source_type,
-                "target_type": advisory.target_type,
-                "occurrence_count": advisory.occurrence_count,
-                "semantic_window_ids": list(advisory.semantic_window_ids),
-                "observation_ids": list(advisory.observation_ids),
-            },
+            evidence_snapshot=snapshot,
             reasoning=(
                 f"{advisory.occurrence_count} observations between "
                 f"{advisory.source_type or 'unknown'} and "

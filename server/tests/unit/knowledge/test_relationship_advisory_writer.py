@@ -90,12 +90,11 @@ async def test_materializing_pending_advisory_opens_observation_backed_review():
 
     opened = reviews.opened[0]
     assert opened["evidence_refs"] == [
-        {"kind": "observation", "id": "11"},
-        {"kind": "observation", "id": "12"},
-        {"kind": "observation", "id": "13"},
+        {"kind": "relationship_observation", "identifier": "11"},
+        {"kind": "relationship_observation", "identifier": "12"},
+        {"kind": "relationship_observation", "identifier": "13"},
     ]
     assert opened["expected_state"] == {"domain_version": 4}
-    assert opened["evidence_snapshot"]["semantic_window_ids"] == [
-        "window-1",
-        "window-2",
-    ]
+    assert [
+        pointer.identifier for pointer in opened["evidence_snapshot"].pointers
+    ] == []

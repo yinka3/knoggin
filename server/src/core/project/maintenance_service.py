@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 
+from common.schema.maintenance import MaintenanceImpactPreview
 from core.knowledge.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflict_service import ConflictService
 from core.knowledge.conflicts import (
@@ -28,7 +29,12 @@ from core.knowledge.db.writers.relationship_advisory_writer import (
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationWriter,
 )
-from core.knowledge.maintenance_reviews import RelationshipInterpretationPlan
+from core.knowledge.evidence_service import EvidenceService
+from core.knowledge.maintenance_impact import MaintenanceImpactPlanner
+from core.knowledge.maintenance_reviews import (
+    MaintenanceReviewDetail,
+    RelationshipInterpretationPlan,
+)
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
@@ -166,11 +172,17 @@ class ProjectMaintenanceService:
             thresholds=thresholds,
         )
         for advisory in advisories:
+            bundles = await self._require_knowledge_store().get_relationship_observations_evidence(
+                list(advisory.observation_ids),
+                user_name=self.user_name,
+                project_id=project_id,
+            )
             await self._relationship_advisory_writer.materialize_pending(
                 user_name=self.user_name,
                 project_id=project_id,
                 advisory=advisory,
                 domain_version=domain.version,
+                evidence_snapshot=EvidenceService.snapshot(bundles),
             )
         return advisories
 
@@ -182,6 +194,85 @@ class ProjectMaintenanceService:
             user_name=self.user_name,
             project_id=project_id,
         )
+
+    async def get_maintenance_review_detail(
+        self,
+        project_id: str,
+        review_id: str,
+    ) -> MaintenanceReviewDetail:
+        """Return an immutable review snapshot beside current bounded evidence."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        review = await self._maintenance_reviews.get(
+            review_id,
+            user_name=self.user_name,
+            project_id=project_id,
+        )
+        if review is None:
+            raise FileNotFoundError("Maintenance review not found")
+        observation_ids = [
+            int(pointer.identifier)
+            for pointer in review.evidence_refs
+            if pointer.kind == "relationship_observation"
+        ]
+        context_ids = [
+            pointer.identifier
+            for pointer in review.evidence_refs
+            if pointer.kind == "context_block"
+        ]
+        unsupported = tuple(
+            pointer
+            for pointer in review.evidence_refs
+            if pointer.kind not in {"relationship_observation", "context_block"}
+        )
+        store = self._require_knowledge_store()
+        bundles = list(
+            await store.get_relationship_observations_evidence(
+                observation_ids,
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+        )
+        for block_id in context_ids:
+            bundles.append(
+                await store.get_context_block_evidence(
+                    block_id,
+                    user_name=self.user_name,
+                    project_id=project_id,
+                )
+            )
+        current_snapshot = EvidenceService.snapshot(tuple(bundles))
+        has_missing = unsupported or any(
+            any(node.status == "missing" for node in bundle.nodes)
+            for bundle in bundles
+        )
+        if has_missing:
+            state = "partially_unavailable"
+        elif current_snapshot.state_token == review.evidence_snapshot.state_token:
+            state = "current"
+        else:
+            state = "changed"
+        return MaintenanceReviewDetail(
+            review=review,
+            stored_snapshot=review.evidence_snapshot,
+            current_evidence=tuple(bundles),
+            unavailable_pointers=unsupported,
+            evidence_state=state,
+        )
+
+    async def preview_maintenance_review(
+        self,
+        project_id: str,
+        review_id: str,
+    ) -> tuple[MaintenanceReviewDetail, MaintenanceImpactPreview]:
+        """Return evidence and typed consequences without performing writes."""
+
+        detail = await self.get_maintenance_review_detail(project_id, review_id)
+        if detail.review.status != "open":
+            raise ValueError("Only an open maintenance review can be previewed")
+        if detail.evidence_state != "current":
+            raise ValueError("Maintenance review is stale; evidence changed")
+        return detail, MaintenanceImpactPlanner.preview(detail.review)
 
     async def transition_maintenance_review(
         self,
@@ -238,6 +329,23 @@ class ProjectMaintenanceService:
                 "cannot be applied as a status transition"
             )
 
+        if review.evidence_snapshot.total_edges > 0:
+            observation_ids = [
+                int(pointer.identifier)
+                for pointer in review.evidence_refs
+                if pointer.kind == "relationship_observation"
+            ]
+            current_bundles = await self._require_knowledge_store().get_relationship_observations_evidence(
+                observation_ids,
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+            if (
+                EvidenceService.snapshot(current_bundles).state_token
+                != review.evidence_snapshot.state_token
+            ):
+                raise ValueError("Maintenance review is stale; evidence changed")
+
         domain = await self._domain_store.load(self.user_name, project_id)
         expected_domain_version = self._validate_expected_domain_version(
             review.expected_state.get("domain_version")
@@ -287,9 +395,17 @@ class ProjectMaintenanceService:
             user_name=self.user_name,
             project_id=project_id,
         )
+        async def load_evidence(observation_ids: list[int]):
+            return await self._require_knowledge_store().get_relationship_observations_evidence(
+                observation_ids,
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+
         return await ConflictPacketBuilder(
             self._conflict_discovery_reader,
             token_counter=token_counter,
+            evidence_loader=load_evidence,
         ).build(
             cursor,
             max_span_days=max_seed_span_days,
@@ -304,6 +420,7 @@ class ProjectMaintenanceService:
     ) -> int:
         """Persist grounded conflict reviews and advance the cursor atomically."""
         results = []
+        snapshot = EvidenceService.snapshot(package.evidence_bundles)
         async with self.pg.transaction() as cur:
             for candidate in candidates:
                 result = await self._conflict_writer.record_detection(
@@ -318,6 +435,7 @@ class ProjectMaintenanceService:
                         "discovery_packet_tokens": package.estimated_tokens,
                         "packet_compacted": package.compacted,
                     },
+                    evidence_snapshot=snapshot,
                     cur=cur,
                 )
                 results.append(result)

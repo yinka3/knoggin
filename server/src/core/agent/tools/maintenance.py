@@ -2,9 +2,9 @@ from typing import Dict, List, Optional
 
 from loguru import logger
 
+from common.schema.evidence import EvidencePointer
 from core.knowledge.conflict_service import ConflictService
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
-from core.knowledge.maintenance_reviews import EvidenceRef
 
 
 class MaintenanceTools:
@@ -75,11 +75,11 @@ class MaintenanceTools:
             service = self._require_entity_maintenance_service()
             evidence_refs = [
                 *(
-                    EvidenceRef(kind="message", id=str(message_id))
+                    EvidencePointer(kind="message", identifier=str(message_id))
                     for message_id in (evidence_message_ids or [])
                 ),
                 *(
-                    EvidenceRef(kind="episode", id=str(episode_id))
+                    EvidencePointer(kind="episode", identifier=str(episode_id))
                     for episode_id in (evidence_episode_ids or [])
                 ),
             ]

@@ -11,6 +11,7 @@ from common.schema.context import (
     ContextSnapshot,
 )
 from common.schema.episode.models import Episode, EpisodeCard
+from common.schema.evidence import EvidenceBundle, EvidenceTraversalLimits
 from common.schema.semantic_window import (
     SemanticWindowClaimResult,
     SemanticWindowMessage,
@@ -30,6 +31,7 @@ from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
+from core.knowledge.db.readers.evidence_traversal_reader import EvidenceTraversalReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.message_reader import MessageReader
@@ -63,6 +65,7 @@ from core.knowledge.db.writers.semantic_commit_writer import (
 )
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -101,6 +104,9 @@ class KnowledgeStore:
         self._semantic_window_writer = SemanticWindowWriter(self._postgres_client)
         self._semantic_commit_writer = SemanticCommitWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
+        self._evidence_service = EvidenceService(
+            EvidenceTraversalReader(self._postgres_client)
+        )
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._message_reader = MessageReader(self._postgres_client)
@@ -118,6 +124,57 @@ class KnowledgeStore:
             embedding_service,
         )
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
+
+    async def get_relationship_observation_evidence(
+        self,
+        observation_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned observation."""
+
+        return await self._evidence_service.for_relationship_observation(
+            observation_id,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
+
+    async def get_context_block_evidence(
+        self,
+        block_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned Context block."""
+
+        return await self._evidence_service.for_context_block(
+            block_id,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
+
+    async def get_relationship_observations_evidence(
+        self,
+        observation_ids: list[int],
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> tuple[EvidenceBundle, ...]:
+        """Return bounded provenance for a set of project observations."""
+
+        return await self._evidence_service.for_relationship_observations(
+            observation_ids,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._message_writer.save_message_logs(messages)

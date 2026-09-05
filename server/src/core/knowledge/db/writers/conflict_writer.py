@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Iterable
 
+from common.schema.evidence import EvidenceSnapshot
 from common.scoping import require_scope_value
 from core.knowledge.conflicts import (
     ConflictGroup,
@@ -34,6 +35,7 @@ class ConflictWriter:
         confidence: float | None,
         evidence_ids: Iterable[int],
         metadata: dict[str, Any] | None = None,
+        evidence_snapshot: EvidenceSnapshot | None = None,
         existing_conflict_id: str | None = None,
         cur=None,
     ) -> ConflictWriteResult:
@@ -47,6 +49,7 @@ class ConflictWriter:
         if confidence is not None and not 0.0 <= confidence <= 1.0:
             raise ValueError("Conflict confidence must be between zero and one")
         signature = self._evidence_signature(ids)
+        snapshot = evidence_snapshot or EvidenceSnapshot()
         if existing_conflict_id is not None:
             existing = await self.reviews.get(
                 existing_conflict_id,
@@ -60,6 +63,10 @@ class ConflictWriter:
                 raise ValueError(
                     "Conflict review evidence is immutable; record a new review"
                 )
+            if existing.evidence_snapshot.state_token != snapshot.state_token:
+                raise ValueError(
+                    "Conflict review evidence state changed; record a new review"
+                )
         else:
             existing = await self.reviews.get_by_key(
                 user_name=user_name,
@@ -71,7 +78,7 @@ class ConflictWriter:
             if (
                 existing is not None
                 and existing.status == "open"
-                and existing.dedupe_key != signature
+                and existing.evidence_snapshot.state_token != snapshot.state_token
             ):
                 await self.reviews.transition(
                     existing.review_id,
@@ -82,33 +89,34 @@ class ConflictWriter:
                     reason="New conflict evidence superseded this review",
                     cur=cur,
                 )
-        evidence = await self._load_evidence(
-            user_name=user_name,
-            project_id=project_id,
-            evidence_ids=ids,
-            cur=cur,
-        )
+                existing = None
         review = await self.reviews.open(
             user_name=user_name,
             scope="project",
             project_id=project_id,
             kind="relationship_conflict",
             dedupe_key=signature,
-            evidence_refs=[{"kind": "observation", "id": str(item)} for item in ids],
-            evidence_snapshot={
-                "origin": origin,
-                "kind": kind,
-                "confidence": confidence,
-                "metadata": metadata or {},
-                "observations": evidence,
-                "evidence_ids": ids,
-            },
+            evidence_refs=[
+                {"kind": "relationship_observation", "identifier": str(item)}
+                for item in ids
+            ],
+            evidence_snapshot=snapshot,
             reasoning=rationale,
-            proposed_plan=ConflictResolutionPlan(conflict_kind=kind),
+            proposed_plan=ConflictResolutionPlan(
+                conflict_kind=kind,
+                origin=origin,
+                confidence=confidence,
+                discovery_packet_tokens=(metadata or {}).get("discovery_packet_tokens"),
+                packet_compacted=bool((metadata or {}).get("packet_compacted", False)),
+            ),
             cur=cur,
         )
         created = existing is None
-        existing_evidence = set(existing.evidence_ids("observation")) if existing else set()
+        existing_evidence = (
+            set(existing.evidence_ids("relationship_observation"))
+            if existing
+            else set()
+        )
         evidence_added = len(set(ids) - existing_evidence)
         group = ConflictGroup(
             conflict_id=review.review_id,
@@ -160,42 +168,22 @@ class ConflictWriter:
             user_name=user_name,
             project_id=project_id,
             status="resolved",
-            origin=review.evidence_snapshot.get("origin", "user_created"),
+            origin=getattr(plan, "origin", "user_created"),
             kind=getattr(plan, "conflict_kind", "possible_contradiction"),
             rationale=review.reasoning,
-            confidence=review.evidence_snapshot.get("confidence"),
+            confidence=getattr(plan, "confidence", None),
             evidence_signature=review.dedupe_key or "",
             resolution_kind=resolution_kind,
             resolution_note=resolution_note,
-            metadata=review.evidence_snapshot.get("metadata", {}),
+            metadata={
+                "discovery_packet_tokens": getattr(
+                    plan, "discovery_packet_tokens", None
+                ),
+                "packet_compacted": getattr(plan, "packet_compacted", False),
+            },
         )
 
     @staticmethod
     def _evidence_signature(evidence_ids: Iterable[int]) -> str:
         joined = ",".join(str(value) for value in sorted(set(evidence_ids)))
         return hashlib.sha256(joined.encode("utf-8")).hexdigest()
-
-    async def _load_evidence(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        evidence_ids: list[int],
-        cur=None,
-    ) -> list[dict[str, Any]]:
-        query = """
-            SELECT observation_id, semantic_window_id, source_entity_id,
-                   target_entity_id, observed_relationship_label,
-                   relationship_id, interpretation_source, context, observed_at_ms
-            FROM public.relationship_observations
-            WHERE user_name = %s AND project_id = %s
-              AND observation_id = ANY(%s)
-        """
-        if cur is not None:
-            await cur.execute(query, (user_name, project_id, evidence_ids))
-            rows = await cur.fetchall()
-        else:
-            rows = await self.client.fetch_all(query, (user_name, project_id, evidence_ids))
-        if len(rows) != len(evidence_ids):
-            raise ValueError("Conflict evidence must be relationship observations in this project")
-        return [dict(row) for row in rows]

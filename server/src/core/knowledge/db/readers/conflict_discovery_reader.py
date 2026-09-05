@@ -157,7 +157,13 @@ class ConflictDiscoveryReader:
                 observation.observed_relationship_label,
                 observation.interpretation_source,
                 observation.context,
-                observation.observed_at_ms
+                observation.observed_at_ms,
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM public.relationship_observation_blocks AS block_support
+                    WHERE block_support.observation_id = observation.observation_id
+                      AND block_support.project_id = observation.project_id
+                ) THEN 'context' ELSE 'independent' END AS evidence_origin
             FROM public.relationship_observations observation
             JOIN public.entities source ON source.entity_id = observation.source_entity_id
             JOIN public.entities target ON target.entity_id = observation.target_entity_id

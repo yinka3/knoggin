@@ -66,6 +66,15 @@ class ConflictDiscoveryJob(BaseJob):
         )
         if package is None:
             return JobResult(success=True, summary="No relationship evidence to review")
+        if not package.observations:
+            await self.maintenance_service.complete_conflict_discovery(
+                package,
+                candidates=(),
+            )
+            return JobResult(
+                success=True,
+                summary="Advanced past Context-owned relationship evidence",
+            )
 
         result = await self.llm.generate_structured(
             response_model=LLMConflictDiscoveryResult,

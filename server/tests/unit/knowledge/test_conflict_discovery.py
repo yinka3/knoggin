@@ -110,6 +110,25 @@ async def test_packet_stops_at_token_ceiling_and_advances_only_reviewed_seed():
     assert {row["observation_id"] for row in package.observations} == {101}
 
 
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_packet_advances_past_context_owned_seeds_without_model_evidence():
+    seeds = [
+        {**_observation(101, 1, 2, observed_at_ms=100), "evidence_origin": "context"},
+        {**_observation(102, 2, 3, observed_at_ms=110), "evidence_origin": "context"},
+    ]
+    package = await ConflictPacketBuilder(PacketReader(seeds, {})).build(
+        ConflictDiscoveryCursor("ada", "project-1", 0),
+        max_span_days=60,
+        max_tokens=1_000,
+    )
+
+    assert package is not None
+    assert package.observations == ()
+    assert package.next_observation_id == 102
+    assert package.estimated_tokens == 0
+
+
 class JobStore:
     def __init__(self, package: ConflictDiscoveryPackage) -> None:
         self.package = package

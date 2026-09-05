@@ -1,14 +1,23 @@
 import asyncio
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
 from common.conf.domain_config import DomainConfig
+from common.schema.evidence import (
+    EvidenceBundle,
+    EvidenceEdge,
+    EvidenceNode,
+    EvidencePointer,
+    EvidenceSubject,
+)
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationResult,
     RelationshipInterpretationWriter,
 )
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
+from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.maintenance_reviews import (
     ConflictResolutionPlan,
     EntityMergePlan,
@@ -114,6 +123,90 @@ def _project_service(review: MaintenanceReview):
     service._domain_store = _DomainStore()
     service._relationship_interpretation_writer = _InterpretationWriter(reviews)
     return service, reviews
+
+
+@pytest.mark.no_network
+async def test_review_detail_separates_snapshot_from_current_evidence():
+    pointer = EvidencePointer.for_observation(10)
+    bundle = EvidenceBundle(
+        subject=EvidenceSubject(
+            kind="relationship_observation", identifier="10"
+        ),
+        nodes=(EvidenceNode(pointer=pointer, label="works at", status="active"),),
+        edges=(),
+        total_nodes=1,
+        total_edges=0,
+        state_token="1" * 64,
+    )
+    review = _relationship_review().model_copy(
+        update={
+            "evidence_refs": [pointer],
+            "evidence_snapshot": EvidenceService.snapshot((bundle,)),
+        }
+    )
+    service, _reviews = _project_service(review)
+
+    class Store:
+        async def get_relationship_observations_evidence(self, *args, **kwargs):
+            return (bundle,)
+
+    service.resources.knowledge_store = Store()
+
+    detail = await service.get_maintenance_review_detail("project-1", "review-1")
+
+    assert detail.stored_snapshot == review.evidence_snapshot
+    assert detail.current_evidence == (bundle,)
+    assert detail.evidence_state == "current"
+
+
+@pytest.mark.no_network
+async def test_changed_evidence_prevents_apply_before_canonical_mutation():
+    observation = EvidencePointer.for_observation(10)
+    block = EvidencePointer(kind="context_block", identifier=str(uuid4()))
+
+    def bundle(token):
+        return EvidenceBundle(
+            subject=EvidenceSubject(
+                kind="relationship_observation", identifier="10"
+            ),
+            nodes=(
+                EvidenceNode(pointer=observation, status="active"),
+                EvidenceNode(pointer=block, content_hash="1" * 64),
+            ),
+            edges=(
+                EvidenceEdge(
+                    source=block,
+                    target=observation,
+                    relation="supports_relationship_observation",
+                ),
+            ),
+            total_nodes=2,
+            total_edges=1,
+            state_token=token,
+        )
+
+    captured = bundle("1" * 64)
+    changed = bundle("2" * 64)
+    review = _relationship_review().model_copy(
+        update={
+            "evidence_refs": [observation],
+            "evidence_snapshot": EvidenceService.snapshot((captured,)),
+        }
+    )
+    service, _reviews = _project_service(review)
+
+    class Store:
+        async def get_relationship_observations_evidence(self, *args, **kwargs):
+            return (changed,)
+
+    service.resources.knowledge_store = Store()
+
+    with pytest.raises(ValueError, match="evidence changed"):
+        await service.transition_maintenance_review(
+            "project-1", "review-1", status="applied"
+        )
+
+    assert service._relationship_interpretation_writer.calls == []
 
 
 @pytest.mark.no_network
@@ -426,6 +519,9 @@ class _RollbackWriter:
             "concurrent_conflicts": [],
         }
 
+    async def record_projection_repair_state(self, merge_id, *, repair_pending):
+        self.projection_repair_state = (merge_id, repair_pending)
+
 
 class _ProjectionBuilder:
     def __init__(self):
@@ -452,6 +548,37 @@ async def test_rollback_rebuilds_every_affected_projection():
     ]
 
 
+@pytest.mark.no_network
+async def test_projection_repair_rebuilds_only_derived_state():
+    class RepairWriter:
+        def __init__(self):
+            self.states = []
+
+        async def get_audit(self, merge_id):
+            return {
+                "merge_id": merge_id,
+                "user_name": "ada",
+                "status": "executed",
+                "survivor_entity_id": 2,
+                "retired_entity_id": 3,
+                "affected_project_ids": ["project-1"],
+            }
+
+        async def record_projection_repair_state(self, merge_id, *, repair_pending):
+            self.states.append((merge_id, repair_pending))
+
+    service = EntityMaintenanceService(postgres=object(), user_name="ada")
+    service.writer = RepairWriter()
+    service.projection_rebuilder = _ProjectionBuilder()
+
+    result = await service.repair_merge_projections("merge-1")
+
+    assert result["canonical_status"] == "executed"
+    assert result["projection_repaired"] is True
+    assert service.projection_rebuilder.calls == [("project-1", "ada")]
+    assert service.writer.states == [("merge-1", False)]
+
+
 class _AtomicMergeWriter:
     def __init__(self):
         self.cursor = None
@@ -464,6 +591,9 @@ class _AtomicMergeWriter:
             "survivor_entity_id": 2,
             "retired_entity_id": 3,
         }
+
+    async def record_projection_repair_state(self, merge_id, *, repair_pending):
+        self.repair_state = (merge_id, repair_pending)
 
 
 class _AtomicReviewWriter:
@@ -518,3 +648,80 @@ async def test_merge_and_review_transition_share_one_transaction(monkeypatch):
 
     assert service.writer.cursor is service.review_writer.cursor
     assert client.transaction_enters == 1
+
+
+@pytest.mark.no_network
+async def test_failed_merge_projection_repair_does_not_repeat_canonical_merge(monkeypatch):
+    class Writer(_AtomicMergeWriter):
+        def __init__(self):
+            super().__init__()
+            self.merge_calls = 0
+            self.states = []
+
+        async def merge(self, **kwargs):
+            self.merge_calls += 1
+            result = await super().merge(**kwargs)
+            self.merge_id = kwargs["merge_id"]
+            return result
+
+        async def get_audit(self, merge_id):
+            return {
+                "merge_id": merge_id,
+                "user_name": "ada",
+                "status": "executed",
+                "survivor_entity_id": 2,
+                "retired_entity_id": 3,
+                "affected_project_ids": ["project-1"],
+            }
+
+        async def record_projection_repair_state(self, merge_id, *, repair_pending):
+            self.states.append((merge_id, repair_pending))
+
+    class FailOnceProjection:
+        def __init__(self):
+            self.calls = 0
+
+        async def rebuild_project_projection(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("projection unavailable")
+            return {"entities": 1, "relationships": 0}
+
+    service = EntityMaintenanceService(
+        postgres=RecordingPostgresClient(), user_name="ada"
+    )
+    service.writer = Writer()
+    service.projection_rebuilder = FailOnceProjection()
+
+    async def preview_merge(**_kwargs):
+        return {
+            "context_conflicts": [],
+            "state_hash": "hash-1",
+            "affected_project_ids": ["project-1"],
+            "frontiers": {"project-1": {"token": "frontier"}},
+        }
+
+    async def valid_frontier(*_args, **_kwargs):
+        return True
+
+    async def definition_versions(*_args, **_kwargs):
+        return {"project-1": 1}
+
+    monkeypatch.setattr(service, "preview_merge", preview_merge)
+    monkeypatch.setattr(service, "revalidate_frontier", valid_frontier)
+    monkeypatch.setattr(service, "_definition_versions", definition_versions)
+    plan = EntityMergePlan(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+        frontier_tokens={"project-1": "frontier"},
+        definition_versions={"project-1": 1},
+        expected_state_hash="hash-1",
+    )
+
+    merged = await service.merge(plan)
+    repaired = await service.repair_merge_projections(service.writer.merge_id)
+
+    assert merged["projection_errors"]
+    assert repaired["projection_repaired"] is True
+    assert service.writer.merge_calls == 1
+    assert [pending for _, pending in service.writer.states] == [True, False]

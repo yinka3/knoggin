@@ -804,6 +804,23 @@ class GlobalEntityMergeWriter:
                 (merge_id,),
             )
 
+    async def record_projection_repair_state(
+        self,
+        merge_id: str,
+        *,
+        repair_pending: bool,
+    ) -> None:
+        """Persist only the bounded derived-repair marker for a merge audit."""
+
+        await self.client.execute(
+            """
+            UPDATE public.entity_global_merge_audits
+            SET failure_reason = %s
+            WHERE merge_id = %s
+            """,
+            ("projection_repair_pending" if repair_pending else None, merge_id),
+        )
+
     async def _mutation_rows(self, cur, merge_id: str) -> list[dict[str, Any]]:
         rows = await self._fetch_all(
             cur,

@@ -52,7 +52,13 @@ class RelationshipObservationReader:
                 source_context.entity_type AS source_type,
                 target_context.entity_type AS target_type,
                 context,
-                observed_at_ms
+                observed_at_ms,
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM public.relationship_observation_blocks AS block_support
+                    WHERE block_support.observation_id = relationship_observations.observation_id
+                      AND block_support.project_id = relationship_observations.project_id
+                ) THEN 'context' ELSE 'independent' END AS evidence_origin
             FROM relationship_observations
             LEFT JOIN project_entity_contexts source_context
               ON source_context.project_id = relationship_observations.project_id
@@ -63,6 +69,7 @@ class RelationshipObservationReader:
             WHERE relationship_observations.user_name = %s
               AND relationship_observations.project_id = %s
               AND relationship_observations.interpretation_source = 'observed'
+              AND relationship_observations.retired_at IS NULL
             ORDER BY observed_at_ms, observation_id
             """,
             (user_name, project_id),

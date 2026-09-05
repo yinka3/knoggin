@@ -118,6 +118,29 @@ def test_advisories_do_not_promote_repetition_within_one_semantic_window():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_context_only_observations_do_not_create_advisory_but_mixed_groups_survive():
+    context_rows = [
+        {**unknown_observation(index, index, index + 10), "evidence_origin": "context"}
+        for index in range(1, 4)
+    ]
+    assert build_relationship_advisories(context_rows) == []
+
+    independent_rows = [
+        {
+            **unknown_observation(index, index, index + 20),
+            "evidence_origin": "independent",
+        }
+        for index in range(4, 7)
+    ]
+    advisories = build_relationship_advisories(context_rows + independent_rows)
+
+    assert len(advisories) == 1
+    assert advisories[0].occurrence_count == 6
+    assert advisories[0].observation_ids == (1, 2, 3, 4, 5, 6)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_advisory_decisions_follow_explicit_lifecycle_without_domain_mutation():
     pattern_key = "deploys to|project|technology"
 

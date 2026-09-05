@@ -39,7 +39,9 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         "project_id": "project-1",
         "kind": "relationship_conflict",
         "dedupe_key": "unused",
-        "evidence_refs": [{"kind": "observation", "id": "10"}],
+        "evidence_refs": [
+            {"kind": "relationship_observation", "identifier": "10"}
+        ],
         "evidence_snapshot": {},
         "reasoning": "The evidence may describe incompatible states.",
         "proposed_plan": {

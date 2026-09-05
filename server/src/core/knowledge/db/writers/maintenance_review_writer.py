@@ -8,9 +8,9 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Iterable
 
+from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from common.scoping import require_scope_value
 from core.knowledge.maintenance_reviews import (
-    EvidenceRef,
     MaintenancePlan,
     MaintenanceReview,
     ReviewScope,
@@ -45,7 +45,8 @@ class MaintenanceReviewWriter:
         project_id: str | None,
         kind: str,
         dedupe_key: str | None,
-        evidence_refs: Iterable[EvidenceRef],
+        evidence_refs: Iterable[EvidencePointer],
+        evidence_snapshot: EvidenceSnapshot,
         plan: MaintenancePlan,
         expected_state: dict[str, Any] | None = None,
     ) -> str:
@@ -56,6 +57,7 @@ class MaintenanceReviewWriter:
             "kind": kind,
             "dedupe_key": dedupe_key,
             "evidence_refs": [ref.model_dump(mode="json") for ref in evidence_refs],
+            "evidence_snapshot": evidence_snapshot.model_dump(mode="json"),
             "plan": plan.model_dump(mode="json"),
             "expected_state": expected_state or {},
         }
@@ -72,8 +74,8 @@ class MaintenanceReviewWriter:
         kind: str,
         reasoning: str,
         proposed_plan: MaintenancePlan | dict[str, Any],
-        evidence_refs: Iterable[EvidenceRef | dict[str, Any] | int | str] = (),
-        evidence_snapshot: dict[str, Any] | None = None,
+        evidence_refs: Iterable[EvidencePointer | dict[str, Any] | int] = (),
+        evidence_snapshot: EvidenceSnapshot | dict[str, Any] | None = None,
         expected_state: dict[str, Any] | None = None,
         dedupe_key: str | None = None,
         cur=None,
@@ -93,10 +95,17 @@ class MaintenanceReviewWriter:
         plan = validate_plan(proposed_plan)
         refs = [
             item
-            if isinstance(item, EvidenceRef)
-            else EvidenceRef.from_value(item)
+            if isinstance(item, EvidencePointer)
+            else EvidencePointer.for_observation(item)
+            if isinstance(item, int) and not isinstance(item, bool)
+            else EvidencePointer.model_validate(item)
             for item in evidence_refs
         ]
+        snapshot = (
+            EvidenceSnapshot.model_validate(evidence_snapshot)
+            if evidence_snapshot is not None
+            else self._snapshot_for_refs(refs)
+        )
         signature = self.signature(
             user_name=user_name,
             scope=scope,
@@ -104,6 +113,7 @@ class MaintenanceReviewWriter:
             kind=kind,
             dedupe_key=dedupe_key,
             evidence_refs=refs,
+            evidence_snapshot=snapshot,
             plan=plan,
             expected_state=expected_state,
         )
@@ -116,7 +126,7 @@ class MaintenanceReviewWriter:
             kind=kind,
             dedupe_key=dedupe_key,
             evidence_refs=refs,
-            evidence_snapshot=evidence_snapshot or {},
+            evidence_snapshot=snapshot,
             reasoning=" ".join(reasoning.split()),
             proposed_plan=plan,
             expected_state=expected_state or {},
@@ -130,7 +140,7 @@ class MaintenanceReviewWriter:
             review.kind,
             review.dedupe_key,
             json.dumps([ref.model_dump(mode="json") for ref in refs], sort_keys=True),
-            json.dumps(review.evidence_snapshot, sort_keys=True, default=str),
+            json.dumps(review.evidence_snapshot.model_dump(mode="json"), sort_keys=True),
             review.reasoning,
             json.dumps(plan.model_dump(mode="json"), sort_keys=True, default=str),
             json.dumps(review.expected_state, sort_keys=True, default=str),
@@ -168,11 +178,8 @@ class MaintenanceReviewWriter:
             hydrated = review_from_row(dict(row))
             for ref in refs:
                 observation_id = None
-                if ref.kind == "observation":
-                    try:
-                        observation_id = int(ref.id)
-                    except ValueError:
-                        observation_id = None
+                if ref.kind == "relationship_observation":
+                    observation_id = int(ref.identifier)
                 await self._execute(
                     active_cur,
                     """
@@ -184,10 +191,17 @@ class MaintenanceReviewWriter:
                     (
                         hydrated.review_id,
                         ref.kind,
-                        ref.id,
+                        ref.identifier,
                         observation_id,
                         json.dumps(
-                            (evidence_snapshot or {}).get(ref.id, {}),
+                            next(
+                                (
+                                    fact.model_dump(mode="json")
+                                    for fact in snapshot.facts
+                                    if fact.pointer == ref
+                                ),
+                                {},
+                            ),
                             sort_keys=True,
                             default=str,
                         ),
@@ -202,6 +216,24 @@ class MaintenanceReviewWriter:
                     reason="review created or reaffirmed",
                 )
             return hydrated
+
+    @staticmethod
+    def _snapshot_for_refs(refs: list[EvidencePointer]) -> EvidenceSnapshot:
+        ordered = tuple(
+            sorted(refs, key=lambda ref: (ref.kind, ref.identifier))
+        )
+        token = hashlib.sha256(
+            json.dumps(
+                [ref.model_dump(mode="json") for ref in ordered],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return EvidenceSnapshot(
+            pointers=ordered,
+            total_nodes=len(ordered),
+            state_token=token,
+        )
 
     async def get(
         self,

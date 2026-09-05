@@ -11,24 +11,11 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
+from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
+
 ReviewScope = Literal["project", "user-global"]
 ReviewStatus = Literal["open", "applied", "dismissed", "stale"]
 InterpretationSource = Literal["observed", "domain", "review"]
-
-
-class EvidenceRef(BaseModel):
-    """A stable reference to evidence used by a review."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    kind: str = Field(min_length=1, max_length=40)
-    id: str = Field(min_length=1, max_length=200)
-
-    @classmethod
-    def from_value(cls, value: Any) -> "EvidenceRef":
-        if isinstance(value, (str, int)):
-            return cls(kind="observation", id=str(value))
-        return cls.model_validate(value)
 
 
 class RelationshipInterpretationChange(BaseModel):
@@ -151,6 +138,12 @@ class ConflictResolutionPlan(BaseModel):
 
     kind: Literal["conflict_resolution"] = "conflict_resolution"
     conflict_kind: str = Field(min_length=1, max_length=80)
+    origin: Literal[
+        "background_discovery", "agent_discovery", "user_created"
+    ] = "user_created"
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    discovery_packet_tokens: int | None = Field(default=None, ge=0)
+    packet_compacted: bool = False
     resolution: str | None = Field(default=None, max_length=80)
     note: str | None = Field(default=None, max_length=2_000)
 
@@ -201,8 +194,8 @@ class MaintenanceReview(BaseModel):
     project_id: str | None = None
     kind: str = Field(min_length=1, max_length=80)
     dedupe_key: str | None = Field(default=None, max_length=500)
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list, max_length=512)
-    evidence_snapshot: dict[str, Any] = Field(default_factory=dict)
+    evidence_refs: list[EvidencePointer] = Field(default_factory=list, max_length=512)
+    evidence_snapshot: EvidenceSnapshot = Field(default_factory=EvidenceSnapshot)
     reasoning: str = Field(min_length=1, max_length=8_000)
     proposed_plan: MaintenancePlan
     expected_state: dict[str, Any] = Field(default_factory=dict)
@@ -219,8 +212,18 @@ class MaintenanceReview(BaseModel):
 
     @field_validator("evidence_refs", mode="before")
     @classmethod
-    def normalize_evidence_refs(cls, value: Any) -> list[EvidenceRef]:
-        return [EvidenceRef.from_value(item) for item in (value or [])]
+    def normalize_evidence_refs(cls, value: Any) -> list[EvidencePointer]:
+        return [
+            EvidencePointer.for_observation(item)
+            if isinstance(item, int) and not isinstance(item, bool)
+            else EvidencePointer.model_validate(item)
+            for item in (value or [])
+        ]
+
+    @field_validator("evidence_snapshot", mode="before")
+    @classmethod
+    def normalize_evidence_snapshot(cls, value: Any) -> EvidenceSnapshot:
+        return EvidenceSnapshot.model_validate(value)
 
     @field_validator("proposed_plan", mode="before")
     @classmethod
@@ -234,13 +237,24 @@ class MaintenanceReview(BaseModel):
         values: list[int] = []
         for ref in refs:
             try:
-                value = int(ref.id)
+                value = int(ref.identifier)
             except (TypeError, ValueError):
                 continue
             if value > 0:
                 values.append(value)
         return tuple(dict.fromkeys(values))
 
+
+class MaintenanceReviewDetail(BaseModel):
+    """Stored review state separated from its current live evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    review: MaintenanceReview
+    stored_snapshot: EvidenceSnapshot
+    current_evidence: tuple[EvidenceBundle, ...] = ()
+    unavailable_pointers: tuple[EvidencePointer, ...] = ()
+    evidence_state: Literal["current", "changed", "partially_unavailable"]
 
 def review_from_row(row: dict[str, Any]) -> MaintenanceReview:
     """Hydrate a database row, accepting JSON strings from lightweight fakes."""

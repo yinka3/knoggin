@@ -3,9 +3,11 @@ from pydantic import ValidationError
 
 from common.conf.domain_config import DomainConfig
 from common.conf.relationship_config import normalize_relationship
+from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.knowledge.maintenance_reviews import (
     MaintenanceReview,
+    RelationshipInterpretationChange,
     RelationshipInterpretationPlan,
 )
 from core.knowledge.relationship_advisories import build_relationship_advisories
@@ -176,3 +178,41 @@ async def test_transition_compares_and_records_event_in_one_transaction():
     assert client.transaction_enters == 1
     assert not any(call[0] == "fetch_one" for call in client.calls)
     assert sum("maintenance_review_events" in call[1] for call in client.calls) == 1
+
+
+def test_review_signature_changes_with_typed_evidence_state():
+    pointer = EvidencePointer.for_observation(7)
+    plan = RelationshipInterpretationPlan(
+        changes=[
+            RelationshipInterpretationChange(
+                observation_id=7,
+                expected_relationship_id="relationship-1",
+                target_relationship_type="WORKS_FOR",
+                interpretation_source="review",
+            )
+        ]
+    )
+    base = {
+        "user_name": "ada",
+        "scope": "project",
+        "project_id": "project-1",
+        "kind": "relationship_interpretation",
+        "dedupe_key": None,
+        "evidence_refs": [pointer],
+        "plan": plan,
+    }
+
+    first = MaintenanceReviewWriter.signature(
+        **base,
+        evidence_snapshot=EvidenceSnapshot(
+            pointers=(pointer,), state_token="1" * 64
+        ),
+    )
+    changed = MaintenanceReviewWriter.signature(
+        **base,
+        evidence_snapshot=EvidenceSnapshot(
+            pointers=(pointer,), state_token="2" * 64
+        ),
+    )
+
+    assert first != changed
