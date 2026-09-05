@@ -1,9 +1,7 @@
-import json
-
 import pytest
 
-from common.scoping import IDENTITY_ENTITY_ID
 from core.knowledge.db.readers.graph_reader import GraphReader
+from core.knowledge.db.readers.message_reader import MessageReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
@@ -51,6 +49,65 @@ async def test_surrounding_messages_use_strict_timestamp_and_message_id_bounds()
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_discovery_surrounding_context_requires_open_sealed_history():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [_message(3, 200)],
+            [_message(2, 100)],
+            [_message(4, 300)],
+        ]
+    )
+
+    await GraphReader(client).get_surrounding_messages(
+        3,
+        user_name="ada",
+        session_id="session-1",
+        visible_project_ids=["project-1"],
+        discoverable_only=True,
+    )
+
+    for _, query, _ in client.calls:
+        assert "lifecycle_state = 'sealed'" in query
+        assert "status = 'open'" in query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_explicit_message_hydration_does_not_apply_discovery_lifecycle_filters():
+    client = RecordingPostgresClient(fetch_all_results=[[_message(3, 200)]])
+
+    messages = await GraphReader(client).get_messages_by_ids(
+        [3],
+        user_name="ada",
+        session_ids=["deleted-session"],
+        visible_project_ids=["project-1"],
+    )
+
+    assert [message["id"] for message in messages] == [3]
+    _, query, _ = client.calls[0]
+    assert "lifecycle_state = 'sealed'" not in query
+    assert "status = 'open'" not in query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_fts_discovery_requires_open_sealed_history():
+    client = RecordingPostgresClient(fetch_all_results=[[]])
+
+    assert await MessageReader(client).search_fts(
+        "release plan",
+        user_name="ada",
+        session_ids=["session-1"],
+        visible_project_ids=["project-1"],
+    ) == []
+
+    _, query, _ = client.calls[0]
+    assert "m.lifecycle_state = 'sealed'" in query
+    assert "s.status = 'open'" in query
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_recent_project_messages_uses_an_exclusive_cursor():
     client = RecordingPostgresClient(fetch_all_results=[[_message(6, 600)]])
 
@@ -64,35 +121,6 @@ async def test_recent_project_messages_uses_an_exclusive_cursor():
     _, query, params = client.calls[0]
     assert "AND message_id < %s" in query
     assert params == ("ada", "project-1", 7, 10)
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-@pytest.mark.parametrize(
-    ("connected", "expected"),
-    [("false", False), ('"false"', False), ("true", True), (True, True)],
-)
-async def test_direct_edge_scopes_relationship_and_decodes_age_booleans(
-    connected,
-    expected,
-):
-    client = RecordingPostgresClient(fetch_one_results=[{"connected": connected}])
-
-    result = await GraphReader(client).has_direct_edge(
-        IDENTITY_ENTITY_ID,
-        2,
-        visible_project_ids=["project-1"],
-    )
-
-    assert result is expected
-    _, query, params = client.calls[0]
-    assert "AND r.project_id IN $visible_project_ids" in query
-    assert json.loads(params[0]) == {
-        "id_a": IDENTITY_ENTITY_ID,
-        "id_b": 2,
-        "visible_project_ids": ["project-1"],
-        "identity_entity_id": IDENTITY_ENTITY_ID,
-    }
 
 
 @pytest.mark.storage
@@ -136,56 +164,59 @@ async def test_surrounding_messages_do_not_repeat_same_timestamp_rows(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_direct_edge_ignores_an_edge_from_an_invisible_project(
+async def test_discovery_excludes_unsealed_and_deleted_session_history_but_provenance_remains_readable(
     real_postgres_client,
 ):
-    await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            UNWIND $nodes AS node
-            CREATE (:Entity {id: node.id, project_id: node.project_id})
-            RETURN count(*) AS created
-            """,
-            "created agtype",
-        ),
-        (
-            json.dumps(
-                {
-                    "nodes": [
-                        {"id": IDENTITY_ENTITY_ID, "project_id": "identity"},
-                        {"id": 2, "project_id": "project-1"},
-                    ]
-                }
-            ),
-        ),
+    await real_postgres_client.execute(
+        """
+        INSERT INTO sessions (session_id, user_name, project_id, status)
+        VALUES
+            ('open-session', 'ada', 'project-1', 'open'),
+            ('deleted-session', 'ada', 'project-1', 'deleted')
+        """
     )
-    await real_postgres_client.fetch_one(
-        real_postgres_client.build_cypher(
-            """
-            MATCH (a:Entity {id: $identity_entity_id})
-            MATCH (b:Entity {id: $entity_id})
-            CREATE (a)-[:RELATED_TO {project_id: $relationship_project_id}]->(b)
-            RETURN true AS created
-            """,
-            "created agtype",
-        ),
-        (
-            json.dumps(
-                {
-                    "identity_entity_id": IDENTITY_ENTITY_ID,
-                    "entity_id": 2,
-                    "relationship_project_id": "project-2",
-                }
-            ),
-        ),
+    await real_postgres_client.execute(
+        """
+        INSERT INTO messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state
+        ) VALUES
+            ('ada', 'open-session', 101, 'project-1', 'user',
+             'needle sealed', 100, 'sealed'),
+            ('ada', 'open-session', 102, 'project-1', 'assistant',
+             'needle editable', 101, 'editable'),
+            ('ada', 'open-session', 103, 'project-1', 'assistant',
+             'needle superseded', 102, 'superseded'),
+            ('ada', 'deleted-session', 104, 'project-1', 'user',
+             'needle deleted session', 103, 'sealed')
+        """
     )
 
-    reader = GraphReader(real_postgres_client)
-    assert (
-        await reader.has_direct_edge(
-            IDENTITY_ENTITY_ID,
-            2,
-            visible_project_ids=["project-1"],
-        )
-        is False
+    message_reader = MessageReader(real_postgres_client)
+    matches = await message_reader.search_fts(
+        "needle",
+        user_name="ada",
+        session_ids=["open-session", "deleted-session"],
+        visible_project_ids=["project-1"],
     )
+    assert [(message_id, session_id) for message_id, _, session_id in matches] == [
+        (101, "open-session")
+    ]
+
+    graph_reader = GraphReader(real_postgres_client)
+    context = await graph_reader.get_surrounding_messages(
+        101,
+        user_name="ada",
+        session_id="open-session",
+        visible_project_ids=["project-1"],
+        discoverable_only=True,
+    )
+    assert [message["id"] for message in context] == [101]
+
+    retained = await graph_reader.get_messages_by_ids(
+        [104],
+        user_name="ada",
+        session_ids=["deleted-session"],
+        visible_project_ids=["project-1"],
+    )
+    assert [message["id"] for message in retained] == [104]

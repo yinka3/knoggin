@@ -5,11 +5,8 @@ from common.conf.domain_config import DomainConfig
 from common.exceptions import StorageReadError, StorageWriteError
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
-from core.knowledge.db.writers.entity_merge_writer import (
-    EntityMergeWriter as GraphWriter,
-)
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
-from core.knowledge.db.writers.graph_writer import GraphWriter as IngestionGraphWriter
+from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_writer import MessageWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.db.writers.relationship_reclassification_writer import (
@@ -89,29 +86,8 @@ async def test_message_search_failure_is_not_reported_as_empty_search():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_write_failure_is_not_reported_as_false_result():
+async def test_graph_write_failure_is_standardized():
     writer = GraphWriter(
-        RecordingPostgresClient(
-            cursor_execute_exceptions=[OperationalError("database down")]
-        )
-    )
-
-    with pytest.raises(StorageWriteError) as error:
-        await writer.delete_relationship(
-            2,
-            3,
-            relationship_type="related_to",
-            project_id="project-1",
-        )
-
-    assert error.value.code == "storage_write_error"
-    assert error.value.details["operation"] == "delete_relationship"
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_ingestion_graph_write_failure_is_standardized():
-    writer = IngestionGraphWriter(
         RecordingPostgresClient(
             cursor_execute_exceptions=[OperationalError("database down")]
         )
@@ -163,14 +139,15 @@ async def test_project_episode_write_failure_is_standardized():
     )
 
     with pytest.raises(StorageWriteError) as error:
-        await writer.write_project_episode_window(
-            [],
-            [{"message_id": 7, "session_id": "session-1"}],
+        await writer.write_project_semantic_window_episodes(
+            window_id="11111111-1111-4111-8111-111111111111",
+            episodes=[],
+            window_messages=[{"message_id": 7, "session_id": "session-1"}],
             user_name="ada",
             project_id="project-1",
         )
 
-    assert error.value.details["operation"] == "write_project_episode_window"
+    assert error.value.details["operation"] == "write_project_semantic_window_episodes"
 
 
 @pytest.mark.storage

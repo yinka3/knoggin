@@ -195,6 +195,8 @@ def _relationship_changed(left, right) -> bool:
         or tuple(item.casefold() for item in left.target_types)
         != tuple(item.casefold() for item in right.target_types)
         or left.symmetric != right.symmetric
+        or tuple(item.casefold() for item in left.labels)
+        != tuple(item.casefold() for item in right.labels)
     )
 
 

@@ -6,12 +6,11 @@ from common.schema.episode.models import (
     EPISODE_EMBEDDING_DIMENSION,
     EntityEpisode,
     Episode,
-    EpisodeCheckpoint,
-    EpisodeVersion,
+    EpisodeCard,
     MessageEpisode,
     RelationshipEpisode,
 )
-from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
+from common.scoping import require_scope_value
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -49,8 +48,8 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
-        """Return all matching episodes, prioritizing focus memberships."""
+    ) -> List[EpisodeCard]:
+        """Return all matching episodes in source chronology."""
 
         if entity_id <= 0:
             raise ValueError("get_episodes_for_entity requires a positive entity_id")
@@ -68,14 +67,11 @@ class EpisodeReader:
                 "JOIN episode_entities ee ON ee.episode_id = e.episode_id "
                 "AND ee.project_id = e.project_id"
             ),
-            ordering=(
-                "ee.is_focus_entity DESC, ee.prominence_weight DESC, "
-                "e.importance DESC, e.updated_at DESC"
-            ),
+            ordering="e.last_message_at DESC NULLS LAST, e.episode_id DESC",
             limit=True,
         )
         rows = await self.client.fetch_all(query, (entity_id, *scope, limit))
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_episodes_for_entities(
         self,
@@ -85,7 +81,7 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         """Return prior episodes ranked by overlap with a source entity set."""
 
         normalized_entity_ids = sorted({int(entity_id) for entity_id in entity_ids})
@@ -108,12 +104,11 @@ class EpisodeReader:
                 e.new_developments,
                 e.updates,
                 e.unresolved,
-                e.importance,
                 e.source_message_count,
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
-                e.version_history,
+                e.user_modified,
                 e.created_at,
                 e.updated_at,
                 COUNT(DISTINCT ee.entity_id) AS entity_overlap
@@ -133,12 +128,13 @@ class EpisodeReader:
                     AND em.session_id = %s
               )
             GROUP BY e.episode_id
-            ORDER BY entity_overlap DESC, e.updated_at DESC
+            ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
+                     e.episode_id DESC
             LIMIT %s
             """,
             (normalized_entity_ids, *scope, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_merge_evidence_for_entities(
         self,
@@ -211,20 +207,13 @@ class EpisodeReader:
         episode_rows = await self.client.fetch_all(
             """
             WITH ranked_episodes AS (
-                SELECT
-                    ee.entity_id,
-                    e.episode_id,
-                    e.summary,
-                    e.importance,
-                    ee.is_focus_entity,
-                    ee.prominence_weight,
+                    SELECT
+                        ee.entity_id,
+                        e.episode_id,
+                        e.summary,
                     ROW_NUMBER() OVER (
                         PARTITION BY ee.entity_id
-                        ORDER BY
-                            ee.is_focus_entity DESC,
-                            ee.prominence_weight DESC,
-                            e.importance DESC,
-                            e.updated_at DESC
+                        ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC
                     ) AS evidence_rank
                 FROM episode_entities ee
                 JOIN episodes e
@@ -255,10 +244,9 @@ class EpisodeReader:
                         m.role,
                         m.content,
                         m.timestamp_ms,
-                        em.influence_weight,
                         ROW_NUMBER() OVER (
                             PARTITION BY em.episode_id
-                            ORDER BY em.influence_weight DESC, em.message_position
+                            ORDER BY em.message_position
                         ) AS source_rank
                     FROM episode_messages em
                     JOIN episodes e
@@ -289,7 +277,6 @@ class EpisodeReader:
                         "text": str(row.get("content") or ""),
                         "role": row.get("role"),
                         "timestamp_ms": row.get("timestamp_ms"),
-                        "influence_weight": float(row["influence_weight"]),
                     }
                 )
 
@@ -300,11 +287,7 @@ class EpisodeReader:
                 {
                     "kind": "episode",
                     "episode_id": episode_id,
-                    "session_id": str(row["session_id"]),
                     "text": str(row.get("summary") or ""),
-                    "importance": float(row["importance"]),
-                    "is_focus_entity": bool(row["is_focus_entity"]),
-                    "prominence_weight": float(row["prominence_weight"]),
                 }
             )
             evidence_by_entity[entity_id].extend(
@@ -320,7 +303,7 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         """Search scoped episode summaries and structured narrative fields."""
 
         normalized_query = query.strip()
@@ -344,12 +327,11 @@ class EpisodeReader:
                 e.new_developments,
                 e.updates,
                 e.unresolved,
-                e.importance,
                 e.source_message_count,
                 e.first_message_at,
                 e.last_message_at,
                 e.generator_metadata,
-                e.version_history,
+                e.user_modified,
                 e.created_at,
                 e.updated_at
             FROM episodes e
@@ -363,13 +345,13 @@ class EpisodeReader:
               AND e.search_tsvector @@ q.terms
             ORDER BY
                 ts_rank_cd(e.search_tsvector, q.terms) DESC,
-                e.importance DESC,
-                e.updated_at DESC
+                e.last_message_at DESC NULLS LAST,
+                e.episode_id DESC
             LIMIT %s
             """,
             (normalized_query, *scope, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def search_episodes_by_embedding(
         self,
@@ -380,7 +362,7 @@ class EpisodeReader:
         session_id: str,
         limit: int = 10,
         score_threshold: float = 0.35,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         """Return scoped episodes ranked by cosine similarity to a query vector."""
 
         if limit <= 0:
@@ -404,13 +386,12 @@ class EpisodeReader:
                 e.new_developments,
                 e.updates,
                 e.unresolved,
-                e.importance,
                 e.source_message_count,
                 e.first_message_at,
                 e.last_message_at,
                 e.embedding,
                 e.generator_metadata,
-                e.version_history,
+                e.user_modified,
                 e.created_at,
                 e.updated_at,
                 1 - (e.embedding <=> %s::vector) AS similarity
@@ -429,7 +410,8 @@ class EpisodeReader:
             (vector, *scope, vector, score_threshold, vector, limit),
         )
         return [
-            (await self._hydrate_episode(row), float(row["similarity"])) for row in rows
+            (await self._hydrate_episode_card(row), float(row["similarity"]))
+            for row in rows
         ]
 
     async def get_recent_episodes(
@@ -439,8 +421,8 @@ class EpisodeReader:
         project_id: str,
         session_id: str,
         limit: int = 1,
-    ) -> List[Episode]:
-        """Return the most recently updated episodes in one conversation."""
+    ) -> List[EpisodeCard]:
+        """Return the most recent source episodes in one conversation."""
 
         if limit <= 0:
             return []
@@ -451,10 +433,12 @@ class EpisodeReader:
             "get_recent_episodes",
         )
         rows = await self.client.fetch_all(
-            self._episode_query("TRUE", limit=True),
+            self._episode_query(
+                "TRUE", ordering="e.last_message_at DESC NULLS LAST, e.episode_id DESC", limit=True
+            ),
             (*scope, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_episode_source_messages(
         self,
@@ -483,8 +467,6 @@ class EpisodeReader:
             m.role,
             m.content,
             m.timestamp_ms,
-            em.influence_weight,
-            em.influence_reason,
             em.message_position,
             em.attached_at
         FROM episodes e
@@ -535,338 +517,6 @@ class EpisodeReader:
             "relationships": episode.relationships,
         }
 
-    async def get_episode_checkpoint(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> EpisodeCheckpoint:
-        """Return the chronological cursor for a valid conversation."""
-
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_episode_checkpoint",
-        )
-        row = await self.client.fetch_one(
-            """
-            SELECT
-                COALESCE(ec.last_evaluated_message_id, 0) AS message_id,
-                ec.last_evaluated_timestamp_ms
-            FROM sessions s
-            LEFT JOIN episode_processing_checkpoints ec
-              ON ec.project_id = s.project_id
-             AND ec.session_id = s.session_id
-            WHERE s.user_name = %s
-              AND s.project_id = %s
-              AND s.session_id = %s
-            """,
-            scope,
-        )
-        if row is None:
-            raise ValueError("Episode checkpoint requires an existing session")
-        return EpisodeCheckpoint(
-            last_evaluated_message_id=int(row["message_id"]),
-            last_evaluated_timestamp_ms=row["last_evaluated_timestamp_ms"],
-        )
-
-    async def get_next_episode_window(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        checkpoint: EpisodeCheckpoint,
-        message_count: int,
-    ) -> List[Dict]:
-        """Load the next fully ingested window in chronological message order."""
-
-        if message_count <= 0:
-            raise ValueError("message_count must be positive")
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_next_episode_window",
-        )
-        rows = await self.client.fetch_all(
-            """
-            SELECT
-                m.message_id,
-                m.role,
-                m.content,
-                m.timestamp_ms,
-                m.episode_type,
-                m.episode_eligible AS is_episode_eligible
-            FROM messages m
-            WHERE m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-              AND (
-                    (%s = 0 AND %s::BIGINT IS NULL)
-                 OR (
-                        %s::BIGINT IS NOT NULL
-                    AND (
-                           m.timestamp_ms > %s
-                        OR (m.timestamp_ms = %s AND m.message_id > %s)
-                        OR m.timestamp_ms IS NULL
-                    )
-                 )
-                 OR (
-                        %s::BIGINT IS NULL
-                    AND %s > 0
-                    AND m.timestamp_ms IS NULL
-                    AND m.message_id > %s
-                 )
-              )
-            ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id
-            LIMIT %s
-            """,
-            (
-                *scope,
-                checkpoint.last_evaluated_message_id,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_message_id,
-                checkpoint.last_evaluated_timestamp_ms,
-                checkpoint.last_evaluated_message_id,
-                checkpoint.last_evaluated_message_id,
-                message_count,
-            ),
-        )
-        if len(rows) < message_count or any(
-            not row["is_episode_eligible"] for row in rows
-        ):
-            return []
-        return [
-            {key: value for key, value in row.items() if key != "is_episode_eligible"}
-            for row in rows
-        ]
-
-    async def get_next_project_episode_window(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        message_count: int,
-    ) -> List[Dict]:
-        """Merge each session's next ready stream into one project window.
-
-        A session stops at its first non-ready message, preserving its own
-        chronology.  Other sessions are intentionally independent, so a draft
-        or failed claim in one cannot starve project memory from another.
-        """
-
-        if message_count <= 0:
-            raise ValueError("message_count must be positive")
-        rows = await self.client.fetch_all(
-            """
-            SELECT
-                m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
-                m.user_msg_id, m.lifecycle_state, m.ingestion_state,
-                m.episode_eligible,
-                s.episode_participation_enabled,
-                s.episode_participation_after_message_id,
-                parent.ingestion_state AS parent_ingestion_state,
-                parent.lifecycle_state AS parent_lifecycle_state,
-                COALESCE(ec.last_evaluated_message_id, 0) AS checkpoint_message_id,
-                ec.last_evaluated_timestamp_ms AS checkpoint_timestamp_ms
-            FROM messages m
-            JOIN sessions s
-              ON s.session_id = m.session_id AND s.project_id = m.project_id
-            LEFT JOIN episode_processing_checkpoints ec
-              ON ec.project_id = m.project_id AND ec.session_id = m.session_id
-            LEFT JOIN messages parent
-              ON parent.message_id = m.user_msg_id
-             AND parent.project_id = m.project_id
-             AND parent.session_id = m.session_id
-            WHERE m.user_name = %s
-              AND m.project_id = %s
-              AND s.status <> 'deleted'
-              AND s.episode_participation_enabled = TRUE
-              AND m.message_id > s.episode_participation_after_message_id
-              AND (
-                    (COALESCE(ec.last_evaluated_message_id, 0) = 0
-                     AND ec.last_evaluated_timestamp_ms IS NULL)
-                 OR (
-                    ec.last_evaluated_timestamp_ms IS NOT NULL AND (
-                        m.timestamp_ms > ec.last_evaluated_timestamp_ms
-                        OR (m.timestamp_ms = ec.last_evaluated_timestamp_ms
-                            AND m.message_id > ec.last_evaluated_message_id)
-                        OR m.timestamp_ms IS NULL
-                    ))
-                 OR (ec.last_evaluated_timestamp_ms IS NULL
-                     AND COALESCE(ec.last_evaluated_message_id, 0) > 0
-                     AND m.timestamp_ms IS NULL
-                     AND m.message_id > ec.last_evaluated_message_id)
-              )
-            ORDER BY m.session_id, m.timestamp_ms ASC NULLS LAST, m.message_id
-            """,
-            (user_name, project_id),
-        )
-        streams: Dict[str, List[Dict]] = {}
-        for row in rows:
-            ready = (
-                row["role"] == "user"
-                and row["lifecycle_state"] == "sealed"
-                and row["ingestion_state"] == "processed"
-                and row["episode_eligible"]
-            ) or (
-                row["role"] == "assistant"
-                and row["parent_lifecycle_state"] == "sealed"
-                and row["parent_ingestion_state"] == "processed"
-            )
-            session_id = str(row["session_id"])
-            if not ready:
-                # The first blocked record holds only this session's stream.
-                streams.setdefault(session_id, [])
-                streams[session_id].append({"_blocked": True})
-                continue
-            if any(item.get("_blocked") for item in streams.get(session_id, [])):
-                continue
-            streams.setdefault(session_id, []).append(dict(row))
-
-        bundles: List[List[Dict]] = []
-        for stream in streams.values():
-            index = 0
-            while index < len(stream) and not stream[index].get("_blocked"):
-                bundle = [stream[index]]
-                user_id = int(stream[index]["message_id"])
-                index += 1
-                while (
-                    index < len(stream)
-                    and not stream[index].get("_blocked")
-                    and stream[index].get("role") == "assistant"
-                    and stream[index].get("user_msg_id") == user_id
-                ):
-                    bundle.append(stream[index])
-                    index += 1
-                bundles.append(bundle)
-        bundles.sort(
-            key=lambda bundle: (
-                bundle[0].get("timestamp_ms") is None,
-                bundle[0].get("timestamp_ms") or 0,
-                bundle[0]["message_id"],
-            )
-        )
-        selected: List[Dict] = []
-        for bundle in bundles:
-            if len(selected) >= message_count:
-                break
-            selected.extend(bundle)
-        if len(selected) < message_count:
-            return []
-        return [
-            {
-                key: value
-                for key, value in row.items()
-                if key not in {"lifecycle_state", "ingestion_state", "episode_eligible", "parent_ingestion_state", "parent_lifecycle_state", "checkpoint_message_id", "checkpoint_timestamp_ms", "episode_participation_enabled", "episode_participation_after_message_id"}
-            }
-            for row in selected
-        ]
-
-    async def has_ready_project_episode_window(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        message_count: int,
-    ) -> bool:
-        """Return whether a project has one full unblocked episode window.
-
-        This intentionally reads no message bodies.  It mirrors the
-        project-window readiness rules while stopping after enough durable
-        evidence has been counted.
-        """
-
-        if message_count <= 0:
-            raise ValueError("message_count must be positive")
-        row = await self.client.fetch_one(
-            """
-            WITH candidate_messages AS (
-                SELECT
-                    m.message_id,
-                    m.session_id,
-                    m.role,
-                    m.timestamp_ms,
-                    m.user_msg_id,
-                    m.lifecycle_state,
-                    m.ingestion_state,
-                    m.episode_eligible,
-                    parent.ingestion_state AS parent_ingestion_state,
-                    parent.lifecycle_state AS parent_lifecycle_state,
-                    COALESCE(ec.last_evaluated_message_id, 0) AS checkpoint_message_id,
-                    ec.last_evaluated_timestamp_ms AS checkpoint_timestamp_ms
-                FROM messages m
-                JOIN sessions s
-                  ON s.session_id = m.session_id AND s.project_id = m.project_id
-                LEFT JOIN episode_processing_checkpoints ec
-                  ON ec.project_id = m.project_id AND ec.session_id = m.session_id
-                LEFT JOIN messages parent
-                  ON parent.message_id = m.user_msg_id
-                 AND parent.project_id = m.project_id
-                 AND parent.session_id = m.session_id
-                WHERE m.user_name = %s
-                  AND m.project_id = %s
-                  AND s.status <> 'deleted'
-                  AND s.episode_participation_enabled = TRUE
-                  AND m.message_id > s.episode_participation_after_message_id
-                  AND (
-                        (COALESCE(ec.last_evaluated_message_id, 0) = 0
-                         AND ec.last_evaluated_timestamp_ms IS NULL)
-                     OR (
-                        ec.last_evaluated_timestamp_ms IS NOT NULL AND (
-                            m.timestamp_ms > ec.last_evaluated_timestamp_ms
-                            OR (m.timestamp_ms = ec.last_evaluated_timestamp_ms
-                                AND m.message_id > ec.last_evaluated_message_id)
-                            OR m.timestamp_ms IS NULL
-                        )
-                     )
-                     OR (ec.last_evaluated_timestamp_ms IS NULL
-                         AND COALESCE(ec.last_evaluated_message_id, 0) > 0
-                         AND m.timestamp_ms IS NULL
-                         AND m.message_id > ec.last_evaluated_message_id)
-                  )
-            ),
-            readiness AS (
-                SELECT
-                    *,
-                    (
-                        (role = 'user'
-                         AND lifecycle_state = 'sealed'
-                         AND ingestion_state = 'processed'
-                         AND episode_eligible)
-                        OR (role = 'assistant'
-                            AND parent_lifecycle_state = 'sealed'
-                            AND parent_ingestion_state = 'processed')
-                    ) AS is_ready
-                FROM candidate_messages
-            ),
-            ordered_streams AS (
-                SELECT
-                    *,
-                    SUM(CASE WHEN is_ready THEN 0 ELSE 1 END) OVER (
-                        PARTITION BY session_id
-                        ORDER BY timestamp_ms ASC NULLS LAST, message_id
-                    ) AS blocked_count
-                FROM readiness
-            )
-            SELECT count(*) AS ready_count
-            FROM (
-                SELECT 1
-                FROM ordered_streams
-                WHERE is_ready AND blocked_count = 0
-                LIMIT %s
-            ) AS bounded_ready
-            """,
-            (user_name, project_id, message_count),
-        )
-        return int(row["ready_count"] if row else 0) >= message_count
-
     async def get_project_episode(
         self,
         episode_id: str,
@@ -892,14 +542,77 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         rows = await self.client.fetch_all(
             """
             SELECT e.* FROM episodes e JOIN projects p ON p.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
-            ORDER BY e.updated_at DESC LIMIT %s
+            ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
             """,
             (visible_project_ids or [project_id], user_name, limit),
+        )
+        return [await self._hydrate_episode_card(row) for row in rows]
+
+    async def get_nearby_project_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_ids: List[str],
+        before_message_id: int,
+        before_timestamp_ms: int | None,
+        limit: int,
+    ) -> List[Episode]:
+        """Load bounded prior Episodes from the incoming source neighborhood."""
+
+        if not session_ids or limit <= 0:
+            return []
+        if before_message_id <= 0:
+            raise ValueError("before_message_id must be positive")
+        rows = await self.client.fetch_all(
+            """
+            SELECT e.*
+            FROM episodes e
+            JOIN projects p ON p.project_id = e.project_id
+            WHERE e.project_id = %s
+              AND p.user_name = %s
+              AND e.user_modified = FALSE
+              AND EXISTS (
+                  SELECT 1
+                  FROM episode_messages em
+                  JOIN messages m
+                    ON m.message_id = em.message_id
+                   AND m.project_id = em.project_id
+                   AND m.session_id = em.session_id
+                  WHERE em.episode_id = e.episode_id
+                    AND em.project_id = e.project_id
+                    AND m.session_id = ANY(%s)
+                    AND (
+                         (%s::BIGINT IS NOT NULL AND (
+                              m.timestamp_ms < %s
+                           OR (m.timestamp_ms = %s AND m.message_id < %s)
+                         ))
+                      OR (%s::BIGINT IS NULL AND (
+                              m.timestamp_ms IS NOT NULL
+                           OR (m.timestamp_ms IS NULL AND m.message_id < %s)
+                         ))
+                    )
+              )
+            ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC
+            LIMIT %s
+            """,
+            (
+                project_id,
+                user_name,
+                session_ids,
+                before_timestamp_ms,
+                before_timestamp_ms,
+                before_timestamp_ms,
+                before_message_id,
+                before_timestamp_ms,
+                before_message_id,
+                limit,
+            ),
         )
         return [await self._hydrate_episode(row) for row in rows]
 
@@ -911,7 +624,7 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         rows = await self.client.fetch_all(
             """
             WITH terms AS (SELECT websearch_to_tsquery('simple', %s) AS query)
@@ -920,11 +633,11 @@ class EpisodeReader:
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
               AND e.search_tsvector @@ terms.query
             ORDER BY ts_rank_cd(e.search_tsvector, terms.query) DESC,
-                     e.importance DESC, e.updated_at DESC LIMIT %s
+                     e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
             """,
             (query, visible_project_ids or [project_id], user_name, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def search_project_episodes_by_embedding(
         self,
@@ -935,7 +648,7 @@ class EpisodeReader:
         limit: int,
         score_threshold: float = 0.35,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         vector = json.dumps(self._normalize_embedding(embedding))
         rows = await self.client.fetch_all(
             """
@@ -955,7 +668,10 @@ class EpisodeReader:
                 limit,
             ),
         )
-        return [(await self._hydrate_episode(row), float(row["similarity"])) for row in rows]
+        return [
+            (await self._hydrate_episode_card(row), float(row["similarity"]))
+            for row in rows
+        ]
 
     async def get_project_episodes_for_entities(
         self,
@@ -965,7 +681,7 @@ class EpisodeReader:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         if not entity_ids:
             return []
         rows = await self.client.fetch_all(
@@ -975,13 +691,13 @@ class EpisodeReader:
             JOIN projects p ON p.project_id = e.project_id
             JOIN episode_entities ee ON ee.episode_id = e.episode_id AND ee.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s AND ee.entity_id = ANY(%s)
-              AND e.user_modified = FALSE
             GROUP BY e.episode_id
-            ORDER BY entity_overlap DESC, e.updated_at DESC LIMIT %s
+            ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
+                     e.episode_id DESC LIMIT %s
             """,
             (visible_project_ids or [project_id], user_name, entity_ids, limit),
         )
-        return [await self._hydrate_episode(row) for row in rows]
+        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_project_episode_source_messages(
         self,
@@ -994,7 +710,7 @@ class EpisodeReader:
         return await self.client.fetch_all(
             """
             SELECT m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
-                   em.influence_weight, em.influence_reason, em.message_position,
+                   em.message_position,
                    em.attached_at
             FROM episodes e
             JOIN projects p ON p.project_id = e.project_id
@@ -1005,197 +721,6 @@ class EpisodeReader:
             ORDER BY em.message_position
             """,
             (episode_id, visible_project_ids or [project_id], user_name),
-        )
-
-    async def get_relationship_ids_for_messages(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Dict[int, List[str]]:
-        """Return canonical relationship evidence attached to source messages."""
-
-        normalized_message_ids = sorted({int(message_id) for message_id in message_ids})
-        if not normalized_message_ids:
-            return {}
-        if any(message_id <= 0 for message_id in normalized_message_ids):
-            raise ValueError(
-                "get_relationship_ids_for_messages requires positive message IDs"
-            )
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_relationship_ids_for_messages",
-        )
-        rows = await self.client.fetch_all(
-            """
-            SELECT rer.message_id, rer.relationship_id
-            FROM relationship_observations rer
-            JOIN relationships r
-              ON r.relationship_id = rer.relationship_id
-             AND r.project_id = rer.project_id
-            JOIN messages m
-              ON m.user_name = rer.user_name
-             AND m.session_id = rer.session_id
-             AND m.message_id = rer.message_id
-             AND m.project_id = rer.project_id
-            WHERE rer.message_id = ANY(%s)
-              AND rer.user_name = %s
-              AND rer.session_id = %s
-              AND r.project_id = %s
-              AND m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-            ORDER BY rer.message_id, rer.relationship_id
-            """,
-            (normalized_message_ids, scope[0], scope[2], scope[1], *scope),
-        )
-        relationships_by_message = {
-            message_id: [] for message_id in normalized_message_ids
-        }
-        for row in rows:
-            relationships_by_message[int(row["message_id"])].append(
-                str(row["relationship_id"])
-            )
-        return relationships_by_message
-
-    async def get_episode_generation_catalog(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> tuple[List[Dict], List[Dict]]:
-        """Return the resolved entity and relationship catalogs for source messages."""
-
-        normalized_message_ids = sorted({int(message_id) for message_id in message_ids})
-        if not normalized_message_ids:
-            return [], []
-        if any(message_id <= 0 for message_id in normalized_message_ids):
-            raise ValueError(
-                "get_episode_generation_catalog requires positive message IDs"
-            )
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_episode_generation_catalog",
-        )
-        entity_rows = await self.client.fetch_all(
-            """
-            SELECT
-                e.entity_id,
-                e.canonical_name,
-                e.type,
-                COALESCE(
-                    array_agg(DISTINCT ea.alias)
-                        FILTER (WHERE ea.alias IS NOT NULL),
-                    ARRAY[]::text[]
-                ) AS aliases
-            FROM message_entity_refs mer
-            JOIN messages m ON m.message_id = mer.message_id
-            JOIN entities e ON e.entity_id = mer.entity_id
-            LEFT JOIN entity_aliases ea ON ea.entity_id = e.entity_id
-            WHERE mer.message_id = ANY(%s)
-              AND m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-              AND (e.project_id = %s OR e.entity_id = %s)
-            GROUP BY e.entity_id, e.canonical_name, e.type
-            ORDER BY e.entity_id
-            """,
-            (normalized_message_ids, *scope, project_id, IDENTITY_ENTITY_ID),
-        )
-        relationship_rows = await self.client.fetch_all(
-            """
-            SELECT
-                r.relationship_id,
-                r.entity_a_id,
-                entity_a.canonical_name AS entity_a_name,
-                entity_a.type AS entity_a_type,
-                r.entity_b_id,
-                entity_b.canonical_name AS entity_b_name,
-                entity_b.type AS entity_b_type,
-                r.relationship_type,
-                MAX(rer.confidence) AS confidence,
-                (array_agg(rer.context ORDER BY rer.observed_at_ms DESC)
-                    FILTER (WHERE rer.context IS NOT NULL))[1] AS context,
-                array_agg(DISTINCT rer.message_id ORDER BY rer.message_id)
-                    AS evidence_message_ids
-            FROM relationship_observations rer
-            JOIN relationships r
-              ON r.relationship_id = rer.relationship_id
-             AND r.project_id = rer.project_id
-            JOIN messages m
-              ON m.user_name = rer.user_name
-             AND m.session_id = rer.session_id
-             AND m.message_id = rer.message_id
-             AND m.project_id = rer.project_id
-            JOIN entities entity_a ON entity_a.entity_id = r.entity_a_id
-            JOIN entities entity_b ON entity_b.entity_id = r.entity_b_id
-            WHERE rer.message_id = ANY(%s)
-              AND rer.user_name = %s
-              AND rer.session_id = %s
-              AND m.user_name = %s
-              AND m.project_id = %s
-              AND m.session_id = %s
-              AND r.project_id = %s
-            GROUP BY
-                r.relationship_id,
-                r.entity_a_id,
-                entity_a.canonical_name,
-                entity_a.type,
-                r.entity_b_id,
-                entity_b.canonical_name,
-                entity_b.type,
-                r.relationship_type
-            ORDER BY r.relationship_id
-            """,
-            (
-                normalized_message_ids,
-                scope[0],
-                scope[2],
-                *scope,
-                project_id,
-            ),
-        )
-        return (
-            [
-                {
-                    "entity_id": int(row["entity_id"]),
-                    "canonical_name": str(row["canonical_name"]),
-                    "type": row.get("type"),
-                    "aliases": list(row.get("aliases") or []),
-                }
-                for row in entity_rows
-            ],
-            [
-                {
-                    "relationship_id": str(row["relationship_id"]),
-                    "entity_a": {
-                        "entity_id": int(row["entity_a_id"]),
-                        "canonical_name": str(row["entity_a_name"]),
-                        "type": row.get("entity_a_type"),
-                    },
-                    "entity_b": {
-                        "entity_id": int(row["entity_b_id"]),
-                        "canonical_name": str(row["entity_b_name"]),
-                        "type": row.get("entity_b_type"),
-                    },
-                    "relationship_type": row.get("relationship_type"),
-                    "confidence": float(row["confidence"]),
-                    "context": row.get("context"),
-                    "evidence_message_ids": [
-                        int(message_id)
-                        for message_id in row.get("evidence_message_ids") or []
-                    ],
-                }
-                for row in relationship_rows
-            ],
         )
 
     @staticmethod
@@ -1216,7 +741,7 @@ class EpisodeReader:
         predicate: str,
         *,
         joins: str = "",
-        ordering: str = "e.updated_at DESC",
+        ordering: str = "e.last_message_at DESC NULLS LAST, e.episode_id DESC",
         limit: bool = False,
     ) -> str:
         query = f"""
@@ -1227,13 +752,12 @@ class EpisodeReader:
             e.new_developments,
             e.updates,
             e.unresolved,
-            e.importance,
             e.source_message_count,
             e.first_message_at,
             e.last_message_at,
             e.embedding,
             e.generator_metadata,
-            e.version_history,
+            e.user_modified,
             e.created_at,
             e.updated_at
         FROM episodes e
@@ -1269,7 +793,6 @@ class EpisodeReader:
             new_developments=self._json_list(row.get("new_developments")),
             updates=self._json_list(row.get("updates")),
             unresolved=self._json_list(row.get("unresolved")),
-            importance=float(row["importance"]),
             source_message_count=int(row.get("source_message_count") or 0),
             first_message_at=row.get("first_message_at"),
             last_message_at=row.get("last_message_at"),
@@ -1277,7 +800,28 @@ class EpisodeReader:
             messages=messages,
             entities=entities,
             relationships=relationships,
-            version_history=self._episode_version_list(row.get("version_history")),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            generator_metadata=self._json_dict(row.get("generator_metadata")),
+            user_modified=bool(row.get("user_modified", False)),
+        )
+
+    async def _hydrate_episode_card(self, row: Dict) -> EpisodeCard:
+        """Hydrate discovery metadata without loading source-message rows."""
+
+        episode_id = str(row["episode_id"])
+        return EpisodeCard(
+            episode_id=episode_id,
+            project_id=str(row["project_id"]),
+            summary=str(row["summary"]),
+            new_developments=self._json_list(row.get("new_developments")),
+            updates=self._json_list(row.get("updates")),
+            unresolved=self._json_list(row.get("unresolved")),
+            source_message_count=int(row.get("source_message_count") or 0),
+            first_message_at=row.get("first_message_at"),
+            last_message_at=row.get("last_message_at"),
+            entities=await self._load_entities(episode_id),
+            relationships=await self._load_relationships(episode_id),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             generator_metadata=self._json_dict(row.get("generator_metadata")),
@@ -1290,8 +834,6 @@ class EpisodeReader:
             SELECT
                 message_id,
                 session_id,
-                influence_weight,
-                influence_reason,
                 message_position,
                 attached_at
             FROM episode_messages
@@ -1304,8 +846,6 @@ class EpisodeReader:
             MessageEpisode(
                 message_id=int(row["message_id"]),
                 session_id=str(row["session_id"]),
-                influence_weight=float(row["influence_weight"]),
-                influence_reason=row.get("influence_reason"),
                 message_position=int(row["message_position"]),
                 attached_at=row.get("attached_at"),
             )
@@ -1317,24 +857,18 @@ class EpisodeReader:
             """
             SELECT
                 entity_id,
-                prominence_weight,
-                role,
-                is_focus_entity,
                 source_message_count,
                 first_seen_at,
                 last_seen_at
             FROM episode_entities
             WHERE episode_id = %s
-            ORDER BY is_focus_entity DESC, prominence_weight DESC, entity_id
+            ORDER BY entity_id
             """,
             (episode_id,),
         )
         return [
             EntityEpisode(
                 entity_id=int(row["entity_id"]),
-                prominence_weight=float(row["prominence_weight"]),
-                role=row.get("role"),
-                is_focus_entity=bool(row["is_focus_entity"]),
                 source_message_count=int(row["source_message_count"]),
                 first_seen_at=row.get("first_seen_at"),
                 last_seen_at=row.get("last_seen_at"),
@@ -1347,21 +881,16 @@ class EpisodeReader:
             """
             SELECT
                 relationship_id,
-                prominence_weight,
-                is_central_relationship,
                 source_message_count
             FROM episode_relationships
             WHERE episode_id = %s
-            ORDER BY is_central_relationship DESC, prominence_weight DESC,
-                relationship_id
+            ORDER BY relationship_id
             """,
             (episode_id,),
         )
         return [
             RelationshipEpisode(
                 relationship_id=str(row["relationship_id"]),
-                prominence_weight=float(row["prominence_weight"]),
-                is_central_relationship=bool(row["is_central_relationship"]),
                 source_message_count=int(row["source_message_count"]),
             )
             for row in rows
@@ -1378,13 +907,6 @@ class EpisodeReader:
         if isinstance(value, str):
             value = json.loads(value)
         return dict(value or {})
-
-    @staticmethod
-    def _episode_version_list(value) -> List[EpisodeVersion]:
-        return [
-            EpisodeVersion.model_validate(item)
-            for item in EpisodeReader._json_list(value)
-        ]
 
     @staticmethod
     def _vector_list(value) -> List[float] | None:

@@ -8,7 +8,7 @@ from loguru import logger
 
 from common.schema.settings import ConflictDiscoverySettings
 from core.knowledge.conflicts import LLMConflictDiscoveryResult
-from core.knowledge.store import KnowledgeStore
+from core.project.maintenance_service import ProjectMaintenanceService
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 
 CONFLICT_DISCOVERY_SYSTEM_PROMPT = """
@@ -29,12 +29,12 @@ class ConflictDiscoveryJob(BaseJob):
 
     def __init__(
         self,
-        knowledge_store: KnowledgeStore,
+        maintenance_service: ProjectMaintenanceService,
         settings: ConflictDiscoverySettings,
         *,
         llm: Any | None,
     ) -> None:
-        self.knowledge_store = knowledge_store
+        self.maintenance_service = maintenance_service
         self.llm = llm
         self.update_settings(settings)
 
@@ -58,15 +58,23 @@ class ConflictDiscoveryJob(BaseJob):
                 summary="Conflict discovery requires an LLM",
             )
 
-        package = await self.knowledge_store.build_conflict_discovery_package(
-            user_name=ctx.user_name,
-            project_id=ctx.project_id,
+        package = await self.maintenance_service.build_conflict_discovery_package(
+            ctx.project_id,
             max_seed_span_days=self.max_seed_span_days,
             max_package_tokens=self.max_package_tokens,
             token_counter=getattr(self.llm, "count_tokens", None),
         )
         if package is None:
             return JobResult(success=True, summary="No relationship evidence to review")
+        if not package.observations:
+            await self.maintenance_service.complete_conflict_discovery(
+                package,
+                candidates=(),
+            )
+            return JobResult(
+                success=True,
+                summary="Advanced past Context-owned relationship evidence",
+            )
 
         result = await self.llm.generate_structured(
             response_model=LLMConflictDiscoveryResult,
@@ -91,7 +99,7 @@ class ConflictDiscoveryJob(BaseJob):
                 continue
             candidates.append(candidate)
 
-        written = await self.knowledge_store.complete_conflict_discovery(
+        written = await self.maintenance_service.complete_conflict_discovery(
             package,
             candidates=candidates,
         )

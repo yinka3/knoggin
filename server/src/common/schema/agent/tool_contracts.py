@@ -75,9 +75,9 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_entity",
             "description": (
-                "The starting point for almost every query. "
-                "Provides the 'Snapshot' of an entity: their definition, what they are (Person, Project, etc.), and their most important immediate connections. "
-                "Use this first to ground your answer. Only reach for deeper tools if this summary is insufficient."
+                "Discover entity identities, stable entity IDs, aliases, and project contexts. "
+                "Use the returned entity ID for connections, activity, paths, or an exact Episode follow-up. "
+                "For remembered history, decisions, or developments, use episode_check first."
             ),
             "parameters": {
                 "type": "object",
@@ -101,19 +101,52 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "get_connections",
             "description": (
-                "The 'Deep Dive' into an entity's network. "
-                "Unlike 'search_entity' (which just gives a summary), this tool retrieves the FULL list of relationships and the specific evidence (chat logs) backing them. "
-                "Use this when the user wants to know 'everything' about who someone works with, or when 'search_entity' returned a result that felt incomplete."
+                "Retrieve the observed relationship network for an entity ID returned by search_entity, "
+                "including durable endpoint IDs, project attribution, observation metadata, and supporting messages. "
+                "Use it after discovery when relationship details are needed."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_name": {
-                        "type": "string",
-                        "description": "The exact name of the central entity.",
+                    "entity_id": {
+                        "type": "integer",
+                        "description": "Stable entity ID returned by search_entity.",
+                    },
+                },
+                "required": ["entity_id"],
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_topic_context",
+            "description": (
+                "Load compact entity and supporting-message context for one or "
+                "more active project topics. Use this when the user's question "
+                "materially depends on a listed active topic and more context is "
+                "needed than the pre-fetched hot-topic context provides."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topics": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100,
+                        },
+                        "description": (
+                            "One to three active topic names or configured aliases."
+                        ),
                     }
                 },
-                "required": ["entity_name"],
+                "required": ["topics"],
+                "additionalProperties": False,
             },
             "tags": ["graph:read", "core"],
         },
@@ -130,10 +163,10 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_a": {"type": "string", "description": "First entity name"},
-                    "entity_b": {"type": "string", "description": "Second entity name"},
+                    "entity_a_id": {"type": "integer", "description": "First stable entity ID"},
+                    "entity_b_id": {"type": "integer", "description": "Second stable entity ID"},
                 },
-                "required": ["entity_a", "entity_b"],
+                "required": ["entity_a_id", "entity_b_id"],
             },
             "tags": ["graph:read", "core"],
         },
@@ -177,16 +210,16 @@ TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_name": {
-                        "type": "string",
-                        "description": "Entity to check activity for",
+                    "entity_id": {
+                        "type": "integer",
+                        "description": "Stable entity ID returned by search_entity",
                     },
                     "hours": {
                         "type": "integer",
                         "description": "Hours to look back (e.g., 24 for daily, 168 for weekly).",
                     },
                 },
-                "required": ["entity_name"],
+                "required": ["entity_id"],
             },
             "tags": ["graph:read", "core"],
         },
@@ -219,15 +252,16 @@ TOOL_SCHEMAS = [
             "name": "episode_check",
             "description": (
                 "Retrieve contextual episodic memory about a specific entity, including "
-                "summaries and source-message evidence. Use this for remembered decisions, "
-                "developments, and history. Results are contextual memory, not atomic claims."
+                "compact summaries and provenance references. Use read_episode when the "
+                "original source messages are needed. Results are contextual memory, not "
+                "atomic claims."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_name": {
-                        "type": "string",
-                        "description": "Optional entity whose episodic memory to inspect.",
+                    "entity_id": {
+                        "type": "integer",
+                        "description": "Optional stable entity ID whose episodic memory to inspect.",
                     },
                     "query": {
                         "type": "string",
@@ -268,7 +302,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_recent_episodes",
             "description": (
-                "Return the most recently updated episode summaries in the current "
+                "Return the most recent episode summaries by source chronology in the current "
                 "conversation without searching or requiring an episode ID. Use for "
                 "requests such as 'what was the last episode?' or 'show the last few memories'."
             ),
@@ -438,25 +472,16 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "list_documents",
             "description": (
-                "List documents visible in the current project and session "
-                "context. Use this to discover document IDs, paths, indexing "
+                "List documents visible in the current project context. Use this "
+                "to discover document IDs, paths, indexing "
                 "status, and sizes."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": "Optional folder ID (for example folder_a3f91c).",
-                    },
                     "path_prefix": {
                         "type": "string",
                         "description": "Optional exact path or subtree prefix.",
-                    },
-                    "visibility_scope": {
-                        "type": "string",
-                        "enum": ["project", "session"],
-                        "description": "Optional visibility scope filter.",
                     },
                     "limit": {
                         "type": "integer",
@@ -468,93 +493,8 @@ TOOL_SCHEMAS = [
                         "type": "boolean",
                         "description": (
                             "Apply active document focus when no explicit path "
-                            "or folder filter is provided (default true)."
+                            "filter is provided (default true)."
                         ),
-                    },
-                },
-                "required": [],
-            },
-            "tags": ["documents:read", "core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_folder_uploads",
-            "description": "List folder upload batches visible in this context.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "visibility_scope": {
-                        "type": "string",
-                        "enum": ["project", "session"],
-                        "description": "Optional visibility scope filter.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum batches to return (default 25).",
-                    },
-                },
-                "required": [],
-            },
-            "tags": ["documents:read", "core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_folder_upload_summary",
-            "description": (
-                "Get metadata, scan aggregates, and a shallow tree for one "
-                "visible folder upload. The active folder focus is used when "
-                "folder_root_id is omitted."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": (
-                            "The folder ID (for example folder_a3f91c); "
-                            "optional with folder focus."
-                        ),
-                    },
-                    "use_focus": {
-                        "type": "boolean",
-                        "description": "Use active folder focus (default true).",
-                    },
-                },
-                "required": [],
-            },
-            "tags": ["documents:read", "core"],
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_folder_tree",
-            "description": (
-                "Inspect the document tree for one visible folder upload. The "
-                "active folder focus is used when folder_root_id is omitted."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": "The folder ID (for example folder_a3f91c).",
-                    },
-                    "path_prefix": {
-                        "type": "string",
-                        "description": "Optional exact path or subtree prefix.",
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "description": "Tree depth from 1 to 10 (default 3).",
-                    },
-                    "use_focus": {
-                        "type": "boolean",
-                        "description": "Use active folder focus (default true).",
                     },
                 },
                 "required": [],
@@ -672,10 +612,6 @@ TOOL_SCHEMAS = [
                     "path_prefix": {
                         "type": "string",
                         "description": "Optional exact path or subtree prefix.",
-                    },
-                    "folder_root_id": {
-                        "type": "string",
-                        "description": "Optional folder ID (for example folder_a3f91c).",
                     },
                     "limit": {
                         "type": "integer",
@@ -908,12 +844,6 @@ TOOL_SCHEMAS = [
                         "type": "array",
                         "items": {"type": "string", "minLength": 4},
                         "description": "Episode IDs (for example ep_a3f91c) that support the proposal."
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                        "description": "Advisory model confidence; never treated as authorization."
                     }
                 },
                 "required": [
@@ -987,11 +917,11 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_workspace_files",
+            "name": "list_files",
             "description": (
                 "List bounded metadata for files in the current project's "
-                "managed workspace. This is project-scoped and does not expose "
-                "the host filesystem."
+                "local project folder. This is project-scoped and does not expose "
+                "the host filesystem outside that folder."
             ),
             "parameters": {
                 "type": "object",
@@ -1011,17 +941,18 @@ TOOL_SCHEMAS = [
                 "required": [],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:read", "project", "core"],
+            "tags": ["project-files:read", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "read_workspace_file",
+            "name": "read_file",
             "description": (
                 "Read a bounded line and character slice from one file in the "
-                "current project's managed workspace. PROJECT.md is readable "
-                "but remains user-owned."
+                "current project's local folder. PROJECT.md is readable "
+                "but remains user-owned; controlled CONTEXT.md is unavailable "
+                "through ordinary workspace tools."
             ),
             "parameters": {
                 "type": "object",
@@ -1030,7 +961,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative managed-workspace file path.",
+                        "description": "Relative project-file path.",
                     },
                     "start_line": {
                         "type": "integer",
@@ -1052,17 +983,17 @@ TOOL_SCHEMAS = [
                 "required": ["path"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:read", "project", "core"],
+            "tags": ["project-files:read", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "create_workspace_file",
+            "name": "create_file",
             "description": (
                 "Create a non-empty bounded artifact in the current project's "
-                "managed workspace. Ordinary agent tools cannot create or edit "
-                "the user-owned PROJECT.md."
+                "local project folder. Ordinary agent tools cannot create or edit "
+                "the user-owned PROJECT.md or controlled CONTEXT.md."
             ),
             "parameters": {
                 "type": "object",
@@ -1071,7 +1002,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative path for the new workspace artifact.",
+                        "description": "Relative path for the new project file.",
                     },
                     "content": {
                         "type": "string",
@@ -1083,17 +1014,18 @@ TOOL_SCHEMAS = [
                 "required": ["path", "content"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:write", "project", "core"],
+            "tags": ["project-files:write", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "update_workspace_file",
+            "name": "update_file",
             "description": (
-                "Replace a managed workspace artifact using optimistic "
+                "Replace a project file using optimistic "
                 "concurrency. The supplied SHA-256 content hash must still be "
-                "current; PROJECT.md cannot be changed by this ordinary tool."
+                "current; PROJECT.md and controlled CONTEXT.md cannot be changed "
+                "by this ordinary tool."
             ),
             "parameters": {
                 "type": "object",
@@ -1102,7 +1034,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative path of the workspace artifact.",
+                        "description": "Relative path of the project file.",
                     },
                     "content": {
                         "type": "string",
@@ -1120,17 +1052,17 @@ TOOL_SCHEMAS = [
                 "required": ["path", "content", "expected_content_hash"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:write", "project", "core"],
+            "tags": ["project-files:write", "project", "core"],
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "append_workspace_file",
+            "name": "append_file",
             "description": (
-                "Append bounded UTF-8 content to a managed workspace artifact "
-                "using an expected SHA-256 content hash. PROJECT.md cannot be "
-                "changed by this ordinary tool."
+                "Append bounded UTF-8 content to a project file "
+                "using an expected SHA-256 content hash. PROJECT.md and controlled "
+                "CONTEXT.md cannot be changed by this ordinary tool."
             ),
             "parameters": {
                 "type": "object",
@@ -1139,7 +1071,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 512,
-                        "description": "Relative path of the workspace artifact.",
+                        "description": "Relative path of the project file.",
                     },
                     "content": {
                         "type": "string",
@@ -1157,9 +1089,60 @@ TOOL_SCHEMAS = [
                 "required": ["path", "content", "expected_content_hash"],
                 "additionalProperties": False,
             },
-            "tags": ["workspace:write", "project", "core"],
+            "tags": ["project-files:write", "project", "core"],
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_file",
+            "description": "Move one non-reserved current-project file to an unused relative path using its current SHA-256 hash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "destination_path": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "expected_content_hash": {"type": "string", "minLength": 64, "maxLength": 64},
+                },
+                "required": ["source_path", "destination_path", "expected_content_hash"],
+                "additionalProperties": False,
+            },
+            "tags": ["project-files:write", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete one non-reserved current-project file only when its SHA-256 hash is current.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "expected_content_hash": {"type": "string", "minLength": 64, "maxLength": 64},
+                },
+                "required": ["path", "expected_content_hash"],
+                "additionalProperties": False,
+            },
+            "tags": ["project-files:write", "project", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_folder",
+            "description": "Create an empty directory inside the current project's local folder.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1, "maxLength": 512},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "tags": ["project-files:write", "project", "core"],
+        },
+    },
 ]
 
 READ_CAPABILITY = "read"
@@ -1192,9 +1175,12 @@ _TOOL_CAPABILITIES = {
     "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
-    "create_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
-    "update_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
-    "append_workspace_file": REVERSIBLE_WRITE_CAPABILITY,
+    "create_file": REVERSIBLE_WRITE_CAPABILITY,
+    "update_file": REVERSIBLE_WRITE_CAPABILITY,
+    "append_file": REVERSIBLE_WRITE_CAPABILITY,
+    "move_file": REVERSIBLE_WRITE_CAPABILITY,
+    "delete_file": REVERSIBLE_WRITE_CAPABILITY,
+    "create_folder": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:

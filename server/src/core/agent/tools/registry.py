@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Optional
 import httpx
 
 from common.conf.domain_config import CompiledDomain
+from common.exceptions import ToolExecutionError
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.tool_contracts import (
     CAPABILITY_CLASSES,
@@ -12,13 +13,14 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS,
     get_schema_capability,
 )
-from core.agent.tools.graph import GraphTools
 from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools, create_web_page_http_client
-from core.agent.tools.workspace import WorkspaceTools
+from core.agent.tools.workspace import ProjectFileTools
+from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.documents import DocumentService
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 
@@ -43,6 +45,13 @@ _HEALTH_RUNTIME_INSTRUCTION = (
     "Each health tool is intentionally limited to one call per run. "
     "Health results may describe runtime state but do not authorize any "
     "administrative or mutating action.]"
+)
+
+_TOPIC_CONTEXT_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: load_topic_context retrieves compact supporting context for "
+    "listed active topics. Use it when a topic is materially relevant and deeper "
+    "context is needed; do not use it as a substitute for targeted entity, "
+    "episode, document, or web retrieval.]"
 )
 
 
@@ -98,6 +107,11 @@ TOOL_DEFINITIONS = {
         runtime_instruction=_HEALTH_RUNTIME_INSTRUCTION,
     ),
     "search_entity": _definition("search_entity", default_limit=8),
+    "load_topic_context": _definition(
+        "load_topic_context",
+        default_limit=2,
+        runtime_instruction=_TOPIC_CONTEXT_RUNTIME_INSTRUCTION,
+    ),
     "get_connections": _definition("get_connections", default_limit=8),
     "find_path": _definition("find_path", default_limit=8),
     "search_messages": _definition("search_messages", default_limit=6),
@@ -115,12 +129,6 @@ TOOL_DEFINITIONS = {
     "edit_brain": _definition("edit_brain", default_limit=2),
     "restore_brain_section": _definition("restore_brain_section", default_limit=2),
     "list_documents": _definition("list_documents", default_limit=4),
-    "list_folder_uploads": _definition("list_folder_uploads", default_limit=4),
-    "get_folder_upload_summary": _definition(
-        "get_folder_upload_summary",
-        default_limit=6,
-    ),
-    "list_folder_tree": _definition("list_folder_tree", default_limit=6),
     "get_document_info": _definition("get_document_info", default_limit=6),
     "read_document": _definition("read_document", default_limit=6),
     "search_documents": _definition("search_documents", default_limit=8),
@@ -131,20 +139,23 @@ TOOL_DEFINITIONS = {
     "check_graph_health": _definition("check_graph_health"),
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
-    "list_workspace_files": _definition("list_workspace_files", default_limit=4),
-    "read_workspace_file": _definition("read_workspace_file", default_limit=4),
-    "create_workspace_file": _definition(
-        "create_workspace_file",
+    "list_files": _definition("list_files", default_limit=4),
+    "read_file": _definition("read_file", default_limit=4),
+    "create_file": _definition(
+        "create_file",
         default_limit=2,
     ),
-    "update_workspace_file": _definition(
-        "update_workspace_file",
+    "update_file": _definition(
+        "update_file",
         default_limit=2,
     ),
-    "append_workspace_file": _definition(
-        "append_workspace_file",
+    "append_file": _definition(
+        "append_file",
         default_limit=2,
     ),
+    "move_file": _definition("move_file", default_limit=2),
+    "delete_file": _definition("delete_file", default_limit=2),
+    "create_folder": _definition("create_folder", default_limit=2),
     "save_insight": _definition("save_insight", default_limit=4),
     "spawn_specialist": _definition("spawn_specialist", default_limit=2),
     "search_insights": _definition("search_insights", default_limit=4),
@@ -201,6 +212,7 @@ def get_tool_schemas(
         )
 
     additional = tuple(additional_schemas)
+    _validate_additional_schemas(additional)
     overrides = {
         schema["function"]["name"]: schema
         for schema in additional
@@ -237,6 +249,53 @@ def get_tool_schemas(
             filtered.append(schema)
             selected_names.add(name)
     return filtered
+
+
+def _validate_additional_schemas(schemas: Iterable[dict]) -> None:
+    """Ensure every extra model-visible schema has an engine implementation."""
+
+    seen: set[str] = set()
+    for schema in schemas:
+        if not isinstance(schema, dict):
+            raise ValueError("Additional tool schemas must be objects")
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            raise ValueError("Additional tool schemas require a function object")
+        name = function.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Additional tool schemas require a tool name")
+        if name in seen:
+            raise ValueError(f"Duplicate additional tool schema: {name}")
+        seen.add(name)
+
+        definition = TOOL_DEFINITIONS.get(name)
+        if definition is None:
+            raise ValueError(
+                f"Additional tool schema '{name}' has no registered implementation"
+            )
+        if get_schema_capability(schema) != definition.capability:
+            raise ValueError(
+                f"Tool schema override for '{name}' changes its capability"
+            )
+
+        if definition.dispatch is None:
+            continue
+        parameters = function.get("parameters")
+        properties = (
+            parameters.get("properties", {})
+            if isinstance(parameters, dict)
+            else None
+        )
+        if not isinstance(properties, dict):
+            raise ValueError(
+                f"Additional tool schema '{name}' has invalid parameters"
+            )
+        expected = set(definition.dispatch[1])
+        if set(properties) != expected:
+            raise ValueError(
+                f"Additional tool schema '{name}' does not match its registered "
+                "dispatch parameters"
+            )
 
 
 def get_runtime_instructions(schemas: Iterable[dict]) -> str:
@@ -379,11 +438,10 @@ def validate_registry_contract() -> None:
 
 class Tools(
     SearchTools,
-    GraphTools,
     MemoryTools,
     MaintenanceTools,
     HealthTools,
-    WorkspaceTools,
+    ProjectFileTools,
 ):
     def __init__(
         self,
@@ -399,7 +457,7 @@ class Tools(
         postgres=None,
         agent_id: Optional[str] = None,
         health_service=None,
-        workspace_service=None,
+        entity_maintenance_service: Optional[EntityMaintenanceService] = None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -417,17 +475,18 @@ class Tools(
         self.readable_project_ids = entities.readable_project_ids
         self.compiled_domain = compiled_domain
         self.document_service = document_service
-        self.workspace_service = workspace_service
+        self.project_context_reader = ProjectContextReader(postgres)
         self.document_focus = document_focus
-        self.active_topics = (
-            list(compiled_domain.active_topics) if compiled_domain else None
-        )
         self.search_cfg = search_config or {}
         self.agent_id = agent_id or "AGENT_IDENTITY"
         self.tool_authorization: Optional[ToolPermissions] = None
         self.active_tool_schemas: Dict[str, dict] = {}
         self.short_uuid_references: Dict[str, str] = {}
         self.health_service = health_service
+        # Global entity maintenance is application-owned. Read-only/community
+        # tool compositions intentionally leave it unavailable rather than
+        # constructing an uncoordinated service instance here.
+        self.entity_maintenance_service = entity_maintenance_service
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
         self._web_page_client = create_web_page_http_client()
@@ -443,23 +502,21 @@ class Tools(
         )
 
     async def search_entity(self, query: str, limit: int = None):
-        return await self.knowledge_retrieval.search_entities(
-            query, session_id=self.session_id, limit=limit
-        )
+        return await self.knowledge_retrieval.search_entities(query, limit=limit)
 
-    async def get_connections(self, entity_name: str):
+    async def get_connections(self, entity_id: int):
         return await self.knowledge_retrieval.get_connections(
-            entity_name, session_id=self.session_id
+            entity_id, session_id=self.session_id
         )
 
-    async def get_recent_activity(self, entity_name: str, hours: int = 24):
+    async def get_recent_activity(self, entity_id: int, hours: int = 24):
         return await self.knowledge_retrieval.get_recent_activity(
-            entity_name, session_id=self.session_id, hours=hours
+            entity_id, session_id=self.session_id, hours=hours
         )
 
-    async def episode_check(self, query: str, entity_name: Optional[str] = None):
+    async def episode_check(self, query: str, entity_id: Optional[int] = None):
         return await self.knowledge_retrieval.episode_check(
-            query, session_id=self.session_id, entity_name=entity_name
+            query, session_id=self.session_id, entity_id=entity_id
         )
 
     async def read_episode(self, episode_id: str):
@@ -469,26 +526,51 @@ class Tools(
 
     async def read_recent_episodes(self, limit: int = 2):
         return await self.knowledge_retrieval.read_recent_episodes(
-            session_id=self.session_id, limit=limit
+            session_id=self.session_id,
+            limit=limit,
         )
 
-    async def find_path(self, entity_a: str, entity_b: str):
+    async def find_path(self, entity_a_id: int, entity_b_id: int):
         return await self.knowledge_retrieval.find_path(
-            entity_a, entity_b, session_id=self.session_id
+            entity_a_id, entity_b_id, session_id=self.session_id
         )
 
-    async def get_hot_topic_context(self, hot_topics, *, slim: bool = False):
+    async def get_hot_topic_context(self, hot_topics):
         return await self.knowledge_retrieval.get_hot_topic_context(
-            hot_topics, session_id=self.session_id, slim=slim
+            hot_topics, session_id=self.session_id
         )
+
+    async def load_topic_context(self, topics: list[str]) -> dict:
+        """Load full bounded context for validated active project topics."""
+
+        if self.compiled_domain is None:
+            raise ToolExecutionError(
+                "load_topic_context",
+                "Topic context is unavailable because this run has no project domain.",
+            )
+
+        normalized_topics: list[str] = []
+        invalid_topics: list[str] = []
+        for topic in topics:
+            normalized = self.compiled_domain.normalize_topic(topic)
+            if normalized is None:
+                invalid_topics.append(topic)
+            elif normalized not in normalized_topics:
+                normalized_topics.append(normalized)
+
+        if invalid_topics:
+            raise ToolExecutionError(
+                "load_topic_context",
+                "Unknown or inactive topic(s): " + ", ".join(invalid_topics),
+            )
+
+        return await self.get_hot_topic_context(normalized_topics)
 
     async def get_document_manifest(self):
         """Get indexed documents for prompt context."""
         if not self.document_service:
             return []
-        documents = await self.document_service.list_documents(
-            session_id=self.session_id
-        )
+        documents = await self.document_service.list_documents()
         return [
             document
             for document in documents

@@ -1,9 +1,18 @@
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
+from common.conf.domain_config import DomainConfig
 from common.exceptions import LLMProviderError
+from common.schema.agent.research import resolve_research_profile
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
+from common.schema.context import (
+    AssertionKind,
+    ContextBlockRecord,
+    ContextRevisionOrigin,
+    ContextSnapshot,
+)
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
@@ -25,7 +34,7 @@ class StreamingLLM:
             yield chunk
 
 
-def make_executor(llm, *, additional_tool_schemas=None):
+def make_executor(llm, *, research_profile=None):
     ctx = AgentRun.open(
         user_name="ada",
         project_id="project-1",
@@ -41,42 +50,87 @@ def make_executor(llm, *, additional_tool_schemas=None):
         model="test-model",
         temperature=0.2,
         brain="Use citations",
-        directives="Required:\n- stay grounded",
         enabled_tools=["search_messages"],
-        additional_tool_schemas=additional_tool_schemas,
-        active_topics=["Identity", "Testing"],
+        research_profile=research_profile,
     )
     tools = SimpleNamespace(document_service=None)
     return AgentExecutor(ctx, llm, tools)
 
 
 @pytest.mark.no_network
-async def test_executor_loads_missing_or_unreadable_project_context_non_fatally():
+async def test_executor_loads_missing_or_unreadable_project_brief_non_fatally():
     executor = make_executor(StreamingLLM())
-    assert await executor._load_project_context() == ""
+    assert await executor._load_project_brief() == ""
 
     async def fail_reader():
         raise RuntimeError("workspace unavailable")
 
-    executor.tools.workspace_service = SimpleNamespace(
-        read_project_context=fail_reader
+    executor.tools.document_service = SimpleNamespace(
+        read_project_brief=fail_reader
     )
-    assert await executor._load_project_context() == ""
+    assert await executor._load_project_brief() == ""
 
 
 @pytest.mark.no_network
-async def test_executor_loads_canonical_project_context_directly():
+async def test_executor_loads_user_owned_project_brief_directly():
     executor = make_executor(StreamingLLM())
 
     async def read_context():
         return "# Project\nUse the repository conventions."
 
-    executor.tools.workspace_service = SimpleNamespace(
-        read_project_context=read_context
+    executor.tools.document_service = SimpleNamespace(
+        read_project_brief=read_context
     )
-    assert await executor._load_project_context() == (
+    assert await executor._load_project_brief() == (
         "# Project\nUse the repository conventions."
     )
+
+
+@pytest.mark.no_network
+async def test_executor_renders_current_context_from_the_canonical_reader_only():
+    executor = make_executor(StreamingLLM())
+    revision_id = uuid4()
+    block = ContextBlockRecord(
+        block_id=uuid4(),
+        project_id="project-1",
+        section_key="current_state",
+        markdown="The semantic owner is project-scoped.",
+        content_hash="a" * 64,
+        assertion_kind=AssertionKind.USER_ASSERTED,
+    )
+    snapshot = ContextSnapshot(
+        revision_id=revision_id,
+        project_id="project-1",
+        revision_number=1,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        content_hash="b" * 64,
+        blocks=[block],
+    )
+
+    class Reader:
+        async def get_current_revision(self, **kwargs):
+            assert kwargs == {"user_name": "ada", "project_id": "project-1"}
+            return SimpleNamespace(revision_id=revision_id)
+
+        async def get_snapshot(self, value, **kwargs):
+            assert value == revision_id
+            assert kwargs == {"user_name": "ada", "project_id": "project-1"}
+            return snapshot
+
+    async def projection_is_not_an_authoritative_read():
+        raise AssertionError("CONTEXT.md projection must not be read by the agent")
+
+    executor.tools.project_context_reader = Reader()
+    executor.tools.compiled_domain = DomainConfig.from_mapping({"version": 1}).compile()
+    executor.tools.document_service = SimpleNamespace(
+        read_project_brief=projection_is_not_an_authoritative_read
+    )
+
+    rendered = await executor._load_project_context()
+
+    assert "# Project Context" in rendered
+    assert "The semantic owner is project-scoped." in rendered
 
 
 @pytest.mark.no_network
@@ -126,18 +180,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
         "core.agent.executor.get_agent_prompt",
         fake_agent_prompt,
     )
-    client_tool = {
-        "type": "function",
-        "function": {
-            "name": "client_tool",
-            "capability": "read",
-            "parameters": {"type": "object"},
-        },
-    }
-    executor = make_executor(
-        llm,
-        additional_tool_schemas=[client_tool],
-    )
+    executor = make_executor(llm)
 
     events = [
         event
@@ -180,14 +223,75 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
     assert llm_call["reasoning"] == "high"
     tool_names = [schema["function"]["name"] for schema in llm_call["tools"]]
     assert "search_messages" in tool_names
-    assert "client_tool" in tool_names
+    assert "submit_answer" in tool_names
     assert "search_entity" not in tool_names
 
     _, prompt_kwargs = prompt_calls[0]
     assert prompt_kwargs["documents_context"] == "- file.md"
-    assert prompt_kwargs["agent_directives"] == "Required:\n- stay grounded"
     assert prompt_kwargs["agent_brain"] == "Use citations"
     assert prompt_kwargs["phase"] == "PLAN"
+    assert prompt_kwargs["research_profile"].mode == "normal"
+
+
+@pytest.mark.no_network
+async def test_step_forwards_selected_research_profile_to_prompt(monkeypatch):
+    llm = StreamingLLM(
+        [
+            {
+                "event": "tool_calls",
+                "data": {
+                    "content": "Research first.",
+                    "calls": [
+                        {
+                            "name": "search_messages",
+                            "arguments": '{"query": "profile"}',
+                            "id": "research-call",
+                        }
+                    ],
+                },
+            },
+            {
+                "event": "step_completed",
+                "data": {
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                        "approximate": False,
+                    }
+                },
+            },
+        ]
+    )
+    prompt_kwargs = {}
+
+    def fake_agent_prompt(**kwargs):
+        prompt_kwargs.update(kwargs)
+        return "SYSTEM PROMPT"
+
+    monkeypatch.setattr(
+        "core.agent.executor.get_agent_prompt",
+        fake_agent_prompt,
+    )
+    executor = make_executor(
+        llm,
+        research_profile=resolve_research_profile("deep_research"),
+    )
+
+    _ = [
+        event
+        async for event in executor._step(
+            date="2026-02-03 04:05 UTC",
+            model="test-model",
+            reasoning="high",
+            phase="PLAN",
+            documents_context="",
+            document_focus_context="",
+            last_result=None,
+        )
+    ]
+
+    assert prompt_kwargs["research_profile"].mode == "deep_research"
 
 
 @pytest.mark.no_network

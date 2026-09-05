@@ -5,7 +5,6 @@ from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents import DocumentService
 from core.project.domain_config_store import DomainConfigStore
-from core.project.workspace_service import ProjectWorkspaceService
 from runtime.project_runtime import ProjectRuntime
 from tests.fixtures.fakes import (
     FakeEmbeddingService,
@@ -43,16 +42,15 @@ def make_project_state(
     postgres=None,
     embedding=None,
     domain_config=None,
-    batch_processor=None,
     background_work=None,
     entities=None,
-    pipeline=None,
+    text_processor=None,
 ):
     scheduler = scheduler or FakeScheduler()
     postgres = postgres or FakePostgresClient()
     embedding = embedding or FakeEmbeddingService()
     entities = entities if entities is not None else object()
-    retrieval = SimpleNamespace(set_active_topics=lambda _: None)
+    retrieval = SimpleNamespace()
     reader = DocumentReader(postgres, project_id, [project_id])
     writer = DocumentWriter(postgres, project_id)
     document_service = DocumentService(
@@ -66,19 +64,14 @@ def make_project_state(
         project_id=project_id,
         entities=entities,
         knowledge_retrieval=retrieval,
-        pipeline=pipeline if pipeline is not None else FakePipeline(),
+        text_processor=(
+            text_processor if text_processor is not None else FakePipeline()
+        ),
         scheduler=scheduler,
         user_name="ada",
         domain_config=domain_config or make_domain_config(),
         readable_project_ids=[project_id],
         document_service=document_service,
-        workspace_service=ProjectWorkspaceService(
-            project_id=project_id,
-            reader=reader,
-            writer=writer,
-            indexer=document_service.indexer,
-        ),
         domain_config_store=DomainConfigStore(postgres),
-        batch_processor=batch_processor,
         background_work=background_work,
     )

@@ -1,11 +1,9 @@
 """Write queries for the document knowledge base."""
 
-import hashlib
 import json
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
-from common.exceptions import WorkspaceConflictError
 from infrastructure.postgres_client import PostgresClient
 
 if TYPE_CHECKING:
@@ -94,1006 +92,19 @@ class DocumentWriter:
             chunk.end_paragraph,
         )
 
-    async def insert_workspace_source(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-        visibility_scope: str,
-        display_name: str,
-        created_at: str,
-    ) -> None:
-        """Persist the stable identity for a synchronizable workspace."""
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                INSERT INTO public.document_workspace_sources (
-                    source_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    display_name,
-                    created_at,
-                    updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    source_id,
-                    self._project_id,
-                    session_id,
-                    visibility_scope,
-                    display_name,
-                    created_at,
-                    created_at,
-                ),
-            )
-
-    async def insert_managed_workspace_source(
-        self,
-        *,
-        source_id: str,
-        display_name: str,
-        created_at: str,
-    ) -> None:
-        """Create the single project-owned managed workspace source."""
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                INSERT INTO public.document_workspace_sources (
-                    source_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    ownership_mode,
-                    display_name,
-                    created_at,
-                    updated_at
-                )
-                VALUES (%s, %s, NULL, 'project',
-                        'managed_project_workspace', %s, %s, %s)
-                """,
-                (source_id, self._project_id, display_name, created_at, created_at),
-            )
-
-    async def insert_managed_workspace_source_and_file(
-        self,
-        *,
-        source_id: str,
-        display_name: str,
-        relative_path: str,
-        original_name: str,
-        extension: str,
-        content: bytes,
-        content_hash: str,
-        created_at: str,
-        cursor: Optional[Any] = None,
-    ) -> Dict:
-        """Atomically create a managed source and its first queued file.
-
-        ``cursor`` is supplied by project creation so the project row, source,
-        document metadata, and raw content share one transaction. When omitted,
-        this method provides the same operation as a standalone transaction.
-        """
-        if cursor is not None:
-            return await self._insert_managed_workspace_source_and_file(
-                cursor,
-                source_id=source_id,
-                display_name=display_name,
-                relative_path=relative_path,
-                original_name=original_name,
-                extension=extension,
-                content=content,
-                content_hash=content_hash,
-                created_at=created_at,
-            )
-        async with self._client.transaction() as cur:
-            return await self._insert_managed_workspace_source_and_file(
-                cur,
-                source_id=source_id,
-                display_name=display_name,
-                relative_path=relative_path,
-                original_name=original_name,
-                extension=extension,
-                content=content,
-                content_hash=content_hash,
-                created_at=created_at,
-            )
-
-    async def _insert_managed_workspace_source_and_file(
-        self,
-        cur,
-        *,
-        source_id: str,
-        display_name: str,
-        relative_path: str,
-        original_name: str,
-        extension: str,
-        content: bytes,
-        content_hash: str,
-        created_at: str,
-    ) -> Dict:
-        await cur.execute(
-            """
-            INSERT INTO public.document_workspace_sources (
-                source_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                ownership_mode,
-                display_name,
-                created_at,
-                updated_at
-            )
-            VALUES (%s, %s, NULL, 'project',
-                    'managed_project_workspace', %s, %s, %s)
-            """,
-            (source_id, self._project_id, display_name, created_at, created_at),
-        )
-        document_id = str(uuid.uuid4())
-        await cur.execute(
-            """
-            INSERT INTO public.project_documents (
-                document_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_root_id,
-                source_id,
-                source_kind,
-                original_name,
-                relative_path,
-                extension,
-                size_bytes,
-                content_hash,
-                status,
-                indexed_at,
-                error_message,
-                created_at,
-                updated_at
-            )
-            VALUES (
-                %s, %s, NULL, 'project', NULL, %s, 'workspace',
-                %s, %s, %s, %s, %s, 'queued', NULL, NULL, %s, %s
-            )
-            """,
-            (
-                document_id,
-                self._project_id,
-                source_id,
-                original_name,
-                relative_path,
-                extension,
-                len(content),
-                content_hash,
-                created_at,
-                created_at,
-            ),
-        )
-        await cur.execute(
-            """
-            INSERT INTO public.document_content (document_id, content)
-            VALUES (%s, %s)
-            """,
-            (document_id, content),
-        )
-        return {
-            "source_id": source_id,
-            "document_id": document_id,
-            "project_id": self._project_id,
-            "session_id": None,
-            "visibility_scope": "project",
-            "ownership_mode": "managed_project_workspace",
-            "source_kind": "workspace",
-            "original_name": original_name,
-            "relative_path": relative_path,
-            "extension": extension,
-            "size_bytes": len(content),
-            "content_hash": content_hash,
-            "status": "queued",
-            "indexed_at": None,
-            "error_message": None,
-            "created_at": created_at,
-            "updated_at": created_at,
-            "chunk_count": 0,
-        }
-
-    async def insert_managed_workspace_file(
-        self,
-        *,
-        source_id: str,
-        relative_path: str,
-        original_name: str,
-        extension: str,
-        content: bytes,
-        content_hash: str,
-        updated_at: str,
-    ) -> Dict:
-        """Atomically insert one managed file and queue its indexing state."""
-        document_id = str(uuid.uuid4())
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                SELECT source_id
-                FROM public.document_workspace_sources
-                WHERE source_id = %s
-                  AND project_id = %s
-                  AND ownership_mode = 'managed_project_workspace'
-                FOR UPDATE
-                """,
-                (source_id, self._project_id),
-            )
-            if await cur.fetchone() is None:
-                raise FileNotFoundError("Managed workspace source not found")
-
-            await cur.execute(
-                """
-                SELECT document_id
-                FROM public.project_documents
-                WHERE project_id = %s
-                  AND source_id = %s
-                  AND relative_path = %s
-                FOR UPDATE
-                """,
-                (self._project_id, source_id, relative_path),
-            )
-            if await cur.fetchone() is not None:
-                raise FileExistsError("Managed workspace file already exists")
-
-            await cur.execute(
-                """
-                INSERT INTO public.project_documents (
-                    document_id,
-                    project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_root_id,
-                    source_id,
-                    source_kind,
-                    original_name,
-                    relative_path,
-                    extension,
-                    size_bytes,
-                    content_hash,
-                    status,
-                    indexed_at,
-                    error_message,
-                    created_at,
-                    updated_at
-                )
-                VALUES (
-                    %s, %s, NULL, 'project', NULL, %s, 'workspace',
-                    %s, %s, %s, %s, %s, 'queued', NULL, NULL, %s, %s
-                )
-                """,
-                (
-                    document_id,
-                    self._project_id,
-                    source_id,
-                    original_name,
-                    relative_path,
-                    extension,
-                    len(content),
-                    content_hash,
-                    updated_at,
-                    updated_at,
-                ),
-            )
-            await cur.execute(
-                """
-                INSERT INTO public.document_content (document_id, content)
-                VALUES (%s, %s)
-                """,
-                (document_id, content),
-            )
-        return {
-            "document_id": document_id,
-            "project_id": self._project_id,
-            "session_id": None,
-            "visibility_scope": "project",
-            "source_kind": "workspace",
-            "original_name": original_name,
-            "relative_path": relative_path,
-            "extension": extension,
-            "size_bytes": len(content),
-            "content_hash": content_hash,
-            "status": "queued",
-            "indexed_at": None,
-            "error_message": None,
-            "created_at": updated_at,
-            "updated_at": updated_at,
-            "chunk_count": 0,
-        }
-
-    async def update_managed_workspace_file(
-        self,
-        *,
-        relative_path: str,
-        content: bytes,
-        content_hash: str,
-        expected_content_hash: str,
-        updated_at: str,
-    ) -> Dict:
-        """Atomically replace a managed file after checking its content hash."""
-        async with self._client.transaction() as cur:
-            row = await self._lock_managed_workspace_file(cur, relative_path)
-            if row is None:
-                raise FileNotFoundError("Managed workspace file not found")
-            if row["content_hash"] != expected_content_hash:
-                raise WorkspaceConflictError("Managed workspace file changed")
-            await self._replace_managed_workspace_file(
-                cur,
-                row,
-                content=content,
-                content_hash=content_hash,
-                updated_at=updated_at,
-            )
-        return self._managed_file_result(
-            row,
-            content=content,
-            content_hash=content_hash,
-            updated_at=updated_at,
-        )
-
-    async def append_managed_workspace_file(
-        self,
-        *,
-        relative_path: str,
-        append_content: bytes,
-        expected_content_hash: str,
-        updated_at: str,
-    ) -> Dict:
-        """Atomically append to a managed file under optimistic concurrency."""
-        async with self._client.transaction() as cur:
-            row = await self._lock_managed_workspace_file(
-                cur,
-                relative_path,
-                include_content=True,
-            )
-            if row is None:
-                raise FileNotFoundError("Managed workspace file not found")
-            if row["content_hash"] != expected_content_hash:
-                raise WorkspaceConflictError("Managed workspace file changed")
-            content = bytes(row["content"]) + append_content
-            content_hash = hashlib.sha256(content).hexdigest()
-            await self._replace_managed_workspace_file(
-                cur,
-                row,
-                content=content,
-                content_hash=content_hash,
-                updated_at=updated_at,
-            )
-        return self._managed_file_result(
-            row,
-            content=content,
-            content_hash=content_hash,
-            updated_at=updated_at,
-        )
-
-    async def _lock_managed_workspace_file(
-        self,
-        cur,
-        relative_path: str,
-        *,
-        include_content: bool = False,
-    ):
-        content_column = ", dc.content" if include_content else ""
-        join = (
-            " JOIN public.document_content AS dc "
-            "ON dc.document_id = pd.document_id"
-            if include_content
-            else ""
-        )
-        await cur.execute(
-            f"""
-            SELECT
-                pd.document_id,
-                pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.source_kind,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.content_hash,
-                pd.status,
-                pd.created_at,
-                pd.updated_at,
-                pd.indexed_at,
-                pd.error_message{content_column}
-            FROM public.project_documents AS pd
-            JOIN public.document_workspace_sources AS ws
-              ON ws.source_id = pd.source_id
-             AND ws.project_id = pd.project_id
-            {join}
-            WHERE pd.project_id = %s
-              AND ws.ownership_mode = 'managed_project_workspace'
-              AND pd.relative_path = %s
-            FOR UPDATE
-            """,
-            (self._project_id, relative_path),
-        )
-        return await cur.fetchone()
-
-    async def _replace_managed_workspace_file(
-        self,
-        cur,
-        row: Dict,
-        *,
-        content: bytes,
-        content_hash: str,
-        updated_at: str,
-    ) -> None:
-        await cur.execute(
-            """
-            UPDATE public.project_documents
-            SET
-                size_bytes = %s,
-                content_hash = %s,
-                status = 'queued',
-                indexed_at = NULL,
-                error_message = NULL,
-                updated_at = %s
-            WHERE document_id = %s
-              AND project_id = %s
-            """,
-            (
-                len(content),
-                content_hash,
-                updated_at,
-                row["document_id"],
-                self._project_id,
-            ),
-        )
-        await cur.execute(
-            """
-            UPDATE public.document_content
-            SET content = %s, extracted_text = NULL, extracted_content_hash = NULL
-            WHERE document_id = %s
-            """,
-            (content, row["document_id"]),
-        )
-        await cur.execute(
-            """
-            DELETE FROM public.document_chunks
-            WHERE document_id = %s
-            """,
-            (row["document_id"],),
-        )
-
-    def _managed_file_result(
-        self,
-        row: Dict,
-        *,
-        content: bytes,
-        content_hash: str,
-        updated_at: str,
-    ) -> Dict:
-        result = dict(row)
-        result.pop("content", None)
-        result.update(
-            {
-                "size_bytes": len(content),
-                "content_hash": content_hash,
-                "status": "queued",
-                "indexed_at": None,
-                "error_message": None,
-                "updated_at": updated_at,
-                "chunk_count": 0,
-            }
-        )
-        return result
-
-    async def sync_workspace_manifest(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-        documents: List[Dict],
-        candidate_count: int,
-        included_count: int,
-        excluded_count: int,
-        excluded_reason_counts: Dict[str, int],
-        updated_at: str,
-    ) -> Dict[str, int]:
-        """Atomically admit one complete workspace manifest.
-
-        Unchanged ``relative_path``/``content_hash`` pairs are retained. New
-        and changed files are queued for indexing; paths absent from the
-        manifest are deleted together with their bytes and chunks.
-        """
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                SELECT source_id
-                FROM public.document_workspace_sources
-                WHERE source_id = %s
-                  AND project_id = %s
-                  AND ownership_mode = 'external_sync'
-                  AND (
-                      visibility_scope = 'project'
-                      OR (
-                          visibility_scope = 'session'
-                          AND session_id = %s
-                      )
-                  )
-                FOR UPDATE
-                """,
-                (source_id, self._project_id, session_id),
-            )
-            if await cur.fetchone() is None:
-                raise FileNotFoundError("Workspace source not found")
-
-            await cur.execute(
-                """
-                SELECT document_id, relative_path, content_hash
-                FROM public.project_documents
-                WHERE source_id = %s
-                FOR UPDATE
-                """,
-                (source_id,),
-            )
-            existing_rows = await cur.fetchall()
-            existing_by_path = {
-                row["relative_path"]: row for row in existing_rows
-            }
-            manifest_paths = [document["relative_path"] for document in documents]
-            unchanged = 0
-            queued = 0
-
-            for document in documents:
-                existing = existing_by_path.get(document["relative_path"])
-                if existing and existing["content_hash"] == document["content_hash"]:
-                    unchanged += 1
-                    continue
-
-                document_id = (
-                    str(existing["document_id"])
-                    if existing is not None
-                    else str(uuid.uuid4())
-                )
-                await cur.execute(
-                    """
-                    INSERT INTO public.project_documents (
-                        document_id,
-                        project_id,
-                        session_id,
-                        visibility_scope,
-                        folder_root_id,
-                        source_id,
-                        source_kind,
-                        original_name,
-                        relative_path,
-                        extension,
-                        size_bytes,
-                        content_hash,
-                        status,
-                        indexed_at,
-                        error_message,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, NULL, %s, 'workspace',
-                        %s, %s, %s, %s, %s, 'queued', NULL, NULL, %s, %s
-                    )
-                    ON CONFLICT (source_id, relative_path)
-                    WHERE source_id IS NOT NULL
-                    DO UPDATE SET
-                        original_name = EXCLUDED.original_name,
-                        extension = EXCLUDED.extension,
-                        size_bytes = EXCLUDED.size_bytes,
-                        content_hash = EXCLUDED.content_hash,
-                        status = 'queued',
-                        indexed_at = NULL,
-                        error_message = NULL,
-                        updated_at = EXCLUDED.updated_at
-                    """,
-                    (
-                        document_id,
-                        self._project_id,
-                        session_id,
-                        document["visibility_scope"],
-                        source_id,
-                        document["original_name"],
-                        document["relative_path"],
-                        document["extension"],
-                        document["size_bytes"],
-                        document["content_hash"],
-                        updated_at,
-                        updated_at,
-                    ),
-                )
-                await cur.execute(
-                    """
-                    INSERT INTO public.document_content (document_id, content)
-                    VALUES (%s, %s)
-                    ON CONFLICT (document_id)
-                    DO UPDATE SET
-                        content = EXCLUDED.content,
-                        extracted_text = NULL,
-                        extracted_content_hash = NULL
-                    """,
-                    (document_id, document["content"]),
-                )
-                if existing is not None:
-                    await cur.execute(
-                        """
-                        DELETE FROM public.document_chunks
-                        WHERE document_id = %s
-                        """,
-                        (document_id,),
-                    )
-                queued += 1
-
-            await cur.execute(
-                """
-                DELETE FROM public.project_documents
-                WHERE source_id = %s
-                  AND NOT (relative_path = ANY(%s))
-                RETURNING document_id
-                """,
-                (source_id, manifest_paths),
-            )
-            removed = len(await cur.fetchall())
-            await cur.execute(
-                """
-                UPDATE public.document_workspace_sources
-                SET
-                    last_synced_at = %s,
-                    last_manifest_candidate_count = %s,
-                    last_manifest_included_count = %s,
-                    last_manifest_excluded_count = %s,
-                    last_manifest_excluded_reason_counts = %s::jsonb,
-                    updated_at = %s
-                WHERE source_id = %s
-                """,
-                (
-                    updated_at,
-                    candidate_count,
-                    included_count,
-                    excluded_count,
-                    json.dumps(excluded_reason_counts),
-                    updated_at,
-                    source_id,
-                ),
-            )
-            return {
-                "queued": queued,
-                "unchanged": unchanged,
-                "removed": removed,
-            }
-
-    async def sync_workspace_changes(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-        documents: List[Dict],
-        deleted_paths: List[str],
-        updated_at: str,
-    ) -> Dict[str, int]:
-        """Atomically apply workspace upserts and deletions only.
-
-        Unlike ``sync_workspace_manifest``, paths not named by this operation
-        are retained. This makes it safe for a local filesystem watcher to
-        submit a small change set after a file save.
-        """
-        changed_paths = [document["relative_path"] for document in documents]
-        affected_paths = sorted(set(changed_paths) | set(deleted_paths))
-        if not affected_paths:
-            raise ValueError("workspace changes must affect at least one path")
-
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                SELECT source_id
-                FROM public.document_workspace_sources
-                WHERE source_id = %s
-                  AND project_id = %s
-                  AND ownership_mode = 'external_sync'
-                  AND (
-                      visibility_scope = 'project'
-                      OR (
-                          visibility_scope = 'session'
-                          AND session_id = %s
-                      )
-                  )
-                FOR UPDATE
-                """,
-                (source_id, self._project_id, session_id),
-            )
-            if await cur.fetchone() is None:
-                raise FileNotFoundError("Workspace source not found")
-
-            await cur.execute(
-                """
-                SELECT document_id, relative_path, content_hash
-                FROM public.project_documents
-                WHERE source_id = %s
-                  AND relative_path = ANY(%s)
-                FOR UPDATE
-                """,
-                (source_id, affected_paths),
-            )
-            existing_by_path = {
-                row["relative_path"]: row for row in await cur.fetchall()
-            }
-            unchanged = 0
-            queued = 0
-
-            for document in documents:
-                existing = existing_by_path.get(document["relative_path"])
-                if existing and existing["content_hash"] == document["content_hash"]:
-                    unchanged += 1
-                    continue
-
-                document_id = (
-                    str(existing["document_id"])
-                    if existing is not None
-                    else str(uuid.uuid4())
-                )
-                await cur.execute(
-                    """
-                    INSERT INTO public.project_documents (
-                        document_id,
-                        project_id,
-                        session_id,
-                        visibility_scope,
-                        folder_root_id,
-                        source_id,
-                        source_kind,
-                        original_name,
-                        relative_path,
-                        extension,
-                        size_bytes,
-                        content_hash,
-                        status,
-                        indexed_at,
-                        error_message,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (
-                        %s, %s, %s, %s, NULL, %s, 'workspace',
-                        %s, %s, %s, %s, %s, 'queued', NULL, NULL, %s, %s
-                    )
-                    ON CONFLICT (source_id, relative_path)
-                    WHERE source_id IS NOT NULL
-                    DO UPDATE SET
-                        original_name = EXCLUDED.original_name,
-                        extension = EXCLUDED.extension,
-                        size_bytes = EXCLUDED.size_bytes,
-                        content_hash = EXCLUDED.content_hash,
-                        status = 'queued',
-                        indexed_at = NULL,
-                        error_message = NULL,
-                        updated_at = EXCLUDED.updated_at
-                    """,
-                    (
-                        document_id,
-                        self._project_id,
-                        session_id,
-                        document["visibility_scope"],
-                        source_id,
-                        document["original_name"],
-                        document["relative_path"],
-                        document["extension"],
-                        document["size_bytes"],
-                        document["content_hash"],
-                        updated_at,
-                        updated_at,
-                    ),
-                )
-                await cur.execute(
-                    """
-                    INSERT INTO public.document_content (document_id, content)
-                    VALUES (%s, %s)
-                    ON CONFLICT (document_id)
-                    DO UPDATE SET
-                        content = EXCLUDED.content,
-                        extracted_text = NULL,
-                        extracted_content_hash = NULL
-                    """,
-                    (document_id, document["content"]),
-                )
-                if existing is not None:
-                    await cur.execute(
-                        """
-                        DELETE FROM public.document_chunks
-                        WHERE document_id = %s
-                        """,
-                        (document_id,),
-                    )
-                queued += 1
-
-            removed = 0
-            if deleted_paths:
-                await cur.execute(
-                    """
-                    DELETE FROM public.project_documents
-                    WHERE source_id = %s
-                      AND relative_path = ANY(%s)
-                    RETURNING document_id
-                    """,
-                    (source_id, deleted_paths),
-                )
-                removed = len(await cur.fetchall())
-            await cur.execute(
-                """
-                UPDATE public.document_workspace_sources
-                SET
-                    last_synced_at = %s,
-                    updated_at = %s
-                WHERE source_id = %s
-                """,
-                (updated_at, updated_at, source_id),
-            )
-            return {
-                "queued": queued,
-                "unchanged": unchanged,
-                "removed": removed,
-            }
-
-    async def claim_workspace_documents(
-        self,
-        *,
-        source_id: str,
-        limit: int,
-        updated_at: str,
-    ) -> List[Dict]:
-        """Claim a bounded FIFO batch of queued files for one workspace."""
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                WITH candidates AS (
-                    SELECT document_id
-                    FROM public.project_documents
-                    WHERE project_id = %s
-                      AND source_id = %s
-                      AND status = 'queued'
-                    ORDER BY updated_at ASC, document_id ASC
-                    LIMIT %s
-                    FOR UPDATE SKIP LOCKED
-                )
-                UPDATE public.project_documents AS pd
-                SET
-                    status = 'indexing',
-                    indexed_at = NULL,
-                    error_message = NULL,
-                    updated_at = %s
-                FROM candidates
-                WHERE pd.document_id = candidates.document_id
-                RETURNING
-                    pd.document_id,
-                    pd.session_id,
-                    pd.relative_path,
-                    pd.extension,
-                    pd.content_hash
-                """,
-                (self._project_id, source_id, limit, updated_at),
-            )
-            return [dict(row) for row in await cur.fetchall()]
-
-    async def persist_workspace_indexed_documents(
-        self,
-        *,
-        documents: List[Dict],
-        indexed_at: str,
-    ) -> List[str]:
-        """Persist a workspace batch with one transaction and one COPY stream."""
-        if not documents:
-            return []
-        for document in documents:
-            self._validate_chunk_embeddings(
-                document["chunks"],
-                document["embeddings"],
-                "persist_workspace_indexed_documents",
-            )
-        expected_hashes = {
-            str(document["document_id"]): document["content_hash"]
-            for document in documents
-        }
-        document_ids = list(expected_hashes)
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                SELECT document_id, content_hash
-                FROM public.project_documents
-                WHERE project_id = %s
-                  AND document_id = ANY(%s)
-                  AND status = 'indexing'
-                FOR UPDATE
-                """,
-                (self._project_id, document_ids),
-            )
-            current_hashes = {
-                str(row["document_id"]): row["content_hash"]
-                for row in await cur.fetchall()
-            }
-            current_documents = [
-                document
-                for document in documents
-                if current_hashes.get(str(document["document_id"]))
-                == document["content_hash"]
-            ]
-            if not current_documents:
-                return []
-
-            current_ids = [
-                str(document["document_id"]) for document in current_documents
-            ]
-            await cur.execute(
-                """
-                DELETE FROM public.document_chunks
-                WHERE document_id = ANY(%s)
-                """,
-                (current_ids,),
-            )
-            for document in current_documents:
-                await cur.execute(
-                    """
-                    UPDATE public.document_content
-                    SET
-                        extracted_text = %s,
-                        extracted_content_hash = %s
-                    WHERE document_id = %s
-                    """,
-                    (
-                        document["extracted_text"],
-                        document["content_hash"],
-                        document["document_id"],
-                    ),
-                )
-            await self._copy_chunk_rows(
-                cur,
-                [
-                    self._chunk_copy_row(
-                        document_id=str(document["document_id"]),
-                        relative_path=document["relative_path"],
-                        chunk_index=chunk_index,
-                        chunk=chunk,
-                        embedding=embedding,
-                    )
-                    for document in current_documents
-                    for chunk_index, (chunk, embedding) in enumerate(
-                        zip(document["chunks"], document["embeddings"])
-                    )
-                ],
-            )
-            await cur.execute(
-                """
-                UPDATE public.project_documents
-                SET
-                    status = 'indexed',
-                    indexed_at = %s,
-                    error_message = NULL,
-                    updated_at = %s
-                WHERE document_id = ANY(%s)
-                RETURNING document_id
-                """,
-                (indexed_at, indexed_at, current_ids),
-            )
-            return [str(row["document_id"]) for row in await cur.fetchall()]
-
     async def insert_document(
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
-        visibility_scope: str,
         original_name: str,
         relative_path: str,
         extension: str,
         size_bytes: int,
         content_hash: str,
-        content: bytes,
         created_at: str,
     ) -> None:
         """
-        Insert one manual-upload document row and its raw bytes in a single
-        transaction.
+        Insert one project-owned document catalog row atomically.
         """
         async with self._client.transaction() as cur:
             await cur.execute(
@@ -1101,10 +112,6 @@ class DocumentWriter:
                 INSERT INTO public.project_documents (
                     document_id,
                     project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_root_id,
-                    source_kind,
                     original_name,
                     relative_path,
                     extension,
@@ -1115,15 +122,13 @@ class DocumentWriter:
                     updated_at
                 )
                 VALUES (
-                    %s, %s, %s, %s, NULL, 'manual_upload',
+                    %s, %s,
                     %s, %s, %s, %s, %s, 'queued', %s, %s
                 )
                 """,
                 (
                     document_id,
                     self._project_id,
-                    session_id,
-                    visibility_scope,
                     original_name,
                     relative_path,
                     extension,
@@ -1133,19 +138,11 @@ class DocumentWriter:
                     created_at,
                 ),
             )
-            await cur.execute(
-                """
-                INSERT INTO public.document_content (document_id, content)
-                VALUES (%s, %s)
-                """,
-                (document_id, content),
-            )
 
     async def delete_document(
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
     ) -> Optional[Dict]:
         """Purge document content while retaining a provenance tombstone."""
         async with self._client.transaction() as cur:
@@ -1153,8 +150,6 @@ class DocumentWriter:
                 """
             UPDATE public.project_documents
             SET status = 'deleted',
-                source_id = NULL,
-                folder_root_id = NULL,
                 deleted_at = COALESCE(deleted_at, now()),
                 indexed_at = NULL,
                 error_message = NULL,
@@ -1162,20 +157,9 @@ class DocumentWriter:
             WHERE document_id = %s
               AND project_id = %s
               AND status <> 'deleted'
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
             RETURNING
                 document_id,
                 project_id,
-                session_id,
-                visibility_scope,
-                folder_root_id,
-                source_kind,
                 original_name,
                 relative_path,
                 extension,
@@ -1188,7 +172,7 @@ class DocumentWriter:
                 error_message,
                 deleted_at
                 """,
-                (document_id, self._project_id, session_id),
+                (document_id, self._project_id),
             )
             row = await cur.fetchone()
             if row is None:
@@ -1202,7 +186,7 @@ class DocumentWriter:
             )
             await cur.execute(
                 """
-                DELETE FROM public.document_content
+                DELETE FROM public.document_extractions
                 WHERE document_id = %s
                 """,
                 (document_id,),
@@ -1213,12 +197,11 @@ class DocumentWriter:
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
         status: str,
         allowed_statuses: tuple[str, ...],
         updated_at: str,
     ) -> Optional[Dict]:
-        """Atomically transition one visible document into a work state."""
+        """Atomically transition one project-owned document into a work state."""
         allowed = tuple(allowed_statuses)
         async with self._client.transaction() as cur:
             await cur.execute(
@@ -1231,21 +214,10 @@ class DocumentWriter:
                     updated_at = %s
                 WHERE document_id = %s
                   AND project_id = %s
-                  AND (
-                      visibility_scope = 'project'
-                      OR (
-                          visibility_scope = 'session'
-                          AND session_id = %s
-                      )
-                  )
                   AND status = ANY(%s)
                 RETURNING
                     document_id,
                     project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_root_id,
-                    source_kind,
                     original_name,
                     relative_path,
                     extension,
@@ -1262,7 +234,6 @@ class DocumentWriter:
                     updated_at,
                     document_id,
                     self._project_id,
-                    session_id,
                     list(allowed),
                 ),
             )
@@ -1309,132 +280,10 @@ class DocumentWriter:
         )
         return len(rows)
 
-    async def insert_folder_batch(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-        visibility_scope: str,
-        folder_name: str,
-        candidate_count: int,
-        candidate_bytes: int,
-        excluded_count: int,
-        excluded_bytes: int,
-        excluded_directory_count: int,
-        excluded_reason_counts: Dict,
-        scan_settings: Dict,
-        documents: List[Dict],
-        created_at: str,
-    ) -> None:
-        """
-        Atomically insert one folder-upload batch record together with each
-        document's queued metadata and raw bytes.
-
-        Each element of `documents` must contain:
-            document_id, original_name, relative_path, extension,
-            size_bytes, content_hash, and content (bytes).
-        """
-        async with self._client.transaction() as cur:
-            await cur.execute(
-                """
-                        INSERT INTO public.document_folder_uploads (
-                            folder_root_id,
-                            project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_name,
-                            candidate_count,
-                            candidate_bytes,
-                            document_count,
-                            total_size_bytes,
-                            excluded_count,
-                            excluded_bytes,
-                            excluded_directory_count,
-                            excluded_reason_counts,
-                            scan_settings,
-                            created_at
-                        )
-                        VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s
-                        )
-                        """,
-                (
-                    folder_root_id,
-                    self._project_id,
-                    session_id,
-                    visibility_scope,
-                    folder_name,
-                    candidate_count,
-                    candidate_bytes,
-                    len(documents),
-                    sum(d["size_bytes"] for d in documents),
-                    excluded_count,
-                    excluded_bytes,
-                    excluded_directory_count,
-                    json.dumps(excluded_reason_counts),
-                    json.dumps(scan_settings),
-                    created_at,
-                ),
-            )
-
-            for document in documents:
-                await cur.execute(
-                    """
-                            INSERT INTO public.project_documents (
-                                document_id,
-                                project_id,
-                                session_id,
-                                visibility_scope,
-                                folder_root_id,
-                                source_kind,
-                                original_name,
-                                relative_path,
-                                extension,
-                                size_bytes,
-                                content_hash,
-                                status,
-                                created_at,
-                                updated_at
-                            )
-                            VALUES (
-                                %s, %s, %s, %s, %s, 'folder_upload',
-                                %s, %s, %s, %s, %s, 'queued', %s, %s
-                            )
-                            """,
-                    (
-                        document["document_id"],
-                        self._project_id,
-                        session_id,
-                        visibility_scope,
-                        folder_root_id,
-                        document["original_name"],
-                        document["relative_path"],
-                        document["extension"],
-                        document["size_bytes"],
-                        document["content_hash"],
-                        created_at,
-                        created_at,
-                    ),
-                )
-                await cur.execute(
-                    """
-                            INSERT INTO public.document_content (
-                                document_id, content
-                            )
-                            VALUES (%s, %s)
-                            """,
-                    (
-                        document["document_id"],
-                        document["content"],
-                    ),
-                )
-
     async def persist_indexed_chunks(
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
         chunks: List[Union["DocumentChunk", str]],
         embeddings: List[List[float]],
         extracted_text: str,
@@ -1458,10 +307,6 @@ class DocumentWriter:
                         SELECT
                             document_id,
                             project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_root_id,
-                            source_kind,
                             original_name,
                             relative_path,
                             extension,
@@ -1480,16 +325,9 @@ class DocumentWriter:
                         FROM public.project_documents AS pd
                         WHERE pd.document_id = %s
                           AND pd.project_id = %s
-                          AND (
-                              pd.visibility_scope = 'project'
-                              OR (
-                                  pd.visibility_scope = 'session'
-                                  AND pd.session_id = %s
-                              )
-                          )
                         FOR UPDATE
                         """,
-                (document_id, self._project_id, session_id),
+                (document_id, self._project_id),
             )
             locked = await cur.fetchone()
             if locked is None:
@@ -1528,13 +366,18 @@ class DocumentWriter:
             )
             await cur.execute(
                 """
-                UPDATE public.document_content
+                INSERT INTO public.document_extractions (
+                    document_id,
+                    extracted_text,
+                    extracted_content_hash
+                )
+                VALUES (%s, %s, %s)
+                ON CONFLICT (document_id) DO UPDATE
                 SET
-                    extracted_text = %s,
-                    extracted_content_hash = %s
-                WHERE document_id = %s
+                    extracted_text = EXCLUDED.extracted_text,
+                    extracted_content_hash = EXCLUDED.extracted_content_hash
                 """,
-                (extracted_text, locked["content_hash"], document_id),
+                (document_id, extracted_text, locked["content_hash"]),
             )
 
             await cur.execute(
@@ -1549,10 +392,6 @@ class DocumentWriter:
                         RETURNING
                             document_id,
                             project_id,
-                            session_id,
-                            visibility_scope,
-                            folder_root_id,
-                            source_kind,
                             original_name,
                             relative_path,
                             extension,
@@ -1577,7 +416,6 @@ class DocumentWriter:
         self,
         *,
         document_id: str,
-        session_id: Optional[str],
         error_message: str,
         updated_at: str,
     ) -> None:
@@ -1593,16 +431,9 @@ class DocumentWriter:
                         FROM public.project_documents
                         WHERE document_id = %s
                           AND project_id = %s
-                          AND (
-                              visibility_scope = 'project'
-                              OR (
-                                  visibility_scope = 'session'
-                                  AND session_id = %s
-                              )
-                          )
                         FOR UPDATE
                         """,
-                (document_id, self._project_id, session_id),
+                (document_id, self._project_id),
             )
             row = await cur.fetchone()
             if row is None or row["status"] == "indexed":
@@ -1662,3 +493,97 @@ class DocumentWriter:
             """,
             (self._project_id,),
         )
+
+    async def insert_saved_web_link(
+        self,
+        *,
+        link_id: str,
+        url: str,
+        title: str | None,
+        summary: str | None,
+        created_at: str,
+    ) -> Dict:
+        """Persist one project-owned bookmark without document derivation."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                INSERT INTO public.saved_web_links (
+                    link_id,
+                    project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING
+                    link_id,
+                    project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    updated_at
+                """,
+                (
+                    link_id,
+                    self._project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    created_at,
+                ),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise RuntimeError("Saved web link insert did not return a row")
+        return dict(row)
+
+    async def update_saved_web_link(
+        self,
+        *,
+        link_id: str,
+        title: str | None,
+        summary: str | None,
+        updated_at: str,
+    ) -> Optional[Dict]:
+        """Replace bookmark presentation fields within the active project."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                UPDATE public.saved_web_links
+                SET
+                    title = %s,
+                    summary = %s,
+                    updated_at = %s
+                WHERE link_id = %s
+                  AND project_id = %s
+                RETURNING
+                    link_id,
+                    project_id,
+                    url,
+                    title,
+                    summary,
+                    created_at,
+                    updated_at
+                """,
+                (title, summary, updated_at, link_id, self._project_id),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row is not None else None
+
+    async def delete_saved_web_link(self, *, link_id: str) -> bool:
+        """Remove a project bookmark without touching source provenance."""
+        async with self._client.transaction() as cur:
+            await cur.execute(
+                """
+                DELETE FROM public.saved_web_links
+                WHERE link_id = %s
+                  AND project_id = %s
+                RETURNING link_id
+                """,
+                (link_id, self._project_id),
+            )
+            return await cur.fetchone() is not None

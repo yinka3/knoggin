@@ -1,5 +1,6 @@
 """Strict LLM-boundary schemas for entity and relationship extraction."""
 
+import re
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -19,7 +20,6 @@ class EntityMention(BaseModel):
     msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
     name: str
     type: str
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
 
     @field_validator("name", "type")
     @classmethod
@@ -42,7 +42,6 @@ class RelationshipMention(StructuredLLMOutput):
     entity_a: str = Field(..., description="Name of the first entity")
     entity_b: str = Field(..., description="Name of the second entity")
     relationship: str = Field(..., description="Evidence-grounded relationship label")
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
     context: Optional[str] = Field(
         None, description="Short excerpt or paraphrase grounding the relationship"
     )
@@ -64,7 +63,6 @@ class IdentityRelationshipMention(StructuredLLMOutput):
 
     entity_name: str
     relationship: str
-    confidence: float = Field(1.0, ge=0.0, le=1.0)
     context: Optional[str] = None
     msg_id: str = Field(..., pattern=r"^m[1-9]\d*$")
 
@@ -84,3 +82,40 @@ class RelationshipExtraction(StructuredLLMOutput):
 
     connections: List[RelationshipMention] = Field(default_factory=list)
     user_connections: List[IdentityRelationshipMention] = Field(default_factory=list)
+
+
+class ContextRelationshipMention(StructuredLLMOutput):
+    """A VP-02 result grounded to one or more local Context block IDs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_ids: List[str] = Field(default_factory=list)
+    entity_a: str
+    entity_b: str
+    relationship: str
+    context: Optional[str] = None
+
+    @field_validator("block_ids")
+    @classmethod
+    def validate_block_ids(cls, value: List[str]) -> List[str]:
+        if not value or len(value) != len(set(value)):
+            raise ValueError("block_ids must contain one or more unique local block IDs")
+        if any(not re.match(r"^b[1-9]\d*$", item) for item in value):
+            raise ValueError("block_ids must contain local bN Context references")
+        return value
+
+    @field_validator("entity_a", "entity_b", "relationship")
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        return normalize_required_text(value, field_name=info.field_name)
+
+    @field_validator("context")
+    @classmethod
+    def validate_context(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_optional_text(value, field_name="context")
+
+
+class ContextRelationshipExtraction(StructuredLLMOutput):
+    """The Context-native VP-02 response shape."""
+
+    connections: List[ContextRelationshipMention] = Field(default_factory=list)

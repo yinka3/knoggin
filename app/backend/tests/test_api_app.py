@@ -1,5 +1,5 @@
 from knoggin import DocumentFocusSubtree
-from knoggin_app_api.contracts import MessageCreateRequest, document_focus_to_sdk
+from knoggin_app_api.contracts import RunCreateRequest, document_focus_to_sdk
 from knoggin_app_api.main import create_app
 
 
@@ -11,14 +11,14 @@ def test_fastapi_app_exposes_the_first_public_api_slice():
         "/api/v1/health",
         "/api/v1/projects",
         "/api/v1/projects/{project_id}/sessions",
-        "/api/v1/sessions/{session_id}/messages",
+        "/api/v1/sessions/{session_id}/runs",
         "/api/v1/runs/{run_id}",
         "/api/v1/runs/{run_id}/events",
     }.issubset(paths)
 
 
 def test_message_request_accepts_a_structured_browser_document_focus():
-    request = MessageCreateRequest.model_validate(
+    request = RunCreateRequest.model_validate(
         {
             "content": "Compare the selected files",
             "documentFocus": {

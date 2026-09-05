@@ -12,10 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from loguru import logger
 
+from common.exceptions import SessionBusyError
 from knoggin import Knoggin, Turn
 
 from .contracts import (
-    MessageCreateRequest,
+    RunCreateRequest,
     ProjectCreateRequest,
     SessionCreateRequest,
     document_focus_to_sdk,
@@ -130,10 +131,10 @@ def _router() -> APIRouter:
                 request_id,
             )
 
-    @router.post("/sessions/{session_id}/messages", status_code=202)
-    async def submit_message(
+    @router.post("/sessions/{session_id}/runs", status_code=202)
+    async def start_run(
         session_id: str,
-        body: MessageCreateRequest,
+        body: RunCreateRequest,
         request: Request,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> JSONResponse:
@@ -146,7 +147,7 @@ def _router() -> APIRouter:
                 request_id,
             )
         if not body.content.strip():
-            return _error("INVALID_MESSAGE", "content is required", 400, request_id)
+            return _error("INVALID_RUN", "content is required", 400, request_id)
         try:
             run = await request.app.state.runs.submit_turn(
                 session_id=session_id,
@@ -168,10 +169,17 @@ def _router() -> APIRouter:
             )
         except ValueError:
             return _error(
-                "INVALID_MESSAGE", "The message request is invalid.", 400, request_id
+                "INVALID_RUN", "The run request is invalid.", 400, request_id
+            )
+        except SessionBusyError:
+            return _error(
+                "SESSION_BUSY",
+                "This session already has an active run.",
+                409,
+                request_id,
             )
         except Exception:
-            logger.exception("Message submission failed")
+            logger.exception("Run submission failed")
             return _error(
                 "RUN_SUBMIT_FAILED", "The run could not be started.", 500, request_id
             )

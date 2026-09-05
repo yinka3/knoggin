@@ -51,15 +51,10 @@ async def real_resource_manager(monkeypatch):
         ),
         revision_env="KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION",
     )
-    gliner_model = _local_snapshot(
-        huggingface_hub,
-        os.environ.get("KNOGGIN_GLINER_MODEL", "urchade/gliner_large-v2.1"),
-        revision_env="KNOGGIN_GLINER_REVISION",
-    )
     _local_snapshot(
         huggingface_hub,
-        os.environ.get("KNOGGIN_GLINER_BASE_MODEL", "microsoft/deberta-v3-large"),
-        revision_env="KNOGGIN_GLINER_BASE_REVISION",
+        os.environ.get("KNOGGIN_VP01_MODEL", "fastino/gliner2.5-base-v1"),
+        revision_env="KNOGGIN_VP01_REVISION",
     )
 
     monkeypatch.setenv(
@@ -71,7 +66,6 @@ async def real_resource_manager(monkeypatch):
     )
     monkeypatch.setenv("KNOGGIN_EMBEDDING_MODEL", embedding_model)
     monkeypatch.setenv("KNOGGIN_RERANKER_MODEL", reranker_model)
-    monkeypatch.setenv("KNOGGIN_GLINER_MODEL", gliner_model)
     monkeypatch.setenv(
         "KNOGGIN_EMBEDDING_BACKEND",
         os.environ.get("KNOGGIN_EMBEDDING_BACKEND", "onnx"),
@@ -95,7 +89,7 @@ async def real_resource_manager(monkeypatch):
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_real_runtime_startup_and_shutdown_drains_active_work(
+async def test_real_runtime_shutdown_cancels_background_and_drains_model_work(
     real_resource_manager,
 ):
     manager = real_resource_manager
@@ -103,7 +97,7 @@ async def test_real_runtime_startup_and_shutdown_drains_active_work(
     assert manager.embedding is not None
     assert manager.embedding.embedding_dim > 0
     assert manager.spacy is not None
-    assert manager.gliner is not None
+    assert manager.vp01 is not None
     assert manager.work_snapshot()["background_work"]["queued"] == 0
 
     ingestion_started = asyncio.Event()
@@ -145,10 +139,16 @@ async def test_real_runtime_startup_and_shutdown_drains_active_work(
     ingestion_release.set()
     agent_tool_release.set()
 
-    await asyncio.gather(shutdown_task, ingestion_task, agent_tool_task)
+    shutdown_result, ingestion_result, agent_tool_result = await asyncio.gather(
+        shutdown_task,
+        ingestion_task,
+        agent_tool_task,
+        return_exceptions=True,
+    )
 
-    assert ingestion_task.result() == "ingestion-complete"
-    assert agent_tool_task.result() == "agent-tool-complete"
+    assert shutdown_result is None
+    assert isinstance(ingestion_result, asyncio.CancelledError)
+    assert agent_tool_result == "agent-tool-complete"
     assert manager.postgres is None
     assert manager.embedding is None
     assert manager.llm_service is None

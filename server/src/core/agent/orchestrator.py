@@ -16,11 +16,14 @@ from common.schema.document import (
     dump_document_focus,
     parse_document_focus,
 )
+from common.schema.source.references import SourceReferenceCandidate
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
+from core.agent.sources.document_selection import build_document_selection_candidate
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 from core.agent.tools.registry import Tools
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 
 if TYPE_CHECKING:
     from runtime.session_runtime import SessionRuntime
@@ -37,9 +40,16 @@ class AgentOrchestrator:
     It prepares the environment and delegates the reasoning loop to AgentExecutor.
     """
 
-    def __init__(self, agent_manager: AgentManager, *, config_provider):
+    def __init__(
+        self,
+        agent_manager: AgentManager,
+        *,
+        config_provider,
+        entity_maintenance_service: EntityMaintenanceService | None = None,
+    ):
         self._agent_manager = agent_manager
         self._config_provider = config_provider
+        self._entity_maintenance_service = entity_maintenance_service
 
     async def run_stream(
         self,
@@ -49,15 +59,8 @@ class AgentOrchestrator:
         model: Optional[str] = None,
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-        simulated_date: Optional[str] = None,
-        agent_temperature: Optional[float] = None,
-        agent_brain: Optional[str] = None,
-        agent_directives: Optional[str] = None,
         conversation_history: Optional[List[Dict]] = None,
         hot_topics: Optional[List[str]] = None,
-        agent_persona_override: Optional[str] = None,
-        agent_name_override: Optional[str] = None,
-        additional_tool_schemas: Optional[List[Dict]] = None,
         user_message_id: Optional[int] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
         request_document_focus: Optional[DocumentFocus] = None,
@@ -84,8 +87,6 @@ class AgentOrchestrator:
             # Identity & Persona
             identity = await self._resolve_agent_identity(
                 agent_id if agent_id is not None else context.agent_id,
-                agent_name_override,
-                agent_persona_override,
             )
             agent_cfg = identity.config
             effective_model = (
@@ -94,21 +95,20 @@ class AgentOrchestrator:
                 else (context.model if context.model is not None else agent_cfg.model)
             )
             effective_temperature = (
-                agent_temperature
-                if agent_temperature is not None
-                else (
-                    agent_cfg.temperature
-                    if agent_cfg and agent_cfg.temperature is not None
-                    else 0.7
-                )
+                agent_cfg.temperature
+                if agent_cfg and agent_cfg.temperature is not None
+                else 0.7
             )
-            effective_brain = agent_brain or (agent_cfg.brain if agent_cfg else "")
-            effective_directives = agent_directives or ""
+            effective_brain = agent_cfg.brain if agent_cfg else ""
 
             # Services (Session-Aware)
             effective_document_focus = await self._resolve_document_focus(
                 context,
                 request_document_focus or context.document_focus,
+            )
+            document_selection_context = await self._resolve_document_selection_context(
+                context,
+                effective_document_focus,
             )
             tools = await self._bootstrap_services(
                 context,
@@ -138,15 +138,14 @@ class AgentOrchestrator:
                 try:
                     hot_topic_context = await tools.get_hot_topic_context(
                         effective_hot_topics,
-                        slim=True,
                     )
                 except Exception as exc:
                     logger.warning(f"Failed to preload hot topic context: {exc}")
 
             run = AgentRun.open(
                 user_name=context.user_name,
-                session_id=context.session_id,
                 project_id=context.project_id or "",
+                session_id=context.session_id,
                 user_query=user_query,
                 run_id=run_id,
                 agent=identity,
@@ -155,25 +154,19 @@ class AgentOrchestrator:
                 model=effective_model,
                 temperature=effective_temperature,
                 brain=effective_brain,
-                directives=effective_directives,
                 enabled_tools=effective_enabled_tools,
-                additional_tool_schemas=additional_tool_schemas,
                 hot_topics=effective_hot_topics,
-                active_topics=list(compiled_domain.active_topics),
                 hot_topic_context=hot_topic_context,
                 history=conversation_history or [],
                 document_focus=effective_document_focus,
-                initial_source_candidates=(
-                    build_pasted_text_candidates(
-                        project_id=context.project_id or "",
-                        session_id=context.session_id,
-                        source_message_id=user_message_id,
-                        message_content=incoming_user_query,
-                        agent_run_id=run_id,
-                        spans=pasted_text_spans,
-                    )
-                    if user_message_id is not None
-                    else []
+                document_selection_context=document_selection_context,
+                initial_source_candidates=self._initial_source_candidates(
+                    context=context,
+                    run_id=run_id,
+                    user_message_id=user_message_id,
+                    message_content=incoming_user_query,
+                    pasted_text_spans=pasted_text_spans,
+                    selection_context=document_selection_context,
                 ),
             )
 
@@ -185,10 +178,7 @@ class AgentOrchestrator:
                 on_successful_completion=self._agent_manager.mark_turn_completed,
             )
 
-            async for event in executor.execute(
-                user_timezone=user_timezone,
-                simulated_date=simulated_date,
-            ):
+            async for event in executor.execute(user_timezone=user_timezone):
                 yield validate_agent_execution_event(event)
 
         except Exception as e:
@@ -209,8 +199,6 @@ class AgentOrchestrator:
     async def _resolve_agent_identity(
         self,
         agent_id: Optional[str],
-        name_override: Optional[str],
-        persona_override: Optional[str],
     ) -> AgentIdentity:
         """Resolve the durable Postgres agent used for this run."""
         resolved_id = agent_id or await self._agent_manager.get_default_agent_id()
@@ -220,10 +208,9 @@ class AgentOrchestrator:
 
         return AgentIdentity(
             config=agent_cfg,
-            name=name_override or agent_cfg.name,
+            name=agent_cfg.name,
             persona=(
-                persona_override
-                or agent_cfg.persona_markdown
+                agent_cfg.persona_markdown
                 or "A helpful and thorough personal intelligence assistant."
             ),
         )
@@ -248,7 +235,6 @@ class AgentOrchestrator:
             compiled_domain=context.project.compiled_domain,
             search_config=search_cfg,
             document_service=context.document_service,
-            workspace_service=getattr(context.project, "workspace_service", None),
             document_focus=(
                 dump_document_focus(document_focus)
                 if document_focus is not None
@@ -259,9 +245,43 @@ class AgentOrchestrator:
             postgres=context.resources.postgres,
             agent_id=agent_id,
             health_service=getattr(context, "health_service", None),
+            entity_maintenance_service=self._entity_maintenance_service,
         )
 
         return tools
+
+    @staticmethod
+    def _initial_source_candidates(
+        *,
+        context: SessionRuntime,
+        run_id: str,
+        user_message_id: Optional[int],
+        message_content: str,
+        pasted_text_spans: Optional[List[Dict]],
+        selection_context: Optional[Dict],
+    ) -> List[SourceReferenceCandidate]:
+        candidates = (
+            build_pasted_text_candidates(
+                project_id=context.project_id or "",
+                session_id=context.session_id,
+                source_message_id=user_message_id,
+                message_content=message_content,
+                agent_run_id=run_id,
+                spans=pasted_text_spans,
+            )
+            if user_message_id is not None
+            else []
+        )
+        if selection_context is not None:
+            candidates.append(
+                build_document_selection_candidate(
+                    project_id=context.project_id or "",
+                    session_id=context.session_id,
+                    agent_run_id=run_id,
+                    selection_context=selection_context,
+                )
+            )
+        return candidates
 
     async def _resolve_document_focus(
         self,
@@ -274,15 +294,9 @@ class AgentOrchestrator:
         try:
             persisted = parse_document_focus(focus)
             target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
                 document_id=(
                     persisted.document_id
                     if persisted.target_type == "document"
-                    else None
-                ),
-                folder_root_id=(
-                    persisted.folder_root_id
-                    if persisted.target_type != "document"
                     else None
                 ),
                 path_prefix=(
@@ -291,8 +305,11 @@ class AgentOrchestrator:
                     else None
                 ),
             )
+            if persisted.target_type == "document" and persisted.selection is not None:
+                target["selection"] = persisted.selection
             return create_document_focus(
                 mode=("request" if persisted.mode == "request" else "pinned"),
+                behavior=persisted.behavior,
                 created_at=persisted.created_at,
                 **target,
             )
@@ -302,3 +319,37 @@ class AgentOrchestrator:
                 f"{context.session_id}: {exc}"
             )
             return None
+
+    async def _resolve_document_selection_context(
+        self,
+        context: SessionRuntime,
+        focus: Optional[DocumentFocus],
+    ) -> Optional[Dict]:
+        """Read the request-selected passage for prompt context.
+
+        The focus model carries only versioned identity and coordinates. The
+        excerpt is loaded from the document service for this run and is never
+        accepted from the public request.
+        """
+        if (
+            focus is None
+            or focus.target_type != "document"
+            or focus.selection is None
+            or context.document_service is None
+        ):
+            return None
+        result = await context.document_service.resolve_document_selection(
+            document_id=focus.document_id,
+            selection=focus.selection,
+        )
+        return {
+            "document_id": result["document_id"],
+            "project_id": result["project_id"],
+            "relative_path": result["relative_path"],
+            "document_name": result["document_name"],
+            "extension": result["extension"],
+            "chunk_index": result.get("chunk_index"),
+            "content_hash": result["content_hash"],
+            "locator": result["locator"],
+            "excerpt": result["content"],
+        }

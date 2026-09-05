@@ -1,7 +1,11 @@
 import os
 from pathlib import Path
+from uuid import uuid4
 
+import psycopg
 import pytest
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from infrastructure.postgres_client import PostgresClient
 
@@ -11,10 +15,54 @@ DB_URL = os.environ.get(
 )
 
 
+def _database_url(database: str) -> str:
+    params = conninfo_to_dict(DB_URL)
+    params["dbname"] = database
+    return make_conninfo(**params)
+
+
+@pytest.fixture(scope="session")
+def storage_database_url():
+    """Create one canonical fresh database for the storage contract session."""
+
+    database = f"knoggin_storage_{uuid4().hex[:12]}"
+    admin_url = _database_url("postgres")
+    database_url = _database_url(database)
+    schema_sql = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "infrastructure"
+        / "schema.sql"
+    ).read_text(encoding="utf-8")
+
+    with psycopg.connect(admin_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+    try:
+        with psycopg.connect(database_url, autocommit=True) as connection:
+            connection.execute("CREATE EXTENSION vector")
+            connection.execute("CREATE EXTENSION age")
+            connection.execute("LOAD 'age'")
+            connection.execute('SET search_path = ag_catalog, "$user", public')
+            connection.execute(schema_sql)
+            connection.execute("SELECT ag_catalog.create_graph('knoggin_graph')")
+        yield database_url
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as admin:
+            admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database,),
+            )
+            admin.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database))
+            )
+
+
 @pytest.fixture
-async def real_postgres_client():
-    """Provides a connected PostgresClient against the real test database."""
-    client = PostgresClient(dsn=DB_URL, min_size=1, max_size=2)
+async def real_postgres_client(storage_database_url):
+    """Provide a clean client without replaying schema migrations per test."""
+
+    client = PostgresClient(dsn=storage_database_url, min_size=1, max_size=2)
     await client.connect()
     try:
         await _reset_storage_db(client)
@@ -23,58 +71,26 @@ async def real_postgres_client():
         await client.close()
 
 
-@pytest.fixture
-async def clean_db(real_postgres_client):
-    """Wipes relational tables and the AGE graph before every test."""
-    await _reset_storage_db(real_postgres_client)
-
-
 async def _reset_storage_db(client: PostgresClient):
-    """Wipe relational tables and the AGE graph, then seed baseline projects."""
-    schema_sql = (
-        Path(__file__).resolve().parents[3]
-        / "src"
-        / "infrastructure"
-        / "schema.sql"
-    ).read_text(encoding="utf-8")
-    await client.execute(schema_sql)
+    """Truncate canonical tables, seed projects, and wipe the AGE projection."""
+
     await client.execute(
         """
-        TRUNCATE TABLE
-            project_read_scopes,
-            agent_tool_audits,
-            episode_relationships,
-            episode_entities,
-            episode_messages,
-            episode_processing_checkpoints,
-            episodes,
-            agent_brain_snapshots,
-            agents,
-            message_source_refs,
-            project_artifact_revisions,
-            project_artifacts,
-            document_chunks,
-            project_documents,
-            document_folder_uploads,
-            document_workspace_sources,
-            project_document_scan_settings,
-            entity_merge_audits,
-            entity_merge_proposals,
-            relationship_advisory_decisions,
-            relationship_advisories,
-            human_reviews,
-            conflict_evidence_refs,
-            conflict_groups,
-            conflict_discovery_checkpoints,
-            relationship_observations,
-            message_entity_refs,
-            relationships,
-            entity_aliases,
-            entities,
-            messages,
-            sessions,
-            projects
-        RESTART IDENTITY CASCADE;
+        DO $$
+        DECLARE
+            table_names TEXT;
+        BEGIN
+            SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
+            INTO table_names
+            FROM pg_tables
+            WHERE schemaname = 'public';
+
+            IF table_names IS NOT NULL THEN
+                EXECUTE 'TRUNCATE TABLE ' || table_names
+                    || ' RESTART IDENTITY CASCADE';
+            END IF;
+        END
+        $$;
         """
     )
     await client.execute(

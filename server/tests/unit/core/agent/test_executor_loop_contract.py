@@ -7,6 +7,7 @@ from common.exceptions import LLMProviderError
 from common.schema.agent.identity import AgentConfig
 from core.agent.executor import AgentExecutor
 from core.agent.executor import _ToolCall as ToolCall
+from core.agent.prompt_context import build_evidence_context
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
 
@@ -154,12 +155,18 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
     assert "CURRENT EXECUTION PHASE: EXECUTE" in llm.calls[1]["system"]
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert [schema["function"]["name"] for schema in llm.calls[-1]["tools"]] == [
+        "request_clarification",
+        "submit_answer",
+    ]
     assert run.attempt_count == 4
     assert run.call_count == 2
-    assert run.messages == [
-        {"id": "message-1", "message": "Profile changed", "score": 0.9}
-    ]
-    assert run.graph == [{"source": "Knoggin", "target": "Profile"}]
+    assert run.notebook.section_items("messages") == (
+        {"id": "message-1", "message": "Profile changed", "score": 0.9},
+    )
+    assert run.notebook.section_items("relationships") == (
+        {"source": "Knoggin", "target": "Profile"},
+    )
     assert run.usage["total_tokens"] == 20
     assert run.sealed is True
     run.release()
@@ -191,14 +198,130 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
 
     events = [event async for event in executor._execute_run()]
 
-    assert events[-1]["data"]["content"] == "No matching evidence."
+    assert events[-1]["data"]["content"] == "Still looking."
+    assert [call["model"] for call in llm.calls] == ["architect", "architect"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+
+
+@pytest.mark.no_network
+async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
+    monkeypatch,
+):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "profile", "limit": 3}',
+                    "search-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft answer."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final answer."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=2, max_calls=2))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def evidence_result(*_args):
+        return {
+            "data": [
+                {"id": "message-1", "message": "Profile changed", "score": 0.9}
+            ]
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", evidence_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["data"]["content"] == "Final answer."
     assert [call["model"] for call in llm.calls] == [
         "architect",
-        "architect",
+        "librarian",
         "architect",
     ]
-    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
-    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    assert run.attempt_count == 3
+    assert run.synthesis_attempt_count == 1
+
+
+@pytest.mark.no_network
+async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "load_topic_context",
+                    '{"topics": ["Work", "Finance"]}',
+                    "topics-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft answer."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final answer."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=3, max_calls=2))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def topic_context_result(*_args):
+        return {
+            "data": {
+                "Work": {
+                    "entities": [{"name": "Acme"}],
+                    "messages": [
+                        {
+                            "id": "msg_7",
+                            "message": "The offer changes compensation.",
+                        }
+                    ],
+                }
+            }
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", topic_context_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["data"]["content"] == "Final answer."
+    assert "load_topic_context" in [
+        schema["function"]["name"] for schema in llm.calls[0]["tools"]
+    ]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    messages = run.notebook.model_view()["messages"]
+    assert messages[0]["id"] == "msg_7"
+    assert messages[0]["context"][0]["content"] == (
+        "The offer changes compensation."
+    )
 
 
 @pytest.mark.no_network
@@ -238,7 +361,95 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     assert errors[1]["data"]["error"] == "Call limit reached for search_messages"
     assert run.call_count == 2
     assert run.tool_call_counts == {"search_messages": 2}
-    assert [item["id"] for item in run.messages] == ["one", "two"]
+    assert [item["id"] for item in run.notebook.model_view()["messages"]] == [
+        "one",
+        "two",
+    ]
+
+
+@pytest.mark.no_network
+async def test_fallback_summary_uses_all_canonical_evidence_categories():
+    llm = ScriptedLLM([])
+    run = make_run()
+    run.notebook.apply(
+        "episode_check",
+        {
+            "data": {
+                "resolution": "direct",
+                "results": [
+                    {
+                        "entity_name": "Ada",
+                        "episodes": [
+                            {"episode_id": "ep-1", "summary": "Found clue"}
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    run.notebook.apply(
+        "find_path",
+        {"data": [{"entity_a": "Ada", "entity_b": "Knoggin", "step": 0}]},
+    )
+    run.notebook.apply(
+        "web_search",
+        {
+            "data": [
+                {
+                    "title": "Useful source",
+                    "url": "https://example.test/source",
+                    "snippet": "Useful evidence.",
+                    "source_kind": "web_search_result",
+                }
+            ]
+        },
+    )
+    run.notebook.set_summary("Previously compacted evidence.")
+    prompts = []
+
+    async def capture_summary(**kwargs):
+        prompts.append(kwargs["user"])
+        return "Fallback answer."
+
+    llm.generate_text = capture_summary
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    event = await executor._fallback()
+
+    assert event["data"]["content"] == "Fallback answer."
+    assert prompts
+    prompt = prompts[0]
+    assert "Core Evidence Summary" in prompt
+    assert "Episode Check" in prompt
+    assert "Path: Ada -> Knoggin" in prompt
+    assert "Useful source" in prompt
+
+
+@pytest.mark.no_network
+async def test_compaction_token_count_matches_post_compaction_context(monkeypatch):
+    llm = ScriptedLLM([])
+    run = make_run()
+    run.notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m1", "message": "A retained message"}]},
+    )
+    run.notebook.apply(
+        "search_entity",
+        {"data": [{"id": "p1", "canonical_name": "Ada"}]},
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def summarize(_evidence):
+        return "Condensed evidence."
+
+    monkeypatch.setattr(executor, "_generate_evidence_summary", summarize)
+    monkeypatch.setattr("core.agent.executor.MAX_TOKEN_CHUNK_SIZE", 1)
+
+    await executor._manage_context_size()
+
+    assert run.evidence_token_count == llm.count_tokens(
+        build_evidence_context(run)
+    )
 
 
 @pytest.mark.no_network

@@ -24,12 +24,19 @@ class DispatchTools:
         self.calls.append(("search_entity", query, limit))
         return [{"id": 1, "query": query}]
 
-    async def get_recent_activity(self, entity_name, hours=None):
-        self.calls.append(("get_recent_activity", entity_name, hours))
-        return [{"entity": entity_name}]
+    async def load_topic_context(self, topics):
+        self.calls.append(("load_topic_context", topics))
+        return {
+            topic: {"entities": [{"name": topic}], "messages": []}
+            for topic in topics
+        }
 
-    async def episode_check(self, query, entity_name=None):
-        self.calls.append(("episode_check", query, entity_name))
+    async def get_recent_activity(self, entity_id, hours=None):
+        self.calls.append(("get_recent_activity", entity_id, hours))
+        return [{"entity_id": entity_id}]
+
+    async def episode_check(self, query, entity_id=None):
+        self.calls.append(("episode_check", query, entity_id))
         return {"resolution": "exact"}
 
     async def read_episode(self, episode_id):
@@ -56,33 +63,6 @@ class DispatchTools:
         )
         return [{"url": url, "content": "page lines"}]
 
-    async def list_folder_uploads(self, visibility_scope=None, limit=25):
-        self.calls.append(
-            ("list_folder_uploads", visibility_scope, limit)
-        )
-        return [{"folder_root_id": "folder-1"}]
-
-    async def get_folder_upload_summary(self, folder_root_id):
-        self.calls.append(("get_folder_upload_summary", folder_root_id))
-        return {"folder_root_id": folder_root_id}
-
-    async def list_folder_tree(
-        self,
-        folder_root_id,
-        path_prefix=None,
-        max_depth=3,
-        use_focus=True,
-    ):
-        self.calls.append(
-            (
-                "list_folder_tree",
-                folder_root_id,
-                path_prefix,
-                max_depth,
-                use_focus,
-            )
-        )
-        return [{"name": "src", "type": "directory"}]
 
     async def broken(self):
         raise RuntimeError("method exploded")
@@ -100,12 +80,17 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     activity = await execute_tool(
         tools,
         "get_recent_activity",
-        {"entity_name": "Knoggin", "hours": "48"},
+        {"entity_id": "7", "hours": "48"},
     )
     entity = await execute_tool(
         tools,
         "search_entity",
         {"query": 99, "limit": "2"},
+    )
+    topic_context = await execute_tool(
+        tools,
+        "load_topic_context",
+        {"topics": ["Work", "Finance"]},
     )
     file_content = await execute_tool(
         tools,
@@ -127,30 +112,10 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         "read_web_page",
         {"url": "https://example.test/report.pdf", "page_number": "2"},
     )
-    uploads = await execute_tool(
-        tools,
-        "list_folder_uploads",
-        {"visibility_scope": "project", "limit": "7"},
-    )
-    summary = await execute_tool(
-        tools,
-        "get_folder_upload_summary",
-        {"folder_root_id": "folder-1"},
-    )
-    tree = await execute_tool(
-        tools,
-        "list_folder_tree",
-        {
-            "folder_root_id": "folder-1",
-            "path_prefix": "src",
-            "max_depth": "4",
-            "use_focus": "false",
-        },
-    )
     episode = await execute_tool(
         tools,
         "episode_check",
-        {"query": "What changed?", "entity_name": 7},
+        {"query": "What changed?", "entity_id": "7"},
     )
     expanded_episode = await execute_tool(
         tools,
@@ -159,8 +124,14 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     )
 
     assert result == {"data": [{"id": "msg_1"}]}
-    assert activity == {"data": [{"entity": "Knoggin"}]}
+    assert activity == {"data": [{"entity_id": 7}]}
     assert entity == {"data": [{"id": 1, "query": "99"}]}
+    assert topic_context == {
+        "data": {
+            "Work": {"entities": [{"name": "Work"}], "messages": []},
+            "Finance": {"entities": [{"name": "Finance"}], "messages": []},
+        }
+    }
     assert file_content == {
         "data": [{"document_id": "file-1", "content": "lines"}]
     }
@@ -173,15 +144,13 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     assert pdf_page_content == {
         "data": [{"url": "https://example.test/report.pdf", "content": "page lines"}]
     }
-    assert uploads == {"data": [{"folder_root_id": "folder-1"}]}
-    assert summary == {"data": {"folder_root_id": "folder-1"}}
-    assert tree == {"data": [{"name": "src", "type": "directory"}]}
     assert episode == {"data": {"resolution": "exact"}}
     assert expanded_episode == {"data": [{"id": "42"}]}
     assert tools.calls == [
         ("search_messages", "1234", 5),
-        ("get_recent_activity", "Knoggin", 48),
+        ("get_recent_activity", 7, 48),
         ("search_entity", "99", 2),
+        ("load_topic_context", ["Work", "Finance"]),
         ("read_document", "file-1", None, 2, 4),
         ("read_web_page", "https://example.test/report", 2, 5, None, None),
         (
@@ -193,10 +162,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
             None,
         ),
         ("read_web_page", "https://example.test/report.pdf", None, 150, None, 2),
-        ("list_folder_uploads", "project", 7),
-        ("get_folder_upload_summary", "folder-1"),
-        ("list_folder_tree", "folder-1", "src", 4, False),
-        ("episode_check", "What changed?", "7"),
+        ("episode_check", "What changed?", 7),
         ("read_episode", "42"),
     ]
 
@@ -212,6 +178,14 @@ def test_read_web_page_registry_definition_matches_schema_and_default_limit():
         "read_web_page",
         ("url", "start_line", "max_lines", "query", "page_number"),
     )
+
+
+@pytest.mark.no_network
+def test_entity_search_schema_routes_memory_questions_to_episode_check_first():
+    description = TOOL_SCHEMAS_BY_NAME["search_entity"]["function"]["description"]
+
+    assert "episode_check first" in description
+    assert "starting point for almost every query" not in description
 
 
 @pytest.mark.no_network

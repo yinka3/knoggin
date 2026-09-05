@@ -61,53 +61,32 @@ async def test_insert_document_uses_public_transaction_contract():
 
     await writer.insert_document(
         document_id="11111111-1111-4111-8111-111111111111",
-        session_id=None,
-        visibility_scope="project",
         original_name="notes.md",
         relative_path="notes.md",
         extension=".md",
         size_bytes=5,
         content_hash="hash",
-        content=b"hello",
         created_at="2026-07-12T00:00:00+00:00",
     )
 
     assert client.transaction_count == 1
-    assert len(client.cursor.calls) == 2
+    assert len(client.cursor.calls) == 1
     assert "INSERT INTO public.project_documents" in client.cursor.calls[0][0]
-    assert "INSERT INTO public.document_content" in client.cursor.calls[1][0]
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-@pytest.mark.parametrize("operation", ["workspace", "single_document"])
-async def test_document_writer_rejects_mismatched_chunk_embedding_lists(operation):
+async def test_document_writer_rejects_mismatched_chunk_embedding_lists():
     client = TransactionOnlyClient()
     writer = DocumentWriter(client, "project-1")
 
     with pytest.raises(ValueError, match=_MISMATCH_ERROR):
-        if operation == "workspace":
-            await writer.persist_workspace_indexed_documents(
-                documents=[
-                    {
-                        "document_id": "document-1",
-                        "relative_path": "notes.md",
-                        "content_hash": "hash",
-                        "extracted_text": "notes",
-                        "chunks": ["chunk"],
-                        "embeddings": [],
-                    }
-                ],
-                indexed_at="2026-07-23T00:00:00+00:00",
-            )
-        else:
-            await writer.persist_indexed_chunks(
-                document_id="document-1",
-                session_id=None,
-                chunks=["chunk"],
-                embeddings=[],
-                extracted_text="notes",
-                indexed_at="2026-07-23T00:00:00+00:00",
-            )
+        await writer.persist_indexed_chunks(
+            document_id="document-1",
+            chunks=["chunk"],
+            embeddings=[],
+            extracted_text="notes",
+            indexed_at="2026-07-23T00:00:00+00:00",
+        )
 
     assert client.transaction_count == 0

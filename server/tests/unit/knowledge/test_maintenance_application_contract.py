@@ -1,0 +1,727 @@
+import asyncio
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+
+from common.conf.domain_config import DomainConfig
+from common.schema.evidence import (
+    EvidenceBundle,
+    EvidenceEdge,
+    EvidenceNode,
+    EvidencePointer,
+    EvidenceSubject,
+)
+from core.knowledge.db.writers.relationship_interpretation_writer import (
+    RelationshipInterpretationResult,
+    RelationshipInterpretationWriter,
+)
+from core.knowledge.entity.maintenance_service import EntityMaintenanceService
+from core.knowledge.evidence_service import EvidenceService
+from core.knowledge.maintenance_reviews import (
+    ConflictResolutionPlan,
+    EntityMergePlan,
+    MaintenanceReview,
+    RelationshipInterpretationChange,
+    RelationshipInterpretationPlan,
+)
+from core.project.maintenance_service import ProjectMaintenanceService
+from core.project.project_manager import ProjectManager
+from tests.fixtures.fakes import RecordingPostgresClient
+
+
+def _domain() -> DomainConfig:
+    return DomainConfig.from_mapping(
+        {
+            "version": 1,
+            "topics": {"General": {}},
+            "entity_types": {
+                "Concept": {"topic": "General", "labels": ["concept"]}
+            },
+            "relationships": {
+                "RELATED_TO": {
+                    "source_types": ["Concept"],
+                    "target_types": ["Concept"],
+                }
+            },
+        }
+    )
+
+
+def _relationship_review(*, status: str = "open") -> MaintenanceReview:
+    return MaintenanceReview(
+        review_id="review-1",
+        user_name="ada",
+        scope="project",
+        project_id="project-1",
+        kind="relationship_interpretation",
+        reasoning="The observed relationship should use the project definition.",
+        proposed_plan=RelationshipInterpretationPlan(
+            changes=[
+                RelationshipInterpretationChange(
+                    observation_id=10,
+                    expected_relationship_id="old",
+                    target_relationship_type="RELATED_TO",
+                    interpretation_source="review",
+                )
+            ]
+        ),
+        expected_state={"domain_version": 1},
+        status=status,
+    )
+
+
+class _ReviewStore:
+    def __init__(self, review: MaintenanceReview):
+        self.review = review
+        self.transitions = []
+
+    async def get(self, review_id, **kwargs):
+        assert review_id == self.review.review_id
+        return self.review
+
+    async def transition(self, review_id, **kwargs):
+        self.transitions.append((review_id, kwargs))
+        self.review = self.review.model_copy(update={"status": kwargs["status"]})
+        return self.review
+
+
+class _DomainStore:
+    async def load(self, user_name, project_id):
+        assert (user_name, project_id) == ("ada", "project-1")
+        return _domain()
+
+
+class _InterpretationWriter:
+    def __init__(self, reviews: _ReviewStore):
+        self.reviews = reviews
+        self.calls = []
+
+    async def apply_plan(self, **kwargs):
+        self.calls.append(kwargs)
+        await self.reviews.transition(
+            kwargs["review_id"],
+            status="applied",
+        )
+        return RelationshipInterpretationResult(1, 0, 0, 0, "audit-1")
+
+
+async def _active_project(_project_id):
+    return {"project_id": "project-1", "status": "active"}
+
+
+def _project_service(review: MaintenanceReview):
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(postgres=object(), knowledge_store=object()),
+        user_name="ada",
+        project_lookup=_active_project,
+        active_projects={},
+        project_leases={},
+    )
+    reviews = _ReviewStore(review)
+    service._maintenance_reviews = reviews
+    service._domain_store = _DomainStore()
+    service._relationship_interpretation_writer = _InterpretationWriter(reviews)
+    return service, reviews
+
+
+@pytest.mark.no_network
+async def test_review_detail_separates_snapshot_from_current_evidence():
+    pointer = EvidencePointer.for_observation(10)
+    bundle = EvidenceBundle(
+        subject=EvidenceSubject(
+            kind="relationship_observation", identifier="10"
+        ),
+        nodes=(EvidenceNode(pointer=pointer, label="works at", status="active"),),
+        edges=(),
+        total_nodes=1,
+        total_edges=0,
+        state_token="1" * 64,
+    )
+    review = _relationship_review().model_copy(
+        update={
+            "evidence_refs": [pointer],
+            "evidence_snapshot": EvidenceService.snapshot((bundle,)),
+        }
+    )
+    service, _reviews = _project_service(review)
+
+    class Store:
+        async def get_relationship_observations_evidence(self, *args, **kwargs):
+            return (bundle,)
+
+    service.resources.knowledge_store = Store()
+
+    detail = await service.get_maintenance_review_detail("project-1", "review-1")
+
+    assert detail.stored_snapshot == review.evidence_snapshot
+    assert detail.current_evidence == (bundle,)
+    assert detail.evidence_state == "current"
+
+
+@pytest.mark.no_network
+async def test_changed_evidence_prevents_apply_before_canonical_mutation():
+    observation = EvidencePointer.for_observation(10)
+    block = EvidencePointer(kind="context_block", identifier=str(uuid4()))
+
+    def bundle(token):
+        return EvidenceBundle(
+            subject=EvidenceSubject(
+                kind="relationship_observation", identifier="10"
+            ),
+            nodes=(
+                EvidenceNode(pointer=observation, status="active"),
+                EvidenceNode(pointer=block, content_hash="1" * 64),
+            ),
+            edges=(
+                EvidenceEdge(
+                    source=block,
+                    target=observation,
+                    relation="supports_relationship_observation",
+                ),
+            ),
+            total_nodes=2,
+            total_edges=1,
+            state_token=token,
+        )
+
+    captured = bundle("1" * 64)
+    changed = bundle("2" * 64)
+    review = _relationship_review().model_copy(
+        update={
+            "evidence_refs": [observation],
+            "evidence_snapshot": EvidenceService.snapshot((captured,)),
+        }
+    )
+    service, _reviews = _project_service(review)
+
+    class Store:
+        async def get_relationship_observations_evidence(self, *args, **kwargs):
+            return (changed,)
+
+    service.resources.knowledge_store = Store()
+
+    with pytest.raises(ValueError, match="evidence changed"):
+        await service.transition_maintenance_review(
+            "project-1", "review-1", status="applied"
+        )
+
+    assert service._relationship_interpretation_writer.calls == []
+
+
+@pytest.mark.no_network
+async def test_retrying_a_semantic_window_keeps_the_durable_window_and_wakes_its_owner():
+    service, _reviews = _project_service(_relationship_review())
+    retried = SimpleNamespace(window_id="window-1", stage="context_committed")
+    calls = []
+
+    class Store:
+        async def retry_project_semantic_window(self, **kwargs):
+            calls.append(kwargs)
+            return retried
+
+    class Runtime:
+        def __init__(self):
+            self.wakes = 0
+
+        def signal_semantic_work(self):
+            self.wakes += 1
+            return True
+
+    runtime = Runtime()
+    service.resources.knowledge_store = Store()
+    service._active_projects["project-1"] = runtime
+
+    result = await service.retry_semantic_window("project-1", "window-1")
+
+    assert result is retried
+    assert calls == [
+        {
+            "window_id": "window-1",
+            "user_name": "ada",
+            "project_id": "project-1",
+        }
+    ]
+    assert runtime.wakes == 1
+
+
+@pytest.mark.no_network
+async def test_applying_relationship_review_executes_plan_before_applied_status():
+    service, reviews = _project_service(_relationship_review())
+
+    result = await service.transition_maintenance_review(
+        "project-1",
+        "review-1",
+        status="applied",
+        expected_state={"domain_version": 1},
+    )
+
+    assert result.status == "applied"
+    assert service._relationship_interpretation_writer.calls[0]["review_id"] == (
+        "review-1"
+    )
+    assert reviews.transitions[-1][1]["status"] == "applied"
+
+
+@pytest.mark.no_network
+async def test_applying_relationship_review_uses_project_maintenance_lock():
+    service, _reviews = _project_service(_relationship_review())
+    await service.lock.acquire()
+    task = asyncio.create_task(
+        service.transition_maintenance_review(
+            "project-1",
+            "review-1",
+            status="applied",
+        )
+    )
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert service._relationship_interpretation_writer.calls == []
+    finally:
+        service.lock.release()
+    result = await task
+    assert result.status == "applied"
+
+
+@pytest.mark.no_network
+async def test_generic_applied_transition_rejects_plan_with_dedicated_workflow():
+    review = _relationship_review().model_copy(
+        update={
+            "kind": "relationship_conflict",
+            "proposed_plan": ConflictResolutionPlan(
+                conflict_kind="possible_contradiction"
+            ),
+        }
+    )
+    service, reviews = _project_service(review)
+
+    with pytest.raises(ValueError, match="dedicated maintenance operation"):
+        await service.transition_maintenance_review(
+            "project-1",
+            "review-1",
+            status="applied",
+        )
+
+    assert reviews.transitions == []
+
+
+@pytest.mark.no_network
+async def test_relationship_review_requires_a_valid_domain_version_snapshot():
+    review = _relationship_review().model_copy(
+        update={"expected_state": {"domain_version": True}}
+    )
+    service, reviews = _project_service(review)
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        await service.transition_maintenance_review(
+            "project-1",
+            "review-1",
+            status="applied",
+        )
+
+    assert reviews.transitions == []
+
+
+@pytest.mark.no_network
+async def test_dismissal_remains_a_status_only_transition():
+    service, reviews = _project_service(_relationship_review())
+
+    result = await service.transition_maintenance_review(
+        "project-1",
+        "review-1",
+        status="dismissed",
+        reason="Not applicable",
+    )
+
+    assert result.status == "dismissed"
+    assert service._relationship_interpretation_writer.calls == []
+    assert reviews.transitions[-1][1]["status"] == "dismissed"
+
+
+@pytest.mark.no_network
+async def test_reviewed_relationship_plan_rejects_all_changes_before_mutation():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                {
+                    "observation_id": 10,
+                    "relationship_id": "changed",
+                    "project_id": "project-1",
+                    "source_entity_id": 2,
+                    "target_entity_id": 3,
+                    "relationship_type": "RELATED_TO",
+                    "symmetric": False,
+                    "source_type": "Concept",
+                    "target_type": "Concept",
+                }
+            ]
+        ]
+    )
+    writer = RelationshipInterpretationWriter(client)
+
+    with pytest.raises(ValueError, match="review is stale"):
+        await writer.apply_plan(
+            user_name="ada",
+            project_id="project-1",
+            plan=_relationship_review().proposed_plan,
+            review_id="review-1",
+        )
+
+    assert not any(
+        "UPDATE public.relationship_observations" in query
+        for kind, query, _params in client.calls
+        if kind == "execute"
+    )
+
+
+class _MergeReviewStore:
+    def __init__(self, review):
+        self.review = review
+
+    async def get(self, review_id, **_kwargs):
+        return self.review if review_id == self.review.review_id else None
+
+
+@pytest.mark.no_network
+async def test_global_merge_review_uses_stored_plan_and_expected_state(monkeypatch):
+    service = EntityMaintenanceService(
+        postgres=RecordingPostgresClient(),
+        user_name="ada",
+    )
+    plan = EntityMergePlan(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+        expected_state_hash="hash-1",
+    )
+    review = MaintenanceReview(
+        review_id="review-merge",
+        user_name="ada",
+        scope="user-global",
+        project_id=None,
+        kind="entity_merge",
+        reasoning="The evidence identifies one entity.",
+        proposed_plan=plan,
+        expected_state={"state_hash": "hash-1"},
+    )
+    service.review_writer = _MergeReviewStore(review)
+    calls = []
+
+    async def merge(received_plan, **kwargs):
+        calls.append((received_plan, kwargs))
+        return {
+            "merge_id": "merge-1",
+            "affected_project_ids": ["project-1"],
+            "survivor_entity_id": 2,
+            "retired_entity_id": 3,
+        }
+
+    monkeypatch.setattr(service, "merge", merge)
+
+    result = await service.apply_merge_review(
+        "review-merge",
+        expected_state={"state_hash": "hash-1"},
+    )
+
+    assert result["review_id"] == "review-merge"
+    assert calls == [
+        (
+            plan,
+            {
+                "user_name": None,
+                "expected_state_hash": "hash-1",
+                "review_id": "review-merge",
+                "review_expected_state": {"state_hash": "hash-1"},
+            },
+        )
+    ]
+
+
+class _EntityCache:
+    def __init__(self):
+        self.removed = []
+
+    def remove_entities(self, entity_ids):
+        self.removed.append(entity_ids)
+        return len(entity_ids)
+
+
+class _EntityService:
+    async def apply_merge_review(self, review_id, **_kwargs):
+        assert review_id == "review-merge"
+        return {
+            "merge_id": "merge-1",
+            "affected_project_ids": ["project-1"],
+            "survivor_entity_id": 2,
+            "retired_entity_id": 3,
+        }
+
+    async def rollback(self, merge_id, **_kwargs):
+        assert merge_id == "merge-1"
+        return {
+            "merge_id": merge_id,
+            "affected_project_ids": ["project-1"],
+            "survivor_entity_id": 2,
+            "retired_entity_id": 3,
+            "applied_mutation_ids": [1],
+        }
+
+
+@pytest.mark.no_network
+async def test_project_manager_invalidates_affected_live_entity_cache():
+    manager = ProjectManager.__new__(ProjectManager)
+    manager.entity_maintenance_service = _EntityService()
+    manager.maintenance_service = SimpleNamespace(lock=__import__("asyncio").Lock())
+    cache = _EntityCache()
+    manager.active_projects = {"project-1": SimpleNamespace(entities=cache)}
+
+    result = await manager.apply_global_entity_merge_review("review-merge")
+
+    assert cache.removed == [[2, 3]]
+    assert result["runtime_cache_invalidations"] == {"project-1": 2}
+
+
+@pytest.mark.no_network
+async def test_project_manager_invalidates_cache_after_rollback():
+    manager = ProjectManager.__new__(ProjectManager)
+    manager.entity_maintenance_service = _EntityService()
+    manager.maintenance_service = SimpleNamespace(lock=__import__("asyncio").Lock())
+    cache = _EntityCache()
+    manager.active_projects = {"project-1": SimpleNamespace(entities=cache)}
+
+    result = await manager.rollback_global_entity_merge("merge-1")
+
+    assert cache.removed == [[2, 3]]
+    assert result["runtime_cache_invalidations"] == {"project-1": 2}
+
+
+class _RollbackWriter:
+    async def plan_rollback(self, **_kwargs):
+        return {
+            "merge_id": "merge-1",
+            "survivor_entity_id": 2,
+            "retired_entity_id": 3,
+            "affected_project_ids": ["project-1", "project-2"],
+            "safe_mutation_ids": [1],
+            "conflicting_mutations": [],
+            "already_applied_mutation_ids": [],
+            "mutations": [{"mutation_id": 1}],
+        }
+
+    async def rollback_safe(self, **_kwargs):
+        return {
+            "merge_id": "merge-1",
+            "survivor_entity_id": 2,
+            "retired_entity_id": 3,
+            "affected_project_ids": ["project-1", "project-2"],
+            "applied_mutation_ids": [1],
+            "rolled_back": True,
+            "concurrent_conflicts": [],
+        }
+
+    async def record_projection_repair_state(self, merge_id, *, repair_pending):
+        self.projection_repair_state = (merge_id, repair_pending)
+
+
+class _ProjectionBuilder:
+    def __init__(self):
+        self.calls = []
+
+    async def rebuild_project_projection(self, project_id, user_name):
+        self.calls.append((project_id, user_name))
+        return {"entities": 1, "relationships": 0}
+
+
+@pytest.mark.no_network
+async def test_rollback_rebuilds_every_affected_projection():
+    service = EntityMaintenanceService(postgres=object(), user_name="ada")
+    service.writer = _RollbackWriter()
+    service.projection_rebuilder = _ProjectionBuilder()
+
+    result = await service.rollback("merge-1")
+
+    assert result["rolled_back"] is True
+    assert result["projection_errors"] == []
+    assert service.projection_rebuilder.calls == [
+        ("project-1", "ada"),
+        ("project-2", "ada"),
+    ]
+
+
+@pytest.mark.no_network
+async def test_projection_repair_rebuilds_only_derived_state():
+    class RepairWriter:
+        def __init__(self):
+            self.states = []
+
+        async def get_audit(self, merge_id):
+            return {
+                "merge_id": merge_id,
+                "user_name": "ada",
+                "status": "executed",
+                "survivor_entity_id": 2,
+                "retired_entity_id": 3,
+                "affected_project_ids": ["project-1"],
+            }
+
+        async def record_projection_repair_state(self, merge_id, *, repair_pending):
+            self.states.append((merge_id, repair_pending))
+
+    service = EntityMaintenanceService(postgres=object(), user_name="ada")
+    service.writer = RepairWriter()
+    service.projection_rebuilder = _ProjectionBuilder()
+
+    result = await service.repair_merge_projections("merge-1")
+
+    assert result["canonical_status"] == "executed"
+    assert result["projection_repaired"] is True
+    assert service.projection_rebuilder.calls == [("project-1", "ada")]
+    assert service.writer.states == [("merge-1", False)]
+
+
+class _AtomicMergeWriter:
+    def __init__(self):
+        self.cursor = None
+
+    async def merge(self, **kwargs):
+        self.cursor = kwargs["cur"]
+        return {
+            "merge_id": "merge-1",
+            "affected_project_ids": ["project-1"],
+            "survivor_entity_id": 2,
+            "retired_entity_id": 3,
+        }
+
+    async def record_projection_repair_state(self, merge_id, *, repair_pending):
+        self.repair_state = (merge_id, repair_pending)
+
+
+class _AtomicReviewWriter:
+    def __init__(self):
+        self.cursor = None
+
+    async def transition(self, _review_id, **kwargs):
+        self.cursor = kwargs["cur"]
+
+
+@pytest.mark.no_network
+async def test_merge_and_review_transition_share_one_transaction(monkeypatch):
+    client = RecordingPostgresClient()
+    service = EntityMaintenanceService(postgres=client, user_name="ada")
+    service.writer = _AtomicMergeWriter()
+    service.review_writer = _AtomicReviewWriter()
+    plan = EntityMergePlan(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+        frontier_tokens={"project-1": "frontier"},
+        definition_versions={"project-1": 1},
+        expected_state_hash="hash-1",
+    )
+
+    async def preview_merge(**_kwargs):
+        return {
+            "context_conflicts": [],
+            "state_hash": "hash-1",
+            "affected_project_ids": ["project-1"],
+            "frontiers": {"project-1": {"token": ""}},
+        }
+
+    async def true_frontier(*_args, **_kwargs):
+        return True
+
+    async def versions(*_args, **_kwargs):
+        return {"project-1": 1}
+
+    async def no_projection_errors(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(service, "preview_merge", preview_merge)
+    monkeypatch.setattr(service, "revalidate_frontier", true_frontier)
+    monkeypatch.setattr(service, "_definition_versions", versions)
+    monkeypatch.setattr(service, "_rebuild_projections", no_projection_errors)
+
+    await service.merge(
+        plan,
+        review_id="review-1",
+        review_expected_state={"state_hash": "hash-1"},
+    )
+
+    assert service.writer.cursor is service.review_writer.cursor
+    assert client.transaction_enters == 1
+
+
+@pytest.mark.no_network
+async def test_failed_merge_projection_repair_does_not_repeat_canonical_merge(monkeypatch):
+    class Writer(_AtomicMergeWriter):
+        def __init__(self):
+            super().__init__()
+            self.merge_calls = 0
+            self.states = []
+
+        async def merge(self, **kwargs):
+            self.merge_calls += 1
+            result = await super().merge(**kwargs)
+            self.merge_id = kwargs["merge_id"]
+            return result
+
+        async def get_audit(self, merge_id):
+            return {
+                "merge_id": merge_id,
+                "user_name": "ada",
+                "status": "executed",
+                "survivor_entity_id": 2,
+                "retired_entity_id": 3,
+                "affected_project_ids": ["project-1"],
+            }
+
+        async def record_projection_repair_state(self, merge_id, *, repair_pending):
+            self.states.append((merge_id, repair_pending))
+
+    class FailOnceProjection:
+        def __init__(self):
+            self.calls = 0
+
+        async def rebuild_project_projection(self, *_args):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("projection unavailable")
+            return {"entities": 1, "relationships": 0}
+
+    service = EntityMaintenanceService(
+        postgres=RecordingPostgresClient(), user_name="ada"
+    )
+    service.writer = Writer()
+    service.projection_rebuilder = FailOnceProjection()
+
+    async def preview_merge(**_kwargs):
+        return {
+            "context_conflicts": [],
+            "state_hash": "hash-1",
+            "affected_project_ids": ["project-1"],
+            "frontiers": {"project-1": {"token": "frontier"}},
+        }
+
+    async def valid_frontier(*_args, **_kwargs):
+        return True
+
+    async def definition_versions(*_args, **_kwargs):
+        return {"project-1": 1}
+
+    monkeypatch.setattr(service, "preview_merge", preview_merge)
+    monkeypatch.setattr(service, "revalidate_frontier", valid_frontier)
+    monkeypatch.setattr(service, "_definition_versions", definition_versions)
+    plan = EntityMergePlan(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+        frontier_tokens={"project-1": "frontier"},
+        definition_versions={"project-1": 1},
+        expected_state_hash="hash-1",
+    )
+
+    merged = await service.merge(plan)
+    repaired = await service.repair_merge_projections(service.writer.merge_id)
+
+    assert merged["projection_errors"]
+    assert repaired["projection_repaired"] is True
+    assert service.writer.merge_calls == 1
+    assert [pending for _, pending in service.writer.states] == [True, False]

@@ -1,20 +1,22 @@
-from collections.abc import Callable, Iterable
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain
 from common.schema.artifacts import ArtifactDraft, ArtifactReference, ArtifactRevision
-from common.schema.episode.models import Episode, EpisodeCheckpoint
-from common.schema.ingestion.contracts import (
-    EntityWrite,
-    EpisodeEligibility,
-    ExecutionScope,
-    GraphWriteSummary,
-    IngestionCommit,
-    MessageEntityRef,
-    RelationshipWrite,
+from common.schema.context import (
+    ContextProjectionState,
+    ContextRevisionOrigin,
+    ContextRevisionRecord,
+    ContextSnapshot,
+)
+from common.schema.episode.models import Episode, EpisodeCard
+from common.schema.evidence import EvidenceBundle, EvidenceTraversalLimits
+from common.schema.semantic_window import (
+    SemanticWindowClaimResult,
+    SemanticWindowMessage,
+    SemanticWindowRecord,
+    SemanticWindowStage,
 )
 from common.schema.source.references import (
     AssistantMessageWithSources,
@@ -22,65 +24,48 @@ from common.schema.source.references import (
     SourceReference,
     SourceReferenceCandidate,
 )
-from core.knowledge.conflict_discovery import ConflictPacketBuilder
-from core.knowledge.conflict_service import ConflictService
-from core.knowledge.conflicts import (
-    ConflictDiscoveryPackage,
-    ConflictGroup,
-    ConflictOrigin,
-    ConflictResolutionKind,
-    ConflictWriteResult,
-)
+from core.knowledge.context.models import ContextMaterialization
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.db.id_allocator import IdAllocator
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.readers.artifact_reader import ArtifactReader
-from core.knowledge.db.readers.conflict_discovery_reader import (
-    ConflictDiscoveryReader,
-)
-from core.knowledge.db.readers.conflict_reader import ConflictReader
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.episode_reader import EpisodeReader
+from core.knowledge.db.readers.evidence_traversal_reader import EvidenceTraversalReader
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
-from core.knowledge.db.readers.merge_audit_reader import MergeAuditReader
 from core.knowledge.db.readers.message_reader import MessageReader
+from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.db.readers.relationship_observation_reader import (
     RelationshipObservationReader,
 )
+from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
-from core.knowledge.db.writers.conflict_writer import ConflictWriter
-from core.knowledge.db.writers.entity_merge_writer import EntityMergeWriter
 from core.knowledge.db.writers.entity_reclassification_writer import (
     EntityReclassificationWriter,
     HistoricalReclassificationResult,
 )
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
-from core.knowledge.db.writers.human_review_writer import HumanReviewWriter
-from core.knowledge.db.writers.merge_audit_writer import MergeAuditWriter
 from core.knowledge.db.writers.message_lifecycle_writer import (
-    IngestionClaim,
+    ExchangeClosure,
     MessageAcceptance,
     MessageLifecycleWriter,
 )
 from core.knowledge.db.writers.message_writer import MessageWriter
-from core.knowledge.db.writers.relationship_advisory_writer import (
-    RelationshipAdvisoryWriter,
-)
+from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.db.writers.relationship_reclassification_writer import (
     HistoricalRelationshipReclassificationResult,
     RelationshipReclassificationWriter,
 )
-from core.knowledge.db.writers.retention_writer import RetentionWriter
-from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
-from core.knowledge.human_reviews import HumanReview
-from core.knowledge.relationship_advisories import (
-    AdvisoryThresholds,
-    RelationshipAdvisory,
-    RelationshipAdvisoryDecision,
+from core.knowledge.db.writers.semantic_commit_writer import (
+    SemanticCommitSummary,
+    SemanticCommitWriter,
 )
+from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
+from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
@@ -109,44 +94,87 @@ class KnowledgeStore:
             self._postgres_client
         )
         self._episode_writer = EpisodeWriter(self._postgres_client)
-        self._entity_merge_writer = EntityMergeWriter(self._postgres_client)
         self._message_writer = MessageWriter(self._postgres_client)
         self._message_lifecycle_writer = MessageLifecycleWriter(
             self._postgres_client, self._message_writer
         )
-        self._human_review_writer = HumanReviewWriter(self._postgres_client)
-        self._conflict_writer = ConflictWriter(
-            self._postgres_client,
-            reviews=self._human_review_writer,
-        )
-        self._conflict_service = ConflictService(self._conflict_writer)
-        self._conflict_discovery_reader = ConflictDiscoveryReader(self._postgres_client)
-        self._conflict_reader = ConflictReader(self._postgres_client)
-        self._merge_audit_writer = MergeAuditWriter(self._postgres_client)
-        self._retention_writer = RetentionWriter(self._postgres_client)
-        self._relationship_advisory_writer = RelationshipAdvisoryWriter(
-            self._postgres_client,
-            reviews=self._human_review_writer,
-        )
         self._source_reference_writer = SourceReferenceWriter(self._postgres_client)
         self._artifact_writer = ArtifactWriter(self._postgres_client)
+        self._project_context_writer = ProjectContextWriter(self._postgres_client)
+        self._semantic_window_writer = SemanticWindowWriter(self._postgres_client)
+        self._semantic_commit_writer = SemanticCommitWriter(self._postgres_client)
         self._entity_reader = EntityReader(self._postgres_client)
+        self._evidence_service = EvidenceService(
+            EvidenceTraversalReader(self._postgres_client)
+        )
         self._episode_reader = EpisodeReader(self._postgres_client)
         self._graph_reader = GraphReader(self._postgres_client)
         self._message_reader = MessageReader(self._postgres_client)
         self._knowledge_query_reader = KnowledgeQueryReader(self._postgres_client)
-        self._merge_audit_reader = MergeAuditReader(self._postgres_client)
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._artifact_reader = ArtifactReader(self._postgres_client)
+        self._project_context_reader = ProjectContextReader(self._postgres_client)
         self._relationship_observation_reader = RelationshipObservationReader(
             self._postgres_client
         )
+        self._semantic_window_reader = SemanticWindowReader(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._embedding_rebuilder = EmbeddingRebuilder(
             self._postgres_client,
             embedding_service,
         )
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
+
+    async def get_relationship_observation_evidence(
+        self,
+        observation_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned observation."""
+
+        return await self._evidence_service.for_relationship_observation(
+            observation_id,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
+
+    async def get_context_block_evidence(
+        self,
+        block_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one project-owned Context block."""
+
+        return await self._evidence_service.for_context_block(
+            block_id,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
+
+    async def get_relationship_observations_evidence(
+        self,
+        observation_ids: list[int],
+        *,
+        user_name: str,
+        project_id: str,
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> tuple[EvidenceBundle, ...]:
+        """Return bounded provenance for a set of project observations."""
+
+        return await self._evidence_service.for_relationship_observations(
+            observation_ids,
+            user_name=user_name,
+            project_id=project_id,
+            limits=limits,
+        )
 
     async def save_message_logs(self, messages: List[Dict]) -> bool:
         return await self._message_writer.save_message_logs(messages)
@@ -158,193 +186,452 @@ class KnowledgeStore:
             message, edit_window_seconds=edit_window_seconds
         )
 
-    async def edit_user_message(
+    async def ensure_project_context(
         self,
         *,
         user_name: str,
         project_id: str,
-        session_id: str | None = None,
-        message_id: int,
-        content: str,
-    ) -> int:
-        return await self._message_lifecycle_writer.edit_user_message(
+    ) -> None:
+        """Initialize the project-owned Context root without creating a revision."""
+
+        await self._project_context_writer.ensure_context(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
-            message_id=message_id,
-            content=content,
         )
 
-    async def select_user_message_revision(
+    async def get_current_project_context_revision(
         self,
         *,
         user_name: str,
         project_id: str,
-        session_id: str | None = None,
-        message_id: int,
-        revision: int,
-    ) -> str:
-        return await self._message_lifecycle_writer.select_user_message_revision(
+    ) -> ContextRevisionRecord | None:
+        return await self._project_context_reader.get_current_revision(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
-            message_id=message_id,
-            revision=revision,
         )
 
-    async def seal_due_user_messages(
+    async def get_project_context_projection_state(
         self,
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
-        settle_delay_seconds: float,
-    ) -> List[int]:
-        return await self._message_lifecycle_writer.seal_due_user_messages(
+    ) -> ContextProjectionState | None:
+        return await self._project_context_reader.get_projection_state(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
-            settle_delay_seconds=settle_delay_seconds,
         )
 
-    async def reset_claimed_ingestion(
+    async def get_project_context_snapshot(
         self,
+        revision_id: str,
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
-    ) -> List[int]:
-        return await self._message_lifecycle_writer.reset_claimed_ingestion(
+    ) -> ContextSnapshot | None:
+        return await self._project_context_reader.get_snapshot(
+            revision_id,
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
         )
 
-    async def claim_next_ingestion_batch(
+    async def get_project_context_revision_impact_block_ids(
         self,
+        revision_id: str,
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
-        batch_size: int,
-    ) -> IngestionClaim | None:
-        return await self._message_lifecycle_writer.claim_next_batch(
+    ) -> frozenset:
+        return await self._project_context_reader.get_revision_impact_block_ids(
+            revision_id,
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
-            batch_size=batch_size,
         )
 
-    async def get_ingestion_queue_health(
+    async def get_project_context_block_supports(
+        self,
+        block_ids: list[str],
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> dict:
+        return await self._project_context_reader.get_block_supports(
+            block_ids,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_context_snapshot(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> ContextSnapshot | None:
+        """Reload a Context revision committed before its window checkpoint CAS."""
+
+        return await self._project_context_reader.get_window_snapshot(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def commit_project_context_revision(
         self,
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
+        expected_parent_revision_id: str | None,
+        window_id: str | None,
+        origin: ContextRevisionOrigin,
+        domain_version: int,
+        edit_summary: str,
+        materialization: ContextMaterialization,
+    ) -> ContextSnapshot:
+        return await self._project_context_writer.commit_revision(
+            user_name=user_name,
+            project_id=project_id,
+            expected_parent_revision_id=expected_parent_revision_id,
+            window_id=window_id,
+            origin=origin,
+            domain_version=domain_version,
+            edit_summary=edit_summary,
+            materialization=materialization,
+        )
+
+    async def record_project_context_projection(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        revision_id: str,
+        projection_hash: str,
+    ) -> bool:
+        return await self._project_context_writer.record_projection(
+            user_name=user_name,
+            project_id=project_id,
+            revision_id=revision_id,
+            projection_hash=projection_hash,
+        )
+
+    async def claim_project_semantic_window(
+        self,
+        window: SemanticWindowRecord,
+        messages: list[SemanticWindowMessage],
+    ) -> SemanticWindowClaimResult:
+        return await self._semantic_window_writer.claim_window(window, messages)
+
+    async def get_project_semantic_window(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> SemanticWindowRecord | None:
+        return await self._semantic_window_reader.get_window(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_messages(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[SemanticWindowMessage]:
+        return await self._semantic_window_reader.get_window_messages(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_active_project_semantic_window(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> SemanticWindowRecord | None:
+        return await self._semantic_window_reader.get_active_window(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_evidence_messages(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        return await self._semantic_window_reader.get_window_evidence_messages(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_assistant_source_refs(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        """Load assistant-owned source refs from frozen window membership only."""
+
+        return await self._semantic_window_reader.get_window_assistant_source_refs(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_episode_result(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[Episode] | None:
+        episode_ids = await self._semantic_window_reader.get_window_episode_ids(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+        if episode_ids is None:
+            return None
+        episodes: list[Episode] = []
+        for episode_id in episode_ids:
+            episode = await self._episode_reader.get_project_episode(
+                episode_id,
+                user_name=user_name,
+                project_id=project_id,
+            )
+            if episode is None:
+                raise RuntimeError("Semantic window references an unavailable episode")
+            episodes.append(episode)
+        return episodes
+
+    async def write_project_semantic_window_episodes(
+        self,
+        *,
+        window_id: str,
+        episodes: list[Episode],
+        window_messages: list[dict],
+        user_name: str,
+        project_id: str,
+    ) -> bool:
+        return await self._episode_writer.write_project_semantic_window_episodes(
+            window_id=window_id,
+            episodes=episodes,
+            window_messages=window_messages,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def enrich_project_semantic_window_episodes(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+    ) -> dict[str, int]:
+        """Attach active Context-backed Knowledge links after semantic commit."""
+
+        return await self._episode_writer.enrich_project_semantic_window_episodes(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_unclaimed_project_semantic_exchange_rows(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        """Load whole canonical exchanges for project-level semantic admission."""
+
+        return await self._semantic_window_reader.get_unclaimed_project_exchange_rows(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def advance_project_semantic_window_stage(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+        expected_stage: SemanticWindowStage,
+        next_stage: SemanticWindowStage,
+        context_revision_id: str | None = None,
+    ) -> bool:
+        return await self._semantic_window_writer.advance_stage(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+            expected_stage=expected_stage,
+            next_stage=next_stage,
+            context_revision_id=context_revision_id,
+        )
+
+    async def record_project_semantic_window_failure(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+        expected_stage: SemanticWindowStage,
+        failure_stage: str,
+        failure_code: str,
+        error_summary: str,
+        failed_at_ms: int,
+        next_retry_at_ms: int | None,
+    ) -> SemanticWindowRecord | None:
+        return await self._semantic_window_writer.record_failure(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+            expected_stage=expected_stage,
+            failure_stage=failure_stage,
+            failure_code=failure_code,
+            error_summary=error_summary,
+            failed_at_ms=failed_at_ms,
+            next_retry_at_ms=next_retry_at_ms,
+        )
+
+    async def retry_project_semantic_window(
+        self,
+        *,
+        window_id: str,
+        user_name: str,
+        project_id: str,
+    ) -> SemanticWindowRecord | None:
+        """Make one failed active window eligible for an operator retry."""
+
+        return await self._semantic_window_writer.retry_window(
+            window_id=window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def commit_project_semantic_knowledge(self, build) -> SemanticCommitSummary:
+        """Atomically reconcile a Context-committed window into Knowledge."""
+
+        return await self._semantic_commit_writer.commit(build)
+
+    async def get_active_context_relationship_supports(
+        self,
+        relationship_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict]:
+        return await self._relationship_observation_reader.get_active_context_supports(
+            relationship_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_semantic_window_health(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
     ) -> Dict[str, int | None]:
-        """Return bounded PostgreSQL queue counters without exposing messages."""
+        """Return project semantic-window health without exposing messages."""
 
         row = await self._postgres_client.fetch_one(
             """
             SELECT
-                count(*) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS pending_count,
-                count(*) FILTER (WHERE ingestion_state = 'claimed') AS claimed_count,
-                count(*) FILTER (WHERE ingestion_state = 'blocked') AS blocked_count,
-                min(timestamp_ms) FILTER (WHERE ingestion_state IN ('waiting_for_seal', 'ready')) AS oldest_pending_ms,
-                max(timestamp_ms) FILTER (WHERE ingestion_state = 'processed') AS last_processed_ms
-            FROM public.messages
-            WHERE user_name = %s AND project_id = %s AND session_id = %s
-              AND role = 'user'
+                count(*) FILTER (WHERE stage <> 'completed') AS pending_count,
+                count(*) FILTER (WHERE stage = 'claimed') AS claimed_count,
+                count(*) FILTER (WHERE last_failure_at_ms IS NOT NULL) AS failed_count,
+                count(*) FILTER (
+                    WHERE stage <> 'completed'
+                      AND last_failure_at_ms IS NOT NULL
+                      AND next_retry_at_ms IS NULL
+                ) AS exhausted_count,
+                min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
+                    FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
+                max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
+                    AS last_processed_ms
+            FROM public.project_semantic_windows
+            WHERE user_name = %s AND project_id = %s
             """,
-            (user_name, project_id, session_id),
+            (user_name, project_id),
         )
         return {
             key: row.get(key) if row else None
             for key in (
                 "pending_count",
                 "claimed_count",
-                "blocked_count",
+                "failed_count",
+                "exhausted_count",
                 "oldest_pending_ms",
                 "last_processed_ms",
             )
         }
 
-    async def release_ingestion_claim(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        batch_id: str,
-        blocked: bool,
-    ) -> None:
-        await self._message_lifecycle_writer.release_ingestion_claim(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            batch_id=batch_id,
-            blocked=blocked,
-        )
-
-    async def fail_ingestion_claim(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        batch_id: str,
-        failure_stage: str,
-        failure_code: str,
-        error_summary: str,
-        retryable: bool,
-        max_attempts: int,
-    ) -> bool:
-        return await self._message_lifecycle_writer.fail_ingestion_claim(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            batch_id=batch_id,
-            failure_stage=failure_stage,
-            failure_code=failure_code,
-            error_summary=error_summary,
-            retryable=retryable,
-            max_attempts=max_attempts,
-        )
-
-    async def retry_blocked_ingestion(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        message_ids: List[int],
-    ) -> List[int]:
-        return await self._message_lifecycle_writer.retry_blocked_ingestion(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            message_ids=message_ids,
-        )
-
-    async def save_assistant_message_with_source_refs(
+    async def finalize_assistant_exchange(
         self,
         message: Dict,
         candidates: List[SourceReferenceCandidate],
         *,
         readable_project_ids: List[str],
         artifact: ArtifactDraft | None = None,
-    ) -> List[SourceReference]:
-        """Persist one assistant message, sources, and artifact atomically."""
+    ) -> tuple[int, list[str], bool]:
+        """Commit one final assistant response and its exchange closure together.
+
+        The result is ``(assistant_message_id, source_ref_ids, created)``.
+        Retries of the same finalization return the original assistant instead
+        of creating a second answer.
+        """
 
         if message.get("role") != "assistant":
+            raise ValueError("Only assistant messages can finalize an exchange")
+        user_message_id = message.get("user_msg_id")
+        if not isinstance(user_message_id, int) or isinstance(user_message_id, bool):
+            raise ValueError("Assistant exchange finalization requires user_msg_id")
+        scope = ("user_name", "project_id", "session_id", "id")
+        missing = [name for name in scope if not message.get(name)]
+        if missing:
             raise ValueError(
-                "source references can only be saved for assistant messages"
+                "Assistant exchange finalization missing scope fields: "
+                + ", ".join(missing)
             )
-        if not candidates and artifact is None:
-            await self.save_message_logs([message])
-            return []
 
         async with self._postgres_client.transaction() as cur:
+            existing = await self._message_lifecycle_writer.prepare_assistant_exchange_finalization(
+                user_name=message["user_name"],
+                project_id=message["project_id"],
+                session_id=message["session_id"],
+                user_message_id=user_message_id,
+                cur=cur,
+            )
+            if existing is not None:
+                await cur.execute(
+                    """
+                    SELECT source_ref_id
+                    FROM public.message_source_refs
+                    WHERE project_id = %s
+                      AND session_id = %s
+                      AND message_id = %s
+                    ORDER BY created_at ASC, result_position ASC, source_ref_id ASC
+                    """,
+                    (
+                        message["project_id"],
+                        message["session_id"],
+                        existing.assistant_message_id,
+                    ),
+                )
+                rows = await cur.fetchall()
+                return (
+                    int(existing.assistant_message_id),
+                    [str(row["source_ref_id"]) for row in rows],
+                    False,
+                )
+
             await self._message_writer.save_message_logs([message], cur=cur)
             references = await self._source_reference_writer.write_for_assistant_message(
                 message["id"],
@@ -364,7 +651,45 @@ class KnowledgeStore:
                     session_id=message["session_id"],
                     cursor=cur,
                 )
-            return references
+            await self._message_lifecycle_writer.close_user_exchange(
+                user_name=message["user_name"],
+                project_id=message["project_id"],
+                session_id=message["session_id"],
+                user_message_id=user_message_id,
+                outcome="assistant_final",
+                closed_at_ms=int(message.get("sealed_at_ms") or 0),
+                cur=cur,
+            )
+            return (
+                int(message["id"]),
+                [
+                    str(reference.source_ref_id)
+                    for reference in references
+                    if getattr(reference, "source_ref_id", None)
+                ],
+                True,
+            )
+
+    async def close_user_exchange(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        user_message_id: int,
+        outcome: str,
+        closed_at_ms: int | None = None,
+    ) -> ExchangeClosure:
+        """Close a clarification, failure, cancellation, or user-only turn."""
+
+        return await self._message_lifecycle_writer.close_user_exchange(
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            outcome=outcome,
+            closed_at_ms=closed_at_ms,
+        )
 
     async def get_project_artifact(
         self,
@@ -430,25 +755,6 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
-    async def write_message_source_refs(
-        self,
-        message_id: int,
-        candidates: List[SourceReferenceCandidate],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        readable_project_ids: List[str],
-    ) -> List[SourceReference]:
-        return await self._source_reference_writer.write_for_assistant_message(
-            message_id,
-            candidates,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            readable_project_ids=readable_project_ids,
-        )
-
     async def get_message_source_refs(
         self,
         message_id: int,
@@ -459,6 +765,22 @@ class KnowledgeStore:
     ) -> List[SourceConsulted]:
         return await self._source_reference_reader.get_message_source_refs(
             message_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
+    async def get_source_reference(
+        self,
+        source_ref_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> SourceReference | None:
+        """Read one assistant-owned provenance row for explicit promotion."""
+        return await self._source_reference_reader.get_source_reference(
+            source_ref_id,
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
@@ -500,26 +822,6 @@ class KnowledgeStore:
     async def allocate_message_id(self) -> int:
         return await self._id_allocator.allocate_message_id()
 
-    async def write_batch(
-        self,
-        entities: List[EntityWrite],
-        relationships: List[RelationshipWrite],
-        *,
-        message_entity_refs: Optional[List[MessageEntityRef]] = None,
-        eligible_messages: Optional[List[EpisodeEligibility]] = None,
-        scope: ExecutionScope,
-    ) -> bool:
-        return await self._graph_writer.write_batch(
-            entities,
-            relationships,
-            message_entity_refs=message_entity_refs or (),
-            eligible_messages=eligible_messages or (),
-            scope=scope,
-        )
-
-    async def commit_ingestion(self, commit: IngestionCommit) -> GraphWriteSummary:
-        return await self._graph_writer.commit_ingestion(commit)
-
     async def get_project_episode_source_refs(
         self, episode_id: str, *, user_name: str, project_id: str
     ) -> List[SourceConsulted]:
@@ -527,62 +829,25 @@ class KnowledgeStore:
             episode_id, user_name=user_name, project_id=project_id
         )
 
-    async def write_project_episode_window(
-        self,
-        episodes: List[Episode],
-        window_messages: List[Dict],
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> bool:
-        return await self._episode_writer.write_project_episode_window(
-            episodes, window_messages, user_name=user_name, project_id=project_id
-        )
-
-    async def get_episode_checkpoint(
+    async def edit_episode(
         self,
         *,
+        episode_id: str,
         user_name: str,
         project_id: str,
-        session_id: str,
-    ) -> EpisodeCheckpoint:
-        return await self._episode_reader.get_episode_checkpoint(
+        summary: str,
+        new_developments: List[str],
+        updates: List[str],
+        unresolved: List[str],
+    ) -> None:
+        await self._episode_writer.edit_episode(
+            episode_id=episode_id,
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def get_next_episode_window(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        checkpoint: EpisodeCheckpoint,
-        message_count: int,
-    ) -> List[Dict]:
-        return await self._episode_reader.get_next_episode_window(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            checkpoint=checkpoint,
-            message_count=message_count,
-        )
-
-    async def get_next_project_episode_window(
-        self, *, user_name: str, project_id: str, message_count: int
-    ) -> List[Dict]:
-        return await self._episode_reader.get_next_project_episode_window(
-            user_name=user_name, project_id=project_id, message_count=message_count
-        )
-
-    async def has_ready_project_episode_window(
-        self, *, user_name: str, project_id: str, message_count: int
-    ) -> bool:
-        return await self._episode_reader.has_ready_project_episode_window(
-            user_name=user_name,
-            project_id=project_id,
-            message_count=message_count,
+            summary=summary,
+            new_developments=new_developments,
+            updates=updates,
+            unresolved=unresolved,
         )
 
     async def get_project_episode(
@@ -607,12 +872,31 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_recent_project_episodes(
             user_name=user_name,
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
+        )
+
+    async def get_nearby_project_episodes(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_ids: List[str],
+        before_message_id: int,
+        before_timestamp_ms: int | None,
+        limit: int,
+    ) -> List[Episode]:
+        return await self._episode_reader.get_nearby_project_episodes(
+            user_name=user_name,
+            project_id=project_id,
+            session_ids=session_ids,
+            before_message_id=before_message_id,
+            before_timestamp_ms=before_timestamp_ms,
+            limit=limit,
         )
 
     async def search_project_episodes(
@@ -623,7 +907,7 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.search_project_episodes(
             query,
             user_name=user_name,
@@ -641,7 +925,7 @@ class KnowledgeStore:
         limit: int = 10,
         score_threshold: float = 0.35,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         return await self._episode_reader.search_project_episodes_by_embedding(
             embedding,
             user_name=user_name,
@@ -674,7 +958,7 @@ class KnowledgeStore:
         project_id: str,
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_project_episodes_for_entities(
             entity_ids,
             user_name=user_name,
@@ -706,7 +990,7 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_episodes_for_entity(
             entity_id,
             user_name=user_name,
@@ -723,28 +1007,13 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_episodes_for_entities(
             entity_ids,
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
             limit=limit,
-        )
-
-    async def get_episode_generation_catalog(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> tuple[List[Dict], List[Dict]]:
-        return await self._episode_reader.get_episode_generation_catalog(
-            message_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
         )
 
     async def get_merge_evidence_for_entities(
@@ -770,7 +1039,7 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 10,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.search_episodes(
             query,
             user_name=user_name,
@@ -788,7 +1057,7 @@ class KnowledgeStore:
         session_id: str,
         limit: int = 10,
         score_threshold: float = 0.35,
-    ) -> List[tuple[Episode, float]]:
+    ) -> List[tuple[EpisodeCard, float]]:
         return await self._episode_reader.search_episodes_by_embedding(
             embedding,
             user_name=user_name,
@@ -805,7 +1074,7 @@ class KnowledgeStore:
         project_id: str,
         session_id: str,
         limit: int = 1,
-    ) -> List[Episode]:
+    ) -> List[EpisodeCard]:
         return await self._episode_reader.get_recent_episodes(
             user_name=user_name,
             project_id=project_id,
@@ -828,32 +1097,10 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
-    async def get_episode_graph_context(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Optional[Dict]:
-        return await self._episode_reader.get_episode_graph_context(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
     async def ensure_identity_entity(
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
-
-    async def update_entity_canonical_name(
-        self, entity_id: int, canonical_name: str, *, project_id: str
-    ) -> None:
-        return await self._graph_writer.update_entity_canonical_name(
-            entity_id, canonical_name, project_id=project_id
-        )
 
     async def update_entity_embedding(
         self, entity_id: int, embedding: List[float], *, project_id: str
@@ -867,23 +1114,6 @@ class KnowledgeStore:
     ) -> None:
         return await self._graph_writer.update_entity_aliases(
             alias_updates, project_id=project_id
-        )
-
-    async def merge_entities(
-        self,
-        primary_id: int,
-        secondary_id: int,
-        *,
-        project_id: str,
-        final_topic: Optional[str] = None,
-        cur=None,
-    ) -> bool:
-        return await self._entity_merge_writer.merge_entities(
-            primary_id,
-            secondary_id,
-            project_id=project_id,
-            final_topic=final_topic,
-            cur=cur,
         )
 
     async def preview_historical_reclassification(
@@ -978,49 +1208,6 @@ class KnowledgeStore:
             project_id=project_id,
         )
 
-    async def expire_merge_rollback_states(
-        self,
-        cutoff: datetime,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> int:
-        return await self._merge_audit_writer.expire_rollback_states(
-            cutoff,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def purge_expired_operational_records(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        tool_audit_cutoff: datetime,
-        merge_history_cutoff: datetime,
-    ) -> Dict[str, int]:
-        return await self._retention_writer.purge_expired_records(
-            user_name=user_name,
-            project_id=project_id,
-            tool_audit_cutoff=tool_audit_cutoff,
-            merge_history_cutoff=merge_history_cutoff,
-        )
-
-    async def delete_relationship(
-        self,
-        entity_a_id: int,
-        entity_b_id: int,
-        *,
-        relationship_type: str,
-        project_id: str,
-    ) -> bool:
-        return await self._entity_merge_writer.delete_relationship(
-            entity_a_id,
-            entity_b_id,
-            relationship_type=relationship_type,
-            project_id=project_id,
-        )
-
     async def rebuild_project_projection(
         self,
         project_id: str,
@@ -1079,209 +1266,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_entity_ids_for_messages(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        session_id: str,
-        project_id: str,
-    ) -> Dict[int, List[int]]:
-        return await self._entity_reader.get_entity_ids_for_messages(
-            message_ids,
-            user_name=user_name,
-            session_id=session_id,
-            project_id=project_id,
-        )
-
-    async def get_relationship_ids_for_messages(
-        self,
-        message_ids: List[int],
-        *,
-        user_name: str,
-        session_id: str,
-        project_id: str,
-    ) -> Dict[int, List[str]]:
-        return await self._episode_reader.get_relationship_ids_for_messages(
-            message_ids,
-            user_name=user_name,
-            session_id=session_id,
-            project_id=project_id,
-        )
-
-    async def get_relationship_advisories(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        thresholds: AdvisoryThresholds | None = None,
-    ) -> list[RelationshipAdvisory]:
-        """Derive actionable unknown-relationship suggestions from evidence."""
-
-        advisories = await self._relationship_observation_reader.get_advisories(
-            user_name=user_name,
-            project_id=project_id,
-            thresholds=thresholds,
-        )
-        for advisory in advisories:
-            await self._relationship_advisory_writer.materialize_pending(
-                user_name=user_name,
-                project_id=project_id,
-                advisory=advisory,
-            )
-        return advisories
-
-    async def get_open_human_reviews(
-        self, *, user_name: str, project_id: str
-    ) -> list[HumanReview]:
-        return await self._human_review_writer.list_open(
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def build_conflict_discovery_package(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        max_seed_span_days: int,
-        max_package_tokens: int,
-        token_counter: Callable[[str], int] | None = None,
-    ) -> ConflictDiscoveryPackage | None:
-        cursor = await self._conflict_discovery_reader.get_cursor(
-            user_name=user_name,
-            project_id=project_id,
-        )
-        return await ConflictPacketBuilder(
-            self._conflict_discovery_reader,
-            token_counter=token_counter,
-        ).build(
-            cursor,
-            max_span_days=max_seed_span_days,
-            max_tokens=max_package_tokens,
-        )
-
-    async def complete_conflict_discovery(
-        self,
-        package: ConflictDiscoveryPackage,
-        *,
-        candidates: Iterable[Any],
-    ) -> int:
-        """Persist grounded conflict groups and advance the cursor atomically."""
-
-        results = []
-        async with self._postgres_client.transaction() as cur:
-            for candidate in candidates:
-                result = await self._conflict_writer.record_detection(
-                    user_name=package.cursor.user_name,
-                    project_id=package.cursor.project_id,
-                    origin="background_discovery",
-                    kind=candidate.kind,
-                    rationale=candidate.rationale,
-                    confidence=candidate.confidence,
-                    evidence_ids=candidate.evidence_ids,
-                    metadata={
-                        "discovery_packet_tokens": package.estimated_tokens,
-                        "packet_compacted": package.compacted,
-                    },
-                    cur=cur,
-                )
-                results.append(result)
-            await self._conflict_discovery_reader.advance(
-                package.cursor,
-                last_reviewed_observation_id=package.next_observation_id,
-                cur=cur,
-            )
-
-        for result in results:
-            await self._conflict_service.notify_detection(
-                user_name=package.cursor.user_name,
-                project_id=package.cursor.project_id,
-                origin="background_discovery",
-                result=result,
-            )
-        return sum(int(result.should_notify) for result in results)
-
-    async def record_conflict_detection(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        origin: ConflictOrigin,
-        kind: str,
-        rationale: str,
-        confidence: float | None,
-        evidence_ids: List[int],
-        metadata: Dict | None = None,
-        existing_conflict_id: str | None = None,
-    ) -> ConflictWriteResult:
-        return await self._conflict_service.record_detection(
-            user_name=user_name,
-            project_id=project_id,
-            origin=origin,
-            kind=kind,
-            rationale=rationale,
-            confidence=confidence,
-            evidence_ids=evidence_ids,
-            metadata=metadata,
-            existing_conflict_id=existing_conflict_id,
-        )
-
-    async def get_conflict_group(
-        self,
-        *,
-        conflict_id: str,
-        user_name: str,
-        project_id: str,
-    ) -> Dict | None:
-        return await self._conflict_reader.get_detail(
-            conflict_id=conflict_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def resolve_conflict_group(
-        self,
-        *,
-        conflict_id: str,
-        user_name: str,
-        project_id: str,
-        resolution_kind: ConflictResolutionKind,
-        resolved_by: str,
-        resolution_note: str | None = None,
-    ) -> ConflictGroup:
-        return await self._conflict_service.resolve(
-            conflict_id=conflict_id,
-            user_name=user_name,
-            project_id=project_id,
-            resolution_kind=resolution_kind,
-            resolved_by=resolved_by,
-            resolution_note=resolution_note,
-        )
-
-    async def apply_relationship_advisory_action(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        pattern_key: str,
-        action: str,
-        relationship_type: str | None = None,
-        note: str | None = None,
-        decided_by: str | None = None,
-    ) -> RelationshipAdvisoryDecision:
-        """Persist one explicit advisory decision without changing the domain."""
-
-        return await self._relationship_advisory_writer.apply_action(
-            user_name=user_name,
-            project_id=project_id,
-            pattern_key=pattern_key,
-            action=action,
-            relationship_type=relationship_type,
-            note=note,
-            decided_by=decided_by,
-        )
-
     async def get_recent_project_messages(
         self,
         user_name: str,
@@ -1305,6 +1289,7 @@ class KnowledgeStore:
         visible_project_ids: List[str],
         forward: int = 3,
         target_total: int = 10,
+        discoverable_only: bool = False,
     ) -> List[Dict]:
         return await self._graph_reader.get_surrounding_messages(
             message_id,
@@ -1313,6 +1298,7 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
             forward=forward,
             target_total=target_total,
+            discoverable_only=discoverable_only,
         )
 
     async def validate_existing_ids(
@@ -1323,67 +1309,12 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_neighbor_ids(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> Set[int]:
-        return await self._graph_reader.get_neighbor_ids(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
     async def get_entities_by_names(
         self, names: List[str], *, visible_project_ids: List[str]
     ) -> List[Dict]:
         return await self._entity_reader.get_entities_by_names(
             names,
             visible_project_ids=visible_project_ids,
-        )
-
-    async def get_neighbor_entities(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        limit: int = 5,
-    ) -> List[Dict]:
-        return await self._graph_reader.get_neighbor_entities(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
-        )
-
-    async def get_merge_topic_strength(
-        self,
-        primary_id: int,
-        secondary_id: int,
-        project_id: str,
-    ) -> Dict:
-        return await self._graph_reader.get_merge_topic_strength(
-            primary_id,
-            secondary_id,
-            project_id,
-        )
-
-    async def has_direct_edge(
-        self, id_a: int, id_b: int, *, visible_project_ids: List[str]
-    ) -> bool:
-        return await self._graph_reader.has_direct_edge(
-            id_a,
-            id_b,
-            visible_project_ids=visible_project_ids,
-        )
-
-    async def search_similar_entities(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        limit: int = 50,
-    ) -> List[Tuple[int, float]]:
-        return await self._entity_reader.search_similar_entities(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-            limit=limit,
         )
 
     async def search_entities_by_embedding(
@@ -1436,27 +1367,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_graph_stats(
-        self, *, visible_project_ids: List[str]
-    ) -> Dict[str, int]:
-        return await self._graph_reader.get_graph_stats(
-            visible_project_ids=visible_project_ids
-        )
-
-    async def get_entity_count_by_type(
-        self, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._entity_reader.get_entity_count_by_type(
-            visible_project_ids=visible_project_ids
-        )
-
-    async def get_entity_count_by_topic(
-        self, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._entity_reader.get_entity_count_by_topic(
-            visible_project_ids=visible_project_ids
-        )
-
     async def get_top_connected_entities(
         self, *, visible_project_ids: List[str], limit: int = 10
     ) -> List[Dict]:
@@ -1465,28 +1375,12 @@ class KnowledgeStore:
             limit=limit,
         )
 
-    async def get_entity_relationships(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[Dict]:
-        return await self._entity_reader.get_entity_relationships(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-
     async def get_recently_active_entities(
         self, *, visible_project_ids: List[str], days: int = 7, limit: int = 10
     ) -> List[Dict]:
         return await self._entity_reader.get_recently_active_entities(
             visible_project_ids=visible_project_ids,
             days=days,
-            limit=limit,
-        )
-
-    async def get_notable_entities(
-        self, *, visible_project_ids: List[str], limit: int = 10
-    ) -> List[Dict]:
-        return await self._entity_reader.get_notable_entities(
-            visible_project_ids=visible_project_ids,
             limit=limit,
         )
 
@@ -1502,12 +1396,12 @@ class KnowledgeStore:
         self,
         hot_topic_names: List[str],
         *,
-        visible_project_ids: List[str],
+        project_id: str,
         msg_limit: int = 5,
     ) -> Dict:
         return await self._knowledge_query_reader.get_hot_topic_context_with_messages(
             hot_topic_names,
-            visible_project_ids=visible_project_ids,
+            project_id=project_id,
             msg_limit=msg_limit,
         )
 
@@ -1533,7 +1427,6 @@ class KnowledgeStore:
         query: str,
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         limit: int = 5,
         connections_limit: int = 5,
         evidence_limit: int = 5,
@@ -1541,7 +1434,6 @@ class KnowledgeStore:
         return await self._entity_reader.search_by_name(
             query,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             limit=limit,
             connections_limit=connections_limit,
             evidence_limit=evidence_limit,
@@ -1549,47 +1441,41 @@ class KnowledgeStore:
 
     async def get_related_entities(
         self,
-        entity_names: List[str],
+        entity_ids: List[int],
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
-        return await self._entity_reader.get_related_entities_by_name(
-            entity_names,
+        return await self._entity_reader.get_related_entities(
+            entity_ids,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             limit=limit,
         )
 
     async def get_recent_activity(
         self,
-        entity_name: str,
+        entity_id: int,
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         hours: int = 24,
     ) -> List[Dict]:
         return await self._knowledge_query_reader.get_recent_activity(
-            entity_name,
+            entity_id,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             hours=hours,
         )
 
-    async def find_path_filtered(
+    async def find_path(
         self,
-        start_name: str,
-        end_name: str,
+        start_entity_id: int,
+        end_entity_id: int,
         *,
         visible_project_ids: List[str],
-        active_topics: List[str] = None,
         max_depth: int = 4,
-    ) -> Tuple[List[Dict], bool]:
-        return await self._graph_reader.find_path_filtered(
-            start_name,
-            end_name,
+    ) -> List[Dict]:
+        return await self._graph_reader.find_path(
+            start_entity_id,
+            end_entity_id,
             visible_project_ids=visible_project_ids,
-            active_topics=active_topics,
             max_depth=max_depth,
         )

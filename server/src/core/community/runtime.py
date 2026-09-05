@@ -450,7 +450,6 @@ class AACRuntime:
             knowledge_store=self.resources.knowledge_store,
             postgres=self.resources.postgres,
             agent_id=agent.id,
-            workspace_service=None,
         )
         tools = AACTools(
             user_name=self.user_name,

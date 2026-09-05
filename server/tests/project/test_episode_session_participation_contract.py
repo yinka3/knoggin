@@ -46,7 +46,7 @@ async def test_participation_changes_set_a_future_message_boundary():
     manager.pg = _Postgres()
     manager.active_projects = {}
 
-    participation = await manager.set_episode_participating_sessions(
+    participation = await manager.set_episode_sources(
         "project", ["session-b"]
     )
 

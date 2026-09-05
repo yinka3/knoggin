@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 
 import pytest
 
+from common.exceptions import SessionBusyError
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import fetch_conversation_turns
 from runtime.session_runtime import SessionRuntime
 from tests.fixtures.factories import make_project_state
-from tests.fixtures.fakes import FakeConfigValue, FakeConsumer, FakeResources
+from tests.fixtures.fakes import FakeConfigValue, FakeResources
 
 
 def _pasted_source_candidate():
@@ -66,14 +67,25 @@ async def _collect_turn(ctx, message, orchestrator):
     ]
 
 
+def _runtime(resources, *, session_id="session-1", project_id="project-1"):
+    runtime = SessionRuntime(
+        "ada",
+        resources,
+        session_id=session_id,
+        project_id=project_id,
+        project=make_project_state(project_id),
+        model=None,
+        agent_id=None,
+        enabled_tools=None,
+    )
+    runtime.project.project_semantic_job = object()
+    return runtime
+
+
 @pytest.fixture
 def context(monkeypatch):
     resources = FakeResources()
-    ctx = SessionRuntime("ada", resources)
-    ctx.session_id = "session-1"
-    ctx.project_id = "project-1"
-    ctx.project = make_project_state("project-1")
-    ctx.consumer = FakeConsumer()
+    ctx = _runtime(resources)
     monkeypatch.setattr(
         SessionRuntime,
         "current_config",
@@ -86,11 +98,11 @@ def context(monkeypatch):
 @pytest.mark.no_network
 async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
     resources = FakeResources()
-    ctx = SessionRuntime("ada", resources)
-    ctx.session_id = "session-1"
+    ctx = _runtime(resources)
+    ctx.project.project_semantic_job = None
 
     with pytest.raises(RuntimeError, match="not fully initialized"):
-        await ctx.add(Message(content="hello"))
+        await ctx.open_agent_run_stream(Message(content="hello"))
 
 
 @pytest.mark.runtime
@@ -113,14 +125,14 @@ async def test_conversation_history_can_exclude_the_current_first_message():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_persists_editable_turn_and_signals_consumer(context):
+async def test_open_run_persists_editable_turn_without_waking_semantic_work(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
-    msg = await ctx.add(Message(content="  hello world  ", timestamp=timestamp))
+    await ctx.open_agent_run_stream(
+        Message(content="  hello world  ", timestamp=timestamp)
+    )
 
-    assert msg.id == 1
-    assert ctx.consumer.signaled == 1
     assert resources.knowledge_store.saved_message_logs == [
         [
             {
@@ -137,8 +149,6 @@ async def test_context_add_persists_editable_turn_and_signals_consumer(context):
                     "content:4922391fe82054bfa5ad28b1e1a03bf0077f12fc578a324f37ca7263209dc0bf"
                 ),
                 "lifecycle_state": "editable",
-                "ingestion_state": "waiting_for_seal",
-                "episode_eligible": False,
                 "edit_window_seconds": 600,
             }
         ]
@@ -147,51 +157,29 @@ async def test_context_add_persists_editable_turn_and_signals_consumer(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_uses_durable_message_acceptance(context):
+async def test_open_run_uses_durable_message_acceptance(context):
     ctx, resources = context
 
-    accepted = await ctx.add(Message(content="durable only"))
+    await ctx.open_agent_run_stream(Message(content="durable only"))
 
-    assert accepted.id == 1
-    assert ctx.consumer.signaled == 1
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_deduplicates_same_message_timestamp_and_session(context):
+async def test_overlapping_run_is_rejected_before_second_message_persists(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
-    first = await ctx.add(Message(content="hello", timestamp=timestamp))
-    second = await ctx.add(Message(content="hello", timestamp=timestamp))
+    await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
+    with pytest.raises(SessionBusyError):
+        await ctx.open_agent_run_stream(Message(content="second", timestamp=timestamp))
 
-    assert first.id == 1
-    assert second.id == 1
-    assert ctx.consumer.signaled == 2
     assert len(resources.knowledge_store.saved_message_logs) == 1
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_accept_message_reports_durable_idempotency_without_running_agent(context):
-    ctx, resources = context
-
-    first, first_created = await ctx.accept_message(
-        Message(content="hello", metadata={"idempotency_key": "request-1"})
-    )
-    duplicate, duplicate_created = await ctx.accept_message(
-        Message(content="hello", metadata={"idempotency_key": "request-1"})
-    )
-
-    assert (first.id, first_created) == (duplicate.id, True)
-    assert duplicate_created is False
-    assert ctx.consumer.signaled == 2
-    assert len(resources.knowledge_store.saved_message_logs) == 1
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_context_add_retries_after_durable_acceptance_write_failure(context, monkeypatch):
+async def test_open_run_retries_after_durable_acceptance_write_failure(context, monkeypatch):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     original_persist = ctx._persist_user_turn
@@ -207,21 +195,18 @@ async def test_context_add_retries_after_durable_acceptance_write_failure(contex
     monkeypatch.setattr(ctx, "_persist_user_turn", fail_once)
 
     with pytest.raises(ConnectionError, match="temporary Postgres failure"):
-        await ctx.add(Message(content="hello", timestamp=timestamp))
+        await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
 
-    retried = await ctx.add(Message(content="hello", timestamp=timestamp))
+    await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
 
-    assert retried.id == 2
-    assert ctx.consumer.signaled == 1
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_context_add_persists_a_durable_acceptance_key(context):
+async def test_open_run_persists_a_durable_acceptance_key(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
 
-    accepted = await ctx.add(Message(content="hello", timestamp=timestamp))
+    await ctx.open_agent_run_stream(Message(content="hello", timestamp=timestamp))
 
-    assert accepted.id == 1
     assert resources.knowledge_store.saved_message_logs[0][0]["acceptance_key"].startswith(
         "content:"
     )
@@ -230,7 +215,7 @@ async def test_context_add_persists_a_durable_acceptance_key(context):
 async def test_context_assistant_turn_uses_canonical_message_sequence(context):
     ctx, resources = context
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
-    await ctx.add_assistant_turn("hello from assistant", timestamp)
+    await ctx.add_assistant_turn("hello from assistant", timestamp, user_msg_id=1)
 
     assert resources.knowledge_store.saved_message_logs == [
         [
@@ -243,14 +228,35 @@ async def test_context_assistant_turn_uses_canonical_message_sequence(context):
                 "project_id": "project-1",
                     "timestamp": timestamp.timestamp() * 1000,
                     "metadata": {},
-                    "user_msg_id": None,
+                    "user_msg_id": 1,
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
-                    "ingestion_state": "excluded",
-                    "episode_eligible": False,
                 }
         ]
     ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_exchange_closure_wakes_the_shared_project_owner(
+    context,
+):
+    ctx, _resources = context
+    project_wakes = 0
+
+    def signal_semantic_work():
+        nonlocal project_wakes
+        project_wakes += 1
+        return True
+
+    ctx.project.signal_semantic_work = signal_semantic_work
+    await ctx.add_assistant_turn(
+        "hello from assistant",
+        datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc),
+        user_msg_id=1,
+    )
+
+    assert project_wakes == 1
 
 
 @pytest.mark.runtime
@@ -261,15 +267,17 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def save_atomically(message, candidates, *, readable_project_ids):
+    async def save_atomically(message, candidates, *, readable_project_ids, artifact=None):
+        del artifact
         calls.append((message, candidates, readable_project_ids))
-        return []
+        return message["id"], [], True
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = save_atomically
+    resources.knowledge_store.finalize_assistant_exchange = save_atomically
 
     await ctx.add_assistant_turn(
         "hello from assistant",
         timestamp,
+        user_msg_id=1,
         source_candidates=[candidate],
     )
 
@@ -284,11 +292,9 @@ async def test_context_assistant_turn_persists_source_candidates_with_message(co
                 "project_id": "project-1",
                     "timestamp": timestamp.timestamp() * 1000,
                     "metadata": {},
-                    "user_msg_id": None,
+                    "user_msg_id": 1,
                     "lifecycle_state": "sealed",
                     "sealed_at_ms": int(timestamp.timestamp() * 1000),
-                    "ingestion_state": "excluded",
-                    "episode_eligible": False,
             },
             [candidate],
             ["project-1"],
@@ -308,17 +314,18 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     candidate = _pasted_source_candidate()
     calls = []
 
-    async def fail_once_then_save(message, candidates, *, readable_project_ids):
+    async def fail_once_then_save(message, candidates, *, readable_project_ids, artifact=None):
         del readable_project_ids
+        del artifact
         calls.append((message, candidates))
         if len(calls) == 1:
             raise ConnectionError("temporary transaction failure")
-        return []
+        return message["id"], [], True
 
     async def skip_retry_delay(_delay):
         return None
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = (
+    resources.knowledge_store.finalize_assistant_exchange = (
         fail_once_then_save
     )
     monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
@@ -326,6 +333,7 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     await ctx.add_assistant_turn(
         "hello from assistant",
         timestamp,
+        user_msg_id=1,
         source_candidates=[candidate],
     )
 
@@ -344,8 +352,9 @@ async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     attempts = 0
 
-    async def fail_atomically(_message, _candidates, *, readable_project_ids):
+    async def fail_atomically(_message, _candidates, *, readable_project_ids, artifact=None):
         del readable_project_ids
+        del artifact
         nonlocal attempts
         attempts += 1
         raise ConnectionError("source reference write failed")
@@ -353,13 +362,14 @@ async def test_abandoned_source_handoff_leaves_no_staged_assistant_turn(
     async def skip_retry_delay(_delay):
         return None
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = fail_atomically
+    resources.knowledge_store.finalize_assistant_exchange = fail_atomically
     monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
 
     with pytest.raises(ConnectionError, match="source reference write failed"):
         await ctx.add_assistant_turn(
             "failed assistant response",
             timestamp,
+            user_msg_id=1,
             source_candidates=[_pasted_source_candidate()],
         )
 
@@ -377,7 +387,9 @@ async def test_context_assistant_turn_failure_removes_staged_message_and_raises(
     timestamp = datetime(2026, 1, 2, 3, 4, tzinfo=timezone.utc)
     attempts = 0
 
-    async def fail_save(messages):
+    async def fail_save(_message, _candidates, *, readable_project_ids, artifact=None):
+        del readable_project_ids
+        del artifact
         nonlocal attempts
         attempts += 1
         raise ConnectionError("Postgres unavailable")
@@ -385,14 +397,16 @@ async def test_context_assistant_turn_failure_removes_staged_message_and_raises(
     async def skip_retry_delay(delay):
         return None
 
-    monkeypatch.setattr(resources.knowledge_store, "save_message_logs", fail_save)
+    monkeypatch.setattr(resources.knowledge_store, "finalize_assistant_exchange", fail_save)
     monkeypatch.setattr(
         "runtime.session_runtime.asyncio.sleep",
         skip_retry_delay,
     )
 
     with pytest.raises(ConnectionError, match="Postgres unavailable"):
-        await ctx.add_assistant_turn("failed assistant response", timestamp)
+        await ctx.add_assistant_turn(
+            "failed assistant response", timestamp, user_msg_id=1
+        )
 
     assert attempts == 3
 
@@ -411,12 +425,13 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         history_calls.append((limit, up_to_msg_id))
         return [{"role": "assistant", "content": "A prior durable answer."}]
 
-    async def persist_assistant(message, candidates, *, readable_project_ids):
+    async def persist_assistant(message, candidates, *, readable_project_ids, artifact=None):
+        del artifact
         nonlocal persisted
         source_handoffs.append((message, candidates, readable_project_ids))
         resources.knowledge_store.saved_message_logs.append([message])
         persisted = True
-        return candidates
+        return message["id"], [], True
 
     async def handler(kwargs):
         candidate = _pasted_source_candidate().model_copy(
@@ -429,7 +444,7 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
         )
 
     ctx.get_conversation_context = history
-    resources.knowledge_store.save_assistant_message_with_source_refs = (
+    resources.knowledge_store.finalize_assistant_exchange = (
         persist_assistant
     )
     orchestrator = _FakeTurnOrchestrator(handler)
@@ -463,14 +478,6 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     }
     assert candidates[0].source_message_id == 1
     assert readable_project_ids == ["project-1"]
-    assert ctx.agent_run_snapshot() == {
-        "state": "completed",
-        "active": False,
-        "queued_message_ids": [],
-        "queue_paused": False,
-    }
-
-
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_run_agent_stream_persists_artifact_with_assistant_completion(context):
@@ -489,7 +496,7 @@ async def test_run_agent_stream_persists_artifact_with_assistant_completion(cont
             (message, candidates, readable_project_ids, artifact)
         )
         resources.knowledge_store.saved_message_logs.append([message])
-        return []
+        return message["id"], [], True
 
     async def handler(_kwargs):
         yield _response_event(
@@ -497,7 +504,7 @@ async def test_run_agent_stream_persists_artifact_with_assistant_completion(cont
             artifact=artifact.model_dump(mode="json"),
         )
 
-    resources.knowledge_store.save_assistant_message_with_source_refs = (
+    resources.knowledge_store.finalize_assistant_exchange = (
         persist_assistant
     )
     events = await _collect_turn(
@@ -535,93 +542,36 @@ async def test_run_agent_stream_forwards_selected_research_mode(context):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_run_agent_stream_serializes_accepted_turns_in_fifo_order(context):
-    ctx, _ = context
+async def test_run_agent_stream_rejects_an_overlapping_turn_before_persistence(context):
+    ctx, resources = context
     first_started = asyncio.Event()
     release_first = asyncio.Event()
-    active_runs = 0
-    max_active_runs = 0
-
-    async def handler(kwargs):
-        nonlocal active_runs, max_active_runs
-        active_runs += 1
-        max_active_runs = max(max_active_runs, active_runs)
-        try:
-            if kwargs["user_query"] == "first":
-                first_started.set()
-                await release_first.wait()
-            yield _response_event(f"answer to {kwargs['user_query']}")
-        finally:
-            active_runs -= 1
-
-    orchestrator = _FakeTurnOrchestrator(handler)
-    first = asyncio.create_task(
-        _collect_turn(ctx, Message(content="first"), orchestrator)
-    )
-    await first_started.wait()
-    second = asyncio.create_task(
-        _collect_turn(ctx, Message(content="second"), orchestrator)
-    )
-
-    for _ in range(5):
-        await asyncio.sleep(0)
-
-    assert [call["user_query"] for call in orchestrator.calls] == ["first"]
-    assert ctx.agent_run_snapshot()["queued_message_ids"] == [1, 2]
-
-    release_first.set()
-    first_events, second_events = await asyncio.gather(first, second)
-
-    assert [call["user_query"] for call in orchestrator.calls] == ["first", "second"]
-    assert max_active_runs == 1
-    assert first_events[-1]["data"]["content"] == "answer to first"
-    assert second_events[-1]["data"]["content"] == "answer to second"
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_failed_run_pauses_the_next_accepted_turn_until_resumed(context):
-    ctx, _ = context
-    first_started = asyncio.Event()
-    release_first = asyncio.Event()
-
     async def handler(kwargs):
         if kwargs["user_query"] == "first":
             first_started.set()
             await release_first.wait()
-            yield {"event": "error", "data": {"message": "agent failed"}}
-            return
-        yield _response_event("answer to second")
+        yield _response_event(f"answer to {kwargs['user_query']}")
 
     orchestrator = _FakeTurnOrchestrator(handler)
     first = asyncio.create_task(
         _collect_turn(ctx, Message(content="first"), orchestrator)
     )
     await first_started.wait()
-    second = asyncio.create_task(
-        _collect_turn(ctx, Message(content="second"), orchestrator)
-    )
+    with pytest.raises(SessionBusyError):
+        await ctx.open_agent_run_stream(
+            Message(content="second"), orchestrator=orchestrator
+        )
 
-    for _ in range(5):
-        await asyncio.sleep(0)
-    release_first.set()
-    assert (await first) == [{"event": "error", "data": {"message": "agent failed"}}]
-
-    for _ in range(5):
-        await asyncio.sleep(0)
     assert [call["user_query"] for call in orchestrator.calls] == ["first"]
-    assert ctx.agent_run_snapshot() == {
-        "state": "failed",
-        "active": False,
-        "queued_message_ids": [2],
-        "queue_paused": True,
-    }
+    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == [
+        "user"
+    ]
 
-    assert await ctx.resume_agent_queue() is True
-    second_events = await second
+    release_first.set()
+    first_events = await first
 
-    assert [call["user_query"] for call in orchestrator.calls] == ["first", "second"]
-    assert second_events[-1]["data"]["content"] == "answer to second"
+    assert [call["user_query"] for call in orchestrator.calls] == ["first"]
+    assert first_events[-1]["data"]["content"] == "answer to first"
 
 
 @pytest.mark.runtime
@@ -652,17 +602,9 @@ async def test_cancel_active_agent_run_keeps_only_the_durable_user_turn(context)
     assert [
         batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs
     ] == ["user"]
-    assert ctx.agent_run_snapshot() == {
-        "state": "cancelled",
-        "active": False,
-        "queued_message_ids": [],
-        "queue_paused": True,
-    }
-
-
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_shutdown_cancels_active_run_and_prevents_queued_run(context):
+async def test_session_shutdown_cancels_active_run_and_rejects_new_run(context):
     ctx, resources = context
     first_started = asyncio.Event()
     never_finish = asyncio.Event()
@@ -678,33 +620,17 @@ async def test_session_shutdown_cancels_active_run_and_prevents_queued_run(conte
         _collect_turn(ctx, Message(content="first"), orchestrator)
     )
     await first_started.wait()
-    second = asyncio.create_task(
-        _collect_turn(ctx, Message(content="second"), orchestrator)
-    )
-
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert ctx.agent_run_snapshot()["queued_message_ids"] == [1, 2]
+    with pytest.raises(SessionBusyError):
+        await ctx.open_agent_run_stream(
+            Message(content="second"), orchestrator=orchestrator
+        )
 
     await ctx.shutdown()
 
     with pytest.raises(asyncio.CancelledError):
         await first
-    second_events = await second
-
     assert [call["user_query"] for call in orchestrator.calls] == ["first"]
-    assert second_events == [
-        {
-            "event": "error",
-            "data": {
-                "message": "The response could not be completed or saved. Please try again."
-            },
-        }
-    ]
-    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == [
-        "user",
-        "user",
-    ]
+    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == ["user"]
 
 
 @pytest.mark.runtime
@@ -712,11 +638,7 @@ async def test_session_shutdown_cancels_active_run_and_prevents_queued_run(conte
 async def test_cancelling_one_session_run_does_not_cancel_another(context):
     ctx, _ = context
     other_resources = FakeResources()
-    other = SessionRuntime("ada", other_resources)
-    other.session_id = "session-2"
-    other.project_id = "project-2"
-    other.project = make_project_state("project-2")
-    other.consumer = FakeConsumer()
+    other = _runtime(other_resources, session_id="session-2", project_id="project-2")
 
     first_started = asyncio.Event()
     second_started = asyncio.Event()
@@ -748,4 +670,3 @@ async def test_cancelling_one_session_run_does_not_cancel_another(context):
     second_events = await second
 
     assert second_events[-1]["data"]["content"] == "second session answer"
-    assert other.agent_run_snapshot()["state"] == "completed"

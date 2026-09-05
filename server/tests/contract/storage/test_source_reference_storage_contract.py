@@ -75,6 +75,23 @@ def text_document_candidate(**overrides) -> SourceReferenceCandidate:
     return SourceReferenceCandidate.model_validate(payload)
 
 
+def document_selection_candidate(**overrides) -> SourceReferenceCandidate:
+    return text_document_candidate(
+        locator={"kind": "code_lines", "start_line": 4, "end_line": 6},
+        excerpt="4: def answer():\n5:     return 42",
+        metadata={
+            "document_name": "notes.py",
+            "relative_path": "docs/notes.py",
+            "extension": ".py",
+            "selection": True,
+        },
+        encounter_kind="document_selection",
+        agent_run_id="run-selection",
+        tool_call_id=None,
+        **overrides,
+    )
+
+
 def docx_document_candidate(**overrides) -> SourceReferenceCandidate:
     return text_document_candidate(
         locator={
@@ -224,11 +241,11 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
     query, params = client.calls[0][1], client.calls[0][2]
     assert "INSERT INTO public.message_source_refs" in query
     assert "message.role = 'assistant'" in query
-    assert "document.visibility_scope = 'project'" in query
+    assert "document.project_id = ANY(%s)" in query
     assert "ON CONFLICT (idempotency_key) DO UPDATE" in query
     assert params[1:4] == ("project-1", "session-1", 101)
     assert params[17] == SourceReferenceWriter.idempotency_key(candidate)
-    assert params[-11:] == (
+    assert params[-9:] == (
         101,
         "project-1",
         "session-1",
@@ -238,8 +255,6 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
         "project-1",
         CONTENT_HASH,
         ["project-1"],
-        "project-1",
-        "session-1",
     )
 
 
@@ -277,6 +292,28 @@ async def test_writer_uses_stable_idempotency_for_tool_and_pasted_origins():
     )
     assert SourceReferenceWriter.idempotency_key(pasted) == (
         SourceReferenceWriter.idempotency_key(pasted)
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_writer_accepts_server_resolved_document_selection_candidates():
+    candidate = document_selection_candidate()
+    client = RecordingPostgresClient(fetch_one_results=[persisted_row(candidate)])
+
+    references = await SourceReferenceWriter(client).write_for_assistant_message(
+        101,
+        [candidate],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        readable_project_ids=["project-1"],
+    )
+
+    assert references[0].encounter_kind == "document_selection"
+    assert references[0].tool_call_id is None
+    assert SourceReferenceWriter.idempotency_key(candidate) == (
+        SourceReferenceWriter.idempotency_key(candidate)
     )
 
 
@@ -527,11 +564,11 @@ async def _seed_scope(real_postgres_client):
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         )
         VALUES (
-            %s, 'project-1', 'project', 'manual_upload',
+            %s, 'project-1',
             'report.pdf', '/report.pdf', '.pdf', 10, %s
         )
         """,
@@ -540,11 +577,11 @@ async def _seed_scope(real_postgres_client):
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         )
         VALUES (
-            %s, 'project-1', 'project', 'manual_upload',
+            %s, 'project-1',
             'notes.md', '/notes.md', '.md', 10, %s
         )
         """,
@@ -595,7 +632,6 @@ async def test_real_postgres_document_tombstone_preserves_message_provenance(
 
     deleted = await DocumentWriter(real_postgres_client, "project-1").delete_document(
         document_id=DOCUMENT_ID,
-        session_id=None,
     )
     assert deleted is not None
     assert deleted["status"] == "deleted"
@@ -627,26 +663,14 @@ async def test_real_postgres_provenance_uses_captured_cross_project_document_sco
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         ) VALUES (
-            %s, 'project-2', 'project', 'manual_upload',
+            %s, 'project-2',
             'shared.pdf', '/shared.pdf', '.pdf', 10, %s
         )
         """,
         (CROSS_PROJECT_DOCUMENT_ID, "e" * 64),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.project_documents (
-            document_id, project_id, session_id, visibility_scope, source_kind,
-            original_name, relative_path, extension, size_bytes, content_hash
-        ) VALUES (
-            %s, 'project-2', 'session-2', 'session', 'manual_upload',
-            'private.pdf', '/private.pdf', '.pdf', 10, %s
-        )
-        """,
-        (CROSS_PROJECT_SESSION_DOCUMENT_ID, "f" * 64),
     )
     writer = SourceReferenceWriter(real_postgres_client)
     reader = SourceReferenceReader(real_postgres_client)
@@ -676,23 +700,6 @@ async def test_real_postgres_provenance_uses_captured_cross_project_document_sco
     )
     assert presented[0].source_project_id == "project-2"
     assert presented[0].source_status == "available"
-    with pytest.raises(ValueError, match="not visible"):
-        await writer.write_for_assistant_message(
-            101,
-            [
-                document_candidate(
-                    document_id=CROSS_PROJECT_SESSION_DOCUMENT_ID,
-                    source_project_id="project-2",
-                    content_hash="f" * 64,
-                    agent_run_id="private-run",
-                    tool_call_id="private-call",
-                )
-            ],
-            user_name="ada",
-            project_id="project-1",
-            session_id="session-1",
-            readable_project_ids=readable_scope,
-        )
     with pytest.raises(ValueError, match="captured readable scope"):
         await writer.write_for_assistant_message(
             101,
@@ -720,10 +727,10 @@ async def test_real_postgres_preserves_cross_project_provenance_after_source_del
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         ) VALUES (
-            %s, 'project-2', 'project', 'manual_upload',
+            %s, 'project-2',
             'shared.pdf', '/shared.pdf', '.pdf', 10, %s
         )
         """,

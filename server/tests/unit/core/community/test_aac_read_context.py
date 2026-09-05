@@ -30,12 +30,12 @@ async def test_aac_read_context_discovers_user_projects_and_uses_identity_scope(
     assert context.entities.project_id == IDENTITY_SCOPE
     assert context.entities.readable_project_ids == list(context.readable_project_ids)
     assert context.knowledge_retrieval.project_id == IDENTITY_SCOPE
-    assert context.knowledge_retrieval.active_topics is None
+    assert not hasattr(context.knowledge_retrieval, "active_topics")
     assert not hasattr(context.documents, "delete_document")
 
 
 @pytest.mark.no_network
-async def test_aac_document_reader_never_grants_session_private_visibility():
+async def test_aac_document_reader_uses_only_readable_project_ownership():
     postgres = FakePostgresClient()
     postgres.upsert_project("project-1", user_name="ada")
 
@@ -46,12 +46,11 @@ async def test_aac_document_reader_never_grants_session_private_visibility():
         embedding_service=FakeEmbeddingService(),
     )
 
-    await context.documents.list_documents(session_id=None, limit=10)
+    await context.documents.list_documents(limit=10)
     query = postgres.calls[-1][1]
-    assert "visibility_scope = 'project'" in query
-    assert "visibility_scope = 'session'" in query
-    assert "session_id = %s" in query
+    assert "pd.project_id = ANY(%s)" in query
+    assert "visibility_scope" not in query
+    assert "session_id" not in query
     params = postgres.calls[-1][2]
     assert params[0] == list(context.readable_project_ids)
-    assert params[1] == IDENTITY_SCOPE
-    assert params[2] is None
+    assert params[1] == 10

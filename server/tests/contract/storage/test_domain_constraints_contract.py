@@ -1,5 +1,5 @@
 import pytest
-from psycopg.errors import CheckViolation, ForeignKeyViolation
+from psycopg.errors import CheckViolation
 
 
 async def _seed_scoped_graph(client) -> None:
@@ -8,14 +8,18 @@ async def _seed_scoped_graph(client) -> None:
         INSERT INTO sessions (session_id, user_name, project_id)
         VALUES ('session-1', 'ada', 'project-1');
 
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, topic
-        )
+        INSERT INTO entities (entity_id, user_name, canonical_name)
         VALUES
-            (1, 'ada', '__identity__', 'Ada', 'Identity'),
-            (2, 'ada', 'project-1', 'Primary', 'People'),
-            (3, 'ada', 'project-1', 'Secondary', 'People'),
-            (4, 'ada', 'project-2', 'Other Project', 'People');
+            (1, 'ada', 'Ada'),
+            (2, 'ada', 'Primary'),
+            (3, 'ada', 'Secondary'),
+            (4, 'ada', 'Other Project');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 2, 'ada', 'person', 'People'),
+            ('project-1', 3, 'ada', 'person', 'People'),
+            ('project-2', 4, 'ada', 'person', 'People');
 
         INSERT INTO messages (
             user_name, session_id, message_id, project_id, role, content
@@ -61,18 +65,19 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
     )
     with pytest.raises(
         CheckViolation,
-        match="relationship_observations_confidence_range_check",
+        match="relationship_observations_interpretation_source_check",
     ):
         await real_postgres_client.execute(
             """
             INSERT INTO relationship_observations (
-                relationship_id, project_id, user_name, session_id, message_id,
+                relationship_id, project_id, user_name, semantic_window_id,
                 source_entity_id, target_entity_id, observed_relationship_label,
-                confidence, observed_at_ms
+                interpretation_source, observed_at_ms
             )
             VALUES (
-                'project-1:1:2:knows', 'project-1', 'ada', 'session-1', 101,
-                1, 2, 'knows', 1.1, 1
+                'project-1:1:2:knows', 'project-1', 'ada',
+                '11111111-1111-4111-8111-111111111111',
+                1, 2, 'knows', 'invalid', 1
             )
             """
         )
@@ -101,7 +106,7 @@ async def test_domain_constraints_reject_invalid_relationship_values_and_scope(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_domain_constraints_enforce_attachment_and_checkpoint_scope(
+async def test_domain_constraints_enforce_message_entity_attachment_scope(
     real_postgres_client,
 ):
     await _seed_scoped_graph(real_postgres_client)
@@ -119,61 +124,6 @@ async def test_domain_constraints_enforce_attachment_and_checkpoint_scope(
             VALUES (101, 4)
             """
         )
-    with pytest.raises(ForeignKeyViolation):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO episode_processing_checkpoints (project_id, session_id)
-            VALUES ('project-2', 'session-1')
-            """
-        )
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.no_network
-async def test_domain_constraints_reject_invalid_audit_lifecycle_values(
-    real_postgres_client,
-):
-    await real_postgres_client.execute(
-        """
-        INSERT INTO entity_merge_proposals (
-            proposal_id, user_name, project_id,
-            primary_entity_id, duplicate_entity_id, reasoning,
-            reviewed_state_hash, reviewed_state, confirmation_token_hash
-        )
-        VALUES (
-            'proposal-1', 'ada', 'project-1', 2, 3, 'Test lifecycle',
-            'hash', '{}'::jsonb, 'token'
-        );
-        INSERT INTO entity_merge_audits (
-            audit_id, proposal_id, user_name, project_id,
-            primary_entity_id, duplicate_entity_id, reasoning, confirmed_by
-        )
-        VALUES (
-            'audit-1', 'proposal-1', 'ada', 'project-1',
-            2, 3, 'Test lifecycle', 'ada'
-        );
-        """
-    )
-    with pytest.raises(CheckViolation, match="entity_merge_audits_status_check"):
-        await real_postgres_client.execute(
-            """
-            UPDATE entity_merge_audits
-            SET status = 'unknown'
-            WHERE audit_id = 'audit-1'
-            """
-        )
-    with pytest.raises(
-        CheckViolation,
-        match="entity_merge_audits_rollback_status_check",
-    ):
-        await real_postgres_client.execute(
-            """
-            UPDATE entity_merge_audits
-            SET rollback_status = 'unknown'
-            WHERE audit_id = 'audit-1'
-            """
-        )
-
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
@@ -186,10 +136,8 @@ async def test_additive_constraints_reject_invalid_graph_and_episode_values(
     with pytest.raises(CheckViolation, match="entities_canonical_name_nonblank_check"):
         await real_postgres_client.execute(
             """
-            INSERT INTO entities (
-                entity_id, user_name, project_id, canonical_name, topic
-            )
-            VALUES (5, 'ada', 'project-1', '   ', 'People')
+            INSERT INTO entities (entity_id, user_name, canonical_name)
+            VALUES (5, 'ada', '   ')
             """
         )
     with pytest.raises(CheckViolation, match="messages_id_positive_check"):
@@ -204,26 +152,24 @@ async def test_additive_constraints_reject_invalid_graph_and_episode_values(
 
     await real_postgres_client.execute(
         """
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, topic
-        )
-        VALUES (5, 'ada', 'project-1', 'Third', 'People');
+        INSERT INTO entities (entity_id, user_name, canonical_name)
+        VALUES (5, 'ada', 'Third');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES ('project-1', 5, 'ada', 'person', 'People');
         INSERT INTO episodes (episode_id, project_id, summary)
-        VALUES ('episode-1', 'project-1', 'Focus limit');
+        VALUES ('episode-1', 'project-1', 'Memberships are unranked');
         INSERT INTO episode_entities (
-            episode_id, project_id, entity_id, is_focus_entity
+            episode_id, project_id, entity_id
         )
         VALUES
-            ('episode-1', 'project-1', 2, TRUE),
-            ('episode-1', 'project-1', 3, TRUE);
+            ('episode-1', 'project-1', 2),
+            ('episode-1', 'project-1', 3);
         """
     )
-    with pytest.raises(CheckViolation, match="at most two focus entities"):
-        await real_postgres_client.execute(
-            """
-            INSERT INTO episode_entities (
-                episode_id, project_id, entity_id, is_focus_entity
-            )
-            VALUES ('episode-1', 'project-1', 5, TRUE)
-            """
-        )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO episode_entities (episode_id, project_id, entity_id)
+        VALUES ('episode-1', 'project-1', 5)
+        """
+    )

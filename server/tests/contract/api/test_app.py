@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from api.app import create_app
-from common.exceptions import StorageReadError
+from common.exceptions import SessionBusyError, StorageReadError
 from common.schema.artifacts import (
     ArtifactDraft,
     MarkdownArtifactBlock,
@@ -14,12 +14,10 @@ from common.schema.artifacts import (
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
-    MessageAcceptance,
     ProjectResponse,
     RunResult,
     SessionResponse,
     StartRunRequest,
-    SubmitMessageRequest,
 )
 
 
@@ -62,6 +60,7 @@ class FakeApplication:
         self.calls = []
         self.fail_projects = False
         self.artifact, self.artifact_revision = _artifact_payloads()
+        self.document_focus = None
 
     async def create_project(self, *, user_name, request: CreateProjectRequest):
         self.calls.append(("project", user_name, request))
@@ -71,7 +70,6 @@ class FakeApplication:
             id="project-1",
             name=request.name,
             description=request.description,
-            access_mode=request.access_mode,
             status="active",
         )
 
@@ -87,15 +85,28 @@ class FakeApplication:
             else None,
         )
 
-    async def submit_message(
-        self,
-        *,
-        user_name,
-        session_id,
-        request: SubmitMessageRequest,
-    ):
-        self.calls.append(("message", user_name, session_id, request))
-        return MessageAcceptance(message_id=42, idempotent=False)
+    async def get_document_focus(self, *, user_name, session_id):
+        self.calls.append(("document_focus_get", user_name, session_id))
+        return self.document_focus
+
+    async def set_document_focus(self, *, user_name, session_id, request):
+        self.calls.append(("document_focus_set", user_name, session_id, request))
+        target = request.model_dump()
+        self.document_focus = {
+            "mode": "pinned",
+            "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+            "target_type": target["target_type"],
+            "document_id": target.get("document_id"),
+            "relative_path": "docs/notes.py"
+            if target["target_type"] == "document"
+            else None,
+            "path_prefix": target.get("path_prefix"),
+        }
+        return self.document_focus
+
+    async def clear_document_focus(self, *, user_name, session_id):
+        self.calls.append(("document_focus_clear", user_name, session_id))
+        self.document_focus = None
 
     async def run_stream(self, *, user_name, request: StartRunRequest):
         self.calls.append(("run", user_name, request))
@@ -145,10 +156,92 @@ class FakeApplication:
             else None
         )
 
+    @staticmethod
+    def _maintenance_review(scope="user-global", project_id=None):
+        return {
+            "review_id": "review-1",
+            "scope": scope,
+            "project_id": project_id,
+            "kind": "entity_merge" if scope == "user-global" else "relationship_interpretation",
+            "reasoning": "Reviewed durable evidence.",
+            "proposed_plan": {
+                "kind": "entity_merge" if scope == "user-global" else "relationship_interpretation",
+            },
+            "expected_state": {"state_hash": "hash-1"},
+            "status": "open",
+        }
+
+    async def list_global_maintenance_reviews(self, *, user_name):
+        self.calls.append(("global_reviews", user_name))
+        return [self._maintenance_review()]
+
+    async def decide_global_maintenance_review(self, *, user_name, review_id, request):
+        self.calls.append(("global_review_decision", user_name, review_id, request))
+        return {"review_id": review_id, "action": request.action}
+
+    async def list_project_maintenance_reviews(self, *, user_name, project_id):
+        self.calls.append(("project_reviews", user_name, project_id))
+        return [self._maintenance_review("project", project_id)]
+
+    async def get_project_maintenance_review(
+        self, *, user_name, project_id, review_id
+    ):
+        self.calls.append(("project_review_detail", user_name, project_id, review_id))
+        return {
+            "review": self._maintenance_review("project", project_id),
+            "stored_snapshot": {},
+            "current_evidence": [],
+            "unavailable_pointers": [],
+            "evidence_state": "current",
+        }
+
+    async def preview_project_maintenance_review(
+        self, *, user_name, project_id, review_id
+    ):
+        detail = await self.get_project_maintenance_review(
+            user_name=user_name, project_id=project_id, review_id=review_id
+        )
+        return {
+            "detail": detail,
+            "impact": {
+                "review_id": review_id,
+                "evidence_state_token": detail["stored_snapshot"].get(
+                    "state_token",
+                    "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e9f414c0cce5cfd4e3d7e1b",
+                ),
+                "impacts": [],
+                "no_applicable_impact": "No canonical mutation.",
+            },
+        }
+
+    async def decide_project_maintenance_review(
+        self, *, user_name, project_id, review_id, request
+    ):
+        self.calls.append(
+            ("project_review_decision", user_name, project_id, review_id, request)
+        )
+        return {"review_id": review_id, "action": request.action}
+
+    async def preview_entity_merge_rollback(self, *, user_name, merge_id):
+        self.calls.append(("rollback_preview", user_name, merge_id))
+        return {"merge_id": merge_id, "safe_mutation_ids": [1]}
+
+    async def rollback_entity_merge(self, *, user_name, merge_id, request):
+        self.calls.append(("rollback", user_name, merge_id, request))
+        return {
+            "merge_id": merge_id,
+            "applied_mutation_ids": list(request.approved_mutation_ids),
+        }
+
 
 class BrokenStreamApplication(FakeApplication):
     async def run_stream(self, *, user_name, request: StartRunRequest):
         yield {"type": "private.tool.payload", "secret": "do not expose"}
+
+
+class BusyRunApplication(FakeApplication):
+    async def open_run_stream(self, *, user_name, request: StartRunRequest):
+        raise SessionBusyError()
 
 
 async def _client(app):
@@ -176,11 +269,6 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
                 "enabled_tools": [" Search_Messages "],
             },
         )
-        message = await client.post(
-            "/v1/sessions/session-1/messages",
-            headers={"X-User-Name": "ada"},
-            json={"content": "remember this", "idempotency_key": "m-1"},
-        )
         result = await client.post(
             "/v1/runs",
             headers={"X-User-Name": "ada"},
@@ -195,11 +283,6 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
     assert project.json()["id"] == "project-1"
     assert session.status_code == 201
     assert session.json()["enabled_tools"] == ["search_messages"]
-    assert message.json() == {
-        "message_id": 42,
-        "accepted": True,
-        "idempotent": False,
-    }
     assert result.status_code == 200
     assert result.json() == {
         "run_id": "run-1",
@@ -214,10 +297,143 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
     assert [call[0] for call in port.calls] == [
         "project",
         "session",
-        "message",
         "run",
     ]
     assert port.calls[-1][2].research_mode == "research"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_document_focus_routes_keep_selection_request_only():
+    port = FakeApplication()
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        initial = await client.get(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+        )
+        set_focus = await client.put(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+            json={"target_type": "document", "document_id": "document-1"},
+        )
+        rejected_selection = await client.put(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+            json={
+                "target_type": "document",
+                "document_id": "document-1",
+                "selection": {
+                    "content_hash": "a" * 64,
+                    "locator": {
+                        "kind": "text_lines",
+                        "start_line": 1,
+                        "end_line": 1,
+                    },
+                },
+            },
+        )
+        cleared = await client.delete(
+            "/v1/sessions/session-1/document-focus",
+            headers={"X-User-Name": "ada"},
+        )
+
+    assert initial.status_code == 200
+    assert initial.json() is None
+    assert set_focus.status_code == 200
+    assert set_focus.json()["relative_path"] == "docs/notes.py"
+    assert rejected_selection.status_code == 422
+    assert cleared.status_code == 204
+    assert [call[0] for call in port.calls] == [
+        "document_focus_get",
+        "document_focus_set",
+        "document_focus_clear",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_maintenance_routes_expose_review_decisions_and_rollback():
+    port = FakeApplication()
+    app = create_app(port)
+    headers = {"X-User-Name": "ada"}
+
+    async with await _client(app) as client:
+        global_reviews = await client.get("/v1/maintenance/reviews", headers=headers)
+        global_decision = await client.post(
+            "/v1/maintenance/reviews/review-1/decision",
+            headers=headers,
+            json={"action": "apply", "expected_state": {"state_hash": "hash-1"}},
+        )
+        project_reviews = await client.get(
+            "/v1/projects/project-1/maintenance/reviews",
+            headers=headers,
+        )
+        project_detail = await client.get(
+            "/v1/projects/project-1/maintenance/reviews/review-1",
+            headers=headers,
+        )
+        project_preview = await client.get(
+            "/v1/projects/project-1/maintenance/reviews/review-1/preview",
+            headers=headers,
+        )
+        project_decision = await client.post(
+            "/v1/projects/project-1/maintenance/reviews/review-2/decision",
+            headers=headers,
+            json={"action": "dismiss", "reason": "Not applicable"},
+        )
+        preview = await client.get(
+            "/v1/maintenance/entity-merges/merge-1/rollback",
+            headers=headers,
+        )
+        rollback = await client.post(
+            "/v1/maintenance/entity-merges/merge-1/rollback",
+            headers=headers,
+            json={"approved_mutation_ids": [1, 2]},
+        )
+
+    assert global_reviews.status_code == 200
+    assert global_reviews.json()["reviews"][0]["review_id"] == "review-1"
+    assert global_decision.json()["result"]["action"] == "apply"
+    assert project_reviews.json()["reviews"][0]["project_id"] == "project-1"
+    assert project_detail.json()["evidence_state"] == "current"
+    assert project_preview.json()["impact"]["review_id"] == "review-1"
+    assert project_decision.json()["result"]["action"] == "dismiss"
+    assert preview.json()["result"]["safe_mutation_ids"] == [1]
+    assert rollback.json()["result"]["applied_mutation_ids"] == [1, 2]
+    assert [call[0] for call in port.calls] == [
+        "global_reviews",
+        "global_review_decision",
+        "project_reviews",
+        "project_review_detail",
+        "project_review_detail",
+        "project_review_decision",
+        "rollback_preview",
+        "rollback",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_run_admission_conflict_is_returned_before_http_or_sse_starts():
+    app = create_app(BusyRunApplication())
+
+    async with await _client(app) as client:
+        run = await client.post(
+            "/v1/runs",
+            headers={"X-User-Name": "ada"},
+            json={"session_id": "session-1", "query": "hello"},
+        )
+        stream = await client.post(
+            "/v1/runs/stream",
+            headers={"X-User-Name": "ada"},
+            json={"session_id": "session-1", "query": "hello"},
+        )
+
+    for response in (run, stream):
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "session_busy"
 
 
 @pytest.mark.unit

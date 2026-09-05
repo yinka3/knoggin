@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.utils.time_utils import frozen_time
-from core.agent.prompt_context import build_user_message, update_accumulators
+from core.agent.prompt_context import build_user_message
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.tool_runtime import summarize_result
 
@@ -54,8 +54,14 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     )
     ctx.call_count = 1
     ctx.last_error = "Duplicate call skipped"
-    ctx.profiles.append({"id": 7, "canonical_name": "Ada"})
-    ctx.profiles.append({"id": 8, "canonical_name": "Grace"})
+    ctx.notebook.apply(
+        "search_entity",
+        {"data": [{"id": 8, "canonical_name": "Grace"}]},
+    )
+    ctx.notebook.apply(
+        "search_entity",
+        {"data": [{"id": 7, "canonical_name": "Ada"}]},
+    )
 
     message = build_user_message(
         ctx,
@@ -98,6 +104,72 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
 
 
 @pytest.mark.no_network
+def test_topic_context_tool_accumulates_messages_as_evidence():
+    ctx = make_ctx()
+    result = {
+        "data": {
+            "Work": {
+                "entities": [{"name": "Acme"}],
+                "messages": [
+                    {
+                        "id": "msg_7",
+                        "message": "The offer includes a leadership role.",
+                        "timestamp": "2026-01-01T10:00:00+00:00",
+                    }
+                ],
+            },
+            "Finance": {
+                "entities": [{"name": "Savings"}],
+                "messages": [],
+            },
+        }
+    }
+
+    assert ctx.accumulate_tool_result("load_topic_context", result) is True
+    assert ctx.new_evidence_gathered is True
+    assert summarize_result("load_topic_context", result) == (
+        "Loaded context for 2 topic(s) with 1 supporting message(s)",
+        2,
+    )
+    assert ctx.notebook.section_items("messages") == (
+        {
+            "id": "msg_7",
+            "message": "The offer includes a leadership role.",
+            "timestamp": "2026-01-01T10:00:00+00:00",
+            "score": 1.0,
+            "context": [
+                {
+                    "role": "assistant",
+                    "timestamp": "2026-01-01T10:00:00+00:00",
+                    "content": "The offer includes a leadership role.",
+                    "is_hit": True,
+                }
+            ],
+        },
+    )
+
+    message = build_user_message(
+        ctx,
+        last_result=[{"tool": "load_topic_context", "result": result}],
+    )
+
+    assert "Loaded context for 2 topic(s)" in message
+    assert "[TOPIC: Work]" in message
+    assert "The offer includes a leadership role." in message
+
+
+@pytest.mark.no_network
+def test_topic_context_without_messages_does_not_count_as_new_evidence():
+    ctx = make_ctx()
+
+    assert ctx.accumulate_tool_result(
+        "load_topic_context",
+        {"data": {"Work": {"entities": [{"name": "Acme"}], "messages": []}}},
+    ) is False
+    assert ctx.new_evidence_gathered is False
+
+
+@pytest.mark.no_network
 def test_build_user_message_renders_discovered_sources_for_next_step():
     ctx = make_ctx(user_query="Research the latest profile behavior changes")
     result_data = [
@@ -120,8 +192,8 @@ def test_build_user_message_renders_discovered_sources_for_next_step():
             "source_kind": "news_search_result",
         },
     ]
-    update_accumulators(ctx, "web_search", {"data": result_data[:1]})
-    update_accumulators(ctx, "news_search", {"data": result_data[1:]})
+    ctx.accumulate_tool_result("web_search", {"data": result_data[:1]})
+    ctx.accumulate_tool_result("news_search", {"data": result_data[1:]})
 
     message = build_user_message(
         ctx,
@@ -151,9 +223,8 @@ def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
         "query": "useful context",
         "rank": 1,
     }
-    update_accumulators(ctx, "web_search", {"data": [source]})
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result("web_search", {"data": [source]})
+    ctx.accumulate_tool_result(
         "search_entity",
         {"data": [{"id": 1, "canonical_name": "Ada"}]},
     )
@@ -173,11 +244,10 @@ def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_skips_non_source_search_status_items():
+def test_notebook_skips_non_source_search_status_items():
     ctx = make_ctx()
 
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "web_search",
         {
             "data": [
@@ -191,15 +261,15 @@ def test_update_accumulators_skips_non_source_search_status_items():
         },
     )
 
-    assert [item["url"] for item in ctx.sources] == [
+    assert [item["url"] for item in ctx.notebook.model_view()["sources"]] == [
         "https://example.test/source"
     ]
 
 
 @pytest.mark.no_network
-def test_compact_evidence_trims_sources_with_other_evidence():
+def test_rollover_evidence_preserves_sources_and_summary_references():
     ctx = make_ctx()
-    ctx.sources = [
+    sources = [
         {
             "title": f"Source {index}",
             "url": f"https://example.test/{index}",
@@ -207,17 +277,17 @@ def test_compact_evidence_trims_sources_with_other_evidence():
         }
         for index in range(6)
     ]
+    assert ctx.accumulate_tool_result("web_search", {"data": sources}) is True
 
-    ctx.compact_evidence("Condensed source evidence")
+    rollover = ctx.rollover_notebook("Condensed source evidence")
 
-    assert ctx.evidence_summary == "Condensed source evidence"
-    assert [item["title"] for item in ctx.sources] == [
-        "Source 1",
-        "Source 2",
-        "Source 3",
-        "Source 4",
-        "Source 5",
+    assert ctx.notebook.summary.text == "Condensed source evidence"
+    assert rollover.generation == 2
+    assert [item["title"] for item in ctx.notebook.model_view()["sources"]] == [
+        f"Source {index}" for index in range(6)
     ]
+    assert ctx.notebook.summary.references
+    assert all(ctx.notebook._known_reference(ref) for ref in ctx.notebook.summary.references)
 
 
 @pytest.mark.no_network
@@ -239,10 +309,9 @@ def test_read_web_page_ranges_remain_distinct_and_visible_after_later_tool_calls
         "start_line": 2,
         "end_line": 2,
     }
-    update_accumulators(ctx, "read_web_page", {"data": [first_range]})
-    update_accumulators(ctx, "read_web_page", {"data": [second_range]})
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result("read_web_page", {"data": [first_range]})
+    ctx.accumulate_tool_result("read_web_page", {"data": [second_range]})
+    ctx.accumulate_tool_result(
         "search_entity",
         {"data": [{"id": 1, "canonical_name": "Ada"}]},
     )
@@ -287,7 +356,7 @@ def test_read_external_pdf_page_is_rendered_as_read_content_not_discovery():
         "source_kind": "web_pdf",
     }
 
-    update_accumulators(ctx, "read_web_page", {"data": [pdf_page]})
+    ctx.accumulate_tool_result("read_web_page", {"data": [pdf_page]})
     message = build_user_message(
         ctx,
         last_result={"tool": "read_web_page", "result": {"data": [pdf_page]}},
@@ -327,11 +396,10 @@ def test_build_user_message_includes_absolute_and_elapsed_last_turn_time():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_dedupes_and_trims_messages_by_score():
+def test_notebook_dedupes_without_blind_tail_trimming():
     ctx = make_ctx()
 
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_messages",
         {
             "data": [
@@ -356,8 +424,7 @@ def test_update_accumulators_dedupes_and_trims_messages_by_score():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_messages",
         {
             "data": [
@@ -371,20 +438,22 @@ def test_update_accumulators_dedupes_and_trims_messages_by_score():
         },
     )
 
-    assert [msg["id"] for msg in ctx.messages] == ["msg_2", "msg_3"]
+    messages = ctx.notebook.model_view()["messages"]
+    assert [msg["id"] for msg in messages] == ["msg_1", "msg_2"]
+    assert messages[0]["score"] == 1.0
+    assert ctx.notebook.last_apply_result.accepted is False
+    assert ctx.notebook.last_apply_result.reason == "capacity"
 
 
 @pytest.mark.no_network
-def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
+def test_notebook_dedupes_profiles_graph_files_and_sources():
     ctx = make_ctx()
 
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_entity",
         {"data": [{"id": 1, "canonical_name": "Ada"}, {"id": 1}]},
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "get_connections",
         {
             "data": [
@@ -393,25 +462,33 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "get_recent_activity",
         {"data": [{"source": "Ada", "target": "Testing"}]},
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "find_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "find_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
-    update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
-    update_accumulators(ctx, "episode_check", {"data": {"resolution": "exact"}})
-    update_accumulators(
-        ctx,
+    episode_result = {
+        "data": {
+            "resolution": "exact",
+            "results": [
+                {
+                    "episodes": [
+                        {"episode_id": "ep-1", "summary": "Profile changed"}
+                    ]
+                }
+            ],
+        }
+    }
+    ctx.accumulate_tool_result("episode_check", episode_result)
+    ctx.accumulate_tool_result("episode_check", episode_result)
+    ctx.accumulate_tool_result(
         "search_documents",
         {
             "data": [
@@ -431,8 +508,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "read_document",
         {
             "data": [
@@ -445,8 +521,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "web_search",
         {
             "data": [
@@ -469,8 +544,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             ]
         },
     )
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "news_search",
         {
             "data": [
@@ -486,16 +560,26 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
         },
     )
 
-    assert ctx.profiles == [{"id": 1, "canonical_name": "Ada"}]
-    assert ctx.graph == [
+    assert ctx.notebook.section_items("entities") == (
+        {"id": 1, "canonical_name": "Ada"},
+    )
+    assert ctx.notebook.section_items("relationships") == (
         {"source": "Ada", "target": "Knoggin", "score": 0.8},
         {"source": "Ada", "target": "Testing"},
-    ]
-    assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Knoggin"}]
-    assert ctx.episodes == [{"resolution": "exact"}]
+    )
+    assert ctx.notebook.section_items("paths") == (
+        {"entity_a": "Ada", "entity_b": "Knoggin"},
+    )
+    assert ctx.notebook.section_items("episodes") == (
+        {
+            "episode_id": "ep-1",
+            "summary": "Profile changed",
+            "resolution": "exact",
+        },
+    )
     assert [
         (msg["id"], msg["source_type"], msg["message"])
-        for msg in ctx.messages
+        for msg in ctx.notebook.model_view()["messages"]
     ] == [
         ("document:file-1:2", "document", "profile plan"),
         (
@@ -504,7 +588,7 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
             "10: exact content",
         ),
     ]
-    assert ctx.sources == [
+    assert ctx.notebook.model_view()["sources"] == [
         {
             "title": "Example A",
             "url": "https://example.test/a",
@@ -527,21 +611,11 @@ def test_update_accumulators_dedupes_profiles_graph_files_and_sources():
 
 
 @pytest.mark.no_network
-def test_update_accumulators_caps_non_message_evidence_buckets():
+def test_notebook_rejects_oversized_buckets_atomically():
     ctx = make_ctx(
-        limits=AgentRunLimits(
-            max_history_turns=2,
-            max_accumulated_messages=2,
-            max_accumulated_profiles=2,
-            max_accumulated_graph=2,
-            max_accumulated_paths=1,
-            max_accumulated_episodes=1,
-            max_accumulated_sources=1,
-        )
+        limits=AgentRunLimits(max_accumulated_profiles=2)
     )
-
-    update_accumulators(
-        ctx,
+    ctx.accumulate_tool_result(
         "search_entity",
         {
             "data": [
@@ -551,99 +625,19 @@ def test_update_accumulators_caps_non_message_evidence_buckets():
             ]
         },
     )
-    update_accumulators(
-        ctx,
-        "get_connections",
-        {
-            "data": [
-                {"source": "Ada", "target": "Alpha"},
-                {"source": "Ada", "target": "Beta"},
-                {"source": "Ada", "target": "Gamma"},
-            ]
-        },
-    )
-    update_accumulators(
-        ctx,
-        "find_path",
-        {
-            "data": [
-                {"entity_a": "Ada", "entity_b": "Alpha"},
-                {"entity_a": "Ada", "entity_b": "Beta"},
-            ]
-        },
-    )
-    update_accumulators(
-        ctx,
-        "episode_check",
-        {"data": [{"id": "episode-1"}, {"id": "episode-2"}]},
-    )
-    update_accumulators(
-        ctx,
-        "web_search",
-        {
-            "data": [
-                {
-                    "title": "Old result",
-                    "url": "https://example.test/old",
-                    "snippet": "Old snippet.",
-                },
-                {
-                    "title": "New result",
-                    "url": "https://example.test/new",
-                    "snippet": "New snippet.",
-                },
-            ]
-        },
-    )
-    update_accumulators(
-        ctx,
-        "search_documents",
-        {
-            "data": [
-                {
-                    "document_id": "file-1",
-                    "chunk_index": 1,
-                    "content": "one",
-                },
-                {
-                    "document_id": "file-1",
-                    "chunk_index": 2,
-                    "content": "two",
-                },
-                {
-                    "document_id": "file-1",
-                    "chunk_index": 3,
-                    "content": "three",
-                },
-            ]
-        },
-    )
 
-    assert [profile["id"] for profile in ctx.profiles] == [2, 3]
-    assert [(item["source"], item["target"]) for item in ctx.graph] == [
-        ("Ada", "Beta"),
-        ("Ada", "Gamma"),
-    ]
-    assert ctx.paths == [{"entity_a": "Ada", "entity_b": "Beta"}]
-    assert ctx.episodes == [{"id": "episode-2"}]
-    assert ctx.sources == [
-        {
-            "title": "New result",
-            "url": "https://example.test/new",
-            "snippet": "New snippet.",
-            "source_kind": "web_search_result",
-        }
-    ]
-    assert [message["chunk_index"] for message in ctx.messages] == [2, 3]
+    assert ctx.notebook.section_items("entities") == ()
+    assert ctx.notebook.last_apply_result.accepted is False
+    assert ctx.notebook.last_apply_result.reason == "capacity"
 
 
 @pytest.mark.no_network
-def test_update_accumulators_ignores_errors_and_empty_results():
+def test_notebook_ignores_errors_and_empty_results():
     ctx = make_ctx()
 
-    update_accumulators(ctx, "search_messages", {"error": "failed"})
-    update_accumulators(ctx, "search_messages", {"data": []})
-    update_accumulators(ctx, "unknown", {"data": [{"id": "x"}]})
+    ctx.accumulate_tool_result("search_messages", {"error": "failed"})
+    ctx.accumulate_tool_result("search_messages", {"data": []})
+    ctx.accumulate_tool_result("unknown", {"data": [{"id": "x"}]})
 
     assert ctx.has_any() is False
 
@@ -671,17 +665,6 @@ def test_update_accumulators_ignores_errors_and_empty_results():
         ),
         ("search_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
         ("list_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
-        (
-            "list_folder_uploads",
-            {"data": [{"folder_root_id": "folder-1"}]},
-            ("Found 1 items", 1),
-        ),
-        ("list_folder_tree", {"data": []}, ("Found 0 items", 0)),
-        (
-            "get_folder_upload_summary",
-            {"data": {"folder_root_id": "folder-1"}},
-            ("Loaded folder upload summary", 1),
-        ),
         (
             "read_document",
             {"data": [{"content": "lines"}]},

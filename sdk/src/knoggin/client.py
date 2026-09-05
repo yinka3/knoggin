@@ -84,11 +84,12 @@ class Knoggin:
         turn: Turn,
         idempotency_key: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Validate a turn, then return its direct canonical engine stream.
+        """Admit and persist a turn, then return its canonical engine stream.
 
         The returned stream is not a detached run resource. The engine remains
         responsible for serializing session execution and durably committing
-        its final answer before exposing the response event.
+        its final answer before exposing the response event. Admission happens
+        before this method returns, so an overlapping turn raises immediately.
         """
 
         session_id = session_id.strip()
@@ -103,7 +104,7 @@ class Knoggin:
             content=turn.content.strip(),
             metadata={"idempotency_key": (idempotency_key or "").strip()},
         )
-        return context.run_agent_stream(
+        return await context.open_agent_run_stream(
             message,
             model=turn.model,
             agent_id=turn.agent_id,

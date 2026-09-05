@@ -32,11 +32,7 @@ class AgeProjectionWriter:
         UNWIND $batch AS data
         MERGE (e:Entity {id: data.id})
         SET e.user_name = data.user_name,
-            e.project_id = data.project_id,
-            e.canonical_name = data.canonical_name,
-            e.type = data.type,
-            e.topic = data.topic,
-            e.last_mentioned = data.now
+            e.canonical_name = data.canonical_name
 
         WITH e, data,
             coalesce(e.aliases, []) + coalesce(data.aliases, []) AS all_aliases
@@ -58,16 +54,12 @@ class AgeProjectionWriter:
         )
 
     async def project_identity(self, cur, identity: Dict) -> None:
-        """Project the canonical identity node with exact reserved properties."""
+        """Project the canonical user-global identity node."""
         cypher = """
         MERGE (e:Entity {id: $id})
         SET e.user_name = $user_name,
-            e.project_id = $project_id,
             e.canonical_name = $canonical_name,
-            e.aliases = $aliases,
-            e.type = $type,
-            e.topic = $topic,
-            e.last_mentioned = $now
+            e.aliases = $aliases
         RETURN e.id
         """
         await cur.execute(
@@ -86,46 +78,19 @@ class AgeProjectionWriter:
             ),
         )
         cypher = """
-        MATCH (n:Entity)
-        WHERE n.project_id = $project_id
-          AND coalesce(n.id, -1) <> $identity_entity_id
-        DETACH DELETE n
-        RETURN count(n)
+        MATCH ()-[r:RELATED_TO]->()
+        WHERE r.project_id = $project_id
+        DELETE r
+        RETURN count(r)
         """
         await cur.execute(self._build_cypher(cypher), params)
 
     async def project_entity_domain(self, cur, entities: List[Dict]) -> None:
-        """Update type and timestamp properties for explicit reclassification."""
+        """Contexts are canonical SQL state, not properties of global AGE nodes."""
 
-        if not entities:
-            return
-
-        batch = []
-        for entity in entities:
-            entity_id = int(entity["id"])
-            project_id = str(entity["project_id"])
-            entity_type = str(entity["type"]).strip()
-            if not entity_type or not project_id:
-                raise ValueError("Reclassified entity projection fields are required")
-            batch.append(
-                {
-                    "id": entity_id,
-                    "project_id": project_id,
-                    "type": entity_type,
-                }
-            )
-
-        cypher = """
-        UNWIND $batch AS data
-        MATCH (e:Entity {id: data.id})
-        WHERE e.project_id = data.project_id
-        SET e.type = data.type
-        RETURN count(e)
-        """
-        await cur.execute(
-            self._build_cypher(cypher),
-            (json.dumps({"batch": batch}),),
-        )
+        # Keep the method as an explicit lifecycle seam for callers.  AGE
+        # projects global identities and project-scoped relationships only.
+        return None
 
     async def project_relationships(self, cur, relationships: List[Dict]) -> None:
         if not relationships:
@@ -135,8 +100,6 @@ class AgeProjectionWriter:
         UNWIND $batch AS rel
         MATCH (a:Entity {id: rel.entity_a_id})
         MATCH (b:Entity {id: rel.entity_b_id})
-        WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
-          AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
         MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
             r.relationship_type = rel.relationship_type,
@@ -147,10 +110,7 @@ class AgeProjectionWriter:
             self._build_cypher(cypher),
             (
                 json.dumps(
-                    {
-                        "batch": relationships,
-                        "identity_entity_id": IDENTITY_ENTITY_ID,
-                    }
+                    {"batch": relationships}
                 ),
             ),
         )
@@ -169,8 +129,6 @@ class AgeProjectionWriter:
         delete_cypher = """
         MATCH (e:Entity)-[r:RELATED_TO]-(target:Entity)
         WHERE e.id IN $entity_ids
-          AND (e.project_id = $project_id OR e.id = $identity_entity_id)
-          AND (target.project_id = $project_id OR target.id = $identity_entity_id)
           AND r.project_id = $project_id
         WITH DISTINCT r
         DELETE r
@@ -183,7 +141,6 @@ class AgeProjectionWriter:
                     {
                         "project_id": project_id,
                         "entity_ids": entity_ids,
-                        "identity_entity_id": IDENTITY_ENTITY_ID,
                     }
                 ),
             ),
@@ -196,8 +153,6 @@ class AgeProjectionWriter:
         UNWIND $batch AS rel
         MATCH (a:Entity {id: rel.entity_a_id})
         MATCH (b:Entity {id: rel.entity_b_id})
-        WHERE (a.project_id = rel.project_id OR a.id = $identity_entity_id)
-          AND (b.project_id = rel.project_id OR b.id = $identity_entity_id)
         MERGE (a)-[r:RELATED_TO {relationship_id: rel.relationship_id}]->(b)
         SET r.project_id = rel.project_id,
             r.relationship_type = rel.relationship_type,
@@ -220,15 +175,11 @@ class AgeProjectionWriter:
         self,
         cur,
         primary_id: int,
-        project_id: str,
         aliases: List[str],
-        last_mentioned_ms: int,
     ) -> None:
         cypher = """
         MATCH (p:Entity {id: $primary_id})
-        WHERE p.project_id = $project_id
-        SET p.aliases = $aliases,
-            p.last_mentioned = $last_mentioned
+        SET p.aliases = $aliases
         RETURN p.id
         """
         await cur.execute(
@@ -237,9 +188,7 @@ class AgeProjectionWriter:
                 json.dumps(
                     {
                         "primary_id": primary_id,
-                        "project_id": project_id,
                         "aliases": aliases,
-                        "last_mentioned": last_mentioned_ms,
                     }
                 ),
             ),
@@ -264,12 +213,10 @@ class AgeProjectionWriter:
 
         params = {
             "entity_ids": entity_ids,
-            "project_id": project_id,
         }
         entity_cypher = """
         MATCH (e:Entity)
         WHERE e.id IN $entity_ids
-          AND e.project_id = $project_id
         DETACH DELETE e
         RETURN count(DISTINCT e)
         """

@@ -27,15 +27,15 @@ class AdvisoryThresholds:
 
     min_occurrences: int = 3
     min_distinct_entities: int = 2
-    min_distinct_messages: int = 2
+    min_distinct_windows: int = 2
 
     def __post_init__(self) -> None:
         if self.min_occurrences < 1:
             raise ValueError("min_occurrences must be positive")
         if self.min_distinct_entities < 1:
             raise ValueError("min_distinct_entities must be positive")
-        if self.min_distinct_messages < 1:
-            raise ValueError("min_distinct_messages must be positive")
+        if self.min_distinct_windows < 1:
+            raise ValueError("min_distinct_windows must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,9 +49,10 @@ class RelationshipAdvisory:
     occurrence_count: int
     distinct_source_entities: int
     distinct_target_entities: int
-    message_ids: tuple[int, ...]
+    semantic_window_ids: tuple[str, ...]
     first_observed_ms: int | None
     last_observed_ms: int | None
+    observation_ids: tuple[int, ...] = ()
     disposition: str = "pending"
     proposed_relationship_type: str | None = None
     decision_note: str | None = None
@@ -72,7 +73,8 @@ class RelationshipAdvisory:
             "distinct_source_entities": self.distinct_source_entities,
             "distinct_target_entities": self.distinct_target_entities,
             "distinct_entities": self.distinct_entities,
-            "message_ids": list(self.message_ids),
+            "semantic_window_ids": list(self.semantic_window_ids),
+            "observation_ids": list(self.observation_ids),
             "first_observed_ms": self.first_observed_ms,
             "last_observed_ms": self.last_observed_ms,
             "disposition": self.disposition,
@@ -243,6 +245,8 @@ def build_relationship_advisories(
     thresholds = thresholds or AdvisoryThresholds()
     groups: dict[str, dict[str, Any]] = {}
     for row in observations:
+        if row.get("interpretation_source", "observed") != "observed":
+            continue
         if row.get("domain_status", "unrecognized") != "unrecognized":
             continue
         raw_label = (
@@ -266,21 +270,35 @@ def build_relationship_advisories(
                 "source_type": source_type,
                 "target_type": target_type,
                 "occurrences": 0,
-                "message_ids": set(),
+                "semantic_window_ids": set(),
+                "observation_ids": set(),
                 "source_entities": set(),
                 "target_entities": set(),
                 "first_observed_ms": None,
                 "last_observed_ms": None,
+                "independent_occurrences": 0,
+                "independent_windows": set(),
+                "independent_entities": set(),
             },
         )
         group["occurrences"] += 1
-        group["message_ids"].add(int(row["message_id"]))
+        group["semantic_window_ids"].add(str(row["semantic_window_id"]))
+        observation_id = row.get("observation_id")
+        if observation_id is not None:
+            group["observation_ids"].add(int(observation_id))
         source_id = row.get("source_entity_id") or row.get("entity_a_id")
         target_id = row.get("target_entity_id") or row.get("entity_b_id")
         if source_id is not None:
             group["source_entities"].add(int(source_id))
         if target_id is not None:
             group["target_entities"].add(int(target_id))
+        if row.get("evidence_origin", "independent") == "independent":
+            group["independent_occurrences"] += 1
+            group["independent_windows"].add(str(row["semantic_window_id"]))
+            if source_id is not None:
+                group["independent_entities"].add(int(source_id))
+            if target_id is not None:
+                group["independent_entities"].add(int(target_id))
         observed_ms = row.get("observed_at_ms")
         if observed_ms is not None:
             observed_ms = int(observed_ms)
@@ -296,11 +314,10 @@ def build_relationship_advisories(
     advisories = []
     for key, group in groups.items():
         occurrence_count = group["occurrences"]
-        distinct_entities = len(group["source_entities"] | group["target_entities"])
         if (
-            occurrence_count < thresholds.min_occurrences
-            or distinct_entities < thresholds.min_distinct_entities
-            or len(group["message_ids"]) < thresholds.min_distinct_messages
+            group["independent_occurrences"] < thresholds.min_occurrences
+            or len(group["independent_entities"]) < thresholds.min_distinct_entities
+            or len(group["independent_windows"]) < thresholds.min_distinct_windows
         ):
             continue
         advisories.append(
@@ -312,7 +329,8 @@ def build_relationship_advisories(
                 occurrence_count=occurrence_count,
                 distinct_source_entities=len(group["source_entities"]),
                 distinct_target_entities=len(group["target_entities"]),
-                message_ids=tuple(sorted(group["message_ids"])),
+                semantic_window_ids=tuple(sorted(group["semantic_window_ids"])),
+                observation_ids=tuple(sorted(group["observation_ids"])),
                 first_observed_ms=group["first_observed_ms"],
                 last_observed_ms=group["last_observed_ms"],
             )

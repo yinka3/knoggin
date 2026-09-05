@@ -21,11 +21,15 @@ from common.exceptions import (
     LLMProviderError,
     LLMResponseError,
     NotFoundError,
+    SessionBusyError,
     StorageError,
     ToolExecutionError,
 )
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
+from common.schema.document import DocumentSelection
+from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
+from common.schema.maintenance import MaintenanceImpactPreview
 from common.schema.source.references import SourceConsulted
 
 PUBLIC_CONTRACT_VERSION = "1"
@@ -68,9 +72,8 @@ class PublicModel(BaseModel):
 class CreateProjectRequest(PublicModel):
     name: str = Field(min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=10_000)
-    access_mode: str = Field(default="open", min_length=1, max_length=32)
 
-    @field_validator("name", "access_mode")
+    @field_validator("name")
     @classmethod
     def _reject_blank_text(cls, value: str) -> str:
         value = value.strip()
@@ -83,7 +86,6 @@ class ProjectResponse(PublicModel):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     description: str | None = None
-    access_mode: str = Field(min_length=1)
     status: Literal["active", "archived", "deleted"]
     session_count: int = Field(default=0, ge=0)
     allowed_projects: tuple[str, ...] = ()
@@ -103,7 +105,7 @@ class CreateSessionRequest(PublicModel):
 class SessionResponse(PublicModel):
     session_id: str = Field(min_length=1)
     project_id: str = Field(min_length=1)
-    status: Literal["open", "closed", "deleted"] = "open"
+    status: Literal["open", "deleted"] = "open"
     model: str | None = None
     agent_id: str | None = None
     enabled_tools: tuple[str, ...] | None = None
@@ -130,23 +132,125 @@ class UpdateAgentRequest(PublicModel):
         return "allowlist"
 
 
-class SubmitMessageRequest(PublicModel):
-    content: str = Field(min_length=1, max_length=100_000)
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=256)
+class RunDocumentFocusDocument(PublicModel):
+    """One document optionally anchored at a request-scoped selection."""
 
-    @field_validator("content")
+    target_type: Literal["document"]
+    document_id: str = Field(min_length=1)
+    selection: DocumentSelection | None = None
+    behavior: Literal["prefer", "restrict"] = "restrict"
+
+
+class RunDocumentFocusSubtree(PublicModel):
+    """One request-scoped project-relative subtree."""
+
+    target_type: Literal["subtree"]
+    path_prefix: str = Field(min_length=1)
+    behavior: Literal["prefer", "restrict"] = "prefer"
+
+
+RunDocumentFocus = Annotated[
+    Union[RunDocumentFocusDocument, RunDocumentFocusSubtree],
+    Field(discriminator="target_type"),
+]
+
+
+class SetDocumentFocusDocument(PublicModel):
+    """Persisted focus for one document, deliberately without a selection."""
+
+    target_type: Literal["document"]
+    document_id: str = Field(min_length=1)
+    behavior: Literal["prefer", "restrict"] = "prefer"
+
+
+class SetDocumentFocusSubtree(PublicModel):
+    """Persisted focus for one project-relative subtree."""
+
+    target_type: Literal["subtree"]
+    path_prefix: str = Field(min_length=1)
+    behavior: Literal["prefer", "restrict"] = "prefer"
+
+
+SetDocumentFocusRequest = Annotated[
+    Union[SetDocumentFocusDocument, SetDocumentFocusSubtree],
+    Field(discriminator="target_type"),
+]
+
+
+class DocumentFocusResponse(PublicModel):
+    """Stable public projection of the currently pinned session focus."""
+
+    mode: Literal["pinned"]
+    behavior: Literal["prefer", "restrict"] = "prefer"
+    created_at: datetime
+    target_type: Literal["document", "subtree"]
+    document_id: str | None = None
+    relative_path: str | None = None
+    path_prefix: str | None = None
+
+
+class PromoteSourceRequest(PublicModel):
+    """Explicitly keep one source previously returned by an assistant."""
+
+    session_id: str = Field(min_length=1)
+    source_ref_id: str = Field(min_length=1)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+
+
+class MaintenanceReviewResponse(PublicModel):
+    """Application-facing projection of one typed maintenance proposal."""
+
+    review_id: str = Field(min_length=1)
+    scope: Literal["project", "user-global"]
+    project_id: str | None = None
+    kind: str = Field(min_length=1, max_length=80)
+    reasoning: str = Field(min_length=1, max_length=8_000)
+    proposed_plan: dict[str, Any]
+    expected_state: dict[str, Any]
+    status: Literal["open", "applied", "dismissed", "stale"]
+    created_at: datetime | None = None
+    resolved_at: datetime | None = None
+
+
+class MaintenanceReviewListResponse(PublicModel):
+    reviews: tuple[MaintenanceReviewResponse, ...]
+
+
+class MaintenanceReviewDetailResponse(PublicModel):
+    review: MaintenanceReviewResponse
+    stored_snapshot: EvidenceSnapshot
+    current_evidence: tuple[EvidenceBundle, ...] = ()
+    unavailable_pointers: tuple[EvidencePointer, ...] = ()
+    evidence_state: Literal["current", "changed", "partially_unavailable"]
+
+
+class MaintenanceReviewPreviewResponse(PublicModel):
+    detail: MaintenanceReviewDetailResponse
+    impact: MaintenanceImpactPreview
+
+
+class MaintenanceReviewDecisionRequest(PublicModel):
+    action: Literal["apply", "dismiss"]
+    expected_state: dict[str, Any] | None = None
+    reason: str | None = Field(default=None, max_length=2_000)
+
+
+class MaintenanceOperationResponse(PublicModel):
+    result: dict[str, Any]
+
+
+class EntityMergeRollbackRequest(PublicModel):
+    approved_mutation_ids: tuple[int, ...] = Field(default=(), max_length=10_000)
+
+    @field_validator("approved_mutation_ids")
     @classmethod
-    def _reject_blank_content(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("content must not be blank")
-        return value
-
-
-class MessageAcceptance(PublicModel):
-    message_id: int = Field(gt=0)
-    accepted: bool = True
-    idempotent: bool = False
+    def _validate_mutation_ids(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in values):
+            raise ValueError("approved mutation IDs must be positive integers")
+        if len(set(values)) != len(values):
+            raise ValueError("approved mutation IDs must be unique")
+        return values
 
 
 class StartRunRequest(PublicModel):
@@ -156,6 +260,7 @@ class StartRunRequest(PublicModel):
     agent_id: str | None = Field(default=None, min_length=1)
     enabled_tools: list[str] | None = None
     research_mode: ResearchMode = "normal"
+    document_focus: RunDocumentFocus | None = None
 
     _normalise_tools = field_validator("enabled_tools")(_normalise_enabled_tools)
 
@@ -255,6 +360,11 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
     NotFoundError: (
         "not_found",
         "The requested resource was not found.",
+        False,
+    ),
+    SessionBusyError: (
+        "session_busy",
+        "This session already has an active run.",
         False,
     ),
     StorageError: (

@@ -425,8 +425,8 @@ class FakeKnowledgeStore:
         self.next_entity_id = 2
         self.next_message_id = 1
         self.embedding_rebuild_calls = []
-        self.reset_claimed_ingestion_calls = []
         self.accepted_message_ids = {}
+        self.closed_exchanges = []
 
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
@@ -468,29 +468,22 @@ class FakeKnowledgeStore:
         row = {
             **message,
             "lifecycle_state": "editable",
-            "ingestion_state": "waiting_for_seal",
-            "episode_eligible": False,
             "edit_window_seconds": edit_window_seconds,
         }
         self.saved_message_logs.append([row])
         self.accepted_message_ids[acceptance_key] = message["id"]
         return MessageAcceptance(message_id=message["id"], created=True)
 
-    async def reset_claimed_ingestion(self, *, user_name, project_id, session_id):
-        self.reset_claimed_ingestion_calls.append(
-            {
-                "user_name": user_name,
-                "project_id": project_id,
-                "session_id": session_id,
-            }
-        )
-        return []
-
-    async def save_assistant_message_with_source_refs(
+    async def finalize_assistant_exchange(
         self, message, candidates, *, readable_project_ids, artifact=None
     ):
+        del readable_project_ids, artifact
         self.saved_message_logs.append([message])
-        return list(candidates)
+        return message["id"], [], True
+
+    async def close_user_exchange(self, **kwargs):
+        self.closed_exchanges.append(kwargs)
+        return None
 
     async def get_recent_project_messages(
         self, user_name, project_id, limit, before_message_id=None
@@ -596,7 +589,6 @@ class FakePostgresClient:
             "user_name": user_name,
             "name": project_id,
             "description": None,
-            "access_mode": "open",
             "status": status,
             "domain_config": {
                 "version": 1,
@@ -649,7 +641,6 @@ class FakePostgresClient:
                 "user_name": params.get("user_name"),
                 "name": params.get("name"),
                 "description": params.get("description"),
-                "access_mode": params.get("access_mode", "open"),
                 "status": params.get("status", "active"),
                 "domain_config": json.loads(params["domain_config"])
                 if isinstance(params.get("domain_config"), str)
@@ -767,7 +758,6 @@ class FakePostgresClient:
                 "user_name": params.get("user_name"),
                 "name": params.get("name"),
                 "description": params.get("description"),
-                "access_mode": params.get("access_mode", "open"),
                 "status": params.get("status", "active"),
                 "domain_config": json.loads(params["domain_config"])
                 if isinstance(params.get("domain_config"), str)
@@ -825,8 +815,6 @@ class FakePostgresClient:
                 )
             if "last_active_at = now()" in normalized:
                 row["last_active_at"] = self._now()
-            if "status = 'closed'" in normalized:
-                row["status"] = "closed"
             if "status = 'deleted'" in normalized:
                 row["status"] = "deleted"
                 row["deleted_at"] = row.get("deleted_at") or self._now()
@@ -840,17 +828,6 @@ class FakePostgresClient:
                     if field == "enabled_tools" and isinstance(value, str):
                         value = json.loads(value)
                     row[field] = value
-            return
-
-        if "update public.messages" in normalized and "ingestion_state = 'excluded'" in normalized:
-            for row in self.messages:
-                if (
-                    row.get("user_name") == params.get("user_name")
-                    and row.get("session_id") == params.get("session_id")
-                    and row.get("ingestion_state") != "processed"
-                ):
-                    row["ingestion_state"] = "excluded"
-                    row["episode_eligible"] = False
             return
 
         if "delete from public.messages" in normalized:
@@ -1003,7 +980,7 @@ class FakeResources:
     embedding: FakeEmbeddingService = field(default_factory=FakeEmbeddingService)
     llm_service: FakeLLMService = field(default_factory=FakeLLMService)
     executor: Any = None
-    gliner: Any = None
+    vp01: Any = None
     spacy: Any = None
 
 class FakeScheduler:
@@ -1019,18 +996,6 @@ class FakeScheduler:
     async def stop(self):
         self.running = False
         self.stopped += 1
-
-class FakeConsumer:
-    def __init__(self):
-        self.signaled = 0
-        self.stopped = 0
-
-    def signal(self):
-        self.signaled += 1
-
-    async def stop(self):
-        self.stopped += 1
-
 
 class FakeSession:
     def __init__(self, session_id="session-1", project_id="project-1"):

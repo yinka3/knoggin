@@ -6,6 +6,8 @@ from dataclasses import replace
 from typing import Any
 
 from common.scoping import require_scope_value
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
+from core.knowledge.maintenance_reviews import RelationshipAdvisoryPlan
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,
@@ -42,25 +44,78 @@ class RelationshipObservationReader:
                 relationship_id,
                 user_name,
                 project_id,
-                session_id,
-                message_id,
+                semantic_window_id,
                 source_entity_id,
                 target_entity_id,
-                source_type,
-                target_type,
                 observed_relationship_label,
-                canonical_relationship_type,
-                domain_status,
-                confidence,
+                interpretation_source,
+                source_context.entity_type AS source_type,
+                target_context.entity_type AS target_type,
                 context,
-                observed_at_ms
+                observed_at_ms,
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM public.relationship_observation_blocks AS block_support
+                    WHERE block_support.observation_id = relationship_observations.observation_id
+                      AND block_support.project_id = relationship_observations.project_id
+                ) THEN 'context' ELSE 'independent' END AS evidence_origin
             FROM relationship_observations
-            WHERE user_name = %s
-              AND project_id = %s
-              AND domain_status = 'unrecognized'
+            LEFT JOIN project_entity_contexts source_context
+              ON source_context.project_id = relationship_observations.project_id
+             AND source_context.entity_id = relationship_observations.source_entity_id
+            LEFT JOIN project_entity_contexts target_context
+              ON target_context.project_id = relationship_observations.project_id
+             AND target_context.entity_id = relationship_observations.target_entity_id
+            WHERE relationship_observations.user_name = %s
+              AND relationship_observations.project_id = %s
+              AND relationship_observations.interpretation_source = 'observed'
+              AND relationship_observations.retired_at IS NULL
             ORDER BY observed_at_ms, observation_id
             """,
             (user_name, project_id),
+        )
+
+    async def get_active_context_supports(
+        self,
+        relationship_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return current active Context support rows for one relationship.
+
+        Retired observations are deliberately excluded.  The caller receives
+        only immutable block-version IDs and durable observation identities;
+        the Context reader remains responsible for rendering block content.
+        """
+
+        user_name = require_scope_value(
+            user_name, "user_name", "get_active_context_relationship_supports"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "get_active_context_relationship_supports"
+        )
+        relationship_id = require_scope_value(
+            relationship_id,
+            "relationship_id",
+            "get_active_context_relationship_supports",
+        )
+        return await self.client.fetch_all(
+            """
+            SELECT observation.observation_id,
+                   observation.semantic_window_id,
+                   support.block_id
+            FROM public.relationship_observations AS observation
+            JOIN public.relationship_observation_blocks AS support
+              ON support.observation_id = observation.observation_id
+             AND support.project_id = observation.project_id
+            WHERE observation.relationship_id = %s
+              AND observation.project_id = %s
+              AND observation.user_name = %s
+              AND observation.retired_at IS NULL
+            ORDER BY observation.observation_id, support.block_id
+            """,
+            (relationship_id, project_id, user_name),
         )
 
     async def get_advisories(
@@ -112,31 +167,37 @@ class RelationshipObservationReader:
             "project_id",
             "get_relationship_advisory_decisions",
         )
-        rows = await self.client.fetch_all(
-            """
-            SELECT
-                pattern_key,
-                disposition,
-                proposed_relationship_type,
-                last_action,
-                decision_note,
-                decided_by,
-                revision
-            FROM relationship_advisories
-            WHERE user_name = %s
-              AND project_id = %s
-            """,
-            (user_name, project_id),
+        reviews = await MaintenanceReviewWriter(self.client).list(
+            user_name=user_name,
+            project_id=project_id,
         )
-        return {
-            row["pattern_key"]: RelationshipAdvisoryDecision(
-                pattern_key=row["pattern_key"],
-                disposition=row.get("disposition", "pending"),
-                proposed_relationship_type=row.get("proposed_relationship_type"),
-                last_action=row.get("last_action"),
-                decision_note=row.get("decision_note"),
-                decided_by=row.get("decided_by"),
-                revision=int(row.get("revision", 0)),
+        decisions: dict[str, RelationshipAdvisoryDecision] = {}
+        for review in reviews:
+            if review.kind != "relationship_advisory":
+                continue
+            plan = review.proposed_plan
+            if not isinstance(plan, RelationshipAdvisoryPlan):
+                continue
+            disposition = "pending"
+            if review.status == "applied":
+                disposition = "accepted"
+            elif review.status == "dismissed":
+                disposition = "suppressed" if plan.action == "suppress" else "dismissed"
+            previous = decisions.get(plan.pattern_key)
+            stored_revision = review.expected_state.get("revision")
+            revision = (
+                int(stored_revision)
+                if isinstance(stored_revision, int)
+                and not isinstance(stored_revision, bool)
+                and stored_revision >= 0
+                else (previous.revision + 1 if previous else 1)
             )
-            for row in rows
-        }
+            decisions[plan.pattern_key] = RelationshipAdvisoryDecision(
+                pattern_key=plan.pattern_key,
+                disposition=disposition,
+                proposed_relationship_type=plan.proposed_relationship_type,
+                last_action=plan.action,
+                decision_note=plan.note,
+                revision=revision,
+            )
+        return decisions

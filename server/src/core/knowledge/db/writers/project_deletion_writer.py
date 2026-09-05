@@ -10,7 +10,7 @@ from infrastructure.postgres_client import PostgresClient
 
 
 class ProjectDeletionWriter:
-    """Delete a project root and the exceptional identity-scoped entities."""
+    """Delete one project and preserve identities still used by other projects."""
 
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
@@ -49,18 +49,30 @@ class ProjectDeletionWriter:
 
                 await self.projection.clear_project_projection(cur, project_id)
 
-                # Entities deliberately do not have a project FK: the reserved
-                # identity entity shares the table under the non-project
-                # ``__identity__`` scope. Every ordinary entity is still deleted
-                # explicitly before the project cascade begins.
                 await cur.execute(
                     """
-                    DELETE FROM public.entities
+                    SELECT entity_id
+                    FROM public.project_entity_contexts
                     WHERE user_name = %s AND project_id = %s
+                    FOR UPDATE
                     """,
                     (user_name, project_id),
                 )
-                deleted: dict[str, int] = {"entities": max(cur.rowcount, 0)}
+                context_entity_ids = [
+                    int(row["entity_id"]) for row in await cur.fetchall()
+                ]
+                deleted: dict[str, int] = {"entities": len(context_entity_ids)}
+
+                # Assistant memberships restrict deletion of their exchange's
+                # user message. Remove the project-owned memberships first so
+                # aggregate deletion can then rely on the project cascades.
+                await cur.execute(
+                    """
+                    DELETE FROM public.project_semantic_window_messages
+                    WHERE project_id = %s
+                    """,
+                    (project_id,),
+                )
 
                 await cur.execute(
                     """
@@ -72,6 +84,27 @@ class ProjectDeletionWriter:
                 )
                 if await cur.fetchone() is None:
                     raise RuntimeError("Project disappeared during aggregate deletion")
+                if context_entity_ids:
+                    await cur.execute(
+                        """
+                        DELETE FROM public.entities entity
+                        WHERE entity_id = ANY(%s)
+                          AND NOT EXISTS (
+                              SELECT 1 FROM public.project_entity_contexts context
+                              WHERE context.entity_id = entity.entity_id
+                          )
+                        RETURNING entity_id
+                        """,
+                        (context_entity_ids,),
+                    )
+                    orphaned_ids = [
+                        int(row["entity_id"]) for row in await cur.fetchall()
+                    ]
+                    await self.projection.delete_entities_projection(
+                        cur,
+                        orphaned_ids,
+                        project_id,
+                    )
                 deleted["projects"] = 1
                 return deleted
         except PsycopgError as exc:

@@ -64,6 +64,16 @@ def test_domain_config_compiles_canonical_lookups():
     assert compiled.topic_descriptions["Software Development"] == "Software work"
     assert compiled.entity_descriptions["Project"] == "An organized software effort."
     assert "USES: Project -> Technology" in compiled.relationship_block
+    assert tuple(section.key for section in compiled.context_sections) == (
+        "current_state",
+        "active_work",
+        "decisions_and_constraints",
+        "preferences",
+        "open_questions",
+    )
+    assert compiled.context_section("active_work").title == "Active Work"
+    assert compiled.extraction_guidance == ""
+    assert compiled.vp01_language == "en"
     assert type(compiled).from_dict(compiled.to_dict()) == compiled
 
 
@@ -131,7 +141,75 @@ def test_domain_config_rejects_ambiguous_labels_and_invalid_relationships():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_domain_context_configuration_is_ordered_and_separate_from_extraction_guidance():
+    payload = domain_payload()
+    payload["context_sections"] = [
+        {"key": "now", "title": "Now"},
+        {"key": "later", "title": "Later"},
+    ]
+    payload["extraction_guidance"] = "People must be active project contributors."
+    payload["vp01_language"] = "multilingual"
+
+    compiled = DomainConfig.from_mapping(payload).compile()
+
+    assert [section.title for section in compiled.context_sections] == ["Now", "Later"]
+    assert compiled.context_section("missing") is None
+    assert compiled.extraction_guidance == "People must be active project contributors."
+    assert all(
+        section.title != compiled.extraction_guidance
+        for section in compiled.context_sections
+    )
+    assert compiled.vp01_language == "multilingual"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        (
+            {
+                "context_sections": [
+                    {"key": "current", "title": "Current"},
+                    {"key": "other", "title": " current "},
+                ]
+            },
+            "Duplicate normalized context section title",
+        ),
+        (
+            {"context_sections": [{"key": "Unknown-Key", "title": "Current"}]},
+            "lower snake case",
+        ),
+        (
+            {"context_sections": [{"key": "current", "title": "Current", "bad": True}]},
+            "Unknown fields for context section",
+        ),
+        ({"vp01_language": "fr"}, "vp01_language must be 'en' or 'multilingual'"),
+    ],
+)
+def test_domain_context_configuration_rejects_invalid_sections_and_language(
+    update, message
+):
+    payload = domain_payload()
+    payload.update(update)
+
+    with pytest.raises(DomainConfigError, match=message):
+        DomainConfig.from_mapping(payload)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_domain_config_round_trips_through_mapping():
     config = DomainConfig.from_mapping(domain_payload())
 
     assert DomainConfig.from_mapping(config.to_dict()) == config
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_compiled_domain_rejects_malformed_context_section_snapshot():
+    compiled = DomainConfig.from_mapping(domain_payload()).compile().to_dict()
+    compiled["context_sections"] = [{"key": "current_state", "title": ""}]
+
+    with pytest.raises(ValueError, match="Invalid compiled Context section"):
+        type(DomainConfig.from_mapping(domain_payload()).compile()).from_dict(compiled)

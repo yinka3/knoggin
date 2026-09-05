@@ -32,9 +32,6 @@ from common.utils.time_utils import get_now
 from core.agent.formatters import (
     format_document_focus_context,
     format_documents_context,
-    format_entity_results,
-    format_graph_results,
-    format_retrieved_messages,
 )
 from core.agent.prompt_context import (
     build_evidence_context,
@@ -50,11 +47,15 @@ from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import execute_tool, summarize_result
 from core.agent.tools.registry import (
     Tools,
+    get_runtime_instructions,
+    get_tool_definition,
     install_tool_runtime,
 )
+from core.knowledge.context.render import canonical_context_markdown
 from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
+MAX_PROJECT_CONTEXT_CHARS = 24_000
 PUBLIC_AGENT_FAILURE_MESSAGE = "The agent couldn't complete this request. Please try again."
 
 
@@ -87,8 +88,6 @@ def _local_reference_type(tool_name: str) -> str:
         return "document"
     if tool_name in {
         "list_documents",
-        "get_folder_upload_summary",
-        "list_folder_tree",
         "search_documents",
     }:
         return "folder"
@@ -114,6 +113,9 @@ class AgentExecutor:
         self.tools = tools
         self._on_successful_completion = on_successful_completion
         self._aac_budget = aac_budget
+        token_counter = getattr(llm, "count_tokens", None)
+        if callable(token_counter):
+            ctx.notebook.set_token_counter(token_counter)
         install_tool_runtime(
             tools,
             ctx.tool_runtime,
@@ -125,7 +127,6 @@ class AgentExecutor:
     async def execute(
         self,
         user_timezone: Optional[str] = None,
-        simulated_date: Optional[str] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Run one execution from the policy captured on ``AgentRun``."""
 
@@ -138,7 +139,6 @@ class AgentExecutor:
             try:
                 async for event in self._execute_run(
                     user_timezone=user_timezone,
-                    simulated_date=simulated_date,
                 ):
                     yield event
             finally:
@@ -147,15 +147,12 @@ class AgentExecutor:
     async def _execute_run(
         self,
         user_timezone: Optional[str] = None,
-        simulated_date: Optional[str] = None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Runs the reasoning loop and yields events."""
 
         # Prepare environment
         tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
-        current_time = simulated_date or get_now().astimezone(tz).strftime(
-            "%Y-%m-%d %H:%M %Z"
-        )
+        current_time = get_now().astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
         documents_context = ""
         if self.tools.document_service:
@@ -163,8 +160,10 @@ class AgentExecutor:
             if manifest:
                 documents_context = format_documents_context(manifest)
         document_focus_context = format_document_focus_context(
-            getattr(self.tools, "document_focus", None)
+            getattr(self.tools, "document_focus", None),
+            getattr(self.ctx, "document_selection_context", None),
         )
+        project_brief = await self._load_project_brief()
         project_context = await self._load_project_context()
 
         last_result = None
@@ -173,19 +172,24 @@ class AgentExecutor:
         needs_replan = False
         needs_final_synthesis = False
 
-        while self.ctx.attempt_count < self.ctx.limits.max_attempts:
+        while (
+            self.ctx.attempt_count < self.ctx.limits.max_attempts
+            or needs_final_synthesis
+        ):
             if self.ctx.consecutive_errors >= self.ctx.limits.max_consecutive_errors:
                 yield self._terminal_error()
                 return
 
-            if not self.ctx.begin_attempt():
-                break
-
-            if needs_final_synthesis:
+            is_final_synthesis = needs_final_synthesis
+            if is_final_synthesis:
+                if not self.ctx.begin_final_synthesis_attempt():
+                    break
                 phase = _AgentPhase.SYNTHESIZE
                 current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "high"
                 logger.info("AgentExecutor: synthesizing the final response.")
+            elif not self.ctx.begin_attempt():
+                break
             elif self.ctx.attempt_count == 1 or needs_replan:
                 phase = _AgentPhase.PLAN
                 current_model = self.ctx.model or self.llm.agent_model
@@ -217,6 +221,7 @@ class AgentExecutor:
                 documents_context,
                 document_focus_context,
                 last_result,
+                project_brief=project_brief,
                 project_context=project_context,
             ):
                 event_type = event["event"]
@@ -286,7 +291,10 @@ class AgentExecutor:
                                 step_failed = True
                                 break
 
-                        if phase is not _AgentPhase.SYNTHESIZE:
+                        if (
+                            phase is not _AgentPhase.SYNTHESIZE
+                            and self.ctx.new_evidence_gathered
+                        ):
                             logger.info(
                                 "AgentExecutor: evidence is ready; scheduling synthesis."
                             )
@@ -386,6 +394,20 @@ class AgentExecutor:
             return
         yield await self._fallback()
 
+    def _tool_schemas_for_phase(self, phase: _AgentPhase) -> list[dict]:
+        """Return the model-visible tools allowed for one executor phase."""
+
+        if phase is not _AgentPhase.SYNTHESIZE:
+            return list(self.ctx.tool_runtime.schemas)
+        return [
+            schema
+            for schema in self.ctx.tool_runtime.schemas
+            if (
+                definition := get_tool_definition(schema["function"]["name"])
+            ) is not None
+            and definition.executor_protocol
+        ]
+
     async def _step(
         self,
         date: str,
@@ -395,9 +417,16 @@ class AgentExecutor:
         documents_context: str,
         document_focus_context: str,
         last_result: Optional[List[Dict]],
+        project_brief: str = "",
         project_context: str = "",
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
+        tool_schemas = self._tool_schemas_for_phase(phase)
+        runtime_instructions = (
+            get_runtime_instructions(tool_schemas)
+            if phase is _AgentPhase.SYNTHESIZE
+            else self.ctx.tool_runtime.runtime_instructions
+        )
         system_prompt = get_agent_prompt(
             user_name=self.ctx.user_name,
             current_time=date,
@@ -405,14 +434,14 @@ class AgentExecutor:
             agent_name=self.ctx.agent.name,
             documents_context=documents_context,
             document_focus_context=document_focus_context,
-            agent_directives=self.ctx.directives,
             agent_brain=self.ctx.brain,
+            project_brief=project_brief,
             project_context=project_context,
-            runtime_instructions=self.ctx.tool_runtime.runtime_instructions,
-            active_topics=self.ctx.active_topics,
+            runtime_instructions=runtime_instructions,
             is_community=self.ctx.is_community,
             participants=self.ctx.current_participants,
             phase=phase,
+            research_profile=self.ctx.research_profile,
         )
 
         user_message = build_user_message(self.ctx, last_result)
@@ -423,7 +452,7 @@ class AgentExecutor:
             async for event in self.llm.stream_with_tools(
                 system=system_prompt,
                 user=user_message,
-                tools=list(self.ctx.tool_runtime.schemas),
+                tools=tool_schemas,
                 model=model or self.llm.agent_model,
                 temperature=self.ctx.temperature,
                 reasoning=reasoning,
@@ -456,10 +485,10 @@ class AgentExecutor:
                 },
             }
 
-    async def _load_project_context(self) -> str:
-        """Load canonical project context without making it a run blocker."""
-        workspace_service = getattr(self.tools, "workspace_service", None)
-        reader = getattr(workspace_service, "read_project_context", None)
+    async def _load_project_brief(self) -> str:
+        """Load the user-owned PROJECT.md brief without making a run block."""
+        document_service = getattr(self.tools, "document_service", None)
+        reader = getattr(document_service, "read_project_brief", None)
         if reader is None:
             return ""
         try:
@@ -468,13 +497,46 @@ class AgentExecutor:
             return ""
         except Exception as exc:
             logger.warning(
-                "AgentExecutor: project context unavailable ({})",
+                "AgentExecutor: Project Brief unavailable ({})",
                 type(exc).__name__,
             )
             return ""
         if not isinstance(content, str):
             return ""
         return content
+
+    async def _load_project_context(self) -> str:
+        """Render bounded current Context from canonical storage only."""
+
+        reader = getattr(self.tools, "project_context_reader", None)
+        domain = getattr(self.tools, "compiled_domain", None)
+        if reader is None or domain is None:
+            return ""
+        try:
+            revision = await reader.get_current_revision(
+                user_name=self.ctx.user_name,
+                project_id=self.ctx.project_id,
+            )
+            if revision is None:
+                return ""
+            snapshot = await reader.get_snapshot(
+                revision.revision_id,
+                user_name=self.ctx.user_name,
+                project_id=self.ctx.project_id,
+            )
+            if snapshot is None or not snapshot.blocks:
+                return ""
+            rendered = canonical_context_markdown(snapshot.blocks, domain)
+        except Exception as exc:
+            logger.warning(
+                "AgentExecutor: canonical Project Context unavailable ({})",
+                type(exc).__name__,
+            )
+            return ""
+        if len(rendered) <= MAX_PROJECT_CONTEXT_CHARS:
+            return rendered
+        marker = "\n\n[Project Context truncated at the deterministic prompt limit.]\n"
+        return rendered[: MAX_PROJECT_CONTEXT_CHARS - len(marker)].rstrip() + marker
 
     def _parse_tool_calls(
         self,
@@ -569,7 +631,7 @@ class AgentExecutor:
             }
 
             try:
-                if self.ctx.tool_limit_reached(call.name, self.ctx.limits):
+                if self.ctx.tool_limit_reached(call.name):
                     error_message = f"Tool '{call.name}' has reached its call limit"
                     self.ctx.note_nonfatal_error(error_message)
                     results_out.append({"tool": call.name, "error": error_message})
@@ -626,9 +688,12 @@ class AgentExecutor:
                     capture_tool_source_candidates(self.ctx, call, result)
                 )
 
+                # Keep the untouched backend result in the canonical notebook.
+                # Localization is a model-facing projection and must happen only
+                # after accumulation so compact handles cannot erase references.
+                self.ctx.accumulate_tool_result(call.name, result)
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
-                self.ctx.accumulate_tool_result(call.name, model_result)
                 self.ctx.record_tool_success()
                 results_out.append({"tool": call.name, "result": model_result})
 
@@ -801,20 +866,7 @@ class AgentExecutor:
 
     async def _generate_fallback_summary(self) -> Optional[str]:
         """Generate a final response summary from accumulated evidence."""
-        evidence_ctx = ""
-        if self.ctx.profiles:
-            evidence_ctx += (
-                f"\nProfiles FOUND:\n{format_entity_results(self.ctx.profiles)}\n"
-            )
-        if self.ctx.messages:
-            evidence_ctx += (
-                "\nRelevant Messages:\n"
-                f"{format_retrieved_messages(self.ctx.messages)}\n"
-            )
-        if self.ctx.graph:
-            evidence_ctx += (
-                f"\nGraph Context:\n{format_graph_results(self.ctx.graph)}\n"
-            )
+        evidence_ctx = build_evidence_context(self.ctx)
 
         prompt = get_fallback_summary_prompt(
             self.ctx.user_name, self.ctx.user_query, evidence_ctx
@@ -842,25 +894,18 @@ class AgentExecutor:
 
             summary = await self._generate_evidence_summary(evidence_str)
 
-            if summary:
-                self.ctx.compact_evidence(summary)
-            else:
-                logger.warning(
-                    "Evidence summarization failed. Truncating raw evidence as "
-                    "fallback."
-                )
-
             if not summary:
-                self.ctx.compact_evidence(None)
-
-            # Re-calculate token count
-            if summary:
-                self.ctx.set_evidence_token_count(self.llm.count_tokens(summary))
-            else:
-                new_evidence_str = build_evidence_context(self.ctx)
-                self.ctx.set_evidence_token_count(
-                    self.llm.count_tokens(new_evidence_str)
+                logger.warning(
+                    "Evidence summarization failed. Rolling over the retained "
+                    "notebook neighborhood without a generated summary."
                 )
+            self.ctx.rollover_notebook(summary)
+
+            # Recalculate against the actual bounded state retained by the run.
+            post_compaction = build_evidence_context(self.ctx)
+            self.ctx.set_evidence_token_count(
+                self.llm.count_tokens(post_compaction)
+            )
 
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""
@@ -898,9 +943,7 @@ class AgentExecutor:
                 "reasoning": reasoning,
                 "turn": self.ctx.attempt_count,
                 "evidence_state": {
-                    "profiles": len(self.ctx.profiles),
-                    "messages": len(self.ctx.messages),
-                    "graph": len(self.ctx.graph),
+                    **self.ctx.notebook.capacity_report(),
                 },
             },
             verbose_only=True,

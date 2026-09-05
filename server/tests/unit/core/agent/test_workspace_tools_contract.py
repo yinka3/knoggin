@@ -11,61 +11,61 @@ from common.schema.agent.tool_contracts import (
 )
 from core.agent.tool_runtime import execute_tool
 from core.agent.tools.registry import ToolPermissions, get_default_tool_limits
-from core.agent.tools.workspace import WorkspaceTools
+from core.agent.tools.workspace import ProjectFileTools
 
 
-class FakeWorkspaceService:
+class FakeDocumentService:
     def __init__(self):
         self.calls = []
 
-    async def list_files(self, *, path_prefix=None, limit=100):
+    async def list_project_files(self, *, path_prefix=None, limit=100):
         self.calls.append(("list", path_prefix, limit))
         return [{"relative_path": "notes.md", "content_hash": "a" * 64}]
 
-    async def read_file(self, path, **kwargs):
+    async def read_project_file(self, path, **kwargs):
         self.calls.append(("read", path, kwargs))
         return {"relative_path": path, "content": "hello\n"}
 
-    async def create_file(self, path, content):
+    async def create_project_file(self, path, content):
         self.calls.append(("create", path, content))
         return {
             "relative_path": path,
             "content_hash": hashlib.sha256(content.encode()).hexdigest(),
         }
 
-    async def update_file(self, path, content, *, expected_content_hash):
+    async def update_project_file(self, path, content, *, expected_content_hash):
         self.calls.append(("update", path, content, expected_content_hash))
         return {
             "relative_path": path,
             "content_hash": hashlib.sha256(content.encode()).hexdigest(),
         }
 
-    async def append_file(self, path, content, *, expected_content_hash):
+    async def append_project_file(self, path, content, *, expected_content_hash):
         self.calls.append(("append", path, content, expected_content_hash))
         return {"relative_path": path, "content_hash": expected_content_hash}
 
 
-class WorkspaceHarness(WorkspaceTools):
+class ProjectFileHarness(ProjectFileTools):
     def __init__(self, service=None):
-        self.workspace_service = service
+        self.document_service = service
 
 
 @pytest.mark.no_network
-async def test_workspace_tools_forward_bounded_project_scoped_operations():
-    service = FakeWorkspaceService()
-    tools = WorkspaceHarness(service)
+async def test_project_file_tools_forward_bounded_project_scoped_operations():
+    service = FakeDocumentService()
+    tools = ProjectFileHarness(service)
     expected_hash = "b" * 64
 
-    assert await tools.list_workspace_files(path_prefix="docs", limit=3)
-    await tools.read_workspace_file(
+    assert await tools.list_files(path_prefix="docs", limit=3)
+    await tools.read_file(
         "docs/notes.md",
         start_line=2,
         end_line=4,
         max_characters=100,
     )
-    await tools.create_workspace_file("docs/new.md", "new")
-    await tools.update_workspace_file("docs/new.md", "replacement", expected_hash)
-    await tools.append_workspace_file("docs/new.md", "more", expected_hash)
+    await tools.create_file("docs/new.md", "new")
+    await tools.update_file("docs/new.md", "replacement", expected_hash)
+    await tools.append_file("docs/new.md", "more", expected_hash)
 
     assert service.calls == [
         ("list", "docs", 3),
@@ -75,7 +75,6 @@ async def test_workspace_tools_forward_bounded_project_scoped_operations():
             {
                 "start_line": 2,
                 "end_line": 4,
-                "max_lines": 200,
                 "max_characters": 100,
             },
         ),
@@ -87,19 +86,19 @@ async def test_workspace_tools_forward_bounded_project_scoped_operations():
 
 @pytest.mark.no_network
 async def test_project_markdown_is_readable_but_protected_from_ordinary_writes():
-    service = FakeWorkspaceService()
-    tools = WorkspaceHarness(service)
+    service = FakeDocumentService()
+    tools = ProjectFileHarness(service)
 
-    await tools.read_workspace_file("PROJECT.md")
+    await tools.read_file("PROJECT.md")
     assert service.calls[0][0] == "read"
 
     for method in (
-        tools.create_workspace_file,
-        tools.update_workspace_file,
-        tools.append_workspace_file,
+        tools.create_file,
+        tools.update_file,
+        tools.append_file,
     ):
         with pytest.raises(PermissionError, match="PROJECT.md"):
-            if method.__name__ == "create_workspace_file":
+            if method.__name__ == "create_file":
                 await method("project.md", "content")
             else:
                 await method(".\\PROJECT.md", "content", "a" * 64)
@@ -107,19 +106,19 @@ async def test_project_markdown_is_readable_but_protected_from_ordinary_writes()
     assert len(service.calls) == 1
 
     with pytest.raises(ValueError, match="must not escape"):
-        await tools.create_workspace_file("../outside.md", "content")
+        await tools.create_file("../outside.md", "content")
     with pytest.raises(ValueError, match="must not escape"):
-        await tools.list_workspace_files(path_prefix="../outside")
+        await tools.list_files(path_prefix="../outside")
 
 
 @pytest.mark.no_network
-async def test_workspace_writes_require_authorization_and_are_audited():
-    service = FakeWorkspaceService()
+async def test_project_file_writes_require_authorization_and_are_audited():
+    service = FakeDocumentService()
 
     with pytest.raises(ToolExecutionError, match="authorization context"):
         await execute_tool(
-            WorkspaceHarness(service),
-            "create_workspace_file",
+            ProjectFileHarness(service),
+            "create_file",
             {"path": "notes.md", "content": "hello"},
         )
 
@@ -131,10 +130,10 @@ async def test_workspace_writes_require_authorization_and_are_audited():
             self.calls.append((query, params))
 
     postgres = FakePostgres()
-    tools = WorkspaceHarness(service)
+    tools = ProjectFileHarness(service)
     tools.postgres = postgres
     tools.active_tool_schemas = {
-        "create_workspace_file": TOOL_SCHEMAS_BY_NAME["create_workspace_file"]
+        "create_file": TOOL_SCHEMAS_BY_NAME["create_file"]
     }
     tools.tool_authorization = ToolPermissions(
         user_name="user",
@@ -143,13 +142,13 @@ async def test_workspace_writes_require_authorization_and_are_audited():
         audit_project_id="project",
         session_id="session",
         run_id="run",
-        allowed_tools=frozenset({"create_workspace_file"}),
+        allowed_tools=frozenset({"create_file"}),
         allowed_capabilities=frozenset({REVERSIBLE_WRITE_CAPABILITY}),
     )
 
     result = await execute_tool(
         tools,
-        "create_workspace_file",
+        "create_file",
         {"path": "notes.md", "content": "hello"},
     )
 
@@ -160,16 +159,19 @@ async def test_workspace_writes_require_authorization_and_are_audited():
 
 
 @pytest.mark.no_network
-async def test_workspace_schema_registry_limits_and_bounds():
+async def test_project_file_schema_registry_limits_and_bounds():
     expected = {
-        "list_workspace_files",
-        "read_workspace_file",
-        "create_workspace_file",
-        "update_workspace_file",
-        "append_workspace_file",
+        "list_files",
+        "read_file",
+        "create_file",
+        "update_file",
+        "append_file",
+        "move_file",
+        "delete_file",
+        "create_folder",
     }
     assert expected <= set(TOOL_SCHEMAS_BY_NAME)
-    for name in expected - {"list_workspace_files", "read_workspace_file"}:
+    for name in expected - {"list_files", "read_file"}:
         assert (
             get_schema_capability(TOOL_SCHEMAS_BY_NAME[name])
             == REVERSIBLE_WRITE_CAPABILITY
@@ -177,14 +179,17 @@ async def test_workspace_schema_registry_limits_and_bounds():
 
     limits = get_default_tool_limits()
     assert {name: limits[name] for name in expected} == {
-        "list_workspace_files": 4,
-        "read_workspace_file": 4,
-        "create_workspace_file": 2,
-        "update_workspace_file": 2,
-        "append_workspace_file": 2,
+        "list_files": 4,
+        "read_file": 4,
+        "create_file": 2,
+        "update_file": 2,
+        "append_file": 2,
+        "move_file": 2,
+        "delete_file": 2,
+        "create_folder": 2,
     }
 
-    schema = TOOL_SCHEMAS_BY_NAME["create_workspace_file"]
+    schema = TOOL_SCHEMAS_BY_NAME["create_file"]
     assert (
         validate_tool_arguments(
             schema,

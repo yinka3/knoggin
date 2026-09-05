@@ -41,23 +41,45 @@ DEFAULT_SPARSE_CONTEXT_VERBS = [
 ]
 
 
+class SemanticWindowRetrySettings(ConfigModel):
+    """Bounded retry policy for durable project semantic windows."""
+
+    max_attempts: int = Field(3, ge=1, le=20)
+    initial_backoff_seconds: int = Field(30, ge=1, le=3_600)
+    max_backoff_seconds: int = Field(300, ge=1, le=86_400)
+
+    @model_validator(mode="after")
+    def validate_backoff_range(self):
+        if self.max_backoff_seconds < self.initial_backoff_seconds:
+            raise ValueError("max_backoff_seconds must be >= initial_backoff_seconds")
+        return self
+
+
 class IngestionSettings(ConfigModel):
     batch_size: int = Field(8, ge=1, le=100)
     batch_debounce_seconds: float = Field(0.75, ge=0.0, le=10.0)
     batch_timeout: float = Field(300.0, ge=10.0)
     message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
-    ingestion_batch_settle_delay_seconds: float = Field(120.0, ge=0.0, le=3_600.0)
     message_lifecycle_poll_seconds: float = Field(15.0, ge=1.0, le=300.0)
     ingestion_max_attempts: int = Field(3, ge=1, le=20)
     session_window: int = Field(24, ge=1)
+    # This is the sole user-configurable admission-size control for the new
+    # project-level semantic windows.  Idle flush and unavoidable whole-exchange
+    # overfill remain fixed runtime policy, not competing size knobs.
+    semantic_window_tokens: int = Field(128_000, ge=1, le=1_000_000)
+    semantic_window_retry: SemanticWindowRetrySettings = Field(
+        default_factory=SemanticWindowRetrySettings
+    )
 
 
 class DocumentIndexingSettings(ConfigModel):
     recovery_interval_seconds: int = Field(60, ge=10)
     recovery_batch_size: int = Field(16, ge=1, le=100)
+    reconciliation_interval_seconds: int = Field(60, ge=10)
 
 
 class DocumentSettings(ConfigModel):
+    project_library_root: str = Field("data/projects", min_length=1)
     rerank_enabled: bool = True
     rerank_candidates: int = Field(15, ge=1, le=50)
 
@@ -66,25 +88,14 @@ class EpisodeSettings(ConfigModel):
     """Configuration for bounded episodic-memory generation windows."""
 
     enabled: bool = Field(True)
+    # Generation batches and the maximum source evidence an Episode may own
+    # are intentionally separate controls.
+    max_episode_source_messages: int = Field(72, ge=1, le=10_000)
+    max_episode_source_tokens: int = Field(12_000, ge=1, le=1_000_000)
     # A server-owned hard cap across every persisted narrative field.  The
     # prompt uses 90% of this value; persistence validates the full limit.
     max_narrative_chars: int = Field(4000, ge=500, le=20000)
     prior_episode_candidate_count: int = Field(3, ge=1, le=3)
-
-
-class MergeRollbackSettings(ConfigModel):
-    enabled: bool = Field(True)
-    retention_hours: float = Field(5.0, ge=0.5)
-    fallback_interval_hours: float = Field(1.0, ge=0.25)
-
-
-class AuditRetentionSettings(ConfigModel):
-    """Retention windows for completed, non-canonical operational records."""
-
-    enabled: bool = Field(True)
-    interval_hours: float = Field(24.0, ge=0.25)
-    tool_audit_days: int = Field(180, ge=1)
-    merge_history_days: int = Field(180, ge=1)
 
 
 class ConflictDiscoverySettings(ConfigModel):
@@ -95,11 +106,10 @@ class ConflictDiscoverySettings(ConfigModel):
 
 
 class JobSettings(ConfigModel):
-    episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
-    merge_rollback: MergeRollbackSettings = Field(default_factory=MergeRollbackSettings)
-    audit_retention: AuditRetentionSettings = Field(
-        default_factory=AuditRetentionSettings
+    document_indexing: DocumentIndexingSettings = Field(
+        default_factory=DocumentIndexingSettings
     )
+    episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     conflict_discovery: ConflictDiscoverySettings = Field(
         default_factory=ConflictDiscoverySettings
     )
@@ -110,7 +120,6 @@ class JobSettings(ConfigModel):
 
 class TextProcessorSettings(ConfigModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
-    vp01_min_confidence: float = Field(0.8, ge=0.0, le=1.0)
     llm_ner: bool = Field(False)
 
 

@@ -37,9 +37,10 @@ class SessionManager:
         self.project_manager = project_manager
         self.pg = resources.postgres
         self._session_deletion_writer = SessionDeletionWriter(self.pg)
-        self._session_locks: Dict[str, asyncio.Lock] = {}
-        self._deleting_session_ids: set[str] = set()
-        self._lock = asyncio.Lock()
+        # Lifecycle work is deliberately rare for the local single-engine
+        # runtime. Keeping it in one critical section makes publication,
+        # shutdown, and deletion atomic with respect to each other.
+        self._lifecycle_lock = asyncio.Lock()
         self._closed = False
 
     def attach_health_service(self, health_service: Any) -> None:
@@ -65,7 +66,6 @@ class SessionManager:
 
         return len(self._active_sessions)
 
-
     async def list_sessions(self) -> Dict[str, dict]:
         try:
             query = """
@@ -73,7 +73,7 @@ class SessionManager:
                        document_focus, status, created_at, last_active_at
                 FROM public.sessions
                 WHERE user_name = %(user_name)s
-                  AND status <> 'deleted'
+                  AND status = 'open'
             """
             rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
 
@@ -127,7 +127,7 @@ class SessionManager:
 
         session_id = str(uuid.uuid4())
 
-        async with self._lock:
+        async with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("SessionManager is shutting down")
             context = None
@@ -163,7 +163,7 @@ class SessionManager:
                     session_id,
                 )
                 project_leased = True
-                context = await self._session_runtime_factory().bootstrap(
+                context = await self._session_runtime_factory().create(
                     project_state,
                     session_id=session_id,
                     model=model,
@@ -198,115 +198,109 @@ class SessionManager:
                 raise
 
     async def get_or_resume_session(self, session_id: str) -> Optional[SessionRuntime]:
-        async with self._lock:
-            if self._closed:
-                raise RuntimeError("SessionManager is shutting down")
-            active_session = self._active_sessions.get(session_id)
-            if session_id in self._deleting_session_ids:
-                return None
-            if active_session is not None:
-                return active_session
-            if session_id not in self._session_locks:
-                self._session_locks[session_id] = asyncio.Lock()
-            lock = self._session_locks[session_id]
+        async with self._lifecycle_lock:
+            return await self._get_or_resume_session_locked(session_id)
 
-        async with lock:
-            async with self._lock:
-                if self._closed:
-                    raise RuntimeError("SessionManager is shutting down")
-                active_session = self._active_sessions.get(session_id)
-                if (
-                    active_session is not None
-                ):
-                    return active_session
+    async def _get_or_resume_session_locked(
+        self, session_id: str
+    ) -> Optional[SessionRuntime]:
+        """Return a live runtime while the manager lifecycle is serialized."""
 
-            query = """
-                SELECT project_id, model, agent_id, enabled_tools, document_focus
-                FROM public.sessions
+        if self._closed:
+            raise RuntimeError("SessionManager is shutting down")
+        active_session = self._active_sessions.get(session_id)
+        if active_session is not None:
+            return active_session
+
+        query = """
+            SELECT project_id, model, agent_id, enabled_tools, document_focus
+            FROM public.sessions
+            WHERE user_name = %(user_name)s
+              AND session_id = %(session_id)s
+              AND status = 'open'
+        """
+        rows = await self.pg.fetch_all(
+            query,
+            {"user_name": self.user_name, "session_id": session_id},
+        )
+        if not rows:
+            return None
+        metadata = rows[0]
+
+        project_id = metadata.get("project_id")
+        if not project_id:
+            raise ValueError(f"Session {session_id} has no valid project_id")
+
+        model = metadata.get("model")
+        agent_id = metadata.get("agent_id")
+        enabled_tools = metadata.get("enabled_tools")
+        if isinstance(enabled_tools, str):
+            enabled_tools = safe_json_loads(enabled_tools)
+        if enabled_tools is not None and not isinstance(enabled_tools, list):
+            raise ValueError(f"Session {session_id} has invalid enabled_tools")
+
+        document_focus = metadata.get("document_focus")
+        if isinstance(document_focus, str):
+            document_focus = safe_json_loads(document_focus)
+        if document_focus is not None:
+            document_focus = parse_document_focus(document_focus)
+
+        context = None
+        project_leased = False
+        try:
+            project_state = await self.project_manager.acquire_project_for_session(
+                project_id,
+                session_id,
+            )
+            project_leased = True
+            context = await self._session_runtime_factory().create(
+                project_state,
+                session_id=session_id,
+                model=model,
+                agent_id=agent_id,
+                enabled_tools=enabled_tools,
+                document_focus=document_focus,
+            )
+            update_query = """
+                UPDATE public.sessions
+                SET last_active_at = now()
                 WHERE user_name = %(user_name)s
-                  AND status <> 'deleted'
                   AND session_id = %(session_id)s
                   AND status = 'open'
             """
-            rows = await self.pg.fetch_all(
-                query,
+            updated = await self.pg.execute(
+                update_query,
                 {"user_name": self.user_name, "session_id": session_id},
             )
-            if not rows:
-                return None
-            metadata = rows[0]
-
-            project_id = metadata.get("project_id")
-            if not project_id:
-                raise ValueError(f"Session {session_id} has no valid project_id")
-
-            model = metadata.get("model")
-            agent_id = metadata.get("agent_id")
-            enabled_tools = metadata.get("enabled_tools")
-            if isinstance(enabled_tools, str):
-                enabled_tools = safe_json_loads(enabled_tools)
-            if enabled_tools is not None and not isinstance(enabled_tools, list):
-                raise ValueError(f"Session {session_id} has invalid enabled_tools")
-
-            document_focus = metadata.get("document_focus")
-            if isinstance(document_focus, str):
-                document_focus = safe_json_loads(document_focus)
-            if document_focus is not None:
-                document_focus = parse_document_focus(document_focus)
-
-            context = None
-            project_leased = False
-            try:
-                project_state = await self.project_manager.acquire_project_for_session(
+            if updated != 1:
+                raise RuntimeError("Session disappeared while resuming")
+            self._active_sessions[session_id] = context
+            logger.info(f"Resumed session: {session_id}")
+            return context
+        except Exception:
+            if context is not None:
+                try:
+                    await context.shutdown()
+                except Exception:
+                    logger.exception(
+                        "Failed to unload runtime for session {}", session_id
+                    )
+            if project_leased:
+                await self.project_manager.release_project_for_session(
                     project_id,
                     session_id,
                 )
-                project_leased = True
-                context = await self._session_runtime_factory().bootstrap(
-                    project_state,
-                    session_id=session_id,
-                    model=model,
-                    agent_id=agent_id,
-                    enabled_tools=enabled_tools,
-                    document_focus=document_focus,
-                )
-                update_query = """
-                    UPDATE public.sessions
-                    SET last_active_at = now()
-                    WHERE user_name = %(user_name)s
-                      AND session_id = %(session_id)s
-                """
-                updated = await self.pg.execute(
-                    update_query,
-                    {"user_name": self.user_name, "session_id": session_id},
-                )
-                if updated != 1:
-                    raise RuntimeError("Session disappeared while resuming")
-                self._active_sessions[session_id] = context
-                logger.info(f"Resumed session: {session_id}")
-                return context
-            except Exception:
-                if context is not None:
-                    try:
-                        await context.shutdown()
-                    except Exception:
-                        logger.exception(
-                            "Failed to unload runtime for session {}", session_id
-                        )
-                if project_leased:
-                    await self.project_manager.release_project_for_session(
-                        project_id,
-                        session_id,
-                    )
-                raise
+            raise
 
     async def deactivate_runtime_session(self, session_id: str) -> bool:
         """Unload a live session while retaining its durable session record."""
-        async with self._lock:
-            context = self._active_sessions.pop(session_id, None)
-            if session_id not in self._deleting_session_ids:
-                self._session_locks.pop(session_id, None)
+        async with self._lifecycle_lock:
+            return await self._deactivate_runtime_session_locked(session_id)
 
+    async def _deactivate_runtime_session_locked(self, session_id: str) -> bool:
+        """Unload one runtime while the manager lifecycle is serialized."""
+
+        context = self._active_sessions.pop(session_id, None)
         if context is None:
             return False
 
@@ -325,26 +319,21 @@ class SessionManager:
 
     async def shutdown(self) -> None:
         """Unload every live session before global infrastructure shuts down."""
-        async with self._lock:
+        async with self._lifecycle_lock:
+            if self._closed:
+                return
             self._closed = True
             session_ids = list(self._active_sessions)
-            self._deleting_session_ids.update(session_ids)
-
-        results = await asyncio.gather(
-            *(self.deactivate_runtime_session(session_id) for session_id in session_ids),
-            return_exceptions=True,
-        )
-        failures = [result for result in results if isinstance(result, Exception)]
-        if failures:
-            raise RuntimeError(
-                f"Failed to deactivate {len(failures)} session runtime(s)"
-            ) from failures[0]
-
-    async def close_session(self, session_id: str) -> bool:
-        """Compatibility alias for session deletion."""
-
-        await self.delete_session_data(session_id)
-        return True
+            failures: list[Exception] = []
+            for session_id in session_ids:
+                try:
+                    await self._deactivate_runtime_session_locked(session_id)
+                except Exception as exc:
+                    failures.append(exc)
+            if failures:
+                raise RuntimeError(
+                    f"Failed to deactivate {len(failures)} session runtime(s)"
+                ) from failures[0]
 
     async def get_session_history_readonly(
         self, session_id: str, limit: int = 1000
@@ -373,9 +362,9 @@ class SessionManager:
 
         return turns
 
-    async def delete_session_data(self, session_id: str) -> None:
+    async def delete_session(self, session_id: str) -> None:
         """
-        Tombstone a session and purge its session-owned documents.
+        Tombstone a session without mutating project-owned documents.
 
         Canonical messages and their graph projections remain as read-only
         evidence for existing project memories. The durable tombstone excludes
@@ -383,33 +372,17 @@ class SessionManager:
 
         """
         user = self.user_name
-        async with self._lock:
+        async with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("SessionManager is shutting down")
-            if session_id in self._deleting_session_ids:
-                raise RuntimeError(f"Session {session_id} is already being deleted")
-            self._deleting_session_ids.add(session_id)
-            lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-
-        async with lock:
-            # Session.shutdown closes the agent queue and waits for any active
-            # task it cancels before the durable tombstone is written.
-            try:
-                await self.deactivate_runtime_session(session_id)
-                await self._session_deletion_writer.delete_session(
-                    user_name=user,
-                    session_id=session_id,
-                )
-            except Exception:
-                raise
-            finally:
-                async with self._lock:
-                    self._deleting_session_ids.discard(session_id)
-                    self._session_locks.pop(session_id, None)
-
+            await self._deactivate_runtime_session_locked(session_id)
+            await self._session_deletion_writer.delete_session(
+                user_name=user,
+                session_id=session_id,
+            )
             logger.info("Deleted durable session state for {}", session_id)
 
-    async def update_session_metadata(self, session_id: str, new_data: dict) -> dict:
+    async def update_session(self, session_id: str, new_data: dict) -> dict:
         """Update explicitly allowed session configuration fields."""
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("session_id must not be empty")
@@ -419,7 +392,7 @@ class SessionManager:
         unknown_columns = set(new_data) - self._METADATA_UPDATE_COLUMNS
         if unknown_columns:
             raise ValueError(
-                "update_session_metadata does not allow: "
+                "update_session does not allow: "
                 + ", ".join(sorted(unknown_columns))
             )
 
@@ -438,21 +411,26 @@ class SessionManager:
                 sql.SQL("{} = %s").format(sql.Identifier(k)) for k in cols
             )
         )
-        updated = await self.pg.execute(
-            stmt,
-            [*cols.values(), self.user_name, session_id],
-        )
-        if updated != 1:
-            raise FileNotFoundError("Session not found")
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("SessionManager is shutting down")
+            updated = await self.pg.execute(
+                stmt,
+                [*cols.values(), self.user_name, session_id],
+            )
+            if updated != 1:
+                raise FileNotFoundError("Session not found")
 
-        context = self.get_runtime_session(session_id)
-        if context is not None:
-            for key, value in new_data.items():
-                setattr(
-                    context,
-                    key,
-                    list(value) if key == "enabled_tools" and value is not None else value,
-                )
+            context = self.get_runtime_session(session_id)
+            if context is not None:
+                for key, value in new_data.items():
+                    setattr(
+                        context,
+                        key,
+                        list(value)
+                        if key == "enabled_tools" and value is not None
+                        else value,
+                    )
         return new_data
 
     async def get_document_focus(
@@ -460,10 +438,18 @@ class SessionManager:
         session_id: str,
     ) -> Optional[dict]:
         """Return validated persisted document focus without resuming a session."""
-        query = "SELECT document_focus FROM public.sessions WHERE user_name = %(user_name)s AND session_id = %(session_id)s"
+        query = """
+            SELECT document_focus
+            FROM public.sessions
+            WHERE user_name = %(user_name)s
+              AND session_id = %(session_id)s
+              AND status = 'open'
+        """
         rows = await self.pg.fetch_all(query, {"user_name": self.user_name, "session_id": session_id})
 
-        if not rows or not rows[0].get("document_focus"):
+        if not rows:
+            raise FileNotFoundError("Session not found")
+        if not rows[0].get("document_focus"):
             return None
         focus = rows[0]["document_focus"]
 
@@ -480,42 +466,45 @@ class SessionManager:
         session_id: str,
         *,
         document_id: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
+        behavior: str = "prefer",
     ) -> dict:
         """Validate and persist one pinned document focus for a session."""
-        context = await self.get_or_resume_session(session_id)
-        if context is None:
-            raise FileNotFoundError("Session not found")
-        if context.document_service is None:
-            raise RuntimeError("Session document service is unavailable")
+        if behavior not in {"prefer", "restrict"}:
+            raise ValueError("document focus behavior must be 'prefer' or 'restrict'")
+        async with self._lifecycle_lock:
+            context = await self._get_or_resume_session_locked(session_id)
+            if context is None:
+                raise FileNotFoundError("Session not found")
+            if context.document_service is None:
+                raise RuntimeError("Session document service is unavailable")
 
-        target = await context.document_service.resolve_focus_target(
-            session_id=session_id,
-            document_id=document_id,
-            folder_root_id=folder_root_id,
-            path_prefix=path_prefix,
-        )
-        focus = dump_document_focus(
-            create_document_focus(
-                mode="pinned",
-                created_at=get_now_iso(),
-                **target,
+            target = await context.document_service.resolve_focus_target(
+                document_id=document_id,
+                path_prefix=path_prefix,
             )
-        )
+            focus = dump_document_focus(
+                create_document_focus(
+                    mode="pinned",
+                    behavior=behavior,
+                    created_at=get_now_iso(),
+                    **target,
+                )
+            )
 
-        query = "UPDATE public.sessions SET document_focus = %(focus)s WHERE user_name = %(user_name)s AND session_id = %(session_id)s AND status = 'open'"
-        await self.pg.execute(
-            query,
-            {
-                "focus": json.dumps(focus),
-                "user_name": self.user_name,
-                "session_id": session_id,
-            },
-        )
-        context.document_focus = parse_document_focus(focus)
-
-        return focus
+            query = "UPDATE public.sessions SET document_focus = %(focus)s WHERE user_name = %(user_name)s AND session_id = %(session_id)s AND status = 'open'"
+            updated = await self.pg.execute(
+                query,
+                {
+                    "focus": json.dumps(focus),
+                    "user_name": self.user_name,
+                    "session_id": session_id,
+                },
+            )
+            if updated != 1:
+                raise FileNotFoundError("Session not found")
+            context.document_focus = parse_document_focus(focus)
+            return focus
 
     async def clear_document_focus(self, session_id: str) -> bool:
         """Remove persisted focus while preserving all other session metadata."""
@@ -528,13 +517,14 @@ class SessionManager:
             RETURNING session_id
         """
         # We simulate returning by checking row count, but psycopg returns rowcount
-        rowcount = await self.pg.execute(
-            query,
-            {"user_name": self.user_name, "session_id": session_id},
-        )
-        if rowcount == 0:
-            raise FileNotFoundError("Session not found")
-        context = self.get_runtime_session(session_id)
-        if context is not None:
-            context.document_focus = None
+        async with self._lifecycle_lock:
+            rowcount = await self.pg.execute(
+                query,
+                {"user_name": self.user_name, "session_id": session_id},
+            )
+            if rowcount == 0:
+                raise FileNotFoundError("Session not found")
+            context = self.get_runtime_session(session_id)
+            if context is not None:
+                context.document_focus = None
         return True

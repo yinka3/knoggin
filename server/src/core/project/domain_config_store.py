@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from common.conf.domain_config import CompiledDomain, DomainConfig
 from common.scoping import require_scope_value
 from common.utils.json_utils import safe_json_loads
+from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
 from core.project.domain_config_operations import parse_candidate
 
 
@@ -138,6 +139,13 @@ class DomainConfigStore:
                 raise ValueError(
                     f"Project disappeared while activating domain: {project_id}"
                 )
+            await MaintenanceReviewWriter(self.postgres).mark_stale_for_definition(
+                user_name=user_name,
+                project_id=project_id,
+                definition_version=activated.version,
+                reason="Project relationship definitions changed",
+                cur=cur,
+            )
 
         return DomainActivation(
             config=activated,

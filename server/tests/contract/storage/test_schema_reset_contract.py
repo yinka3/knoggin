@@ -9,10 +9,10 @@ from psycopg.errors import CheckViolation
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_schema_reset_does_not_accumulate_dropped_chunk_attributes(
+async def test_fresh_schema_has_no_dropped_chunk_attributes(
     real_postgres_client,
 ):
-    """Repeated schema application must not consume PostgreSQL attribute slots."""
+    """Canonical creation must not consume PostgreSQL attribute slots."""
 
     row = await real_postgres_client.fetch_one(
         """
@@ -49,14 +49,13 @@ async def test_project_documents_rejects_an_oversized_indexed_relative_path(
             INSERT INTO public.project_documents (
                 document_id,
                 project_id,
-                visibility_scope,
                 original_name,
                 relative_path,
                 extension,
                 size_bytes,
                 content_hash
             )
-            VALUES (%s, 'project-1', 'project', 'notes.md', %s, '.md', 1, %s)
+            VALUES (%s, 'project-1', 'notes.md', %s, '.md', 1, %s)
             """,
             (str(uuid4()), "a" * 2049, "a" * 64),
         )

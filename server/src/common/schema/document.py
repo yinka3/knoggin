@@ -1,7 +1,9 @@
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Dict, List, Literal, Optional, Set, Union
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -12,6 +14,93 @@ from pydantic import (
     model_validator,
 )
 
+from common.schema.source.locators import DocumentLocator
+
+
+class SavedWebLink(BaseModel):
+    """One project-owned bookmark, deliberately separate from documents."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    link_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("link_id", "project_id")
+    @classmethod
+    def _require_non_blank_identifier(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("saved web link identifiers must not be blank")
+        return normalized
+
+    @field_validator("url")
+    @classmethod
+    def _require_http_url(cls, value: str) -> str:
+        normalized = value.strip()
+        parsed = urlsplit(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("saved web link url must be an absolute HTTP(S) URL")
+        return normalized
+
+    @field_validator("title", "summary")
+    @classmethod
+    def _normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class UserAttachedFile(BaseModel):
+    """One file explicitly introduced by the user for a conversation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_type: Literal["file"] = "file"
+    original_name: str = Field(min_length=1, max_length=512)
+    content: bytes = Field(min_length=1, repr=False)
+    relative_path: str | None = Field(default=None, min_length=1, max_length=2048)
+
+    @field_validator("original_name", "relative_path")
+    @classmethod
+    def _normalize_file_names(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("attached file names must be non-blank and null-free")
+        return normalized
+
+
+class UserAttachedUrl(BaseModel):
+    """One HTTP(S) URL explicitly introduced by the user."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_type: Literal["url"] = "url"
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        return SavedWebLink._require_http_url(value)
+
+    @field_validator("title", "summary")
+    @classmethod
+    def _normalize_text(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
+UserAttachedSource = Annotated[
+    Union[UserAttachedFile, UserAttachedUrl],
+    Field(discriminator="source_type"),
+]
+
 
 class FolderUploadEntry(BaseModel):
     """One browser-uploaded file in a virtual folder manifest."""
@@ -20,15 +109,6 @@ class FolderUploadEntry(BaseModel):
 
     relative_path: str = Field(min_length=1)
     content: bytes = Field(repr=False)
-
-
-class WorkspaceSyncChanges(BaseModel):
-    """Incremental changes to one previously synchronized workspace source."""
-
-    model_config = ConfigDict(frozen=True)
-
-    upserts: tuple[FolderUploadEntry, ...] = Field(default_factory=tuple)
-    deleted_paths: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class FolderScanSettings(BaseModel):
@@ -162,6 +242,10 @@ class _DocumentFocusBase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     mode: Literal["pinned", "request"] = "pinned"
+    # Duration (``mode``) and retrieval behavior are intentionally separate:
+    # a persisted focus can be a preference, while a request may opt into a
+    # hard boundary for one run.
+    behavior: Literal["prefer", "restrict"] = "prefer"
     created_at: datetime
 
     @field_validator("created_at")
@@ -172,12 +256,31 @@ class _DocumentFocusBase(BaseModel):
         return value.astimezone(timezone.utc)
 
 
+class DocumentSelection(BaseModel):
+    """One version-bound passage selected from a durable document."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content_hash: str = Field(min_length=64, max_length=64)
+    locator: DocumentLocator
+
+    @field_validator("content_hash")
+    @classmethod
+    def _require_sha256_content_hash(cls, value: str) -> str:
+        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(
+                "document selection content_hash must be a SHA-256 hex digest"
+            )
+        return value
+
+
 class DocumentFocusDocument(_DocumentFocusBase):
     """A focus targeting one exact document."""
 
     target_type: Literal["document"]
     document_id: str = Field(min_length=1)
     relative_path: str = Field(min_length=1)
+    selection: DocumentSelection | None = None
 
     @field_validator("document_id", "relative_path")
     @classmethod
@@ -186,15 +289,20 @@ class DocumentFocusDocument(_DocumentFocusBase):
             raise ValueError("document focus selectors must not be blank")
         return normalized
 
+    @model_validator(mode="after")
+    def _selection_is_request_scoped(self):
+        if self.selection is not None and self.mode != "request":
+            raise ValueError("document selections are only valid for request focus")
+        return self
+
 
 class DocumentFocusSubtree(_DocumentFocusBase):
-    """A focus targeting a path subtree within one uploaded folder."""
+    """A focus targeting one project-relative path subtree."""
 
     target_type: Literal["subtree"]
-    folder_root_id: str = Field(min_length=1)
     path_prefix: str = Field(min_length=1)
 
-    @field_validator("folder_root_id", "path_prefix")
+    @field_validator("path_prefix")
     @classmethod
     def _normalize_selectors(cls, value: str) -> str:
         if not (normalized := value.strip()):
@@ -202,22 +310,8 @@ class DocumentFocusSubtree(_DocumentFocusBase):
         return normalized
 
 
-class DocumentFocusFolderUpload(_DocumentFocusBase):
-    """A focus targeting every visible document from one folder upload."""
-
-    target_type: Literal["folder_upload"]
-    folder_root_id: str = Field(min_length=1)
-
-    @field_validator("folder_root_id")
-    @classmethod
-    def _normalize_folder_root_id(cls, value: str) -> str:
-        if not (normalized := value.strip()):
-            raise ValueError("document focus selectors must not be blank")
-        return normalized
-
-
 DocumentFocus = Annotated[
-    Union[DocumentFocusDocument, DocumentFocusSubtree, DocumentFocusFolderUpload],
+    Union[DocumentFocusDocument, DocumentFocusSubtree],
     Field(discriminator="target_type"),
 ]
 
@@ -225,7 +319,6 @@ _DOCUMENT_FOCUS_ADAPTER = TypeAdapter(DocumentFocus)
 _LEGACY_OPTIONAL_SELECTORS = {
     "document_id",
     "relative_path",
-    "folder_root_id",
     "path_prefix",
 }
 
@@ -240,7 +333,7 @@ def parse_document_focus(value: object) -> DocumentFocus:
 
     if isinstance(
         value,
-        (DocumentFocusDocument, DocumentFocusSubtree, DocumentFocusFolderUpload),
+        (DocumentFocusDocument, DocumentFocusSubtree),
     ):
         return value
     if not isinstance(value, dict):
@@ -255,19 +348,27 @@ def parse_document_focus(value: object) -> DocumentFocus:
 def create_document_focus(
     *,
     mode: Literal["pinned", "request"] = "pinned",
+    behavior: Literal["prefer", "restrict"] = "prefer",
     created_at: datetime | str,
     **target: object,
 ) -> DocumentFocus:
     """Create one focus variant from a resolved document-service target."""
 
-    return parse_document_focus({"mode": mode, "created_at": created_at, **target})
+    return parse_document_focus(
+        {
+            "mode": mode,
+            "behavior": behavior,
+            "created_at": created_at,
+            **target,
+        }
+    )
 
 
 def dump_document_focus(value: DocumentFocus) -> dict:
     """Serialize a validated focus using only its variant's selector fields."""
 
     focus = parse_document_focus(value)
-    payload = focus.model_dump(mode="json")
+    payload = focus.model_dump(mode="json", exclude_none=True)
     # Keep the application's stable ISO-8601 UTC form (+00:00) rather than
     # inheriting Pydantic's version-dependent `Z` JSON rendering.
     payload["created_at"] = focus.created_at.isoformat()

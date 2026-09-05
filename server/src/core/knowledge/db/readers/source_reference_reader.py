@@ -88,6 +88,45 @@ class SourceReferenceReader:
             for row in rows
         ]
 
+    async def get_source_reference(
+        self,
+        source_ref_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ) -> SourceReference | None:
+        """Return one assistant-owned source reference for explicit promotion."""
+        scope = self._scope(
+            user_name,
+            project_id,
+            session_id,
+            "get_source_reference",
+        )
+        if not isinstance(source_ref_id, str) or not source_ref_id.strip():
+            raise ValueError("source_ref_id must not be blank")
+        user_name, project_id, session_id = scope
+        row = await self.client.fetch_one(
+            """
+            SELECT ref.*
+            FROM public.message_source_refs AS ref
+            JOIN public.messages AS message
+              ON message.message_id = ref.message_id
+             AND message.project_id = ref.project_id
+             AND message.session_id = ref.session_id
+            JOIN public.sessions AS session
+              ON session.session_id = message.session_id
+             AND session.project_id = message.project_id
+            WHERE ref.source_ref_id = %s
+              AND ref.project_id = %s
+              AND ref.session_id = %s
+              AND message.role = 'assistant'
+              AND session.user_name = %s
+            """,
+            (source_ref_id.strip(), project_id, session_id, user_name),
+        )
+        return None if row is None else self._reference_from_row(row)
+
     async def get_assistant_message_with_sources(
         self,
         message_id: int,

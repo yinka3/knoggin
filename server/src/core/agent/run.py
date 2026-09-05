@@ -21,6 +21,7 @@ from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
+from core.agent.notebook import NotebookRolloverResult, RunNotebook
 from core.agent.tools.registry import (
     ToolRuntime,
     build_tool_runtime,
@@ -63,7 +64,13 @@ class AgentRunLimits:
     max_accumulated_graph: int = 40
     max_accumulated_paths: int = 8
     max_accumulated_episodes: int = 8
-    max_accumulated_sources: int = 12
+    max_accumulated_documents: int = 30
+    max_accumulated_web_discoveries: int = 12
+    max_accumulated_web_reads: int = 12
+    max_accumulated_actions: int = 12
+    max_accumulated_next_steps: int = 12
+    max_accumulated_summary_chars: int = 4000
+    max_notebook_render_tokens: int = 10000
     max_consecutive_errors: int = 3
     empty_result_replan_threshold: int = 3
     tool_timeout: float = 30.0
@@ -84,6 +91,17 @@ class AgentRunLimits:
             max_attempts=settings.max_attempts,
             max_history_turns=settings.agent_history_turns,
             max_accumulated_messages=settings.max_accumulated_messages,
+            max_accumulated_profiles=settings.max_accumulated_profiles,
+            max_accumulated_graph=settings.max_accumulated_graph,
+            max_accumulated_paths=settings.max_accumulated_paths,
+            max_accumulated_episodes=settings.max_accumulated_episodes,
+            max_accumulated_documents=settings.max_accumulated_documents,
+            max_accumulated_web_discoveries=settings.max_accumulated_web_discoveries,
+            max_accumulated_web_reads=settings.max_accumulated_web_reads,
+            max_accumulated_actions=settings.max_accumulated_actions,
+            max_accumulated_next_steps=settings.max_accumulated_next_steps,
+            max_accumulated_summary_chars=settings.max_accumulated_summary_chars,
+            max_notebook_render_tokens=settings.max_notebook_render_tokens,
             max_consecutive_errors=settings.max_consecutive_errors,
             tool_limits=tuple((defaults | overrides).items()),
         )
@@ -95,8 +113,12 @@ class AgentRunLimits:
             self,
             max_calls=self.max_calls * profile.tool_call_budget_multiplier,
             max_attempts=self.max_attempts * profile.attempt_budget_multiplier,
-            max_accumulated_sources=(
-                self.max_accumulated_sources * profile.source_budget_multiplier
+            max_accumulated_web_discoveries=(
+                self.max_accumulated_web_discoveries
+                * profile.source_budget_multiplier
+            ),
+            max_accumulated_web_reads=(
+                self.max_accumulated_web_reads * profile.source_budget_multiplier
             ),
             tool_limits=tuple(
                 (name, limit * profile.tool_call_budget_multiplier)
@@ -127,7 +149,6 @@ class AgentRun:
     model: Optional[str]
     temperature: float
     brain: str
-    directives: str
     enabled_tools: Optional[Tuple[str, ...]]
     additional_tool_schemas: Tuple[Dict[str, Any], ...]
     tool_runtime: ToolRuntime
@@ -137,25 +158,21 @@ class AgentRun:
     )
     history: List[Dict] = field(default_factory=list)
     document_focus: Optional[DocumentFocus] = None
+    document_selection_context: Optional[Dict[str, Any]] = None
     hot_topics: List[str] = field(default_factory=list)
-    active_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
+    notebook: RunNotebook = field(default_factory=RunNotebook)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
     last_turn_at: Optional[datetime] = None
     initial_source_candidates: List[SourceReferenceCandidate] = field(
         default_factory=list
     )
-    messages: List[Dict] = field(default_factory=list)
-    profiles: List[Dict] = field(default_factory=list)
-    graph: List[Dict] = field(default_factory=list)
-    paths: List[Dict] = field(default_factory=list)
-    episodes: List[Dict] = field(default_factory=list)
-    sources: List[Dict] = field(default_factory=list)
-    evidence_summary: Optional[str] = None
+    new_evidence_gathered: bool = False
     evidence_token_count: int = 0
     call_count: int = 0
     attempt_count: int = 0
+    synthesis_attempt_count: int = 0
     consecutive_errors: int = 0
     consecutive_empty_results: int = 0
     tools_used: List[str] = field(default_factory=list)
@@ -182,12 +199,21 @@ class AgentRun:
         model: Optional[str] = None,
         temperature: float = 0.7,
         brain: Optional[str] = None,
-        directives: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
         additional_tool_schemas: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
         audit_project_id: str | None | object = _UNSET_AUDIT_PROJECT_ID,
-        **state: Any,
+        research_profile: ResearchProfile | None = None,
+        history: Optional[List[Dict]] = None,
+        document_focus: Optional[DocumentFocus] = None,
+        document_selection_context: Optional[Dict[str, Any]] = None,
+        hot_topics: Optional[List[str]] = None,
+        hot_topic_context: Optional[Dict[str, Dict]] = None,
+        notebook: Optional[RunNotebook] = None,
+        is_community: bool = False,
+        current_participants: Optional[List[str]] = None,
+        last_turn_at: Optional[datetime] = None,
+        initial_source_candidates: Optional[List[SourceReferenceCandidate]] = None,
     ) -> "AgentRun":
         """Open an agent run with a fixed scope and policy snapshot."""
 
@@ -203,10 +229,10 @@ class AgentRun:
             if audit_project_id is _UNSET_AUDIT_PROJECT_ID
             else cast(str | None, audit_project_id)
         )
-        effective_state = dict(state)
-        effective_state.setdefault(
-            "last_turn_at",
-            getattr(agent.config, "last_turn_at", None),
+        effective_last_turn_at = (
+            last_turn_at
+            if last_turn_at is not None
+            else getattr(agent.config, "last_turn_at", None)
         )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,
@@ -228,12 +254,21 @@ class AgentRun:
             model=model,
             temperature=temperature,
             brain=brain or "",
-            directives=directives or "",
             enabled_tools=effective_enabled_tools,
             additional_tool_schemas=effective_additional_schemas,
             tool_runtime=tool_runtime,
             limits=limits,
-            **effective_state,
+            research_profile=research_profile or DEFAULT_RESEARCH_PROFILES["normal"],
+            history=list(history or []),
+            document_focus=document_focus,
+            document_selection_context=document_selection_context,
+            hot_topics=list(hot_topics or []),
+            hot_topic_context=dict(hot_topic_context or {}),
+            notebook=notebook or RunNotebook(limits=limits),
+            is_community=is_community,
+            current_participants=list(current_participants or []),
+            last_turn_at=effective_last_turn_at,
+            initial_source_candidates=list(initial_source_candidates or []),
         )
 
     @classmethod
@@ -248,11 +283,20 @@ class AgentRun:
         model: Optional[str] = None,
         temperature: float = 0.7,
         brain: Optional[str] = None,
-        directives: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
         additional_tool_schemas: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
-        **state: Any,
+        research_profile: ResearchProfile | None = None,
+        history: Optional[List[Dict]] = None,
+        document_focus: Optional[DocumentFocus] = None,
+        document_selection_context: Optional[Dict[str, Any]] = None,
+        hot_topics: Optional[List[str]] = None,
+        hot_topic_context: Optional[Dict[str, Dict]] = None,
+        notebook: Optional[RunNotebook] = None,
+        is_community: bool = False,
+        current_participants: Optional[List[str]] = None,
+        last_turn_at: Optional[datetime] = None,
+        initial_source_candidates: Optional[List[SourceReferenceCandidate]] = None,
     ) -> "AgentRun":
         """Open a user-level AAC run with no durable project audit owner."""
 
@@ -266,12 +310,21 @@ class AgentRun:
             model=model,
             temperature=temperature,
             brain=brain,
-            directives=directives,
             enabled_tools=enabled_tools,
             additional_tool_schemas=additional_tool_schemas,
             run_id=run_id,
             audit_project_id=None,
-            **state,
+            research_profile=research_profile,
+            history=history,
+            document_focus=document_focus,
+            document_selection_context=document_selection_context,
+            hot_topics=hot_topics,
+            hot_topic_context=hot_topic_context,
+            notebook=notebook,
+            is_community=is_community,
+            current_participants=current_participants,
+            last_turn_at=last_turn_at,
+            initial_source_candidates=initial_source_candidates,
         )
 
     def _require_active(self) -> None:
@@ -289,12 +342,21 @@ class AgentRun:
         self.attempt_count += 1
         return True
 
+    def begin_final_synthesis_attempt(self) -> bool:
+        """Reserve the one final synthesis pass outside the normal attempt budget."""
+
+        self._require_active()
+        if self.synthesis_attempt_count:
+            return False
+        self.synthesis_attempt_count += 1
+        self.attempt_count += 1
+        return True
+
     def is_duplicate(self, tool_name: str, args: Dict) -> bool:
         call_sig = (tool_name, json.dumps(args, sort_keys=True, default=str))
         return call_sig in self.previous_calls
 
-    def tool_limit_reached(self, tool_name: str, config: Any = None) -> bool:
-        del config
+    def tool_limit_reached(self, tool_name: str) -> bool:
         limit = self.limits.get_tool_limit(tool_name, self.limits.max_calls)
         return self.tool_call_counts.get(tool_name, 0) >= limit
 
@@ -353,14 +415,14 @@ class AgentRun:
         self._require_active()
         self.source_candidates.extend(candidates)
 
-    def accumulate_tool_result(self, tool_name: str, result: Dict) -> None:
+    def accumulate_tool_result(self, tool_name: str, result: Dict) -> bool:
         """Apply one tool result to the aggregate's owned evidence buffers."""
 
         self._require_active()
-        # Kept local to avoid a run/prompt-context import cycle.
-        from core.agent.prompt_context import update_accumulators
-
-        update_accumulators(self, tool_name, result)
+        apply_result = self.notebook.apply(tool_name, result)
+        gathered = apply_result.changed
+        self.new_evidence_gathered = self.new_evidence_gathered or gathered
+        return gathered
 
     def record_empty_result(self) -> bool:
         """Record an empty tool turn and report whether replanning is due."""
@@ -379,15 +441,7 @@ class AgentRun:
     def has_any(self) -> bool:
         """Whether this run has accumulated any model-visible evidence."""
 
-        return bool(
-            self.profiles
-            or self.messages
-            or self.graph
-            or self.paths
-            or self.episodes
-            or self.sources
-            or self.evidence_summary
-        )
+        return self.notebook.has_any()
 
     def record_usage(self, usage: Optional[StreamUsage]) -> None:
         self._require_active()
@@ -399,27 +453,17 @@ class AgentRun:
             "approximate", False
         )
 
-    def clear_short_uuid_references(self) -> None:
-        self.short_uuid_references.clear()
-
     def set_evidence_token_count(self, token_count: int) -> None:
         self._require_active()
         if not isinstance(token_count, int) or token_count < 0:
             raise ValueError("evidence token count must be a non-negative integer")
         self.evidence_token_count = token_count
 
-    def compact_evidence(self, summary: Optional[str]) -> None:
-        """Keep only the bounded evidence needed after summarization."""
+    def rollover_notebook(self, summary: Optional[str] = None) -> NotebookRolloverResult:
+        """Start a bounded notebook generation while preserving references."""
 
         self._require_active()
-        if summary:
-            self.evidence_summary = summary
-        self.messages = self.messages[-5:]
-        self.profiles = self.profiles[-5:]
-        self.graph = self.graph[-15:]
-        self.sources = self.sources[-5:]
-        self.episodes = []
-        self.paths = []
+        return self.notebook.rollover(summary)
 
     def finalize(self, content: str) -> None:
         self._require_active()
@@ -443,12 +487,6 @@ class AgentRun:
         self.short_uuid_references.clear()
         self.history.clear()
         self.initial_source_candidates.clear()
-        self.messages.clear()
-        self.profiles.clear()
-        self.graph.clear()
-        self.paths.clear()
-        self.episodes.clear()
-        self.sources.clear()
+        self.notebook.clear()
         self.source_candidates.clear()
-        self.evidence_summary = None
         self.released = True

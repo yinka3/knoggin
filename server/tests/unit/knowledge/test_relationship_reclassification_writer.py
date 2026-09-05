@@ -36,6 +36,8 @@ def unknown_row():
         "project_id": "demo",
         "entity_a_id": 10,
         "entity_b_id": 20,
+        "source_entity_id": 10,
+        "target_entity_id": 20,
         "relationship_type": "deploys to",
         "canonical_relationship_type": None,
         "observed_relationship_label": "deploys to",
@@ -68,10 +70,9 @@ async def test_writer_compare_and_updates_relationship_dependents_transactionall
     assert "FOR UPDATE" in executed[0]
     assert "INSERT INTO public.relationships" in executed[1]
     assert "relationship_observations" in executed[2]
-    assert "domain_version" in executed[2]
-    assert '"symmetric"' in executed[2]
-    assert "episode_relationships" in executed[3]
-    assert "DELETE FROM public.relationships" in executed[-1]
+    assert "interpretation_source" in executed[2]
+    assert any("episode_relationships" in query for query in executed)
+    assert any("DELETE FROM public.relationships" in query for query in executed)
 
 
 @pytest.mark.unit

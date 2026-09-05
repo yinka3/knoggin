@@ -1,11 +1,8 @@
-from typing import Callable, Optional
+from typing import Optional
 
 from loguru import logger
 
-from common.conf.manager import ConfigManager
 from common.schema.document import DocumentFocus
-from core.ingestion.pipeline import IngestionPipeline
-from core.ingestion.worker import IngestionWorker
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
 from runtime.session_runtime import SessionRuntime
@@ -30,15 +27,7 @@ class SessionRuntimeFactory:
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
 
-    @property
-    def config(self):
-        return ConfigManager.get().config
-
-    @property
-    def dev_settings(self):
-        return self.config.developer_settings
-
-    async def bootstrap(
+    async def create(
         self,
         project_state: ProjectRuntime,
         *,
@@ -48,8 +37,8 @@ class SessionRuntimeFactory:
         enabled_tools: Optional[list[str]],
         document_focus: Optional[DocumentFocus] = None,
     ) -> SessionRuntime:
-        """Perform the multi-phase boot sequence: assemble + launch."""
-        ctx = await self.assemble(
+        """Create and launch one fully wired session runtime."""
+        ctx = await self._assemble(
             project_state,
             session_id=session_id,
             model=model,
@@ -58,13 +47,13 @@ class SessionRuntimeFactory:
             document_focus=document_focus,
         )
         try:
-            await self.launch(ctx)
+            await self._launch(ctx)
         except Exception:
             await ctx.shutdown()
             raise
         return ctx
 
-    async def assemble(
+    async def _assemble(
         self,
         project_state: ProjectRuntime,
         *,
@@ -82,39 +71,15 @@ class SessionRuntimeFactory:
         ctx = SessionRuntime(
             self.user_name,
             self.resources,
+            session_id=session_id,
+            project_id=project_state.project_id,
+            project=project_state,
+            model=model,
+            agent_id=agent_id,
+            enabled_tools=enabled_tools,
+            document_focus=document_focus,
             health_service=self.health_service,
             agent_orchestrator=self.agent_orchestrator,
-        )
-        ctx.session_id = session_id
-        ctx.project_id = project_state.project_id
-        ctx.project = project_state
-        ctx.model = model
-        ctx.agent_id = agent_id
-        ctx.enabled_tools = (
-            list(enabled_tools) if enabled_tools is not None else None
-        )
-        ctx.document_focus = document_focus
-
-        # Use the project-owned processor so config updates and background jobs
-        # share the same ingestion runtime as session consumers.
-        processor = project_state.batch_processor
-        if processor is None:
-            raise RuntimeError("project_state.batch_processor not wired")
-        ctx.batch_processor = processor
-
-        # Initialize Batch Consumer with direct callbacks
-        consumer = self._init_batch_consumer(
-            session_id,
-            processor,
-            get_session_context=ctx.get_conversation_context,
-            write_to_graph=ctx._write_to_graph_callback,
-        )
-        ctx.consumer = consumer
-
-        ctx.config_unsubscribers.append(
-            ConfigManager.get().subscribe(
-                consumer.update_settings, "developer_settings.ingestion"
-            )
         )
 
         # Sessions share the project-owned document boundary.
@@ -122,49 +87,8 @@ class SessionRuntimeFactory:
 
         return ctx
 
-    async def launch(self, ctx: SessionRuntime):
-        """Starts background tasks and jobs for the context."""
-        if ctx.consumer:
-            if ctx.consumer.get_session_context is None:
-                raise RuntimeError("consumer.get_session_context callback not wired")
-            if ctx.consumer.write_to_graph is None:
-                raise RuntimeError("consumer.write_to_graph callback not wired")
-
-        if ctx.batch_processor:
-            if ctx.batch_processor._get_next_ent_id is None:
-                raise RuntimeError("batch_processor.get_next_ent_id callback not wired")
-
-        if ctx.consumer:
-            reset_message_ids = await self.resources.knowledge_store.reset_claimed_ingestion(
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-                session_id=ctx.session_id,
-            )
-            if reset_message_ids:
-                logger.info(
-                    "Released {} stale ingestion claims for session {}",
-                    len(reset_message_ids),
-                    ctx.session_id,
-                )
-            ctx.consumer.start()
-
+    async def _launch(self, ctx: SessionRuntime):
+        """Confirm the project-owned semantic owner is available."""
+        if ctx.project.project_semantic_job is None:
+            raise RuntimeError("project semantic job is not registered")
         logger.info(f"System launched successfully for session {ctx.session_id}")
-
-    def _init_batch_consumer(
-        self,
-        session_id: str,
-        processor: IngestionPipeline,
-        get_session_context: Callable,
-        write_to_graph: Callable,
-    ) -> IngestionWorker:
-        ingest_cfg = self.dev_settings.ingestion
-
-        return IngestionWorker(
-            user_name=self.user_name,
-            session_id=session_id,
-            knowledge_store=self.resources.knowledge_store,
-            processor=processor,
-            get_session_context=get_session_context,
-            write_to_graph=write_to_graph,
-            settings=ingest_cfg,
-        )

@@ -7,12 +7,10 @@ from common.exceptions import DependencyError, ToolExecutionError
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
-    MessageAcceptance,
     PublicError,
     RunCompletedEvent,
     RunResult,
     StartRunRequest,
-    SubmitMessageRequest,
     UpdateAgentRequest,
     Usage,
     to_public_error,
@@ -49,15 +47,38 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
 
     # None inherits defaults and [] deliberately disables all optional tools.
     assert CreateSessionRequest(project_id="project-1").enabled_tools is None
-    assert CreateSessionRequest(project_id="project-1", enabled_tools=[]).enabled_tools == []
+    assert (
+        CreateSessionRequest(project_id="project-1", enabled_tools=[]).enabled_tools
+        == []
+    )
     assert StartRunRequest(session_id="session-1", query="hello", enabled_tools=[])
-    assert StartRunRequest(
-        session_id="session-1", query="hello", research_mode="deep_research"
-    ).research_mode == "deep_research"
+    assert (
+        StartRunRequest(
+            session_id="session-1", query="hello", research_mode="deep_research"
+        ).research_mode
+        == "deep_research"
+    )
+    selected_run = StartRunRequest(
+        session_id="session-1",
+        query="explain this",
+        document_focus={
+            "target_type": "document",
+            "document_id": "document-1",
+            "selection": {
+                "content_hash": "a" * 64,
+                "locator": {
+                    "kind": "code_lines",
+                    "start_line": 4,
+                    "end_line": 8,
+                },
+            },
+        },
+    )
+    assert selected_run.document_focus.document_id == "document-1"
+    assert selected_run.document_focus.selection.locator.kind == "code_lines"
     with pytest.raises(ValidationError):
         StartRunRequest(session_id="session-1", query="hello", research_mode="turbo")
 
-    accepted = MessageAcceptance(message_id=12, idempotent=True)
     result = RunResult(
         run_id="run-1",
         content="Done",
@@ -68,13 +89,9 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
             total_tokens=3,
         ),
     )
-    assert accepted.model_dump()["message_id"] == 12
     assert result.model_dump(mode="json")["sources"][0]["source_kind"] == (
         "user_pasted_text"
     )
-
-    with pytest.raises(ValidationError):
-        SubmitMessageRequest(content="hello", unexpected=True)
 
 
 @pytest.mark.unit
@@ -86,6 +103,48 @@ def test_enabled_tools_reject_blank_and_duplicate_names():
         CreateSessionRequest(
             project_id="project-1",
             enabled_tools=["search_messages", " SEARCH_MESSAGES "],
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_run_document_focus_rejects_server_owned_and_invalid_selection_fields():
+    with pytest.raises(ValidationError):
+        StartRunRequest(
+            session_id="session-1",
+            query="explain this",
+            document_focus={
+                "target_type": "document",
+                "document_id": "document-1",
+                "relative_path": "docs/notes.py",
+            },
+        )
+    with pytest.raises(ValidationError, match="SHA-256"):
+        StartRunRequest(
+            session_id="session-1",
+            query="explain this",
+            document_focus={
+                "target_type": "document",
+                "document_id": "document-1",
+                "selection": {
+                    "content_hash": "G" * 64,
+                    "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+                },
+            },
+        )
+    with pytest.raises(ValidationError):
+        StartRunRequest(
+            session_id="session-1",
+            query="explain this",
+            document_focus={
+                "target_type": "subtree",
+                "folder_root_id": "folder-1",
+                "path_prefix": "src",
+                "selection": {
+                    "content_hash": "a" * 64,
+                    "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+                },
+            },
         )
 
 

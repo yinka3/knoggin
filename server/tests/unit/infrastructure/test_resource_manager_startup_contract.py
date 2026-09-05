@@ -18,7 +18,7 @@ from runtime import resources as resources_module
         "tokenizer",
         "embedding",
         "spacy",
-        "gliner",
+        "vp01",
         "postgres",
     ],
 )
@@ -121,21 +121,20 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
 
     class FakeSpacy:
         @staticmethod
-        def load(_name, exclude=None):
+        def blank(language):
             if failure == "spacy":
                 raise RuntimeError("spacy failed")
+            assert language == "en"
             return FakeProcessor()
 
-    class FakeGlinerModel:
-        def to(self, _device):
-            return self
-
-    class FakeGLiNER:
+    class FakeGLiNER25VP01Adapter:
         @staticmethod
-        def from_pretrained(_name):
-            if failure == "gliner":
-                raise RuntimeError("gliner failed")
-            return FakeGlinerModel()
+        def load(*, language, device=None):
+            if failure == "vp01":
+                raise RuntimeError("vp01 failed")
+            assert language == "en"
+            assert device == "cpu"
+            return object()
 
     config = RootConfig(
         llm=LLMSettings(
@@ -165,7 +164,11 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgres)
     monkeypatch.setattr(resources_module, "spacy", FakeSpacy)
-    monkeypatch.setattr(resources_module, "GLiNER", FakeGLiNER)
+    monkeypatch.setattr(
+        resources_module,
+        "GLiNER25VP01Adapter",
+        FakeGLiNER25VP01Adapter,
+    )
     with pytest.raises(DependencyError, match=failure):
         await resources_module.RuntimeResources.create(num_workers=2)
 

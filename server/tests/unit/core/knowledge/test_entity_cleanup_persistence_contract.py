@@ -44,7 +44,10 @@ async def test_selected_entity_cleanup_validates_ownership_before_deleting():
     ownership_query = client.calls[0]
     assert "FOR UPDATE" in ownership_query[1]
     assert ownership_query[2] == ([2, 3], "ada", "project-1")
-    assert "DELETE FROM entities" in client.calls[1][1]
+    assert "DELETE FROM project_entity_contexts" in "\n".join(
+        call[1] for call in client.calls
+    )
+    assert "DELETE FROM entities" in "\n".join(call[1] for call in client.calls)
 
 
 @pytest.mark.unit

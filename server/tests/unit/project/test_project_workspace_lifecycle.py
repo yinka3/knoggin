@@ -2,17 +2,17 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
+from core.knowledge.documents.filesystem import ProjectFilesystemFactory
+from core.project.project_files import PROJECT_FILE_PATH, build_project_markdown
 from core.project.project_manager import ProjectManager
-from core.project.workspace_service import PROJECT_FILE_PATH, build_project_markdown
 from tests.fixtures.factories import make_domain_config
 
 
 class RecordingPostgres:
-    def __init__(self, *, fail_on_content=False):
+    def __init__(self, *, fail_on_project_insert=False):
         self.calls = []
         self.transactions = []
-        self.fail_on_content = fail_on_content
+        self.fail_on_project_insert = fail_on_project_insert
 
     @asynccontextmanager
     async def transaction(self):
@@ -35,7 +35,6 @@ class RecordingPostgres:
                 "user_name": "ada",
                 "name": "Research",
                 "description": "A project description",
-                "access_mode": "open",
                 "status": "active",
                 "domain_config": {},
                 "allowed_projects": [],
@@ -57,16 +56,18 @@ class RecordingCursor:
     async def execute(self, query, params=None):
         self.transaction.append((query, params))
         self.postgres.calls.append((query, params))
-        if self.postgres.fail_on_content and "document_content" in query:
-            raise RuntimeError("content insert failed")
+        if self.postgres.fail_on_project_insert and "INSERT INTO public.projects" in query:
+            raise RuntimeError("project insert failed")
 
 
 @pytest.mark.asyncio
-async def test_project_creation_seeds_queued_project_file_in_same_transaction():
+async def test_project_creation_seeds_native_project_file(tmp_path):
     postgres = RecordingPostgres()
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
     manager = ProjectManager(
         resources=type("Resources", (), {"postgres": postgres})(),
         user_name="ada",
+        filesystem_factory=filesystem_factory,
     )
 
     await manager.create_project(
@@ -79,36 +80,37 @@ async def test_project_creation_seeds_queued_project_file_in_same_transaction():
     assert transaction[-1] == ("commit",)
     queries = [entry[0] for entry in transaction if entry[0] != "rollback"]
     assert any("INSERT INTO public.projects" in query for query in queries)
-    assert any("INSERT INTO public.document_workspace_sources" in query for query in queries)
-    assert any("INSERT INTO public.project_documents" in query for query in queries)
-    assert any("INSERT INTO public.document_content" in query for query in queries)
-
-    document_insert = next(
-        entry
-        for entry in transaction
-        if entry[0] != "commit"
-        and entry[0] != "rollback"
-        and "INSERT INTO public.project_documents" in entry[0]
+    assert not any("INSERT INTO public.project_documents" in query for query in queries)
+    created_project_id = transaction[0][1]["project_id"]
+    assert (
+        filesystem_factory.for_project(created_project_id).read_bytes(PROJECT_FILE_PATH)
+        == build_project_markdown("Research", "A project description").encode("utf-8")
     )
-    assert document_insert[1][4] == PROJECT_FILE_PATH
-    assert "'queued'" in " ".join(document_insert[0].split())
 
 
 @pytest.mark.asyncio
-async def test_project_creation_rolls_back_when_project_file_insert_fails():
-    postgres = RecordingPostgres(fail_on_content=True)
+async def test_project_creation_removes_native_project_file_when_database_insert_fails(
+    tmp_path,
+):
+    postgres = RecordingPostgres(fail_on_project_insert=True)
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
     manager = ProjectManager(
         resources=type("Resources", (), {"postgres": postgres})(),
         user_name="ada",
+        filesystem_factory=filesystem_factory,
     )
 
-    with pytest.raises(RuntimeError, match="content insert failed"):
+    with pytest.raises(RuntimeError, match="project insert failed"):
         await manager.create_project(
             "Research",
             domain_config=make_domain_config(version=0),
         )
 
     assert postgres.transactions[0][-1] == ("rollback",)
+    project_id = postgres.transactions[0][0][1]["project_id"]
+    assert not filesystem_factory.for_project(project_id).root.joinpath(
+        PROJECT_FILE_PATH
+    ).exists()
 
 
 def test_project_markdown_seed_contains_trusted_metadata_and_is_utf8():
@@ -117,11 +119,3 @@ def test_project_markdown_seed_contains_trusted_metadata_and_is_utf8():
     assert "A project description" in content
     assert content.endswith("\n")
     content.encode("utf-8")
-
-
-def test_project_deletion_includes_managed_workspace_tables():
-    assert "document_content" in ProjectDeletionWriter._PROJECT_TABLES
-    assert "project_documents" in ProjectDeletionWriter._PROJECT_TABLES
-    assert "document_workspace_sources" in ProjectDeletionWriter._PROJECT_TABLES
-    assert "conflict_groups" in ProjectDeletionWriter._PROJECT_TABLES
-    assert "conflict_discovery_checkpoints" in ProjectDeletionWriter._PROJECT_TABLES

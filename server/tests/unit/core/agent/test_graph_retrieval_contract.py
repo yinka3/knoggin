@@ -1,234 +1,154 @@
+from types import SimpleNamespace
+
 import pytest
 
 from core.agent.formatters import format_graph_results
-from core.agent.tools.graph import GraphTools
+from core.knowledge.retrieval import KnowledgeRetrieval
 
 
-class GraphRetrievalTool(GraphTools):
-    def __init__(self):
-        self.active_topics = ["Identity"]
-        self.readable_project_ids = ["project-1"]
-        self.search_cfg = {"default_activity_hours": 72}
-        self.user_name = "ada"
-        self.session_id = "session-1"
-        self.resolved = {}
-        self.hydrated_refs = []
+class _Postgres:
+    async def fetch_all(self, _query, _params):
+        return [{"session_id": "session-1"}]
 
-    async def _resolve_entity_name(self, entity):
-        return self.resolved.get(entity)
 
-    async def _hydrate_evidence(self, refs):
-        self.hydrated_refs.append(refs)
-        return [
-            {"id": ref.get("message_id", ref), "message": "evidence"}
-            for ref in refs
-        ]
+def _retrieval(store):
+    class Entities:
+        async def get_profile(self, entity_id):
+            if entity_id in {2, 3}:
+                return SimpleNamespace(canonical_name={2: "Ade", 3: "Acme"}[entity_id])
+            return None
+
+    return KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=Entities(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=store,
+        postgres=_Postgres(),
+        search_config={"default_activity_hours": 72},
+    )
 
 
 @pytest.mark.no_network
-async def test_recent_activity_uses_default_window_scope_and_hydrates_evidence():
-    class FakeKnowledgeStore:
+async def test_recent_activity_uses_stable_id_and_message_evidence():
+    class Store:
         def __init__(self):
             self.calls = []
 
-        async def get_recent_activity(
-            self, canonical, active_topics, hours, visible_project_ids
-        ):
-            self.calls.append((canonical, active_topics, hours, visible_project_ids))
+        async def get_recent_activity(self, entity_id, **kwargs):
+            self.calls.append((entity_id, kwargs))
             return [
                 {
-                    "entity": "Grace",
-                    "evidence_refs": [{"message_id": 7}],
+                    "entity_id": 2,
+                    "entity": "Ade",
+                    "project_id": "project-1",
+                    "evidence_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 7,
+                        }
+                    ],
                     "time": 123,
                 }
             ]
 
-    knowledge_store = FakeKnowledgeStore()
-    tool = GraphRetrievalTool()
-    tool.knowledge_store = knowledge_store
-    tool.resolved = {"Ada": "Ada Lovelace"}
-
-    result = await tool.get_recent_activity("Ada", hours=0)
-
-    assert knowledge_store.calls == [("Ada Lovelace", ["Identity"], 72, ["project-1"])]
-    assert tool.hydrated_refs == [[{"message_id": 7}]]
-    assert result == [
-        {
-            "entity": "Grace",
-            "time": 123,
-            "evidence": [{"id": 7, "message": "evidence"}],
-        }
-    ]
-
-
-@pytest.mark.no_network
-async def test_recent_activity_unknown_entity_returns_clean_error_without_graph_call():
-    class FakeKnowledgeStore:
-        async def get_recent_activity(self, *args, **kwargs):
-            raise AssertionError("graph should not be queried for unknown entity")
-
-    tool = GraphRetrievalTool()
-    tool.knowledge_store = FakeKnowledgeStore()
-
-    assert await tool.get_recent_activity("Missing") == [
-        {"error": "Entity not found: 'Missing'"}
-    ]
-
-
-@pytest.mark.no_network
-async def test_get_connections_reports_hidden_inactive_topics_without_evidence_leak():
-    class FakeKnowledgeStore:
-        def __init__(self):
-            self.calls = []
-
-        async def get_related_entities(
-            self, names, active_topics=None, limit=25, visible_project_ids=None
-        ):
-            self.calls.append((names, active_topics, limit, visible_project_ids))
-            if active_topics == ["Identity"]:
-                return []
+        async def get_messages_by_ids(self, message_ids, **kwargs):
+            assert message_ids == [7]
+            assert kwargs["visible_project_ids"] == ["project-1"]
             return [
                 {
-                    "target": "Dormant",
-                    "evidence_refs": [{"message_id": 7}],
-                    "context": "inactive detail",
-                },
-                {
-                    "target": "Archived",
-                    "evidence_refs": [{"message_id": 8}],
-                    "context": "another inactive detail",
-                },
+                    "id": 7,
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "content": "Ade discussed Acme",
+                    "timestamp": 1_700_000_000_000,
+                }
             ]
 
-    knowledge_store = FakeKnowledgeStore()
-    tool = GraphRetrievalTool()
-    tool.knowledge_store = knowledge_store
-    tool.resolved = {"Ada": "Ada Lovelace"}
+    store = Store()
+    result = await _retrieval(store).get_recent_activity(2, session_id="session-1", hours=0)
 
-    result = await tool.get_connections("Ada")
-
-    assert knowledge_store.calls == [
-        (["Ada Lovelace"], ["Identity"], 50, ["project-1"]),
-        (["Ada Lovelace"], None, 25, ["project-1"]),
+    assert store.calls == [
+        (
+            2,
+            {
+                "hours": 72,
+                "visible_project_ids": ["project-1"],
+            },
+        )
     ]
-    assert result == [
-        {
-            "hidden": True,
-            "count": 2,
-            "message": "2 connection(s) exist through inactive topics",
-        }
-    ]
-    assert tool.hydrated_refs == []
+    assert result[0]["evidence"][0]["id"] == "msg_7"
 
 
 @pytest.mark.no_network
-async def test_find_path_locks_inactive_shortcut_steps_and_strips_evidence():
-    class FakeKnowledgeStore:
-        def __init__(self):
-            self.calls = []
-
-        async def find_path_filtered(
-            self,
-            source,
-            target,
-            active_topics=None,
-            max_depth=4,
-            visible_project_ids=None,
-        ):
-            self.calls.append(
-                (source, target, active_topics, max_depth, visible_project_ids)
-            )
-            if active_topics == ["Identity"]:
-                return [], True
-            return (
-                [
-                    {
-                        "step": 0,
-                        "entity_a": "Ada",
-                        "entity_b": "Dormant",
-                        "topic_a": "Identity",
-                        "topic_b": "Archive",
-                        "evidence_refs": [{"message_id": 7}],
-                    },
-                    {
-                        "step": 1,
-                        "entity_a": "Dormant",
-                        "entity_b": "Grace",
-                        "topic_a": "Archive",
-                        "topic_b": "Identity",
-                        "evidence_refs": [{"message_id": 8}],
-                    },
-                ],
-                False,
-            )
-
-    knowledge_store = FakeKnowledgeStore()
-    tool = GraphRetrievalTool()
-    tool.knowledge_store = knowledge_store
-    tool.resolved = {"Ada": "Ada", "Grace": "Grace"}
-
-    result = await tool.find_path("Ada", "Grace")
-
-    assert knowledge_store.calls == [
-        ("Ada", "Grace", ["Identity"], 4, ["project-1"]),
-        ("Ada", "Grace", None, 4, ["project-1"]),
-    ]
-    assert result == [
-        {
-            "step": 0,
-            "entity_a": "Ada",
-            "entity_b": "Dormant",
-            "topic_a": "Identity",
-            "topic_b": "Archive",
-            "status": "LOCKED",
-            "locked_reason": "Inactive topic(s): Archive",
-            "evidence": [],
-        },
-        {
-            "step": 1,
-            "entity_a": "Dormant",
-            "entity_b": "Grace",
-            "topic_a": "Archive",
-            "topic_b": "Identity",
-            "status": "LOCKED",
-            "locked_reason": "Inactive topic(s): Archive",
-            "evidence": [],
-        },
-    ]
-    assert tool.hydrated_refs == []
-
-
-@pytest.mark.no_network
-async def test_hot_topic_context_hydrates_messages_and_removes_raw_refs():
-    class FakeKnowledgeStore:
-        def __init__(self):
-            self.calls = []
-
-        async def get_hot_topic_context_with_messages(
-            self, hot_topics, msg_limit, slim, visible_project_ids
-        ):
-            self.calls.append((hot_topics, msg_limit, slim, visible_project_ids))
-            return {
-                "Identity": {
-                    "entities": [{"name": "Ada"}],
-                    "message_refs": [{"message_id": 7}],
+async def test_connections_keep_stored_direction_when_selected_from_target():
+    class Store:
+        async def get_related_entities(self, entity_ids, **kwargs):
+            assert entity_ids == [3]
+            assert kwargs == {"limit": 50, "visible_project_ids": ["project-1"]}
+            return [
+                {
+                    "project_id": "project-1",
+                    "relationship_id": "project-1:2:3:works_at",
+                    "source_entity_id": 2,
+                    "target_entity_id": 3,
+                    "source": "Ade",
+                    "target": "Acme",
+                    "relationship_type": "works_at",
+                    "symmetric": False,
+                    "evidence_refs": [],
                 }
-            }
+            ]
 
-    knowledge_store = FakeKnowledgeStore()
-    tool = GraphRetrievalTool()
-    tool.knowledge_store = knowledge_store
+    result = await _retrieval(Store()).get_connections(3, session_id="session-1")
 
-    result = await tool.get_hot_topic_context(["Identity"], slim=True)
-
-    assert knowledge_store.calls == [(["Identity"], 10, True, ["project-1"])]
-    assert tool.hydrated_refs == [[{"message_id": 7}]]
-    assert result == {
-        "Identity": {
-            "entities": [{"name": "Ada"}],
-            "messages": [{"id": 7, "message": "evidence"}],
+    assert result == [
+        {
+            "project_id": "project-1",
+            "relationship_id": "project-1:2:3:works_at",
+            "source_entity_id": 2,
+            "target_entity_id": 3,
+            "source": "Ade",
+            "target": "Acme",
+            "relationship_type": "works_at",
+            "symmetric": False,
+            "evidence": [],
         }
-    }
+    ]
+
+
+@pytest.mark.no_network
+async def test_path_returns_canonical_direction_and_project_attribution():
+    class Store:
+        async def find_path(self, entity_a_id, entity_b_id, **kwargs):
+            assert (entity_a_id, entity_b_id) == (3, 2)
+            assert kwargs == {"max_depth": 4, "visible_project_ids": ["project-1"]}
+            return [
+                {
+                    "step": 0,
+                    "entity_a_id": 3,
+                    "entity_b_id": 2,
+                    "relationship_id": "project-1:2:3:works_at",
+                    "project_id": "project-1",
+                    "source_entity_id": 2,
+                    "target_entity_id": 3,
+                    "source": "Ade",
+                    "target": "Acme",
+                    "relationship_type": "works_at",
+                    "symmetric": False,
+                    "relationship_semantics": "observed_evidence",
+                    "evidence_refs": [],
+                }
+            ]
+
+    result = await _retrieval(Store()).find_path(3, 2, session_id="session-1")
+
+    assert result[0]["source"] == "Ade"
+    assert result[0]["target"] == "Acme"
+    assert result[0]["project_id"] == "project-1"
+    assert result[0]["evidence"] == []
 
 
 @pytest.mark.no_network

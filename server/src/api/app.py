@@ -25,6 +25,7 @@ from common.exceptions import (
     DependencyError,
     LLMProviderError,
     NotFoundError,
+    SessionBusyError,
     StorageError,
     ToolExecutionError,
 )
@@ -34,15 +35,23 @@ from common.schema.public import (
     ArtifactRevisionResponse,
     CreateProjectRequest,
     CreateSessionRequest,
-    MessageAcceptance,
+    DocumentFocusResponse,
+    EntityMergeRollbackRequest,
+    MaintenanceOperationResponse,
+    MaintenanceReviewDecisionRequest,
+    MaintenanceReviewDetailResponse,
+    MaintenanceReviewListResponse,
+    MaintenanceReviewPreviewResponse,
+    MaintenanceReviewResponse,
     ProjectResponse,
+    PromoteSourceRequest,
     PublicError,
     RunCancelledEvent,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
+    SetDocumentFocusRequest,
     StartRunRequest,
-    SubmitMessageRequest,
     to_public_error,
     validate_public_stream_event,
 )
@@ -71,13 +80,35 @@ class ApplicationPort(Protocol):
         request: CreateSessionRequest,
     ) -> Any: ...
 
-    async def submit_message(
+    async def get_document_focus(
         self,
         *,
         user_name: str,
         session_id: str,
-        request: SubmitMessageRequest,
-    ) -> MessageAcceptance | Mapping[str, Any]: ...
+    ) -> DocumentFocusResponse | Mapping[str, Any] | None: ...
+
+    async def set_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+        request: SetDocumentFocusRequest,
+    ) -> DocumentFocusResponse | Mapping[str, Any]: ...
+
+    async def clear_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+    ) -> None: ...
+
+    async def promote_source(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        request: PromoteSourceRequest,
+    ) -> Any: ...
 
     async def run_stream(
         self,
@@ -112,6 +143,67 @@ class ApplicationPort(Protocol):
         artifact_id: str,
         revision: int,
         session_id: str | None = None,
+    ) -> Any: ...
+
+    async def list_global_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+    ) -> Any: ...
+
+    async def decide_global_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> Any: ...
+
+    async def list_project_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> Any: ...
+
+    async def get_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+    ) -> Any: ...
+
+    async def preview_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+    ) -> Any: ...
+
+    async def decide_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> Any: ...
+
+    async def preview_entity_merge_rollback(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+    ) -> Any: ...
+
+    async def rollback_entity_merge(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+        request: EntityMergeRollbackRequest,
     ) -> Any: ...
 
 
@@ -179,7 +271,6 @@ def _project_response(value: Any) -> ProjectResponse:
             "id": _value(data, "id", "project_id"),
             "name": _value(data, "name"),
             "description": _value(data, "description"),
-            "access_mode": _value(data, "access_mode", default="open"),
             "status": status,
             "session_count": _value(data, "session_count", default=0) or 0,
             "allowed_projects": tuple(
@@ -216,17 +307,10 @@ def _session_response(value: Any, request: CreateSessionRequest):
     )
 
 
-def _message_acceptance(value: Any) -> MessageAcceptance:
-    if isinstance(value, MessageAcceptance):
+def _document_focus_response(value: Any) -> DocumentFocusResponse:
+    if isinstance(value, DocumentFocusResponse):
         return value
-    data = _as_data(value)
-    return MessageAcceptance.model_validate(
-        {
-            "message_id": _value(data, "message_id", "id"),
-            "accepted": _value(data, "accepted", default=True),
-            "idempotent": _value(data, "idempotent", default=False),
-        }
-    )
+    return DocumentFocusResponse.model_validate(_as_data(value))
 
 
 def _run_result(value: Any) -> RunResult:
@@ -308,6 +392,53 @@ def _artifact_list_response(value: Any) -> ArtifactListResponse:
     )
 
 
+def _maintenance_review_response(value: Any) -> MaintenanceReviewResponse:
+    if isinstance(value, MaintenanceReviewResponse):
+        return value
+    data = _as_data(value)
+    plan = _value(data, "proposed_plan", default={})
+    if not isinstance(plan, Mapping):
+        plan = _as_data(plan)
+    return MaintenanceReviewResponse.model_validate(
+        {
+            "review_id": _value(data, "review_id", "id"),
+            "scope": _value(data, "scope"),
+            "project_id": _value(data, "project_id"),
+            "kind": _value(data, "kind"),
+            "reasoning": _value(data, "reasoning"),
+            "proposed_plan": dict(plan),
+            "expected_state": dict(_value(data, "expected_state", default={}) or {}),
+            "status": _value(data, "status"),
+            "created_at": _value(data, "created_at"),
+            "resolved_at": _value(data, "resolved_at"),
+        }
+    )
+
+
+def _maintenance_review_list_response(value: Any) -> MaintenanceReviewListResponse:
+    if isinstance(value, MaintenanceReviewListResponse):
+        return value
+    if isinstance(value, Mapping):
+        values = value.get("reviews") or ()
+    else:
+        values = value or ()
+    return MaintenanceReviewListResponse(
+        reviews=tuple(_maintenance_review_response(item) for item in values)
+    )
+
+
+def _maintenance_operation_response(value: Any) -> MaintenanceOperationResponse:
+    if isinstance(value, MaintenanceOperationResponse):
+        return value
+    if isinstance(value, Mapping) and set(value) == {"result"}:
+        value = value["result"]
+    data = _as_data(value)
+    plan = data.get("plan")
+    if plan is not None and not isinstance(plan, Mapping):
+        data["plan"] = _as_data(plan)
+    return MaintenanceOperationResponse(result=data)
+
+
 def _error_response(
     error: Exception,
     *,
@@ -348,6 +479,8 @@ def _status_for_error(error: Exception) -> int:
         return 422
     if isinstance(error, NotFoundError):
         return 404
+    if isinstance(error, SessionBusyError):
+        return 409
     if isinstance(
         error,
         (DependencyError, StorageError, LLMProviderError),
@@ -382,6 +515,25 @@ async def _stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
         for event in result:
             yield event
         return
+    raise ValueError("application port returned a non-streaming run result")
+
+
+async def _open_stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
+    """Open a stream early when the port supports explicit run admission."""
+
+    method = getattr(port, "open_run_stream", None)
+    if method is None:
+        return _stream_from_port(port, **kwargs)
+    result = await _call(method, **kwargs)
+    if hasattr(result, "__aiter__"):
+        return result
+    if isinstance(result, (list, tuple)):
+
+        async def static_events() -> AsyncIterator[object]:
+            for event in result:
+                yield event
+
+        return static_events()
     raise ValueError("application port returned a non-streaming run result")
 
 
@@ -452,27 +604,204 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         except Exception as exc:
             raise exc
 
-    @app.post(
-        "/v1/sessions/{session_id}/messages",
-        response_model=MessageAcceptance,
+    @app.get(
+        "/v1/sessions/{session_id}/document-focus",
+        response_model=DocumentFocusResponse | None,
     )
-    async def submit_message(
+    async def get_document_focus(
         session_id: str,
-        body: SubmitMessageRequest,
         request: Request,
         user_name: str = Depends(current_user),
-    ) -> MessageAcceptance:
-        try:
-            return _message_acceptance(
-                await _call(
-                    port.submit_message,
-                    user_name=user_name,
-                    session_id=session_id,
-                    request=body,
-                )
+    ) -> DocumentFocusResponse | None:
+        value = await _call(
+            port.get_document_focus,
+            user_name=user_name,
+            session_id=session_id,
+        )
+        return None if value is None else _document_focus_response(value)
+
+    @app.put(
+        "/v1/sessions/{session_id}/document-focus",
+        response_model=DocumentFocusResponse,
+    )
+    async def set_document_focus(
+        session_id: str,
+        body: SetDocumentFocusRequest,
+        request: Request,
+        user_name: str = Depends(current_user),
+    ) -> DocumentFocusResponse:
+        return _document_focus_response(
+            await _call(
+                port.set_document_focus,
+                user_name=user_name,
+                session_id=session_id,
+                request=body,
             )
-        except Exception as exc:
-            raise exc
+        )
+
+    @app.delete("/v1/sessions/{session_id}/document-focus", status_code=204)
+    async def clear_document_focus(
+        session_id: str,
+        request: Request,
+        user_name: str = Depends(current_user),
+    ) -> None:
+        await _call(
+            port.clear_document_focus,
+            user_name=user_name,
+            session_id=session_id,
+        )
+
+    @app.post(
+        "/v1/projects/{project_id}/sources/promote",
+        status_code=201,
+    )
+    async def promote_source(
+        project_id: str,
+        body: PromoteSourceRequest,
+        request: Request,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(
+            port.promote_source,
+            user_name=user_name,
+            project_id=project_id,
+            request=body,
+        )
+
+    @app.get(
+        "/v1/maintenance/reviews",
+        response_model=MaintenanceReviewListResponse,
+    )
+    async def list_global_maintenance_reviews(
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewListResponse:
+        return _maintenance_review_list_response(
+            await _call(port.list_global_maintenance_reviews, user_name=user_name)
+        )
+
+    @app.post(
+        "/v1/maintenance/reviews/{review_id}/decision",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def decide_global_maintenance_review(
+        body: MaintenanceReviewDecisionRequest,
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.decide_global_maintenance_review,
+                user_name=user_name,
+                review_id=review_id,
+                request=body,
+            )
+        )
+
+    @app.get(
+        "/v1/projects/{project_id}/maintenance/reviews",
+        response_model=MaintenanceReviewListResponse,
+    )
+    async def list_project_maintenance_reviews(
+        project_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewListResponse:
+        return _maintenance_review_list_response(
+            await _call(
+                port.list_project_maintenance_reviews,
+                user_name=user_name,
+                project_id=project_id,
+            )
+        )
+
+    @app.post(
+        "/v1/projects/{project_id}/maintenance/reviews/{review_id}/decision",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def decide_project_maintenance_review(
+        body: MaintenanceReviewDecisionRequest,
+        project_id: str = Path(min_length=1),
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.decide_project_maintenance_review,
+                user_name=user_name,
+                project_id=project_id,
+                review_id=review_id,
+                request=body,
+            )
+        )
+
+    @app.get(
+        "/v1/projects/{project_id}/maintenance/reviews/{review_id}",
+        response_model=MaintenanceReviewDetailResponse,
+    )
+    async def get_project_maintenance_review(
+        project_id: str = Path(min_length=1),
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewDetailResponse:
+        return MaintenanceReviewDetailResponse.model_validate(
+            await _call(
+                port.get_project_maintenance_review,
+                user_name=user_name,
+                project_id=project_id,
+                review_id=review_id,
+            )
+        )
+
+    @app.get(
+        "/v1/projects/{project_id}/maintenance/reviews/{review_id}/preview",
+        response_model=MaintenanceReviewPreviewResponse,
+    )
+    async def preview_project_maintenance_review(
+        project_id: str = Path(min_length=1),
+        review_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceReviewPreviewResponse:
+        return MaintenanceReviewPreviewResponse.model_validate(
+            await _call(
+                port.preview_project_maintenance_review,
+                user_name=user_name,
+                project_id=project_id,
+                review_id=review_id,
+            )
+        )
+
+    @app.get(
+        "/v1/maintenance/entity-merges/{merge_id}/rollback",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def preview_entity_merge_rollback(
+        merge_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.preview_entity_merge_rollback,
+                user_name=user_name,
+                merge_id=merge_id,
+            )
+        )
+
+    @app.post(
+        "/v1/maintenance/entity-merges/{merge_id}/rollback",
+        response_model=MaintenanceOperationResponse,
+    )
+    async def rollback_entity_merge(
+        body: EntityMergeRollbackRequest,
+        merge_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ) -> MaintenanceOperationResponse:
+        return _maintenance_operation_response(
+            await _call(
+                port.rollback_entity_merge,
+                user_name=user_name,
+                merge_id=merge_id,
+                request=body,
+            )
+        )
 
     @app.get(
         "/v1/projects/{project_id}/artifacts",
@@ -586,10 +915,8 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             else:
                 events = [
                     event
-                    async for event in _stream_from_port(
-                        port,
-                        user_name=user_name,
-                        request=body,
+                    async for event in await _open_stream_from_port(
+                        port, user_name=user_name, request=body
                     )
                 ]
             parsed = [validate_public_stream_event(event) for event in events]
@@ -610,17 +937,18 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         user_name: str = Depends(current_user),
     ) -> StreamingResponse:
         request_id = _request_id(request)
+        stream = await _open_stream_from_port(
+            port,
+            user_name=user_name,
+            request=body,
+        )
 
         async def events() -> AsyncIterator[str]:
             run_id: str | None = None
             previous_sequence = -1
             terminal = False
             try:
-                async for raw_event in _stream_from_port(
-                    port,
-                    user_name=user_name,
-                    request=body,
-                ):
+                async for raw_event in stream:
                     event = validate_public_stream_event(raw_event)
                     if run_id is None:
                         run_id = event.run_id

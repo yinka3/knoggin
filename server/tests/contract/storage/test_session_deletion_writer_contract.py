@@ -38,7 +38,7 @@ class RecordingClient:
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_session_deletion_tombstones_session_and_preserves_message_evidence():
+async def test_session_deletion_tombstones_only_session_state_and_preserves_evidence():
     client = RecordingClient()
     writer = SessionDeletionWriter(client)
 
@@ -46,36 +46,34 @@ async def test_session_deletion_tombstones_session_and_preserves_message_evidenc
 
     assert client.transaction_exits == ["commit"]
     queries = [query for query, _ in client.cursor.calls]
-    assert "UPDATE public.project_documents" in queries[0]
+    assert len(queries) == 1
+    assert "UPDATE public.sessions" in queries[0]
     assert "status = 'deleted'" in queries[0]
-    assert "DELETE FROM public.document_chunks" in queries[1]
-    assert "DELETE FROM public.document_content" in queries[2]
-    assert "UPDATE public.project_documents" in queries[3]
-    assert "DELETE FROM public.document_folder_uploads" in queries[4]
-    assert "DELETE FROM public.document_workspace_sources" in queries[5]
-    assert "UPDATE public.sessions" in queries[6]
-    assert "status = 'deleted'" in queries[6]
     assert not any("DELETE FROM public.messages" in query for query in queries)
     assert not any("DELETE FROM public.sessions" in query for query in queries)
     assert not any("UPDATE public.messages" in query for query in queries)
+    assert not any("project_documents" in query for query in queries)
+    assert not any("document_chunks" in query for query in queries)
+    assert not any("document_extractions" in query for query in queries)
+    assert not any("document_workspace_sources" in query for query in queries)
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_session_deletion_rolls_back_when_document_cleanup_fails():
+async def test_session_deletion_rolls_back_when_session_tombstone_fails():
     client = RecordingClient()
     writer = SessionDeletionWriter(client)
 
     original_execute = client.cursor.execute
 
-    async def fail_document_cleanup(query, params=None):
-        if "UPDATE public.project_documents" in query and "status = 'deleted'" in query:
-            raise RuntimeError("injected document deletion failure")
+    async def fail_session_tombstone(query, params=None):
+        if "UPDATE public.sessions" in query and "status = 'deleted'" in query:
+            raise RuntimeError("injected session tombstone failure")
         await original_execute(query, params)
 
-    client.cursor.execute = fail_document_cleanup
+    client.cursor.execute = fail_session_tombstone
 
-    with pytest.raises(RuntimeError, match="injected document deletion failure"):
+    with pytest.raises(RuntimeError, match="injected session tombstone failure"):
         await writer.delete_session(user_name="ada", session_id="session-1")
 
     assert client.transaction_exits == ["rollback"]
@@ -121,7 +119,7 @@ async def test_session_deletion_preserves_canonical_messages(
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_session_deletion_tombstones_documents_and_removes_all_document_roots(
+async def test_session_deletion_preserves_project_library_rows(
     real_postgres_client,
 ):
     writer = SessionDeletionWriter(real_postgres_client)
@@ -135,61 +133,29 @@ async def test_session_deletion_tombstones_documents_and_removes_all_document_ro
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO public.document_folder_uploads (
-            folder_root_id, project_id, session_id, visibility_scope,
-            folder_name, candidate_count, candidate_bytes, document_count,
-            total_size_bytes, excluded_count, excluded_bytes,
-            excluded_directory_count, scan_settings, indexed_at
-        ) VALUES (
-            '11111111-1111-4111-8111-111111111111', 'project-1', 'session-1',
-            'session', 'Session folder', 0, 0, 0, 0, 0, 0, 0, '{}'::jsonb, NOW()
-        )
-        """
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.document_workspace_sources (
-            source_id, project_id, session_id, visibility_scope, display_name
-        ) VALUES (
-            '22222222-2222-4222-8222-222222222222', 'project-1', 'session-1',
-            'session', 'Session workspace'
-        )
-        """
-    )
-    await real_postgres_client.execute(
-        """
         INSERT INTO public.project_documents (
-            document_id, project_id, session_id, visibility_scope, folder_root_id,
-            source_id, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         ) VALUES
             (
-                '33333333-3333-4333-8333-333333333333', 'project-1', 'session-1',
-                'session', '11111111-1111-4111-8111-111111111111', NULL,
-                'folder_upload', 'session.txt', 'session.txt', '.txt', 7, 'session-hash'
+                '33333333-3333-4333-8333-333333333333', 'project-1',
+                'first.txt', 'first.txt', '.txt', 7, 'first-hash'
             ),
             (
-                '44444444-4444-4444-8444-444444444444', 'project-1', 'session-1',
-                'project', NULL, '22222222-2222-4222-8222-222222222222', 'workspace',
-                'project-visible.txt',
-                'project-visible.txt', '.txt', 7, 'project-visible-hash'
+                '55555555-5555-4555-8555-555555555555', 'project-1',
+                'second.txt', 'second.txt', '.txt', 7, 'second-hash'
             ),
             (
-                '55555555-5555-4555-8555-555555555555', 'project-1', 'session-2',
-                'session', NULL, NULL, 'manual_upload', 'other-session.txt',
-                'other-session.txt', '.txt', 7, 'other-session-hash'
-            ),
-            (
-                '66666666-6666-4666-8666-666666666666', 'project-1', NULL,
-                'project', NULL, NULL, 'manual_upload', 'project-only.txt', 'project-only.txt',
-                '.txt', 7, 'project-only-hash'
+                '66666666-6666-4666-8666-666666666666', 'project-1',
+                'third.txt', 'third.txt', '.txt', 7, 'third-hash'
             )
         """
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO public.document_content (document_id, content)
-        VALUES ('33333333-3333-4333-8333-333333333333', 'session')
+        INSERT INTO public.document_extractions (
+            document_id, extracted_text, extracted_content_hash
+        ) VALUES ('33333333-3333-4333-8333-333333333333', 'session', 'first-hash')
         """
     )
 
@@ -203,29 +169,12 @@ async def test_session_deletion_tombstones_documents_and_removes_all_document_ro
     ) == {"status": "deleted"}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
-        "WHERE session_id = 'session-1' AND status = 'deleted'"
-    ) == {"count": 2}
+        "WHERE project_id = 'project-1' AND status <> 'deleted'"
+    ) == {"count": 3}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.document_content "
+        "SELECT count(*) AS count FROM public.document_extractions "
         "WHERE document_id = '33333333-3333-4333-8333-333333333333'"
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.document_folder_uploads "
-        "WHERE session_id = 'session-1'"
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.document_workspace_sources "
-        "WHERE session_id = 'session-1'"
-    ) == {"count": 0}
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT count(*) AS count
-        FROM public.project_documents
-        WHERE session_id = 'session-1'
-          AND source_id IS NULL
-          AND folder_root_id IS NULL
-        """
-    ) == {"count": 2}
+    ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.project_documents "
         "WHERE document_id IN (\n"

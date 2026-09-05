@@ -40,6 +40,8 @@ class HealthCoordinator:
         self.calls.append(kwargs)
         return dict(self.snapshot)
 
+    health_snapshot = snapshot_for_health
+
 
 class HealthToolHarness(HealthTools):
     def __init__(self, service):
@@ -79,6 +81,7 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
     )
     project = SimpleNamespace(
         project_id="project-a",
+        project_semantic_job=object(),
         scheduler=HealthCoordinator(
             {
                 "state": "running",

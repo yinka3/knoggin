@@ -76,9 +76,7 @@ def test_episode_llm_output_rejects_schema_drift_and_blank_narrative_values():
     valid = {
         "action": "create",
         "summary": "A durable decision was made.",
-        "message_influences": [
-            {"message_id": "m1", "influence_weight": 0.8},
-        ],
+        "message_influences": ["message:1"],
     }
     assert LLMEpisodeDecision.model_validate(valid).summary == valid["summary"]
 

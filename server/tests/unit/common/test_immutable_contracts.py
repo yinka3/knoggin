@@ -4,8 +4,6 @@ import pytest
 
 from common.schema.document import (
     FolderScanSettings,
-    FolderUploadEntry,
-    WorkspaceSyncChanges,
 )
 from common.schema.source.references import SourceReferenceCandidate
 
@@ -47,10 +45,6 @@ def test_source_reference_metadata_is_recursively_immutable_and_serializable():
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_frozen_document_models_use_immutable_collection_types():
-    changes = WorkspaceSyncChanges(
-        upserts=[FolderUploadEntry(relative_path="docs/a.md", content=b"a")],
-        deleted_paths=["docs/old.md"],
-    )
     settings = FolderScanSettings(
         ignored_patterns=[" generated/* "],
         allowed_extensions={"md"},
@@ -59,10 +53,7 @@ def test_frozen_document_models_use_immutable_collection_types():
         blocked_directory_names={"node_modules"},
     )
 
-    assert changes.deleted_paths == ("docs/old.md",)
     assert settings.ignored_patterns == ("generated/*",)
     assert settings.allowed_extensions == frozenset({".md"})
-    with pytest.raises(AttributeError):
-        changes.deleted_paths.append("docs/other.md")
     with pytest.raises(AttributeError):
         settings.blocked_extensions.add(".tmp")

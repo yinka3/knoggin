@@ -2,7 +2,7 @@ import hashlib
 
 import pytest
 
-from core.knowledge.documents import DocumentService
+from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.documents import storage as document_storage
 from tests.fixtures.documents import (
     build_docx_bytes,
@@ -164,6 +164,7 @@ def _document_samples():
 async def test_representative_document_formats_publish_durable_located_chunks(
     real_postgres_client,
     monkeypatch,
+    tmp_path,
 ):
     monkeypatch.setattr(
         document_storage.pytesseract,
@@ -175,6 +176,7 @@ async def test_representative_document_formats_publish_durable_located_chunks(
         postgres_client=real_postgres_client,
         embedding_service=DeterministicDocumentEmbedding(),
         document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
 
     for original_name, content, expected_chunks in _document_samples():
@@ -190,7 +192,7 @@ async def test_representative_document_formats_publish_durable_located_chunks(
         content_row = await real_postgres_client.fetch_one(
             """
             SELECT extracted_text, extracted_content_hash
-            FROM public.document_content
+            FROM public.document_extractions
             WHERE document_id = %s
             """,
             (indexed["document_id"],),
@@ -220,12 +222,14 @@ async def test_representative_document_formats_publish_durable_located_chunks(
 @pytest.mark.no_network
 async def test_failed_extraction_publishes_no_partial_derived_document_state(
     real_postgres_client,
+    tmp_path,
 ):
     service = DocumentService(
         project_id="project-1",
         postgres_client=real_postgres_client,
         embedding_service=DeterministicDocumentEmbedding(),
         document_rerank_enabled=False,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
 
     with pytest.raises(RuntimeError, match="Notebook is not valid JSON"):
@@ -253,8 +257,8 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
     assert await real_postgres_client.fetch_one(
         """
         SELECT extracted_text, extracted_content_hash
-        FROM public.document_content
+        FROM public.document_extractions
         WHERE document_id = %s
         """,
         (document["document_id"],),
-    ) == {"extracted_text": None, "extracted_content_hash": None}
+    ) is None

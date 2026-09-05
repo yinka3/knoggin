@@ -1,7 +1,7 @@
 """Conversation-domain primitives."""
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from pydantic import BaseModel, Field
 
@@ -15,5 +15,3 @@ class Message(BaseModel):
     id: int = Field(-1, description="DB-assigned message ID")
     timestamp: datetime = Field(default_factory=get_now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-    episode_eligible: bool = False
-    episode_type: Optional[str] = None

@@ -64,6 +64,20 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} results", count
 
+    if tool_name == "load_topic_context":
+        if not isinstance(data, dict) or not data:
+            return "No topic context found", 0
+        message_count = sum(
+            len(topic.get("messages", []))
+            for topic in data.values()
+            if isinstance(topic, dict) and isinstance(topic.get("messages"), list)
+        )
+        return (
+            f"Loaded context for {len(data)} topic(s) "
+            f"with {message_count} supporting message(s)",
+            len(data),
+        )
+
     if tool_name == "find_path":
         if data:
             return f"Path found: {len(data)} hops", len(data)
@@ -95,14 +109,9 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Found {count} relevant chunks", count
         return "No results", 0
 
-    if tool_name in ("list_documents", "list_folder_uploads", "list_folder_tree"):
+    if tool_name == "list_documents":
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} items", count
-
-    if tool_name == "get_folder_upload_summary":
-        if isinstance(data, dict):
-            return "Loaded folder upload summary", 1
-        return "No results", 0
 
     return "Completed", 1
 

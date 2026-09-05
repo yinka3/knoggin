@@ -14,7 +14,6 @@ from knoggin import Knoggin, SourceProvenance, Turn, source_provenance_from_resp
 
 
 RunStatus = Literal[
-    "queued",
     "running",
     "awaiting_input",
     "completed",
@@ -56,7 +55,7 @@ class _RunRecord:
     session_id: str
     idempotency_key: str | None = None
     task: asyncio.Task[None] | None = None
-    status: RunStatus = "queued"
+    status: RunStatus = "running"
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     sequence: int = 0
@@ -79,6 +78,7 @@ class RunManager:
         self.knoggin = knoggin
         self.runs: dict[str, _RunRecord] = {}
         self._idempotent_runs: dict[tuple[str, str], str] = {}
+        self._session_submission_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
 
     async def submit_turn(
@@ -92,45 +92,42 @@ class RunManager:
         if not session_id:
             raise ValueError("session_id is required")
         idempotency_key = (idempotency_key or "").strip() or None
-        if idempotency_key:
-            existing_run_id = self._idempotent_runs.get((session_id, idempotency_key))
-            if existing_run_id:
-                return self.get_run(existing_run_id)
+        lock = self._session_submission_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            if idempotency_key:
+                existing_run_id = self._idempotent_runs.get(
+                    (session_id, idempotency_key)
+                )
+                if existing_run_id:
+                    return self.get_run(existing_run_id)
 
-        stream = await self.knoggin.open_turn_stream(
-            session_id=session_id,
-            turn=turn,
-            idempotency_key=idempotency_key,
-        )
-
-        # Opening a stream can await session and document-scope resolution.
-        # Recheck afterwards so concurrent retries still map to one UI run.
-        if idempotency_key:
-            existing_run_id = self._idempotent_runs.get((session_id, idempotency_key))
-            if existing_run_id:
-                return self.get_run(existing_run_id)
-
-        run = _RunRecord(
-            run_id=str(uuid4()),
-            session_id=session_id,
-            idempotency_key=idempotency_key,
-        )
-        self.runs[run.run_id] = run
-        if idempotency_key:
-            self._idempotent_runs[(session_id, idempotency_key)] = run.run_id
-        run.task = asyncio.create_task(
-            self._run_turn(run, stream),
-            name=f"knoggin-ui-run-{run.run_id}",
-        )
-        self._emit(run, "run_queued", {})
-        return self._snapshot(run)
+            # The SDK completes core admission and durable user-turn acceptance
+            # before it returns. A busy session therefore raises here, before a
+            # UI run resource is created.
+            stream = await self.knoggin.open_turn_stream(
+                session_id=session_id,
+                turn=turn,
+                idempotency_key=idempotency_key,
+            )
+            run = _RunRecord(
+                run_id=str(uuid4()),
+                session_id=session_id,
+                idempotency_key=idempotency_key,
+            )
+            self.runs[run.run_id] = run
+            if idempotency_key:
+                self._idempotent_runs[(session_id, idempotency_key)] = run.run_id
+            run.task = asyncio.create_task(
+                self._run_turn(run, stream),
+                name=f"knoggin-ui-run-{run.run_id}",
+            )
+            return self._snapshot(run)
 
     async def _run_turn(
         self,
         run: _RunRecord,
         stream: AsyncIterator[dict[str, Any]],
     ) -> None:
-        run.status = "running"
         self._emit(run, "run_started", {})
         try:
             async for event in stream:

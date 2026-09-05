@@ -4,6 +4,7 @@ import pytest
 
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.source.references import SourceReferenceCandidate
+from core.knowledge.db.writers.message_lifecycle_writer import ExchangeClosure
 from core.knowledge.store import KnowledgeStore
 
 
@@ -45,6 +46,24 @@ class ArtifactWriter:
         return "artifact"
 
 
+class LifecycleWriter:
+    def __init__(self):
+        self.prepare_calls = []
+        self.close_calls = []
+
+    async def prepare_assistant_exchange_finalization(self, **kwargs):
+        self.prepare_calls.append(kwargs)
+        return None
+
+    async def close_user_exchange(self, **kwargs):
+        self.close_calls.append(kwargs)
+        return ExchangeClosure(
+            user_message_id=kwargs["user_message_id"],
+            outcome=kwargs["outcome"],
+            closed_at_ms=kwargs["closed_at_ms"],
+        )
+
+
 def _candidate():
     return SourceReferenceCandidate(
         project_id="project-1",
@@ -62,88 +81,60 @@ def _candidate():
 
 
 @pytest.mark.no_network
-async def test_assistant_message_and_source_refs_share_one_transaction():
-    client = TransactionClient()
-    message_writer = MessageWriter()
-    source_writer = SourceReferenceWriter()
-    store = object.__new__(KnowledgeStore)
-    store._postgres_client = client
-    store._message_writer = message_writer
-    store._source_reference_writer = source_writer
-    message = {
-        "id": 9,
-        "role": "assistant",
-        "user_name": "ada",
-        "project_id": "project-1",
-        "session_id": "session-1",
-    }
-
-    references = await store.save_assistant_message_with_source_refs(
-        message,
-        [_candidate()],
-        readable_project_ids=["project-1"],
-    )
-
-    assert references == ["reference"]
-    assert client.transaction_count == 1
-    assert message_writer.calls == [([message], client.cursor)]
-    assert source_writer.calls == [
-        (
-            9,
-            [_candidate()],
-            {
-                "user_name": "ada",
-                "project_id": "project-1",
-                "session_id": "session-1",
-                "readable_project_ids": ["project-1"],
-                "cursor": client.cursor,
-            },
-        )
-    ]
-
-
-@pytest.mark.no_network
-async def test_assistant_message_sources_and_artifact_share_one_transaction():
+async def test_final_assistant_exchange_closes_the_user_in_the_same_transaction():
     client = TransactionClient()
     message_writer = MessageWriter()
     source_writer = SourceReferenceWriter()
     artifact_writer = ArtifactWriter()
+    lifecycle = LifecycleWriter()
     store = object.__new__(KnowledgeStore)
     store._postgres_client = client
     store._message_writer = message_writer
     store._source_reference_writer = source_writer
     store._artifact_writer = artifact_writer
+    store._message_lifecycle_writer = lifecycle
     message = {
-        "id": 10,
+        "id": 11,
         "role": "assistant",
         "user_name": "ada",
         "project_id": "project-1",
         "session_id": "session-1",
+        "user_msg_id": 7,
+        "sealed_at_ms": 1_000,
     }
-    artifact = ArtifactDraft(
-        title="Saved artifact",
-        blocks=(MarkdownArtifactBlock(content="Durable"),),
-    )
 
-    references = await store.save_assistant_message_with_source_refs(
+    final_message_id, source_ref_ids, created = await store.finalize_assistant_exchange(
         message,
-        [],
+        [_candidate()],
         readable_project_ids=["project-1"],
-        artifact=artifact,
+        artifact=ArtifactDraft(
+            title="Saved artifact",
+            blocks=(MarkdownArtifactBlock(content="Durable"),),
+        ),
     )
 
-    assert references == ["reference"]
+    assert (final_message_id, source_ref_ids, created) == (11, [], True)
     assert client.transaction_count == 1
+    assert lifecycle.prepare_calls == [
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "user_message_id": 7,
+            "cur": client.cursor,
+        }
+    ]
     assert message_writer.calls == [([message], client.cursor)]
-    assert artifact_writer.calls == [
-        (
-            10,
-            artifact,
-            {
-                "user_name": "ada",
-                "project_id": "project-1",
-                "session_id": "session-1",
-                "cursor": client.cursor,
-            },
-        )
+    assert source_writer.calls[0][2]["cursor"] is client.cursor
+    assert artifact_writer.calls[0][2]["cursor"] is client.cursor
+    assert lifecycle.close_calls == [
+        {
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": "session-1",
+            "user_message_id": 7,
+            "outcome": "assistant_final",
+            "closed_at_ms": 1_000,
+            "cur": client.cursor,
+        }
     ]

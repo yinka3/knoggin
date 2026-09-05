@@ -7,18 +7,35 @@ from pathlib import PurePosixPath
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from loguru import logger
+from pydantic import TypeAdapter
 
 from common.schema.document import (
+    DocumentSelection,
     FolderPreview,
     FolderScanSettings,
     FolderUploadEntry,
-    WorkspaceSyncChanges,
+    SavedWebLink,
+    UserAttachedFile,
+    UserAttachedSource,
+    UserAttachedUrl,
 )
 from common.schema.health import sanitize_health_details
+from common.schema.source.locators import (
+    CodeLineLocator,
+    CsvRowLocator,
+    DocxParagraphLocator,
+    PdfPageLocator,
+    TextLineLocator,
+)
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.services.embedding_service import EmbeddingService
+from core.project.project_files import (
+    CONTEXT_FILE_PATH,
+    PROJECT_FILE_PATH,
+    is_controlled_context_file,
+)
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.postgres_client import PostgresClient
 
@@ -29,14 +46,14 @@ from .constants import (
     HYBRID_SEARCH_CANDIDATE_MULTIPLIER,
     HYBRID_SEARCH_MAX_CANDIDATES,
     HYBRID_SEARCH_MIN_CANDIDATES,
+    IMAGE_EXTENSIONS,
     INLINE_INDEX_MAX_BYTES,
     MAX_DOCUMENT_SIZE,
     MAX_READ_CHARACTERS,
     MAX_READ_LINES,
-    VALID_VISIBILITY_SCOPES,
-    WORKSPACE_PREPARE_CONCURRENCY,
     document_extension,
 )
+from .filesystem import ProjectFilesystem, ProjectFilesystemFactory
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
 from .scanning import build_folder_preview, normalize_relative_path
@@ -46,9 +63,19 @@ from .storage import (
     extract_docx_paragraphs,
     extract_pdf_pages,
     extract_text,
+    is_code_extension,
 )
 
 BlockingRunner = Callable[..., Awaitable[Any]]
+_RECONCILIATION_MAX_FILES = 10_000
+
+
+class _UnsetSavedWebLinkField:
+    """Distinguish an omitted bookmark update field from an explicit null."""
+
+
+_UNSET_SAVED_WEB_LINK_FIELD = _UnsetSavedWebLinkField()
+_USER_ATTACHED_SOURCE_ADAPTER = TypeAdapter(UserAttachedSource)
 
 
 async def _run_in_worker(
@@ -75,7 +102,8 @@ class DocumentService:
         blocking_runner: BlockingRunner = _run_in_worker,
         document_rerank_enabled: bool = True,
         document_rerank_candidates: int = DOCUMENT_RERANK_DEFAULT_CANDIDATES,
-        workspace_prepare_concurrency: int = WORKSPACE_PREPARE_CONCURRENCY,
+        filesystem_factory: ProjectFilesystemFactory | None = None,
+        reconciliation_interval_seconds: int = 60,
     ):
         self.project_id = project_id
         self._embedding = embedding_service
@@ -86,10 +114,10 @@ class DocumentService:
         )
         self._writer = writer or DocumentWriter(postgres_client, project_id)
         self._run_blocking = blocking_runner
+        self._filesystem_factory = filesystem_factory
         if indexer is None:
             indexing_policy = DocumentIndexPolicy.capture(
                 inline_index_max_bytes=inline_index_max_bytes,
-                workspace_prepare_concurrency=workspace_prepare_concurrency,
             )
             indexer = DocumentIndexer(
                 project_id=project_id,
@@ -99,6 +127,7 @@ class DocumentService:
                 policy=indexing_policy,
                 blocking_runner=blocking_runner,
                 background_work=background_work,
+                filesystem=self._filesystem,
             )
         self._indexer = indexer
         if not isinstance(document_rerank_enabled, bool):
@@ -111,6 +140,371 @@ class DocumentService:
             raise ValueError("document_rerank_candidates must be between 1 and 50")
         self._document_rerank_enabled = document_rerank_enabled
         self._document_rerank_candidates = document_rerank_candidates
+        if (
+            not isinstance(reconciliation_interval_seconds, int)
+            or isinstance(reconciliation_interval_seconds, bool)
+            or reconciliation_interval_seconds < 10
+        ):
+            raise ValueError("reconciliation_interval_seconds must be at least 10")
+        if self._filesystem_factory is not None:
+            self._indexer.set_reconciliation_callback(
+                self.reconcile_project_files,
+                interval_seconds=reconciliation_interval_seconds,
+            )
+
+    @property
+    def _filesystem(self) -> ProjectFilesystem | None:
+        if self._filesystem_factory is None:
+            return None
+        return self._filesystem_factory.for_project(self.project_id)
+
+    def _filesystem_for_document(self, document: Dict) -> ProjectFilesystem | None:
+        if self._filesystem_factory is None:
+            return None
+        return self._filesystem_factory.for_project(document["project_id"])
+
+    async def _read_source_bytes(
+        self,
+        document: Dict,
+    ) -> bytes | None:
+        filesystem = self._filesystem_for_document(document)
+        if filesystem is None:
+            raise RuntimeError("Document source filesystem is not configured")
+        return await self._run_blocking(
+            filesystem.read_bytes,
+            document["relative_path"],
+        )
+
+    async def reconcile_project_files(self) -> Dict[str, int]:
+        """Bring the manual-document catalog into line with the local project tree.
+
+        Reconciliation deliberately uses the existing folder admission policy so
+        ignored, generated, sensitive, binary, and oversized files do not enter
+        the document catalog merely because an editor created them locally.
+        """
+        filesystem = self._filesystem
+        if filesystem is None:
+            return {"created": 0, "changed": 0, "deleted": 0, "excluded": 0}
+
+        paths = await self._run_blocking(
+            lambda: list(filesystem.iter_paths(limit=_RECONCILIATION_MAX_FILES + 1))
+        )
+        if len(paths) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError(
+                "project filesystem reconciliation exceeds the "
+                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+            )
+        reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
+        paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
+        settings = await self.get_scan_settings()
+        entries: list[FolderUploadEntry] = []
+        for path in paths:
+            if path.size_bytes > settings.max_document_size_bytes:
+                continue
+            content = await self._run_blocking(
+                filesystem.read_bytes,
+                path.relative_path,
+                max_bytes=settings.max_document_size_bytes,
+            )
+            entries.append(
+                FolderUploadEntry(relative_path=path.relative_path, content=content)
+            )
+        preview = await self.preview_folder(
+            folder_name=self.project_id,
+            entries=entries,
+            settings=settings,
+        )
+        content_by_path = {entry.relative_path: entry.content for entry in entries}
+        desired = {entry.relative_path: entry for entry in preview.included}
+        current_rows = await self._reader.list_documents_for_reconciliation(
+            limit=_RECONCILIATION_MAX_FILES + 1,
+        )
+        current = {
+            row["relative_path"]: row
+            for row in current_rows
+        }
+        if len(current) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError(
+                "document catalog reconciliation exceeds the "
+                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+            )
+
+        created = changed = deleted = 0
+        now = get_now_iso()
+        for relative_path, preview_entry in desired.items():
+            content = content_by_path[relative_path]
+            existing = current.pop(relative_path, None)
+            if existing is not None and existing["content_hash"] == preview_entry.content_hash:
+                continue
+            if existing is not None:
+                await self._writer.delete_document(
+                    document_id=str(existing["document_id"]),
+                )
+                changed += 1
+            else:
+                created += 1
+            await self._writer.insert_document(
+                document_id=str(uuid.uuid4()),
+                original_name=preview_entry.original_name,
+                relative_path=relative_path,
+                extension=preview_entry.extension,
+                size_bytes=preview_entry.size_bytes,
+                content_hash=preview_entry.content_hash,
+                created_at=now,
+            )
+        for document in current.values():
+            await self._writer.delete_document(
+                document_id=str(document["document_id"]),
+            )
+            deleted += 1
+        if created or changed or deleted:
+            self._indexer.wake_pending_indexes()
+        return {
+            "created": created,
+            "changed": changed,
+            "deleted": deleted,
+            "excluded": preview.summary.excluded_count + len(reserved_paths),
+        }
+
+    async def list_project_files(
+        self,
+        *,
+        path_prefix: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict]:
+        """List bounded regular files in this project's canonical local tree."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        filesystem = self._filesystem
+        if filesystem is None:
+            return []
+        normalized_prefix = None
+        if path_prefix is not None and path_prefix.strip() not in {"", "."}:
+            normalized_prefix = normalize_relative_path(path_prefix, path_prefix).rstrip("/")
+        files = await self._run_blocking(lambda: list(filesystem.iter_files()))
+        files = [
+            file for file in files if not is_controlled_context_file(file.relative_path)
+        ]
+        if normalized_prefix is not None:
+            files = [
+                file
+                for file in files
+                if file.relative_path == normalized_prefix
+                or file.relative_path.startswith(normalized_prefix + "/")
+            ]
+        return [
+            {
+                "relative_path": file.relative_path,
+                "original_name": PurePosixPath(file.relative_path).name,
+                "extension": document_extension(file.relative_path),
+                "size_bytes": file.size_bytes,
+                "content_hash": file.content_hash,
+            }
+            for file in files[:limit]
+        ]
+
+    async def read_project_file(
+        self,
+        path: str,
+        *,
+        start_line: int = 1,
+        end_line: Optional[int] = None,
+        max_characters: int = MAX_READ_CHARACTERS,
+    ) -> Dict:
+        """Read a bounded UTF-8 file slice from this project's local tree."""
+        if not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1:
+            raise ValueError("start_line must be a positive integer")
+        if end_line is not None and (
+            not isinstance(end_line, int)
+            or isinstance(end_line, bool)
+            or end_line < start_line
+            or end_line - start_line + 1 > MAX_READ_LINES
+        ):
+            raise ValueError(f"end_line must select at most {MAX_READ_LINES} lines")
+        if (
+            not isinstance(max_characters, int)
+            or isinstance(max_characters, bool)
+            or not 1 <= max_characters <= MAX_READ_CHARACTERS
+        ):
+            raise ValueError(
+                f"max_characters must be between 1 and {MAX_READ_CHARACTERS}"
+            )
+        filesystem = self._filesystem
+        if filesystem is None:
+            raise RuntimeError("No local project filesystem is configured")
+        normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
+        content = await self._run_blocking(filesystem.read_bytes, normalized_path)
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("project file is not UTF-8 text") from exc
+        lines = text.splitlines(keepends=True) or [text]
+        if start_line > len(lines):
+            raise ValueError(f"start_line {start_line} exceeds document length {len(lines)}")
+        requested_end = min(
+            end_line or start_line + MAX_READ_LINES - 1,
+            len(lines),
+        )
+        selected = "".join(lines[start_line - 1 : requested_end])
+        character_truncated = len(selected) > max_characters
+        if character_truncated:
+            selected = selected[:max_characters]
+        return {
+            "relative_path": normalized_path,
+            "original_name": PurePosixPath(normalized_path).name,
+            "content": selected,
+            "content_hash": hashlib.sha256(content).hexdigest(),
+            "start_line": start_line,
+            "end_line": requested_end,
+            "total_lines": len(lines),
+            "truncated": character_truncated or requested_end < len(lines),
+        }
+
+    async def read_project_brief(self) -> Optional[str]:
+        """Read the user-owned ``PROJECT.md`` brief without waiting for indexing.
+
+        The engine-maintained ``CONTEXT.md`` projection is deliberately handled
+        by the controlled Context component instead of this generic file API.
+        """
+        try:
+            return (await self.read_project_file(PROJECT_FILE_PATH))["content"]
+        except FileNotFoundError:
+            return None
+
+    async def create_project_file(self, path: str, content: str) -> Dict:
+        """Create a text project file and reconcile it into the document catalog."""
+        payload = self._validate_project_file_content(path, content)
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
+        await self._run_blocking(filesystem.write_bytes, normalized_path, payload)
+        await self.reconcile_project_files()
+        return await self.read_project_file(normalized_path)
+
+    async def update_project_file(
+        self,
+        path: str,
+        content: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Replace a text project file only when its caller has the current hash."""
+        payload = self._validate_project_file_content(path, content)
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
+        await self._run_blocking(
+            filesystem.write_bytes,
+            normalized_path,
+            payload,
+            overwrite=True,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return await self.read_project_file(normalized_path)
+
+    async def append_project_file(
+        self,
+        path: str,
+        content: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Append text to a project file under the same stale-write guard."""
+        if not isinstance(content, str) or not content:
+            raise ValueError("content must not be empty")
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
+        current = await self._run_blocking(filesystem.read_bytes, normalized_path)
+        payload = current + content.encode("utf-8")
+        self._validate_project_file_bytes(normalized_path, payload)
+        await self._run_blocking(
+            filesystem.write_bytes,
+            normalized_path,
+            payload,
+            overwrite=True,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return await self.read_project_file(normalized_path)
+
+    async def move_project_file(
+        self,
+        source_path: str,
+        destination_path: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Move a project file to an unused path under optimistic concurrency."""
+        filesystem = self._require_filesystem()
+        source = normalize_relative_path(source_path, source_path)
+        destination = normalize_relative_path(destination_path, destination_path)
+        self._require_unreserved_context_path(source)
+        self._require_unreserved_context_path(destination)
+        self._validate_project_file_extension(destination)
+        await self._run_blocking(
+            filesystem.move_file,
+            source,
+            destination,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return await self.read_project_file(destination)
+
+    async def delete_project_file(
+        self,
+        path: str,
+        *,
+        expected_content_hash: str,
+    ) -> Dict:
+        """Delete one project file and reconcile the durable catalog tombstone."""
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        self._require_unreserved_context_path(normalized_path)
+        deleted = await self._run_blocking(
+            filesystem.delete_file,
+            normalized_path,
+            expected_content_hash=expected_content_hash,
+        )
+        await self.reconcile_project_files()
+        return {
+            "relative_path": deleted.relative_path,
+            "content_hash": deleted.content_hash,
+            "deleted": True,
+        }
+
+    async def create_project_folder(self, path: str) -> Dict:
+        """Create an empty project directory without introducing catalog state."""
+        filesystem = self._require_filesystem()
+        normalized_path = normalize_relative_path(path, path)
+        return {"relative_path": await self._run_blocking(filesystem.create_folder, normalized_path)}
+
+    def _require_filesystem(self) -> ProjectFilesystem:
+        filesystem = self._filesystem
+        if filesystem is None:
+            raise RuntimeError("No local project filesystem is configured")
+        return filesystem
+
+    @staticmethod
+    def _validate_project_file_extension(path: str) -> None:
+        extension = document_extension(path)
+        if extension not in ACCEPTED_EXTENSIONS - {".pdf", ".docx", *IMAGE_EXTENSIONS}:
+            raise ValueError("agent project files must be text, code, or configuration")
+
+    def _validate_project_file_content(self, path: str, content: str) -> bytes:
+        if not isinstance(content, str) or not content:
+            raise ValueError("content must not be empty")
+        payload = content.encode("utf-8")
+        self._validate_project_file_bytes(path, payload)
+        return payload
+
+    def _validate_project_file_bytes(self, path: str, content: bytes) -> None:
+        self._require_unreserved_context_path(normalize_relative_path(path, path))
+        self._validate_project_file_extension(path)
+        if len(content) > MAX_DOCUMENT_SIZE:
+            raise ValueError("document exceeds the 50 MB size limit")
 
     async def preview_folder(
         self,
@@ -180,18 +574,6 @@ class DocumentService:
         return normalized.rstrip("/")
 
     @staticmethod
-    def _validate_visibility(
-        visibility_scope: str,
-        session_id: Optional[str],
-    ) -> None:
-        if visibility_scope not in VALID_VISIBILITY_SCOPES:
-            raise ValueError(
-                "visibility_scope must be either 'project' or 'session'"
-            )
-        if visibility_scope == "session" and not session_id:
-            raise ValueError("session-visible documents require session_id")
-
-    @staticmethod
     def _public_metadata(row: Dict) -> Dict:
         metadata = dict(row)
         if metadata.get("document_id") is not None:
@@ -203,360 +585,41 @@ class DocumentService:
         metadata.setdefault("chunk_count", 0)
         return metadata
 
-    @staticmethod
-    def _public_folder_metadata(row: Dict) -> Dict:
-        metadata = dict(row)
-        if metadata.get("folder_root_id") is not None:
-            metadata["folder_root_id"] = str(metadata["folder_root_id"])
-        for key in ("created_at", "indexed_at"):
-            value = metadata.get(key)
-            if isinstance(value, datetime):
-                metadata[key] = value.isoformat()
-        return metadata
-
-    @staticmethod
-    def _public_workspace_source(row: Dict) -> Dict:
-        source = dict(row)
-        source.setdefault("ownership_mode", "external_sync")
-        if source.get("source_id") is not None:
-            source["source_id"] = str(source["source_id"])
-        for key in ("created_at", "updated_at", "last_synced_at"):
-            value = source.get(key)
-            if isinstance(value, datetime):
-                source[key] = value.isoformat()
-        return source
-
-    async def create_workspace_source(
+    async def _get_visible_document(
         self,
         *,
-        display_name: str,
-        session_id: Optional[str] = None,
-        visibility_scope: str = "project",
-        ownership_mode: str = "external_sync",
+        document_id: Optional[str],
+        relative_path: Optional[str],
     ) -> Dict:
-        """Create a stable source identity for future workspace syncs.
-
-        This does not upload, queue, or index files.  The returned ``source_id``
-        is the durable handle a caller keeps when it later submits a manifest.
-        """
-        if ownership_mode not in {"external_sync", "managed_project_workspace"}:
-            raise ValueError(
-                "ownership_mode must be either 'external_sync' or "
-                "'managed_project_workspace'"
-            )
-        self._validate_visibility(visibility_scope, session_id)
-        if ownership_mode == "managed_project_workspace":
-            if visibility_scope != "project" or session_id is not None:
-                raise ValueError(
-                    "managed_project_workspace sources must be project-visible"
-                )
-        if not isinstance(display_name, str) or not display_name.strip():
-            raise ValueError("display_name must not be empty")
-
-        source_id = str(uuid.uuid4())
-        created_at = get_now_iso()
-        normalized_name = display_name.strip()
-        if ownership_mode == "managed_project_workspace":
-            await self._writer.insert_managed_workspace_source(
-                source_id=source_id,
-                display_name=normalized_name,
-                created_at=created_at,
-            )
-        else:
-            await self._writer.insert_workspace_source(
-                source_id=source_id,
-                session_id=session_id,
-                visibility_scope=visibility_scope,
-                display_name=normalized_name,
-                created_at=created_at,
-            )
-        return {
-            "source_id": source_id,
-            "project_id": self.project_id,
-            "session_id": session_id,
-            "visibility_scope": visibility_scope,
-            "ownership_mode": ownership_mode,
-            "display_name": normalized_name,
-            "last_synced_at": None,
-            "last_manifest_candidate_count": 0,
-            "last_manifest_included_count": 0,
-            "last_manifest_excluded_count": 0,
-            "last_manifest_excluded_reason_counts": {},
-            "created_at": created_at,
-            "updated_at": created_at,
-        }
-
-    async def get_workspace_source(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str] = None,
-    ) -> Dict:
-        """Return one visible workspace source by its durable identity."""
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("source_id must not be empty")
-        source = await self._reader.fetch_workspace_source(
-            source_id=source_id.strip(),
-            session_id=session_id,
-        )
-        if source is None:
-            raise FileNotFoundError("Workspace source not found")
-        return self._public_workspace_source(source)
-
-    async def sync_workspace_source(
-        self,
-        *,
-        source_id: str,
-        entries: List[FolderUploadEntry],
-        settings: Optional[FolderScanSettings] = None,
-        force_include_paths: Optional[List[str]] = None,
-        session_id: Optional[str] = None,
-    ) -> Dict:
-        """Admit a complete workspace manifest without waiting for indexing.
-
-        The manifest is filtered with the same safety rules as a folder preview.
-        Files whose normalized path and hash are unchanged remain indexed; new
-        or changed files become durable ``queued`` documents. Files omitted by
-        the manifest (including newly excluded files) are removed.
-        """
-        source = await self.get_workspace_source(
-            source_id=source_id,
-            session_id=session_id,
-        )
-        if source.get("ownership_mode", "external_sync") != "external_sync":
-            raise ValueError(
-                "managed project workspace sources must use ProjectWorkspaceService"
-            )
-        validated_entries = [
-            entry
-            if isinstance(entry, FolderUploadEntry)
-            else FolderUploadEntry.model_validate(entry)
-            for entry in entries
-        ]
-        preview = await self.preview_folder(
-            folder_name=source["display_name"],
-            entries=validated_entries,
-            settings=settings,
-            force_include_paths=force_include_paths,
-        )
-        entry_content = {
-            normalize_relative_path(
-                entry.relative_path,
-                entry.relative_path,
-            ): entry.content
-            for entry in validated_entries
-        }
-        documents = [
-            {
-                "original_name": item.original_name,
-                "relative_path": item.relative_path,
-                "extension": item.extension,
-                "size_bytes": item.size_bytes,
-                "content_hash": item.content_hash,
-                "content": entry_content[item.relative_path],
-                "visibility_scope": source["visibility_scope"],
-            }
-            for item in preview.included
-        ]
-        counts = await self._writer.sync_workspace_manifest(
-            source_id=source["source_id"],
-            session_id=session_id,
-            documents=documents,
-            candidate_count=len(validated_entries),
-            included_count=preview.summary.included_count,
-            excluded_count=preview.summary.excluded_count,
-            excluded_reason_counts=preview.summary.reason_counts,
-            updated_at=get_now_iso(),
-        )
-        if counts["queued"]:
-            self._indexer.queue_workspace_source_indexing(
-                source_id=source["source_id"],
-                session_id=session_id,
-            )
-        return {
-            "source": source,
-            "candidate_count": len(validated_entries),
-            "candidate_bytes": sum(
-                len(entry.content) for entry in validated_entries
-            ),
-            "included_count": preview.summary.included_count,
-            "excluded_count": preview.summary.excluded_count,
-            "excluded_reason_counts": preview.summary.reason_counts,
-            **counts,
-        }
-
-    async def sync_workspace_changes(
-        self,
-        *,
-        source_id: str,
-        changes: WorkspaceSyncChanges,
-        settings: Optional[FolderScanSettings] = None,
-        force_include_paths: Optional[List[str]] = None,
-        session_id: Optional[str] = None,
-    ) -> Dict:
-        """Apply changed/new files and deletions without replacing a manifest.
-
-        This is the server-side contract used by future local workspace
-        watchers. It deliberately leaves paths absent from ``changes`` alone;
-        callers use :meth:`sync_workspace_source` for a complete rescan.
-        """
-        source = await self.get_workspace_source(
-            source_id=source_id,
-            session_id=session_id,
-        )
-        if source.get("ownership_mode", "external_sync") != "external_sync":
-            raise ValueError(
-                "managed project workspace sources must use ProjectWorkspaceService"
-            )
-        validated_changes = (
-            changes
-            if isinstance(changes, WorkspaceSyncChanges)
-            else WorkspaceSyncChanges.model_validate(changes)
-        )
-        validated_entries = list(validated_changes.upserts)
-        normalized_upsert_paths = {
-            normalize_relative_path(entry.relative_path, entry.relative_path)
-            for entry in validated_entries
-        }
-        if len(normalized_upsert_paths) != len(validated_entries):
-            raise ValueError(
-                "upserts contain duplicate normalized relative_path values"
-            )
-        normalized_deleted_paths = {
-            normalize_relative_path(path, path)
-            for path in validated_changes.deleted_paths
-        }
-        if len(normalized_deleted_paths) != len(validated_changes.deleted_paths):
-            raise ValueError(
-                "deleted_paths contain duplicate normalized relative_path values"
-            )
-        overlap = normalized_upsert_paths & normalized_deleted_paths
-        if overlap:
-            raise ValueError(
-                "a workspace path cannot be both upserted and deleted: "
-                + ", ".join(sorted(overlap))
-            )
-        if not normalized_upsert_paths and not normalized_deleted_paths:
-            raise ValueError("workspace changes must include an upsert or deletion")
-
-        preview = await self.preview_folder(
-            folder_name=source["display_name"],
-            entries=validated_entries,
-            settings=settings,
-            force_include_paths=force_include_paths,
-        )
-        entry_content = {
-            normalize_relative_path(
-                entry.relative_path,
-                entry.relative_path,
-            ): entry.content
-            for entry in validated_entries
-        }
-        documents = [
-            {
-                "original_name": item.original_name,
-                "relative_path": item.relative_path,
-                "extension": item.extension,
-                "size_bytes": item.size_bytes,
-                "content_hash": item.content_hash,
-                "content": entry_content[item.relative_path],
-                "visibility_scope": source["visibility_scope"],
-            }
-            for item in preview.included
-        ]
-        excluded_paths = {item.relative_path for item in preview.excluded}
-        counts = await self._writer.sync_workspace_changes(
-            source_id=source["source_id"],
-            session_id=session_id,
-            documents=documents,
-            deleted_paths=sorted(normalized_deleted_paths | excluded_paths),
-            updated_at=get_now_iso(),
-        )
-        if counts["queued"]:
-            self._indexer.queue_workspace_source_indexing(
-                source_id=source["source_id"],
-                session_id=session_id,
-            )
-        return {
-            "source": source,
-            "upsert_count": len(validated_entries),
-            "upsert_bytes": sum(len(entry.content) for entry in validated_entries),
-            "included_count": preview.summary.included_count,
-            "excluded_count": preview.summary.excluded_count,
-            "excluded_reason_counts": preview.summary.reason_counts,
-            "deleted_path_count": len(normalized_deleted_paths),
-            **counts,
-        }
-
-    async def get_workspace_indexing_status(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str] = None,
-    ) -> Dict:
-        """Return source lifecycle metadata and aggregate indexing progress."""
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("source_id must not be empty")
-        status = await self._reader.fetch_workspace_indexing_status(
-            source_id=source_id.strip(),
-            session_id=session_id,
-        )
-        if status is None:
-            raise FileNotFoundError("Workspace source not found")
-        result = self._public_workspace_source(status)
-        queued = int(result["queued_count"])
-        indexing = int(result["indexing_count"])
-        failed = int(result["failed_count"])
-        indexed = int(result["indexed_count"])
-        result["status"] = (
-            "indexing"
-            if queued or indexing
-            else "failed"
-            if failed and not indexed
-            else "ready_with_failures"
-            if failed
-            else "ready"
-        )
-        return result
-
-    def queue_workspace_source_indexing(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str] = None,
-    ) -> None:
-        """Delegate durable workspace scheduling to the indexer."""
-        self._indexer.queue_workspace_source_indexing(
-            source_id=source_id,
-            session_id=session_id,
-        )
-
-    async def get_document_info(
-        self,
-        *,
-        session_id: Optional[str] = None,
-        document_id: Optional[str] = None,
-        relative_path: Optional[str] = None,
-    ) -> Dict:
-        """Return metadata for one visible document."""
+        """Resolve exactly one non-deleted document visible to this project."""
         rows = await self._reader.fetch_documents_by_reference(
             document_id=document_id,
             relative_path=relative_path,
-            session_id=session_id,
         )
         if not rows:
             raise FileNotFoundError("Document not found")
         if relative_path is not None and len(rows) > 1:
             raise ValueError(
-                "Multiple visible uploads use this relative_path; "
-                "use document_id"
+                "Multiple visible uploads use this relative_path; use document_id"
             )
-        return self._public_metadata(rows[0])
+        return rows[0]
+
+    async def get_document_info(
+        self,
+        *,
+        document_id: Optional[str] = None,
+        relative_path: Optional[str] = None,
+    ) -> Dict:
+        """Return metadata for one visible document."""
+        document = await self._get_visible_document(
+            document_id=document_id,
+            relative_path=relative_path,
+        )
+        return self._public_metadata(document)
 
     async def read_document(
         self,
         *,
-        session_id: Optional[str] = None,
         document_id: Optional[str] = None,
         relative_path: Optional[str] = None,
         page_number: Optional[int] = None,
@@ -587,27 +650,16 @@ class DocumentService:
         ):
             raise ValueError("page_number must be a positive integer")
 
-        rows = await self._reader.fetch_documents_by_reference(
+        document_metadata = await self._get_visible_document(
             document_id=document_id,
             relative_path=relative_path,
-            session_id=session_id,
         )
-        if not rows:
-            raise FileNotFoundError("Document not found")
-        if relative_path is not None and len(rows) > 1:
-            raise ValueError(
-                "Multiple visible uploads use this relative_path; "
-                "use document_id"
-            )
-
-        document_metadata = rows[0]
         extension = document_metadata["extension"].lower()
         selected_page = None
         docx_paragraphs = None
         if extension == ".pdf":
-            raw_bytes = await self._reader.fetch_document_content(
-                document_id=str(document_metadata["document_id"]),
-                session_id=session_id,
+            raw_bytes = await self._read_source_bytes(
+                document_metadata,
             )
             if raw_bytes is None:
                 raise FileNotFoundError("Document content is missing")
@@ -620,9 +672,8 @@ class DocumentService:
                 )
             text = pages[selected_page - 1].text
         elif extension == ".docx":
-            raw_bytes = await self._reader.fetch_document_content(
-                document_id=str(document_metadata["document_id"]),
-                session_id=session_id,
+            raw_bytes = await self._read_source_bytes(
+                document_metadata,
             )
             if raw_bytes is None:
                 raise FileNotFoundError("Document content is missing")
@@ -634,12 +685,10 @@ class DocumentService:
             text = await self._reader.fetch_extracted_text(
                 document_id=str(document_metadata["document_id"]),
                 content_hash=document_metadata["content_hash"],
-                session_id=session_id,
             )
             if text is None:
-                raw_bytes = await self._reader.fetch_document_content(
-                    document_id=str(document_metadata["document_id"]),
-                    session_id=session_id,
+                raw_bytes = await self._read_source_bytes(
+                    document_metadata,
                 )
                 if raw_bytes is None:
                     raise FileNotFoundError("Document content is missing")
@@ -728,18 +777,140 @@ class DocumentService:
             result["page_number"] = selected_page
         return result
 
+    async def resolve_document_selection(
+        self,
+        *,
+        document_id: str,
+        selection: DocumentSelection,
+    ) -> Dict:
+        """Resolve a current, bounded passage selected from one document.
+
+        The browser provides only a version hash and coordinate. This boundary
+        checks both against the visible durable document and returns server-read
+        content plus a canonical locator, never client-supplied display metadata.
+        """
+        document = await self._get_visible_document(
+            document_id=document_id,
+            relative_path=None,
+        )
+        if selection.content_hash != document["content_hash"]:
+            raise ValueError(
+                "Document selection is stale; refresh the document and select again"
+            )
+
+        extension = str(document["extension"]).lower()
+        locator = selection.locator
+        if isinstance(locator, PdfPageLocator):
+            if extension != ".pdf":
+                raise ValueError("PDF page selections require a PDF document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                page_number=locator.page,
+            )
+            if result["end_line"] != result["total_lines"]:
+                raise ValueError("Selected PDF page exceeds the readable passage limit")
+            canonical_locator = {"kind": "pdf_page", "page": locator.page}
+        elif isinstance(locator, DocxParagraphLocator):
+            if extension != ".docx":
+                raise ValueError("DOCX paragraph selections require a DOCX document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                start_line=locator.start_paragraph,
+                end_line=locator.end_paragraph,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_paragraph,
+                end=locator.end_paragraph,
+            )
+            canonical_locator = dict(result["locator"])
+        elif isinstance(locator, CsvRowLocator):
+            if extension != ".csv":
+                raise ValueError("CSV row selections require a CSV document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                start_line=locator.start_row,
+                end_line=locator.end_row,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_row,
+                end=locator.end_row,
+            )
+            canonical_locator = dict(result["locator"])
+        elif isinstance(locator, CodeLineLocator):
+            if not is_code_extension(extension):
+                raise ValueError("Code line selections require a source-code document")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                start_line=locator.start_line,
+                end_line=locator.end_line,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_line,
+                end=locator.end_line,
+            )
+            canonical_locator = {
+                "kind": "code_lines",
+                "start_line": result["start_line"],
+                "end_line": result["end_line"],
+            }
+        elif isinstance(locator, TextLineLocator):
+            if extension in {".pdf", ".docx", ".csv", ".ipynb", *IMAGE_EXTENSIONS}:
+                raise ValueError(
+                    "Text line selections are unsupported for this document format"
+                )
+            if is_code_extension(extension):
+                raise ValueError("Source-code documents require a code line selection")
+            result = await self.read_document(
+                document_id=str(document["document_id"]),
+                start_line=locator.start_line,
+                end_line=locator.end_line,
+            )
+            self._require_exact_selection_range(
+                result,
+                start=locator.start_line,
+                end=locator.end_line,
+            )
+            canonical_locator = dict(result["locator"])
+        else:  # pragma: no cover - DocumentSelection validates the union.
+            raise ValueError("Unsupported document selection locator")
+
+        if len(result["content"]) >= MAX_READ_CHARACTERS:
+            raise ValueError("Selected passage exceeds the readable character limit")
+        result["locator"] = canonical_locator
+        return result
+
+    @staticmethod
+    def _require_exact_selection_range(result: Dict, *, start: int, end: int) -> None:
+        """Reject a requested range that had to be shortened during reading."""
+        if result["start_line"] != start or result["end_line"] != end:
+            raise ValueError("Selected passage is outside the current document range")
+
     async def delete_document(
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
     ) -> Dict:
         """Purge document content while retaining a minimal provenance record."""
         if not isinstance(document_id, str) or not document_id.strip():
             raise ValueError("document_id must not be empty")
+        document_id = document_id.strip()
+        document = await self._get_visible_document(
+            document_id=document_id,
+            relative_path=None,
+        )
+        filesystem = self._filesystem_for_document(document)
+        if filesystem is None:
+            raise RuntimeError("Document source filesystem is not configured")
+        await self._run_blocking(
+            filesystem.delete_file,
+            document["relative_path"],
+            expected_content_hash=document["content_hash"],
+        )
         row = await self._writer.delete_document(
-            document_id=document_id.strip(),
-            session_id=session_id,
+            document_id=document_id,
         )
         if row is None:
             raise FileNotFoundError("Document not found")
@@ -755,11 +926,12 @@ class DocumentService:
         selected_paths: Optional[List[str]] = None,
         settings: Optional[FolderScanSettings] = None,
         force_include_paths: Optional[List[str]] = None,
-        session_id: Optional[str] = None,
-        visibility_scope: str = "project",
     ) -> Dict:
-        """Durably admit a selected folder batch before indexing its files."""
-        self._validate_visibility(visibility_scope, session_id)
+        """Copy selected folder entries into the canonical project tree.
+
+        A folder upload is an admission event, not a durable object. Relative
+        paths become the only lasting selectors once the files are written.
+        """
         validated_entries = [
             entry
             if isinstance(entry, FolderUploadEntry)
@@ -790,6 +962,10 @@ class DocumentService:
             normalized_selected.sort()
         if not normalized_selected:
             raise ValueError("folder preview contains no eligible documents")
+        if any(is_controlled_context_file(path) for path in normalized_selected):
+            raise PermissionError(
+                f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
+            )
 
         entry_content = {
             normalize_relative_path(
@@ -814,70 +990,69 @@ class DocumentService:
                 + ", ".join(sorted(unavailable))
             )
 
-        folder_root_id = str(uuid.uuid4())
-        created_at = get_now_iso()
         candidate_bytes = sum(len(entry.content) for entry in validated_entries)
-        prepared_documents = []
-
-        for relative_path in normalized_selected:
-            content = entry_content[relative_path]
-            preview_entry = included_by_path[relative_path]
-            prepared_documents.append(
-                {
-                    "document_id": str(uuid.uuid4()),
-                    "relative_path": relative_path,
-                    "original_name": preview_entry.original_name,
-                    "extension": preview_entry.extension,
-                    "size_bytes": preview_entry.size_bytes,
-                    "content_hash": preview_entry.content_hash,
-                    "content": content,
-                }
-            )
-
-        await self._writer.insert_folder_batch(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-            folder_name=folder_name.strip(),
-            candidate_count=len(validated_entries),
-            candidate_bytes=candidate_bytes,
-            excluded_count=preview.summary.excluded_count,
-            excluded_bytes=preview.summary.excluded_bytes,
-            excluded_directory_count=preview.summary.excluded_directory_count,
-            excluded_reason_counts=preview.summary.reason_counts,
-            scan_settings=preview.settings.model_dump(mode="json"),
-            documents=prepared_documents,
-            created_at=created_at,
-        )
-
-        documents = [
-            await self.schedule_document_index(
-                document_id=document["document_id"],
-                session_id=session_id,
-            )
-            for document in prepared_documents
-        ]
+        filesystem = self._require_filesystem()
+        written: list[tuple[str, str]] = []
+        try:
+            for relative_path in normalized_selected:
+                content = entry_content[relative_path]
+                file = await self._run_blocking(
+                    filesystem.write_bytes,
+                    relative_path,
+                    content,
+                )
+                written.append((relative_path, file.content_hash))
+        except Exception:
+            for relative_path, content_hash in reversed(written):
+                try:
+                    await self._run_blocking(
+                        filesystem.delete_file,
+                        relative_path,
+                        expected_content_hash=content_hash,
+                    )
+                except Exception:
+                    logger.exception("Could not roll back folder import file {}", relative_path)
+            raise
+        try:
+            await self.reconcile_project_files()
+        except Exception:
+            for relative_path, content_hash in reversed(written):
+                try:
+                    await self._run_blocking(
+                        filesystem.delete_file,
+                        relative_path,
+                        expected_content_hash=content_hash,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not roll back folder import file {}", relative_path
+                    )
+            raise
         return {
-            "folder_root_id": folder_root_id,
             "project_id": self.project_id,
-            "session_id": session_id,
-            "visibility_scope": visibility_scope,
-            "folder_name": folder_name.strip(),
+            "path_prefix": self._common_path_prefix(normalized_selected),
             "candidate_count": len(validated_entries),
             "candidate_bytes": candidate_bytes,
-            "document_count": len(documents),
-            "total_size_bytes": sum(
-                document["size_bytes"] for document in prepared_documents
-            ),
+            "document_count": len(written),
+            "total_size_bytes": sum(len(entry_content[path]) for path in normalized_selected),
             "excluded_count": preview.summary.excluded_count,
             "excluded_bytes": preview.summary.excluded_bytes,
             "excluded_directory_count": preview.summary.excluded_directory_count,
             "excluded_reason_counts": preview.summary.reason_counts,
             "scan_settings": preview.settings.model_dump(mode="json"),
-            "created_at": created_at,
-            "indexed_at": None,
-            "documents": documents,
+            "relative_paths": normalized_selected,
         }
+
+    @staticmethod
+    def _common_path_prefix(paths: List[str]) -> Optional[str]:
+        """Return a stable shared directory when an imported tree has one."""
+        parents = [PurePosixPath(path).parent.parts for path in paths]
+        shared: list[str] = []
+        for parts in zip(*parents):
+            if len(set(parts)) != 1 or parts[0] == ".":
+                break
+            shared.append(parts[0])
+        return PurePosixPath(*shared).as_posix() if shared else None
 
     async def add_document(
         self,
@@ -885,10 +1060,8 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
-        session_id: Optional[str] = None,
-        visibility_scope: str = "project",
     ) -> Dict:
-        """Store a manual upload as durable queued indexing work."""
+        """Store a project document as durable queued indexing work."""
         if not isinstance(content, bytes):
             raise TypeError("content must be bytes")
         if not content:
@@ -906,31 +1079,44 @@ class DocumentService:
                 f"Unsupported file type '{extension}'. "
                 f"Accepted types include PDF, DOCX, plain text, source code, and images."
             )
-        self._validate_visibility(visibility_scope, session_id)
         normalized_path = normalize_relative_path(relative_path, original_name)
+        self._require_unreserved_context_path(normalized_path)
         document_id = str(uuid.uuid4())
         content_hash = hashlib.sha256(content).hexdigest()
         created_at = get_now_iso()
-
-        await self._writer.insert_document(
-            document_id=document_id,
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-            original_name=original_name,
-            relative_path=normalized_path,
-            extension=extension,
-            size_bytes=len(content),
-            content_hash=content_hash,
-            content=content,
-            created_at=created_at,
+        filesystem = self._filesystem
+        if filesystem is None:
+            raise RuntimeError("Document source filesystem is not configured")
+        await self._run_blocking(
+            filesystem.write_bytes,
+            normalized_path,
+            content,
         )
+        try:
+            await self._writer.insert_document(
+                document_id=document_id,
+                original_name=original_name,
+                relative_path=normalized_path,
+                extension=extension,
+                size_bytes=len(content),
+                content_hash=content_hash,
+                created_at=created_at,
+            )
+        except Exception:
+            try:
+                await self._run_blocking(
+                    filesystem.delete_file,
+                    normalized_path,
+                    expected_content_hash=content_hash,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not roll back local document file after catalog failure"
+                )
+            raise
         return {
             "document_id": document_id,
             "project_id": self.project_id,
-            "session_id": session_id,
-            "visibility_scope": visibility_scope,
-            "folder_root_id": None,
-            "source_kind": "manual_upload",
             "original_name": original_name,
             "relative_path": normalized_path,
             "extension": extension,
@@ -945,18 +1131,23 @@ class DocumentService:
             "chunk_count": 0,
         }
 
+    @staticmethod
+    def _require_unreserved_context_path(path: str) -> None:
+        if is_controlled_context_file(path):
+            raise PermissionError(
+                f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
+            )
+
     async def index_document(
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
         policy: Optional[DocumentIndexPolicy] = None,
     ) -> Dict:
         """Delegate document derivation to this project's DocumentIndexer."""
 
         row = await self._indexer.index_document(
             document_id=document_id,
-            session_id=session_id,
             policy=policy,
         )
         return self._public_metadata(row)
@@ -973,33 +1164,91 @@ class DocumentService:
         content: bytes,
         original_name: str,
         relative_path: Optional[str] = None,
-        session_id: Optional[str] = None,
-        visibility_scope: str = "project",
     ) -> Dict:
         """Persist a document, then index inline or admit durable background work."""
         document = await self.add_document(
             content=content,
             original_name=original_name,
             relative_path=relative_path,
-            session_id=session_id,
-            visibility_scope=visibility_scope,
         )
         return await self.schedule_document_index(
             document_id=document["document_id"],
-            session_id=session_id,
         )
+
+    async def admit_user_source(
+        self,
+        source: UserAttachedSource | Dict[str, Any],
+        *,
+        durable: bool = True,
+    ) -> Dict[str, Any]:
+        """Admit one user-introduced source, durably by default.
+
+        ``durable=False`` is an explicit per-request opt-out.  The transient
+        descriptor is returned to the caller so it can remain run-local; no
+        catalog row, bookmark, or index entry is created in that mode.
+        """
+        if not isinstance(durable, bool):
+            raise ValueError("durable must be a boolean")
+        validated = (
+            source
+            if isinstance(source, (UserAttachedFile, UserAttachedUrl))
+            else _USER_ATTACHED_SOURCE_ADAPTER.validate_python(source)
+        )
+        if isinstance(validated, UserAttachedFile):
+            content_hash = hashlib.sha256(validated.content).hexdigest()
+            if not durable:
+                return {
+                    "source_type": "file",
+                    "durable": False,
+                    "original_name": validated.original_name,
+                    "relative_path": validated.relative_path,
+                    "content_hash": content_hash,
+                    "size_bytes": len(validated.content),
+                }
+            return await self.submit_document(
+                content=validated.content,
+                original_name=validated.original_name,
+                relative_path=validated.relative_path,
+            )
+
+        if not durable:
+            return {
+                "source_type": "url",
+                "durable": False,
+                "url": validated.url,
+                "title": validated.title,
+                "summary": validated.summary,
+            }
+        return await self.save_web_link(
+            url=validated.url,
+            title=validated.title,
+            summary=validated.summary,
+        )
+
+    async def admit_user_sources(
+        self,
+        sources: Iterable[UserAttachedSource | Dict[str, Any]],
+        *,
+        durable: bool = True,
+    ) -> list[Dict[str, Any]]:
+        """Admit a bounded batch of user sources with one explicit policy."""
+        values = list(sources)
+        if len(values) > 100:
+            raise ValueError("at most 100 user sources may be admitted at once")
+        return [
+            await self.admit_user_source(source, durable=durable)
+            for source in values
+        ]
 
     async def schedule_document_index(
         self,
         *,
         document_id: str,
-        session_id: Optional[str] = None,
     ) -> Dict:
         """Delegate durable index admission to the project-owned indexer."""
         return self._public_metadata(
             await self._indexer.schedule_document_index(
                 document_id=document_id,
-                session_id=session_id,
             )
         )
 
@@ -1022,226 +1271,178 @@ class DocumentService:
         """Return a bounded public projection of indexing metrics."""
         return sanitize_health_details(self.indexing_snapshot())
 
-    async def list_folder_uploads(
-        self,
-        *,
-        session_id: Optional[str] = None,
-        visibility_scope: Optional[str] = None,
-        limit: int = 25,
-    ) -> List[Dict]:
-        """List folder upload batches visible to the current session."""
-        if (
-            visibility_scope is not None
-            and visibility_scope not in VALID_VISIBILITY_SCOPES
-        ):
-            raise ValueError(
-                "visibility_scope must be either 'project' or 'session'"
-            )
-        if (
-            not isinstance(limit, int)
-            or isinstance(limit, bool)
-            or not 1 <= limit <= 100
-        ):
-            raise ValueError("limit must be between 1 and 100")
-        rows = await self._reader.list_folder_uploads(
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-            limit=limit,
-        )
-        return [self._public_folder_metadata(row) for row in rows]
-
-    async def get_folder_upload_summary(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str] = None,
-        path_prefix: Optional[str] = None,
-    ) -> Dict:
-        """Return one visible folder batch and a shallow document tree."""
-        folder_root_id = folder_root_id.strip()
-        if not folder_root_id:
-            raise ValueError("folder_root_id must not be empty")
-        folder = await self._reader.fetch_folder_upload(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-        )
-        if folder is None:
-            raise FileNotFoundError("Folder upload not found")
-        result = self._public_folder_metadata(folder)
-        result["tree"] = await self.list_folder_tree(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-            path_prefix=path_prefix,
-            max_depth=2,
-        )
-        return result
-
     async def resolve_focus_target(
         self,
         *,
-        session_id: Optional[str] = None,
         document_id: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> Dict:
         """Validate and canonicalize one visible document-focus target."""
         if document_id is not None:
-            if folder_root_id is not None or path_prefix is not None:
+            if path_prefix is not None:
                 raise ValueError(
                     "document focus cannot include folder filters"
                 )
             document = await self.get_document_info(
-                session_id=session_id,
                 document_id=document_id,
             )
             return {
                 "target_type": "document",
                 "document_id": document["document_id"],
                 "relative_path": document["relative_path"],
-                "folder_root_id": document.get("folder_root_id"),
-                "path_prefix": None,
             }
 
-        if folder_root_id is None:
-            raise ValueError(
-                "document focus requires document_id or folder_root_id"
-            )
-        folder_root_id = folder_root_id.strip()
-        if not folder_root_id:
-            raise ValueError("folder_root_id must not be empty")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        folder = await self._reader.fetch_folder_upload(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
+        if normalized_prefix is None:
+            raise ValueError("document focus requires document_id or path_prefix")
+        documents = await self.list_documents(
+            path_prefix=normalized_prefix,
+            limit=1,
         )
-        if folder is None:
+        if not documents:
             raise FileNotFoundError("Document focus target not found")
-        if normalized_prefix is not None:
-            documents = await self.list_documents(
-                session_id=session_id,
-                folder_root_id=folder_root_id,
-                path_prefix=normalized_prefix,
-                limit=1,
-            )
-            if not documents:
-                raise FileNotFoundError("Document focus target not found")
-            return {
-                "target_type": "subtree",
-                "document_id": None,
-                "relative_path": None,
-                "folder_root_id": folder_root_id,
-                "path_prefix": normalized_prefix,
-            }
         return {
-            "target_type": "folder_upload",
-            "document_id": None,
-            "relative_path": None,
-            "folder_root_id": folder_root_id,
-            "path_prefix": None,
+            "target_type": "subtree",
+            "path_prefix": normalized_prefix,
         }
 
-    @staticmethod
-    def _build_folder_tree(rows: List[Dict], max_depth: int) -> List[Dict]:
-        root = {"children": {}}
-        for row in rows:
-            parts = PurePosixPath(row["relative_path"]).parts
-            current = root
-            for depth, part in enumerate(parts[:-1], start=1):
-                relative_path = PurePosixPath(*parts[:depth]).as_posix()
-                children = current["children"]
-                node = children.setdefault(
-                    part,
-                    {
-                        "name": part,
-                        "relative_path": relative_path,
-                        "type": "directory",
-                        "children": {},
-                    },
-                )
-                if depth >= max_depth:
-                    node["truncated"] = True
-                    current = None
-                    break
-                current = node
-            if current is None:
-                continue
-            name = parts[-1]
-            current["children"][f"\0{name}:{row['document_id']}"] = {
-                "name": name,
-                "relative_path": row["relative_path"],
-                "type": "document",
-                "document_id": str(row["document_id"]),
-                "status": row["status"],
-                "size_bytes": row["size_bytes"],
-                "chunk_count": row.get("chunk_count", 0),
-            }
-
-        def finalize(node):
-            children = list(node.pop("children", {}).values())
-            children.sort(
-                key=lambda item: (
-                    item["type"] == "document",
-                    item["name"].lower(),
-                    item["relative_path"],
-                )
-            )
-            for child in children:
-                if child["type"] == "directory":
-                    finalize(child)
-            node["children"] = children
-
-        finalize(root)
-        return root["children"]
-
-    async def list_folder_tree(
+    async def save_web_link(
         self,
         *,
-        folder_root_id: str,
-        session_id: Optional[str] = None,
-        path_prefix: Optional[str] = None,
-        max_depth: int = 3,
-    ) -> List[Dict]:
-        """Return a deterministic tree for one visible folder upload."""
-        folder_root_id = folder_root_id.strip()
-        if not folder_root_id:
-            raise ValueError("folder_root_id must not be empty")
+        url: str,
+        title: str | None = None,
+        summary: str | None = None,
+    ) -> Dict:
+        """Save one intentional project bookmark without indexing its content."""
+        saved_at = get_now_iso()
+        candidate = SavedWebLink(
+            link_id=str(uuid.uuid4()),
+            project_id=self.project_id,
+            url=url,
+            title=title,
+            summary=summary,
+            created_at=saved_at,
+            updated_at=saved_at,
+        )
+        row = await self._writer.insert_saved_web_link(
+            link_id=candidate.link_id,
+            url=candidate.url,
+            title=candidate.title,
+            summary=candidate.summary,
+            created_at=saved_at,
+        )
+        return self._public_saved_web_link(row)
+
+    async def promote_source(
+        self,
+        source: Dict[str, Any] | Any,
+        *,
+        title: str | None = None,
+        summary: str | None = None,
+    ) -> Dict:
+        """Explicitly promote an assistant-observed web source to a bookmark.
+
+        Source provenance remains message-owned unless this method is called.
+        Promotion stores only the URL bookmark; it never treats a transient
+        search/read excerpt as durable document content.
+        """
+        from common.schema.source.references import SourceReferenceCandidate
+
+        candidate = (
+            source
+            if isinstance(source, SourceReferenceCandidate)
+            else SourceReferenceCandidate.model_validate(source)
+        )
+        if candidate.source_kind not in {
+            "web_search_result",
+            "news_search_result",
+            "web_page",
+            "web_pdf",
+        }:
+            raise ValueError("only assistant-observed web sources can be promoted")
+        if not candidate.canonical_url:
+            raise ValueError("assistant source is missing a canonical URL")
+        if title is None:
+            candidate_title = candidate.metadata.get("title")
+            title = candidate_title if isinstance(candidate_title, str) else None
+        return await self.save_web_link(
+            url=candidate.canonical_url,
+            title=title,
+            summary=summary,
+        )
+
+    async def list_saved_web_links(self, *, limit: int = 50) -> List[Dict]:
+        """List this project's durable bookmarks, newest update first."""
         if (
-            not isinstance(max_depth, int)
-            or isinstance(max_depth, bool)
-            or not 1 <= max_depth <= 10
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 1000
         ):
-            raise ValueError("max_depth must be between 1 and 10")
-        normalized_prefix = self._normalize_path_prefix(path_prefix)
-        folder = await self._reader.fetch_folder_upload(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
+            raise ValueError("limit must be between 1 and 1000")
+        rows = await self._reader.list_saved_web_links(limit=limit)
+        return [self._public_saved_web_link(row) for row in rows]
+
+    async def update_saved_web_link(
+        self,
+        *,
+        link_id: str,
+        title: str | None | _UnsetSavedWebLinkField = _UNSET_SAVED_WEB_LINK_FIELD,
+        summary: str | None | _UnsetSavedWebLinkField = _UNSET_SAVED_WEB_LINK_FIELD,
+    ) -> Dict:
+        """Update supplied bookmark presentation fields without replacing others."""
+        if (
+            title is _UNSET_SAVED_WEB_LINK_FIELD
+            and summary is _UNSET_SAVED_WEB_LINK_FIELD
+        ):
+            raise ValueError("provide title or summary to update a saved web link")
+        normalized_link_id = self._require_saved_web_link_id(link_id)
+        existing = await self._reader.fetch_saved_web_link(link_id=normalized_link_id)
+        if existing is None:
+            raise FileNotFoundError("Saved web link not found")
+        updated_at = get_now_iso()
+        candidate_data = {**existing, "updated_at": updated_at}
+        if title is not _UNSET_SAVED_WEB_LINK_FIELD:
+            candidate_data["title"] = title
+        if summary is not _UNSET_SAVED_WEB_LINK_FIELD:
+            candidate_data["summary"] = summary
+        candidate = SavedWebLink(
+            **candidate_data,
         )
-        if folder is None:
-            raise FileNotFoundError("Folder upload not found")
-        rows = await self._reader.fetch_folder_documents(
-            folder_root_id=folder_root_id,
-            session_id=session_id,
-            path_prefix=normalized_prefix,
+        row = await self._writer.update_saved_web_link(
+            link_id=normalized_link_id,
+            title=candidate.title,
+            summary=candidate.summary,
+            updated_at=updated_at,
         )
-        return self._build_folder_tree(rows, max_depth)
+        if row is None:
+            raise FileNotFoundError("Saved web link not found")
+        return self._public_saved_web_link(row)
+
+    async def delete_saved_web_link(self, *, link_id: str) -> Dict:
+        """Delete a bookmark without changing prior source references."""
+        normalized_link_id = self._require_saved_web_link_id(link_id)
+        if not await self._writer.delete_saved_web_link(link_id=normalized_link_id):
+            raise FileNotFoundError("Saved web link not found")
+        return {"link_id": normalized_link_id, "deleted": True}
+
+    @staticmethod
+    def _require_saved_web_link_id(link_id: str) -> str:
+        if not isinstance(link_id, str) or not (normalized := link_id.strip()):
+            raise ValueError("link_id must not be empty")
+        return normalized
+
+    @staticmethod
+    def _public_saved_web_link(row: Dict) -> Dict:
+        """Normalize one database bookmark into the public service shape."""
+        return SavedWebLink.model_validate(row).model_dump(mode="json")
 
     async def list_documents(
         self,
         *,
-        session_id: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
-        visibility_scope: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
-        """List documents visible to the current project/session context."""
-        if (
-            visibility_scope is not None
-            and visibility_scope not in VALID_VISIBILITY_SCOPES
-        ):
-            raise ValueError(
-                "visibility_scope must be either 'project' or 'session'"
-            )
+        """List documents visible to the current project context."""
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
@@ -1249,20 +1450,7 @@ class DocumentService:
         ):
             raise ValueError("limit must be between 1 and 1000")
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        if folder_root_id is not None:
-            folder_root_id = folder_root_id.strip()
-            if not folder_root_id:
-                raise ValueError("folder_root_id must not be empty")
-            folder = await self._reader.fetch_folder_upload(
-                folder_root_id=folder_root_id,
-                session_id=session_id,
-            )
-            if folder is None:
-                raise FileNotFoundError("Folder upload not found")
         rows = await self._reader.list_documents(
-            session_id=session_id,
-            visibility_scope=visibility_scope,
-            folder_root_id=folder_root_id,
             path_prefix=normalized_prefix,
             limit=limit,
         )
@@ -1272,14 +1460,12 @@ class DocumentService:
         self,
         query: str,
         *,
-        session_id: Optional[str] = None,
         n_results: int = 5,
         document_filter: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         relative_path: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> List[Dict]:
-        """Search indexed chunks visible to the current project/session context."""
+        """Search indexed chunks visible to the current project context."""
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must not be empty")
         if (
@@ -1304,16 +1490,6 @@ class DocumentService:
             else None
         )
         normalized_prefix = self._normalize_path_prefix(path_prefix)
-        if folder_root_id is not None:
-            folder_root_id = folder_root_id.strip()
-            if not folder_root_id:
-                raise ValueError("folder_root_id must not be empty")
-            folder = await self._reader.fetch_folder_upload(
-                folder_root_id=folder_root_id,
-                session_id=session_id,
-            )
-            if folder is None:
-                raise FileNotFoundError("Folder upload not found")
 
         query_embedding = await self._embedding.encode_single(query.strip())
         if len(query_embedding) != EXPECTED_EMBEDDING_DIMENSION:
@@ -1328,7 +1504,6 @@ class DocumentService:
             else n_results
         )
         rows = await self._reader.search_chunks(
-            session_id=session_id,
             query_text=query.strip(),
             query_embedding=query_embedding,
             n_results=retrieval_limit,
@@ -1340,7 +1515,6 @@ class DocumentService:
                 ),
             ),
             document_filter=document_filter,
-            folder_root_id=folder_root_id,
             relative_path=normalized_relative_path,
             path_prefix=normalized_prefix,
         )

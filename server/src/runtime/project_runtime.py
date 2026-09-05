@@ -1,15 +1,18 @@
 import asyncio
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from loguru import logger
 
 from common.conf.domain_config import CompiledDomain, DomainConfig
+from common.conf.manager import ConfigManager
+from common.schema.settings import TextProcessorSettings
 from common.scoping import require_scope_value, require_visible_project_ids
+from core.ingestion.policy import IngestionPolicy
 from core.ingestion.text_processor import TextProcessor
+from core.ingestion.vp01 import VP01EntityExtractor
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.resolver import EntityResolver
 from core.project.domain_config_store import DomainActivation, DomainConfigStore
-from core.project.workspace_service import ProjectWorkspaceService
 from infrastructure.background_work import BackgroundWorkCoordinator
 from infrastructure.job.scheduler import Scheduler
 
@@ -24,16 +27,15 @@ class ProjectRuntime:
         project_id: str,
         entities: EntityResolver,
         knowledge_retrieval: Any,
-        pipeline: TextProcessor,
+        text_processor: TextProcessor,
         scheduler: Scheduler,
         user_name: str,
         readable_project_ids: list[str],
         domain_config: DomainConfig,
         document_service: DocumentService,
-        workspace_service: ProjectWorkspaceService,
         domain_config_store: DomainConfigStore,
-        batch_processor: Optional[Any] = None,
         background_work: Optional[BackgroundWorkCoordinator] = None,
+        get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
     ):
         self.project_id = require_scope_value(
             project_id,
@@ -48,82 +50,93 @@ class ProjectRuntime:
             raise TypeError("ProjectRuntime requires a DomainConfig")
         self.entities = entities
         self.knowledge_retrieval = knowledge_retrieval
-        self.pipeline = pipeline
+        self.text_processor = text_processor
         self.scheduler = scheduler
         self.user_name = user_name
-        self.batch_processor = batch_processor
         self.background_work = background_work
+        if get_vp01 is not None and not callable(get_vp01):
+            raise TypeError("ProjectRuntime get_vp01 must be callable")
+        self._get_vp01 = get_vp01
         self.domain_config_store = domain_config_store
         self.domain_config = domain_config
         self.compiled_domain: CompiledDomain = domain_config.compile()
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
-        self.document_indexer = document_service.indexer
-        self.workspace_service = workspace_service
 
-        self.episode_job: Optional[Any] = None
+        self.project_semantic_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
-        self._shutdown_lock = asyncio.Lock()
-        self._closing = False
         self._closed = False
 
     def add_config_unsubscriber(self, unsubscribe):
         self.config_unsubscribers.append(unsubscribe)
 
+    def signal_semantic_work(self) -> bool:
+        """Expose one project-owned wake edge to every attached session."""
+
+        if self.project_semantic_job is None or self.scheduler is None:
+            return False
+        wake = getattr(self.scheduler, "wake", None)
+        return bool(wake()) if callable(wake) else False
+
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""
-        async with self._shutdown_lock:
-            if self._closed:
-                return
+        if self._closed:
+            return
 
-            logger.info(f"Shutting down ProjectRuntime resources for {self.project_id}")
-            self._closing = True
-            failures = []
+        logger.info(f"Shutting down ProjectRuntime resources for {self.project_id}")
+        failures = []
 
-            for phase, shutdown in (
-                ("scheduler", self.scheduler.stop if self.scheduler else None),
-                ("document indexing", self.document_indexer.shutdown),
-                (
-                    "background work",
-                    (
-                        lambda: (
-                            self.background_work.cancel_project(self.project_id)
-                            if self.background_work is not None
-                            else None
-                        )
-                    ),
-                ),
-            ):
-                if shutdown is None:
-                    continue
-                try:
-                    result = shutdown()
-                    if result is not None:
-                        await result
-                except Exception as exc:
-                    logger.exception(
-                        f"Project shutdown phase failed for {self.project_id}: {phase}"
-                    )
-                    failures.append(exc)
+        for phase, shutdown in (
+            ("scheduler", self.scheduler.stop if self.scheduler else None),
+            ("document indexing", self.document_service.indexer.shutdown),
+            (
+                "background work",
+                self._cancel_owned_background_work,
+            ),
+        ):
+            if shutdown is None:
+                continue
+            try:
+                result = shutdown()
+                if result is not None:
+                    await result
+            except Exception as exc:
+                logger.exception(
+                    f"Project shutdown phase failed for {self.project_id}: {phase}"
+                )
+                failures.append(exc)
 
-            unsubscribers = self.config_unsubscribers
-            self.config_unsubscribers = []
-            for unsubscribe in unsubscribers:
-                try:
-                    unsubscribe()
-                except Exception as exc:
-                    logger.exception(
-                        f"Project configuration cleanup failed for {self.project_id}"
-                    )
-                    failures.append(exc)
+        unsubscribers = self.config_unsubscribers
+        self.config_unsubscribers = []
+        for unsubscribe in unsubscribers:
+            try:
+                unsubscribe()
+            except Exception as exc:
+                logger.exception(
+                    f"Project configuration cleanup failed for {self.project_id}"
+                )
+                failures.append(exc)
 
-            self._closed = True
-            if failures:
-                raise RuntimeError(
-                    f"ProjectRuntime shutdown failed for {self.project_id}"
-                ) from failures[0]
+        self._closed = True
+        if failures:
+            raise RuntimeError(
+                f"ProjectRuntime shutdown failed for {self.project_id}"
+            ) from failures[0]
         # EntityResolver and others don't have explicit shutdown methods,
         # but they will be garbage collected.
+
+    async def _cancel_owned_background_work(self) -> None:
+        """Cancel only document-index and scheduler work owned by this runtime."""
+        if self.background_work is None:
+            return
+        owners = {f"project:{self.project_id}:document-index"}
+        if self.scheduler is not None:
+            owners.update(
+                f"project:{self.project_id}:{name}"
+                for name in getattr(self.scheduler, "registered_job_names", ())
+            )
+        for owner in sorted(owners):
+            await self.background_work.cancel_owner(owner)
 
     async def load_domain_config(self) -> DomainConfig:
         """Load the active domain and install its immutable runtime snapshot."""
@@ -138,19 +151,30 @@ class ProjectRuntime:
                 )
             self.domain_config = config
             self.compiled_domain = config.compile()
-            self._install_compiled_domain(self.compiled_domain)
+            await self._select_vp01(self.compiled_domain)
         return config
 
-    def _install_compiled_domain(self, compiled_domain: CompiledDomain) -> None:
-        """Fan one immutable domain snapshot into future ingestion admission."""
+    def capture_ingestion_policy(self) -> IngestionPolicy:
+        """Freeze the live Context-entity policy for one semantic window."""
 
-        for component in (self.batch_processor, self.pipeline):
-            setter = getattr(component, "set_compiled_domain", None)
-            if setter is not None:
-                setter(compiled_domain)
-        set_active_topics = getattr(self.knowledge_retrieval, "set_active_topics", None)
-        if callable(set_active_topics):
-            set_active_topics(compiled_domain.active_topics)
+        settings = ConfigManager.get().config.developer_settings
+        return IngestionPolicy.capture(
+            text_processor=TextProcessorSettings(
+                gliner_threshold=self.text_processor.gliner_threshold,
+                llm_ner=self.text_processor.llm_ner,
+            ),
+            entity_resolution=settings.entity_resolution,
+            compiled_domain=self.compiled_domain,
+        )
+
+    async def _select_vp01(self, compiled_domain: CompiledDomain) -> None:
+        """Align the live adapter with an explicitly switched domain language."""
+
+        if self._get_vp01 is None:
+            return
+        self.text_processor.set_vp01(
+            await self._get_vp01(compiled_domain.vp01_language)
+        )
 
     async def capture_domain(self) -> CompiledDomain:
         """Return a stable domain snapshot for one admitted runtime operation."""
@@ -181,5 +205,5 @@ class ProjectRuntime:
             )
             self.domain_config = activation.config
             self.compiled_domain = activation.compiled
-            self._install_compiled_domain(activation.compiled)
+            await self._select_vp01(activation.compiled)
             return activation

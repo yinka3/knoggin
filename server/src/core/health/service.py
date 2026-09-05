@@ -50,6 +50,7 @@ class RuntimeHealthService:
         """Return dependency and lifecycle health for the running engine."""
 
         postgres = await self._probe_postgres()
+        projection_repair = await self._read_maintenance_projection_repair()
         active_project_count = self._active_project_count()
         active_session_count = self._active_session_count()
         failures = [
@@ -74,6 +75,8 @@ class RuntimeHealthService:
             name for name, available in subsystems.items() if not available
         ]
         warnings = [f"{name} probe failed" for name in failures]
+        if projection_repair.get("pending_count", 0):
+            warnings.append("Maintenance projection repair is pending")
         warnings.extend(
             f"{name.replace('_', ' ')} is unavailable"
             for name in unavailable_subsystems
@@ -90,7 +93,12 @@ class RuntimeHealthService:
         ):
             status = HealthStatus.FAILED
             summary = "Core runtime dependencies are unavailable"
-        elif failures or unavailable_subsystems or self._closing:
+        elif (
+            failures
+            or unavailable_subsystems
+            or self._closing
+            or projection_repair.get("pending_count", 0)
+        ):
             status = HealthStatus.DEGRADED
             summary = "Runtime is operating with degraded dependencies"
         else:
@@ -117,9 +125,32 @@ class RuntimeHealthService:
                 "loaded_project_count": active_project_count,
                 "active_runtime_session_count": active_session_count,
                 "subsystems": subsystems,
+                "maintenance_projection_repair": projection_repair,
             },
             warnings=warnings,
         )
+
+    async def _read_maintenance_projection_repair(self) -> dict[str, Any]:
+        service = getattr(self.projects, "entity_maintenance_service", None)
+        read_health = getattr(service, "projection_repair_health", None)
+        if not callable(read_health):
+            return {"available": False, "pending_count": 0, "truncated": False}
+        value, error = await self._bounded_read(read_health)
+        if error is not None or not isinstance(value, Mapping):
+            return {
+                "available": False,
+                "pending_count": 0,
+                "truncated": False,
+                "read_status": error or "invalid",
+            }
+        return {
+            "available": True,
+            "pending_count": self._nonnegative_int_or_none(
+                value.get("pending_count")
+            )
+            or 0,
+            "truncated": value.get("truncated") is True,
+        }
 
     async def get_resource_health(
         self,
@@ -206,141 +237,148 @@ class RuntimeHealthService:
         project_id: str,
         session_id: str,
     ) -> HealthSnapshot:
-        """Return bounded worker and PostgreSQL ingestion-queue health.
+        """Return bounded project semantic-job and durable-window health.
 
-        This reads only the durable queue aggregate. It never claims work,
-        wakes a worker, or returns message identifiers or payloads.
+        This reads only bounded durable window and Context projection state. It
+        never claims work, wakes a job, or returns identifiers or payloads.
         """
 
         warnings: list[str] = []
-        worker = self._session_worker(project_id, session_id)
-        worker_snapshot = self._component_snapshot(
-            worker,
+        project = self._project_state(project_id)
+        semantic_job = getattr(project, "project_semantic_job", None)
+        scheduler_snapshot = self._component_snapshot(
+            getattr(project, "scheduler", None),
             "health_snapshot",
             warnings,
         )
-        queue_details = await self._read_ingestion_queue_health(
+        queue_details = await self._read_semantic_window_health(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
         )
         warnings.extend(queue_details.pop("warnings", []))
+        projection_details = await self._read_context_projection_health(
+            user_name=user_name,
+            project_id=project_id,
+        )
+        warnings.extend(projection_details.pop("warnings", []))
 
         queue_available = queue_details.get("queue_available") is True
         pending_count = self._nonnegative_int(queue_details.get("pending_count"))
         claimed_count = self._nonnegative_int(queue_details.get("claimed_count"))
-        blocked_count = self._nonnegative_int(queue_details.get("blocked_count"))
+        failed_count = self._nonnegative_int(queue_details.get("failed_count"))
+        exhausted_count = self._nonnegative_int(queue_details.get("exhausted_count"))
         consecutive_failures = self._nonnegative_int(
-            worker_snapshot.get("consecutive_failures")
+            scheduler_snapshot.get("recent_failed_jobs")
         )
+        projection_failed = projection_details.get("failed") is True
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
-        timeout = worker_snapshot.get("batch_timeout_seconds")
-        timeout_seconds = (
-            float(timeout)
-            if isinstance(timeout, (int, float))
-            and not isinstance(timeout, bool)
-            and timeout > 0
-            else None
-        )
-        current_batch_age = self._age_seconds(
-            worker_snapshot.get("current_batch_started_at")
-        )
-        worker_state = worker_snapshot.get("state")
-        if worker_state == "failed":
-            delay_state = "stalled"
-        elif (
-            self._nonnegative_int(worker_snapshot.get("current_batch_size"))
-            and current_batch_age is not None
-            and timeout_seconds is not None
-            and current_batch_age > timeout_seconds
+        scheduler_state = scheduler_snapshot.get("state")
+        if semantic_job is None:
+            scheduler_state = "not_registered"
+        if scheduler_state == "stopped" or self._nonnegative_int(
+            scheduler_snapshot.get("stalled_jobs")
         ):
             delay_state = "stalled"
-        elif (
-            isinstance(oldest_age, (int, float))
-            and timeout_seconds is not None
-            and oldest_age > timeout_seconds
-        ):
-            delay_state = "delayed"
         elif pending_count:
             delay_state = "unknown"
         else:
             delay_state = "on_time"
 
         if delay_state == "stalled":
-            warnings.append("pending ingestion work is stalled")
+            warnings.append("pending semantic work is stalled")
         elif delay_state == "delayed":
-            warnings.append("pending ingestion work is delayed")
-        if blocked_count:
-            warnings.append("ingestion queue has blocked work")
+            warnings.append("pending semantic work is delayed")
+        if failed_count:
+            warnings.append("semantic windows have recorded failures")
+        if exhausted_count:
+            warnings.append("semantic windows exhausted automatic retries; manual retry required")
         if consecutive_failures:
-            warnings.append("ingestion worker has consecutive failures")
-        if worker_state in {"not_started", "stopped"}:
-            warnings.append("ingestion worker is not running")
-        elif worker_state == "failed":
-            warnings.append("ingestion worker has failed")
+            warnings.append("semantic scheduler has recent failures")
+        if projection_failed:
+            warnings.append("Context projection has a recorded synchronization failure")
+        if scheduler_state in {"not_registered", "stopped"}:
+            warnings.append("project semantic job is not running")
 
-        if worker_state == "failed":
+        if scheduler_state == "not_registered":
             status = HealthStatus.FAILED
-            summary = "Ingestion worker has failed"
+            summary = "Project semantic job is unavailable"
         elif (
             not queue_available
-            or worker_state != "running"
+            or scheduler_state != "running"
             or delay_state in {"delayed", "stalled"}
-            or blocked_count
+            or failed_count
+            or exhausted_count
             or consecutive_failures
+            or projection_failed
+            or projection_details.get("read_failed") is True
         ):
             status = HealthStatus.DEGRADED
-            summary = "Ingestion is operating with degraded health"
+            summary = "Semantic processing is operating with degraded health"
         else:
             status = HealthStatus.HEALTHY
-            summary = "Ingestion is healthy"
+            summary = "Semantic processing is healthy"
 
         if delay_state in {"delayed", "stalled"} or not queue_available:
             activity = HealthActivity.DELAYED
         elif (
             pending_count
             or claimed_count
-            or self._nonnegative_int(worker_snapshot.get("current_batch_size"))
-            or worker_state == "draining"
+            or self._nonnegative_int(scheduler_snapshot.get("running_jobs"))
         ):
             activity = HealthActivity.BUSY
         else:
             activity = HealthActivity.IDLE
 
-        if blocked_count:
-            message_state = "blocked"
+        if exhausted_count:
+            window_state = "exhausted"
+        elif failed_count:
+            window_state = "failed"
         elif claimed_count:
-            message_state = "claimed"
+            window_state = "claimed"
         elif pending_count:
-            message_state = "pending"
+            window_state = "pending"
         elif queue_details.get("last_processed_available"):
-            message_state = "processed"
+            window_state = "completed"
         else:
-            message_state = "unknown"
+            window_state = "unknown"
 
         return HealthSnapshot(
             status=status,
             activity=activity,
             summary=summary,
             details={
-                "worker": worker_snapshot,
-                "queue": {
+                "semantic_job": {
+                    "registered": semantic_job is not None,
+                    "scheduler": scheduler_snapshot,
+                },
+                "semantic_windows": {
                     "available": queue_available,
                     "pending_count": pending_count,
                     "claimed_count": claimed_count,
-                    "blocked_count": blocked_count,
+                    "failed_count": failed_count,
+                    "exhausted_count": exhausted_count,
+                    "manual_retry_required": exhausted_count > 0,
                     "oldest_pending_available": (
                         queue_details.get("oldest_pending_available") is True
                     ),
                     "oldest_pending_age_seconds": oldest_age,
                     "delay_state": delay_state,
                 },
+                "context_projection": {
+                    "available": projection_details.get("available") is True,
+                    "failed": projection_failed,
+                    "failure_code": projection_details.get("failure_code"),
+                    "failure_age_seconds": projection_details.get(
+                        "failure_age_seconds"
+                    ),
+                    "repair_pending": projection_details.get("repair_pending") is True,
+                },
                 "progress": {
                     "last_processed_available": (
                         queue_details.get("last_processed_available") is True
                     ),
-                    "message_state": message_state,
+                    "window_state": window_state,
                 },
             },
             warnings=warnings,
@@ -465,18 +503,6 @@ class RuntimeHealthService:
             warnings=warnings,
         )
 
-    def _session_worker(self, project_id: str, session_id: str) -> Any:
-        """Find the current session's worker without traversing other sessions."""
-
-        try:
-            reader = getattr(self.sessions, "get_runtime_session", None)
-            context = reader(session_id) if callable(reader) else None
-        except (AttributeError, TypeError):
-            return None
-        if context is None or getattr(context, "project_id", None) != project_id:
-            return None
-        return getattr(context, "consumer", None)
-
     def _project_state(self, project_id: str) -> Any:
         projects = getattr(self.projects, "active_projects", None)
         try:
@@ -500,24 +526,24 @@ class RuntimeHealthService:
             return None, error
         return self._nonnegative_int_or_none(value), None
 
-    async def _read_ingestion_queue_health(
+    async def _read_semantic_window_health(
         self,
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
     ) -> dict[str, Any]:
-        """Read the canonical PostgreSQL queue aggregate without message payloads."""
+        """Read canonical project semantic-window health without message payloads."""
 
         store = getattr(self.resources, "knowledge_store", None)
-        read_queue_health = getattr(store, "get_ingestion_queue_health", None)
+        read_queue_health = getattr(store, "get_semantic_window_health", None)
         if not callable(read_queue_health):
             return {
                 "queue_available": False,
-                "warnings": ["PostgreSQL ingestion metrics are unavailable"],
+                "warnings": ["PostgreSQL semantic-window metrics are unavailable"],
                 "pending_count": 0,
                 "claimed_count": 0,
-                "blocked_count": 0,
+                "failed_count": 0,
+                "exhausted_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "last_processed_available": False,
@@ -527,16 +553,16 @@ class RuntimeHealthService:
             lambda: read_queue_health(
                 user_name=user_name,
                 project_id=project_id,
-                session_id=session_id,
             )
         )
         if error is not None or not isinstance(queue, Mapping):
             return {
                 "queue_available": False,
-                "warnings": ["PostgreSQL ingestion metrics are unavailable"],
+                "warnings": ["PostgreSQL semantic-window metrics are unavailable"],
                 "pending_count": 0,
                 "claimed_count": 0,
-                "blocked_count": 0,
+                "failed_count": 0,
+                "exhausted_count": 0,
                 "oldest_pending_available": False,
                 "oldest_pending_age_seconds": None,
                 "last_processed_available": False,
@@ -553,10 +579,59 @@ class RuntimeHealthService:
             "warnings": [],
             "pending_count": self._nonnegative_int(queue.get("pending_count")),
             "claimed_count": self._nonnegative_int(queue.get("claimed_count")),
-            "blocked_count": self._nonnegative_int(queue.get("blocked_count")),
+            "failed_count": self._nonnegative_int(queue.get("failed_count")),
+            "exhausted_count": self._nonnegative_int(queue.get("exhausted_count")),
             "oldest_pending_available": oldest_ms is not None,
             "oldest_pending_age_seconds": oldest_age,
             "last_processed_available": queue.get("last_processed_ms") is not None,
+        }
+
+    async def _read_context_projection_health(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> dict[str, Any]:
+        """Read a redacted projection diagnostic without Context/file contents."""
+
+        store = getattr(self.resources, "knowledge_store", None)
+        read_projection = getattr(store, "get_project_context_projection_state", None)
+        if not callable(read_projection):
+            return {"available": False, "read_failed": False, "warnings": []}
+        state, error = await self._bounded_read(
+            lambda: read_projection(user_name=user_name, project_id=project_id)
+        )
+        if error is not None:
+            return {
+                "available": False,
+                "read_failed": True,
+                "warnings": ["PostgreSQL Context projection metrics are unavailable"],
+            }
+        if state is None:
+            return {
+                "available": True,
+                "read_failed": False,
+                "failed": False,
+                "repair_pending": False,
+                "warnings": [],
+            }
+        failure_code = getattr(state, "projection_failure_code", None)
+        failure_at = getattr(state, "projection_failure_at", None)
+        if isinstance(state, Mapping):
+            failure_code = state.get("projection_failure_code")
+            failure_at = state.get("projection_failure_at")
+            pending_revision = state.get("projection_pending_revision_id")
+        else:
+            pending_revision = getattr(state, "projection_pending_revision_id", None)
+        bounded_code = failure_code[:120] if isinstance(failure_code, str) else None
+        return {
+            "available": True,
+            "read_failed": False,
+            "failed": bounded_code is not None,
+            "failure_code": bounded_code,
+            "failure_age_seconds": self._timestamp_age_seconds(failure_at),
+            "repair_pending": pending_revision is not None,
+            "warnings": [],
         }
 
     async def _bounded_read(
@@ -579,6 +654,20 @@ class RuntimeHealthService:
         if not isinstance(value, str):
             return None
         timestamp = parse_iso_time(value)
+        if timestamp is None:
+            return None
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=get_now().tzinfo)
+        return max((get_now() - timestamp).total_seconds(), 0.0)
+
+    @staticmethod
+    def _timestamp_age_seconds(value: Any) -> float | None:
+        if isinstance(value, datetime):
+            timestamp = value
+        elif isinstance(value, str):
+            timestamp = parse_iso_time(value)
+        else:
+            return None
         if timestamp is None:
             return None
         if timestamp.tzinfo is None:

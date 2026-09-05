@@ -236,14 +236,18 @@ def format_vp01_input(
     messages: List[Dict],
     known_ents: List[Tuple[str, int]],
     gliner_ents: List[Tuple[int, str, str]],
-    ambiguous: List[Tuple[int, str, str, List[str]]],
     covered_texts: Dict[int, set],
     label_block: str,
     message_local_ids: Dict[int, str],
+    identity_context: Optional[str] = None,
 ) -> str:
     lines = []
     lines.append("## Domain Schema\n")
     lines.append(label_block)
+
+    if identity_context:
+        lines.append("\n## Identity Context\n")
+        lines.append(f"Implicit user identity: {identity_context}.")
 
     lines.append("\n## Messages\n")
     valid_msg_ids = [message_local_ids[msg["id"]] for msg in messages]
@@ -263,13 +267,12 @@ def format_vp01_input(
     else:
         lines.append("(none)")
 
-    lines.append("\n## GLiNER Extractions (can override if wrong)\n")
+    lines.append("\n## VP-01 Extractions (can override if wrong)\n")
     gliner_resolved = []
     known_spans = {k[0].lower() for k in known_ents}
     for msg_id, span, label in gliner_ents:
         if span.lower() not in known_spans:
-            if not any(span == a[1] for a in ambiguous):
-                gliner_resolved.append((msg_id, span, label))
+            gliner_resolved.append((msg_id, span, label))
 
     if gliner_resolved:
         for msg_id, span, label in gliner_resolved:
@@ -277,18 +280,10 @@ def format_vp01_input(
     else:
         lines.append("(none)")
 
-    if ambiguous:
-        lines.append("\n## Ambiguous (Task 1: assign topic)")
-        for msg_id, span_text, label, topics in ambiguous:
-            lines.append(
-                f'- MSG {message_local_ids[msg_id]}: "{span_text}" ({label}) '
-                f"-> choose from: {topics}"
-            )
-
     lines.append("\n## Discovery (Task 2: find missed entities)")
     lines.append(
         "Scan messages above for proper nouns not listed in Known Entities or "
-        "GLiNER extractions."
+        "VP-01 extractions."
     )
     lines.append("Include the MSG id where you found each entity.")
     lines.append("Only return msg_id values from the Valid msg_id list above.")
@@ -303,6 +298,7 @@ def format_vp02_input(
     message_local_ids: Dict[int, str],
     user_name: Optional[str] = None,
     relationship_block: str = "",
+    identity_context: Optional[str] = None,
 ) -> str:
     lines = []
 
@@ -328,6 +324,10 @@ def format_vp02_input(
 
     lines.append("\n## Configured Canonical Relationships")
     lines.append(relationship_block or "(none configured)")
+
+    if identity_context:
+        lines.append("\n## Identity Context")
+        lines.append(f"Implicit user identity: {identity_context}.")
 
     lines.append("\n## Messages")
     valid_msg_ids = [message_local_ids[msg["id"]] for msg in messages]
@@ -362,6 +362,52 @@ def format_vp02_input(
     else:
         lines.append("(none)")
 
+    return "\n".join(lines)
+
+
+def format_context_vp02_input(
+    candidates: List[Dict],
+    blocks: List[Dict],
+    *,
+    relationship_block: str = "",
+) -> str:
+    """Format Context-native VP-02 evidence with stable local block handles."""
+
+    lines = ["## Candidate Entities"]
+    names = [candidate["canonical_name"] for candidate in candidates]
+    lines.append(f"Valid canonical entity names: {names}")
+    for candidate in candidates:
+        source_blocks = candidate.get("source_blocks", [])
+        source = f" (introduced in {', '.join(source_blocks)})" if source_blocks else ""
+        lines.append(f"{candidate['canonical_name']} [{candidate['type']}]{source}")
+        if candidate.get("mentions"):
+            lines.append(f"  Mentions: {', '.join(candidate['mentions'])}")
+    if not candidates:
+        lines.append("(none)")
+
+    lines.append("\n## Configured Canonical Relationships")
+    lines.append(relationship_block or "(none configured)")
+
+    lines.append("\n## Current Context Blocks")
+    valid_blocks = [block["local_id"] for block in blocks]
+    lines.append(f"Valid block_ids: {valid_blocks}")
+    for block in blocks:
+        lines.append(
+            f"[BLOCK {block['local_id']}] [{block['section_key']}]: \"{block['markdown']}\""
+        )
+    if not blocks:
+        lines.append("(none)")
+
+    lines.append("\n## Output Constraints")
+    lines.append("Use only Valid canonical entity names for entity_a and entity_b.")
+    lines.append("Each connection must cite one or more Valid block_ids.")
+    lines.append(
+        "Cite the smallest current block set that proves the relation; neighboring "
+        "blocks may resolve pronouns but never invent a relation."
+    )
+    lines.append(
+        "Return no relationship for co-mentions, unstated implications, or agent-derived claims."
+    )
     return "\n".join(lines)
 
 

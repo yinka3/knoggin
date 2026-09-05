@@ -11,7 +11,6 @@ class ResourceProfile:
     name: str
     worker_count: int
     embedding_batch_size: int
-    workspace_prepare_concurrency: int
     background_job_workers: int
     foreground_model_workers: int
     background_model_workers: int
@@ -25,7 +24,6 @@ class ResourceProfile:
                 name="conservative",
                 worker_count=2,
                 embedding_batch_size=8,
-                workspace_prepare_concurrency=2,
                 background_job_workers=1,
                 foreground_model_workers=1,
                 background_model_workers=1,
@@ -34,7 +32,6 @@ class ResourceProfile:
                 name="balanced",
                 worker_count=4,
                 embedding_batch_size=32,
-                workspace_prepare_concurrency=4,
                 background_job_workers=1,
                 foreground_model_workers=1,
                 background_model_workers=1,
@@ -43,7 +40,6 @@ class ResourceProfile:
                 name="performance",
                 worker_count=8,
                 embedding_batch_size=64,
-                workspace_prepare_concurrency=8,
                 background_job_workers=2,
                 foreground_model_workers=1,
                 background_model_workers=1,
@@ -60,10 +56,6 @@ class ResourceProfile:
             worker_count=_positive_int("KNOGGIN_WORKERS", profile.worker_count),
             embedding_batch_size=_positive_int(
                 "KNOGGIN_EMBEDDING_BATCH_SIZE", profile.embedding_batch_size
-            ),
-            workspace_prepare_concurrency=_positive_int(
-                "KNOGGIN_WORKSPACE_PREPARE_CONCURRENCY",
-                profile.workspace_prepare_concurrency,
             ),
             background_job_workers=_positive_int(
                 "KNOGGIN_BACKGROUND_JOB_WORKERS",

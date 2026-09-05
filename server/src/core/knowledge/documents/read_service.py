@@ -22,15 +22,6 @@ class DocumentReadService:
     async def list_documents(self, **kwargs: Any) -> List[Dict]:
         return await self._service.list_documents(**kwargs)
 
-    async def list_folder_uploads(self, **kwargs: Any) -> List[Dict]:
-        return await self._service.list_folder_uploads(**kwargs)
-
-    async def get_folder_upload_summary(self, **kwargs: Any) -> Dict:
-        return await self._service.get_folder_upload_summary(**kwargs)
-
-    async def list_folder_tree(self, **kwargs: Any) -> List[Dict]:
-        return await self._service.list_folder_tree(**kwargs)
-
     async def get_document_info(self, **kwargs: Any) -> Dict:
         return await self._service.get_document_info(**kwargs)
 

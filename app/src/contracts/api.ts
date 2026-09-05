@@ -1,5 +1,4 @@
 export type RunStatus =
-  | "queued"
   | "running"
   | "awaiting_input"
   | "completed"
@@ -20,7 +19,6 @@ export interface Project {
   name: string;
   description: string | null;
   status: string;
-  accessMode: string;
   sessionCount: number;
   createdAt: string | null;
   updatedAt: string | null;
@@ -47,7 +45,7 @@ export type DocumentFocus =
       folderRootId: string;
     };
 
-export interface CreateMessageRequest {
+export interface CreateRunRequest {
   content: string;
   model?: string;
   agentId?: string;
@@ -86,7 +84,6 @@ export interface Run {
 
 export interface RunEventEnvelope<T = unknown> {
   type:
-    | "run.queued"
     | "run.started"
     | "message.delta"
     | "tool.started"

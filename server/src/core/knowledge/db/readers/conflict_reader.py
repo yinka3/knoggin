@@ -1,15 +1,13 @@
-"""Scoped reads for user-led conflict review workflows."""
+"""Reads relationship-conflict MaintenanceReviews."""
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from common.scoping import require_scope_value
+from core.knowledge.maintenance_reviews import review_from_row
 
 
 class ConflictReader:
-    """Loads a conflict group with its immutable evidence snapshots."""
+    """Return the typed review and immutable evidence snapshot for a conflict."""
 
     def __init__(self, client) -> None:
         self.client = client
@@ -20,42 +18,23 @@ class ConflictReader:
         conflict_id: str,
         user_name: str,
         project_id: str,
-    ) -> dict[str, Any] | None:
-        conflict_id = require_scope_value(conflict_id, "conflict_id", "get_conflict")
-        user_name = require_scope_value(user_name, "user_name", "get_conflict")
-        project_id = require_scope_value(project_id, "project_id", "get_conflict")
-        group = await self.client.fetch_one(
+    ) -> dict | None:
+        row = await self.client.fetch_one(
             """
-            SELECT conflict_id, user_name, project_id, status, origin, kind,
-                   rationale, confidence, evidence_signature, resolution_kind,
-                   resolution_note, resolved_by, resolved_at, metadata,
-                   created_at, updated_at, last_detected_at
-            FROM public.conflict_groups
-            WHERE conflict_id = %s
-              AND user_name = %s
-              AND project_id = %s
+            SELECT review_id, user_name, scope, project_id, kind, dedupe_key,
+                   evidence_refs, evidence_snapshot, reasoning, proposed_plan,
+                   expected_state, status, created_at, resolved_at
+            FROM public.maintenance_reviews
+            WHERE review_id = %s AND user_name = %s AND project_id = %s
+              AND kind = 'relationship_conflict'
             """,
-            (conflict_id, user_name, project_id),
+            (
+                require_scope_value(conflict_id, "conflict_id", "get_conflict"),
+                require_scope_value(user_name, "user_name", "get_conflict"),
+                require_scope_value(project_id, "project_id", "get_conflict"),
+            ),
         )
-        if group is None:
+        if row is None:
             return None
-        evidence = await self.client.fetch_all(
-            """
-            SELECT evidence_ref_id, observation_id, observation_snapshot, added_at
-            FROM public.conflict_evidence_refs
-            WHERE conflict_id = %s
-            ORDER BY added_at, evidence_ref_id
-            """,
-            (conflict_id,),
-        )
-        detail = dict(group)
-        for field in ("metadata",):
-            if isinstance(detail.get(field), str):
-                detail[field] = json.loads(detail[field])
-        detail["evidence"] = []
-        for row in evidence:
-            item = dict(row)
-            if isinstance(item.get("observation_snapshot"), str):
-                item["observation_snapshot"] = json.loads(item["observation_snapshot"])
-            detail["evidence"].append(item)
-        return detail
+        review = review_from_row(dict(row))
+        return review.model_dump(mode="json")

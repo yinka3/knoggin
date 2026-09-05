@@ -28,7 +28,6 @@ def test_document_result_localization_keeps_absent_folder_reference_null():
         "data": [
             {
                 "document_id": "00000000-0000-4000-8000-000000000001",
-                "folder_root_id": None,
                 "project_id": "project-1",
             }
         ]
@@ -38,5 +37,4 @@ def test_document_result_localization_keeps_absent_folder_reference_null():
 
     item = localized["data"][0]
     assert item["document_id"].startswith("doc_")
-    assert item["folder_root_id"] is None
     assert "project_id" not in item

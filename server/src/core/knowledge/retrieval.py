@@ -40,7 +40,6 @@ class KnowledgeRetrieval:
         knowledge_store,
         postgres,
         search_config: Optional[Dict] = None,
-        active_topics: Optional[List[str]] = None,
     ) -> None:
         self.project_id = require_scope_value(
             project_id, "project_id", "KnowledgeRetrieval"
@@ -56,11 +55,6 @@ class KnowledgeRetrieval:
         self.knowledge_store = knowledge_store
         self.postgres = postgres
         self.search_cfg = search_config or {}
-        self.active_topics = list(active_topics) if active_topics else None
-
-    def set_active_topics(self, active_topics: List[str]) -> None:
-        """Install the current project's immutable domain topic snapshot."""
-        self.active_topics = list(active_topics)
 
     async def search_messages(
         self,
@@ -127,119 +121,75 @@ class KnowledgeRetrieval:
         self,
         query: str,
         *,
-        session_id: str,
         limit: Optional[int] = None,
     ) -> List[Dict]:
-        """Search visible entities and hydrate their relationship evidence."""
+        """Discover visible entities before requesting a stable-ID follow-up."""
         limit = limit or self.search_cfg.get("default_entity_limit", 5)
         results = await self.knowledge_store.search_entity(
             query,
             visible_project_ids=self.readable_project_ids,
-            active_topics=self.active_topics,
             limit=limit,
         )
-        for entity in results or []:
-            for connection in entity.get("top_connections", []):
-                refs = connection.pop(
-                    "evidence_refs", connection.pop("evidence_ids", [])
-                )
-                connection["evidence"] = await self._hydrate_evidence(
-                    refs, session_id=session_id
-                )
         return results or []
 
     async def get_connections(
-        self, entity_name: str, *, session_id: str
+        self, entity_id: int, *, session_id: str
     ) -> List[Dict]:
-        canonical = await self._resolve_entity_name(entity_name)
-        if not canonical:
-            return [{"error": f"Entity not found: '{entity_name}'"}]
+        if await self.entities.get_profile(entity_id) is None:
+            return [{"error": f"Entity not found: '{entity_id}'"}]
 
         results = await self.knowledge_store.get_related_entities(
-            [canonical],
-            active_topics=self.active_topics,
+            [entity_id],
             limit=50,
             visible_project_ids=self.readable_project_ids,
         )
-        if results:
-            for result in results:
-                refs = result.pop(
-                    "evidence_refs", result.pop("evidence_ids", [])
-                )
-                result["evidence"] = await self._hydrate_evidence(
-                    refs, session_id=session_id
-                )
-            return results
-
-        hidden_results = await self.knowledge_store.get_related_entities(
-            [canonical], active_topics=None, visible_project_ids=self.readable_project_ids
-        )
-        if hidden_results:
-            return [
-                {
-                    "hidden": True,
-                    "count": len(hidden_results),
-                    "message": (
-                        f"{len(hidden_results)} connection(s) exist through "
-                        "inactive topics"
-                    ),
-                }
-            ]
-        return []
+        return await self._hydrate_result_evidence(results, session_id=session_id)
 
     async def get_recent_activity(
-        self, entity_name: str, *, session_id: str, hours: int = 24
+        self, entity_id: int, *, session_id: str, hours: int = 24
     ) -> List[Dict]:
-        canonical = await self._resolve_entity_name(entity_name)
-        if not canonical:
-            return [{"error": f"Entity not found: '{entity_name}'"}]
+        if await self.entities.get_profile(entity_id) is None:
+            return [{"error": f"Entity not found: '{entity_id}'"}]
         hours = hours or self.search_cfg.get("default_activity_hours", 24)
         results = await self.knowledge_store.get_recent_activity(
-            canonical,
-            active_topics=self.active_topics,
+            entity_id,
             hours=hours,
             visible_project_ids=self.readable_project_ids,
         )
-        for result in results:
-            refs = result.pop("evidence_refs", result.pop("evidence_ids", []))
-            result["evidence"] = await self._hydrate_evidence(
-                refs, session_id=session_id
-            )
-        return results
+        return await self._hydrate_result_evidence(results, session_id=session_id)
 
     async def episode_check(
         self,
         query: str,
         *,
         session_id: str,
-        entity_name: Optional[str] = None,
+        entity_id: Optional[int] = None,
     ) -> Dict:
         """Retrieve episodes, then fall back to raw durable messages."""
-        entity_name = (entity_name or "").strip()
         query = query.strip()
         started_at = perf_counter()
-        entity_id = await self.entities.get_id(entity_name) if entity_name else None
 
         if entity_id is not None:
+            profile = await self.entities.get_profile(entity_id)
+            if profile is None:
+                return {"resolution": "exact", "results": []}
             episodes = await self.knowledge_store.get_project_episodes_for_entities(
                 [entity_id],
                 user_name=self.user_name,
                 project_id=self.project_id,
-                session_id=session_id,
-                limit=self._episode_retrieval_limit(),
+                limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
                 visible_project_ids=self.readable_project_ids,
             )
-            profile = await self.entities.get_profile(entity_id)
             metrics: Dict[str, int | float] = {}
-            serialized = await self._serialize_episodes(
-                episodes, session_id=session_id, metrics=metrics
-            )
+            serialized = await self._serialize_episodes(episodes, metrics=metrics)
             await self._emit_episode_retrieval(
                 session_id=session_id,
                 strategy="exact_entity",
                 started_at=started_at,
                 episode_count=len(episodes),
-                focus_episode_count=self._focus_episode_count(episodes, entity_id),
+                matched_entity_episode_count=self._matched_entity_episode_count(
+                    episodes, entity_id
+                ),
                 metrics=metrics,
             )
             return {
@@ -247,60 +197,14 @@ class KnowledgeRetrieval:
                 "results": [
                     {
                         "entity_name": (
-                            profile.canonical_name if profile else entity_name
+                            profile.canonical_name if profile else str(entity_id)
                         ),
+                        "entity_id": entity_id,
                         "similarity": 1.0,
                         "episodes": serialized,
                     }
                 ],
             }
-
-        if entity_name:
-            embedding = await self.embedding_service.encode_single(entity_name)
-            candidates = await self.knowledge_store.search_entities_by_embedding(
-                embedding,
-                limit=5,
-                score_threshold=0.69,
-                visible_project_ids=self.readable_project_ids,
-            )
-            if candidates:
-                metrics: Dict[str, int | float] = {}
-                results = []
-                episode_count = 0
-                focus_episode_count = 0
-                for entity_id, similarity in candidates:
-                    profile = await self.entities.get_profile(entity_id)
-                    episodes = await self.knowledge_store.get_project_episodes_for_entities(
-                        [entity_id],
-                        user_name=self.user_name,
-                        project_id=self.project_id,
-                        limit=self._episode_retrieval_limit(),
-                        visible_project_ids=self.readable_project_ids,
-                    )
-                    episode_count += len(episodes)
-                    focus_episode_count += self._focus_episode_count(
-                        episodes, entity_id
-                    )
-                    results.append(
-                        {
-                            "entity_name": (
-                                profile.canonical_name if profile else str(entity_id)
-                            ),
-                            "similarity": similarity,
-                            "episodes": await self._serialize_episodes(
-                                episodes, session_id=session_id, metrics=metrics
-                            ),
-                        }
-                    )
-                await self._emit_episode_retrieval(
-                    session_id=session_id,
-                    strategy="vector_entity",
-                    started_at=started_at,
-                    episode_count=episode_count,
-                    focus_episode_count=focus_episode_count,
-                    metrics=metrics,
-                )
-                return {"resolution": "vector", "results": results}
 
         if self.embedding_service is not None:
             embedding = await self.embedding_service.encode_single(query)
@@ -308,7 +212,7 @@ class KnowledgeRetrieval:
                 embedding,
                 user_name=self.user_name,
                 project_id=self.project_id,
-                limit=self._episode_retrieval_limit(),
+                limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
                 visible_project_ids=self.readable_project_ids,
             )
             if semantic_matches:
@@ -316,7 +220,6 @@ class KnowledgeRetrieval:
                 metrics: Dict[str, int | float] = {}
                 serialized = await self._serialize_episodes(
                     episodes,
-                    session_id=session_id,
                     similarity_by_episode={
                         episode.episode_id: similarity
                         for episode, similarity in zip(episodes, similarities)
@@ -328,7 +231,7 @@ class KnowledgeRetrieval:
                     strategy="semantic",
                     started_at=started_at,
                     episode_count=len(episodes),
-                    focus_episode_count=0,
+                    matched_entity_episode_count=0,
                     metrics=metrics,
                 )
                 return {
@@ -340,20 +243,18 @@ class KnowledgeRetrieval:
             query,
             user_name=self.user_name,
             project_id=self.project_id,
-            limit=self._episode_retrieval_limit(),
+            limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
             visible_project_ids=self.readable_project_ids,
         )
         if episodes:
             metrics: Dict[str, int | float] = {}
-            serialized = await self._serialize_episodes(
-                episodes, session_id=session_id, metrics=metrics
-            )
+            serialized = await self._serialize_episodes(episodes, metrics=metrics)
             await self._emit_episode_retrieval(
                 session_id=session_id,
                 strategy="lexical",
                 started_at=started_at,
                 episode_count=len(episodes),
-                focus_episode_count=0,
+                matched_entity_episode_count=0,
                 metrics=metrics,
             )
             return {
@@ -367,7 +268,7 @@ class KnowledgeRetrieval:
             strategy="raw_message_fallback",
             started_at=started_at,
             episode_count=0,
-            focus_episode_count=0,
+            matched_entity_episode_count=0,
             metrics={"used_raw_message_fallback": 1},
         )
         return {"resolution": "fallback", "results": fallback}
@@ -407,7 +308,7 @@ class KnowledgeRetrieval:
     async def read_recent_episodes(self, *, session_id: str, limit: int = 2) -> Dict:
         if limit <= 0:
             raise ValueError("read_recent_episodes limit must be positive")
-        effective_limit = min(limit, self._episode_retrieval_limit())
+        effective_limit = min(limit, DEFAULT_EPISODE_RETRIEVAL_LIMIT)
         started_at = perf_counter()
         episodes = await self.knowledge_store.get_recent_project_episodes(
             user_name=self.user_name,
@@ -416,107 +317,54 @@ class KnowledgeRetrieval:
             visible_project_ids=self.readable_project_ids,
         )
         metrics: Dict[str, int | float] = {}
-        serialized = await self._serialize_episodes(
-            episodes, session_id=session_id, metrics=metrics
-        )
+        serialized = await self._serialize_episodes(episodes, metrics=metrics)
         await self._emit_episode_retrieval(
             session_id=session_id,
             strategy="recent",
             started_at=started_at,
             episode_count=len(episodes),
-            focus_episode_count=0,
+            matched_entity_episode_count=0,
             metrics=metrics,
         )
         return {
             "resolution": "recent",
             "results": [
                 {
-                    "query": f"{effective_limit} most recently updated episodes",
+                    "query": f"{effective_limit} most recent episodes by source chronology",
                     "episodes": serialized,
                 }
             ],
         }
 
     async def find_path(
-        self, entity_a: str, entity_b: str, *, session_id: str
+        self, entity_a_id: int, entity_b_id: int, *, session_id: str
     ) -> List[Dict]:
-        canonical_a = await self._resolve_entity_name(entity_a)
-        canonical_b = await self._resolve_entity_name(entity_b)
-        if not canonical_a and not canonical_b:
-            return [{"error": f"Neither entity found: '{entity_a}' and '{entity_b}'"}]
-        if not canonical_a:
-            return [{"error": f"Entity not found: '{entity_a}'"}]
-        if not canonical_b:
-            return [{"error": f"Entity not found: '{entity_b}'"}]
+        entity_a = await self.entities.get_profile(entity_a_id)
+        entity_b = await self.entities.get_profile(entity_b_id)
+        if entity_a is None and entity_b is None:
+            return [{"error": f"Neither entity found: '{entity_a_id}' and '{entity_b_id}'"}]
+        if entity_a is None:
+            return [{"error": f"Entity not found: '{entity_a_id}'"}]
+        if entity_b is None:
+            return [{"error": f"Entity not found: '{entity_b_id}'"}]
 
-        path, has_inactive_shortcut = await self.knowledge_store.find_path_filtered(
-            canonical_a,
-            canonical_b,
-            active_topics=self.active_topics,
+        path = await self.knowledge_store.find_path(
+            entity_a_id,
+            entity_b_id,
             max_depth=4,
             visible_project_ids=self.readable_project_ids,
         )
-        if path:
-            for step in path:
-                step["evidence"] = await self._hydrate_evidence(
-                    step.pop("evidence_refs", []), session_id=session_id
-                )
-            if has_inactive_shortcut:
-                path.append({"note": "A shorter connection exists through inactive topics"})
-            return path
-
-        if not has_inactive_shortcut:
-            return []
-        full_path, _ = await self.knowledge_store.find_path_filtered(
-            canonical_a,
-            canonical_b,
-            active_topics=None,
-            max_depth=4,
-            visible_project_ids=self.readable_project_ids,
-        )
-        safe_path = []
-        for step in full_path:
-            topic_a, topic_b = step.get("topic_a", "General"), step.get("topic_b", "General")
-            both_active = (
-                self.active_topics is not None
-                and topic_a in self.active_topics
-                and topic_b in self.active_topics
-            )
-            if both_active:
-                step["evidence"] = await self._hydrate_evidence(
-                    step.pop("evidence_refs", []), session_id=session_id
-                )
-                safe_path.append(step)
-                continue
-            inactive = (
-                [topic for topic in (topic_a, topic_b) if topic not in self.active_topics]
-                if self.active_topics is not None
-                else [topic_a, topic_b]
-            )
-            safe_path.append(
-                {
-                    "step": step.get("step"),
-                    "entity_a": step.get("entity_a"),
-                    "entity_b": step.get("entity_b"),
-                    "topic_a": topic_a,
-                    "topic_b": topic_b,
-                    "status": "LOCKED",
-                    "locked_reason": f"Inactive topic(s): {', '.join(inactive)}",
-                    "evidence": [],
-                }
-            )
-        return safe_path
+        return await self._hydrate_result_evidence(path, session_id=session_id)
 
     async def get_hot_topic_context(
-        self, hot_topics: List[str], *, session_id: str, slim: bool = False
+        self, hot_topics: List[str], *, session_id: str
     ) -> Dict[str, Dict]:
         if not hot_topics:
             return {}
         raw = await self.knowledge_store.get_hot_topic_context_with_messages(
             hot_topics,
-            msg_limit=10,
-            slim=slim,
-            visible_project_ids=self.readable_project_ids,
+            msg_limit=5,
+            project_id=self.project_id,
         )
         for data in raw.values():
             refs = data.get("message_refs", data.get("message_ids", []))
@@ -527,15 +375,12 @@ class KnowledgeRetrieval:
             data.pop("message_ids", None)
         return raw
 
-    async def _resolve_entity_name(self, entity: str) -> Optional[str]:
-        return await self.entities.resolve_entity_name(entity)
-
     async def _search_messages(
         self, query: str, *, session_id: str, k: int
     ) -> List[Tuple[str, float, Optional[str]]]:
         fts_limit = self.search_cfg.get("fts_limit", 50)
         rerank_candidates = self.search_cfg.get("rerank_candidates", 25)
-        visible_sessions = await self._get_visible_session_ids(session_id)
+        visible_sessions = await self._get_visible_session_ids()
         fts_results = await self.knowledge_store.search_messages_fts(
             query,
             user_name=self.user_name,
@@ -613,8 +458,13 @@ class KnowledgeRetrieval:
             return []
 
         grouped: Dict[tuple[str, str], List[Dict]] = {}
+        requested_indexes: Dict[tuple[str, str, int], List[int]] = {}
         for item in normalized:
             grouped.setdefault((item["user_name"], item["session_id"]), []).append(item)
+            requested_indexes.setdefault(
+                (item["user_name"], item["session_id"], item["message_id"]),
+                [],
+            ).append(item["idx"])
 
         results_by_idx: Dict[int, Dict] = {}
         for (user_name, reference_session_id), items in grouped.items():
@@ -631,35 +481,56 @@ class KnowledgeRetrieval:
                     if isinstance(timestamp, (int, float))
                     else ""
                 )
-                for item in items:
-                    if (
-                        item["idx"] not in results_by_idx
-                        and item["user_name"] == user_name
-                        and item["session_id"] == reference_session_id
-                        and item["message_id"] == message["id"]
-                    ):
-                        results_by_idx[item["idx"]] = {
-                            "id": f"msg_{message['id']}",
-                            "user_name": message.get("user_name"),
-                            "session_id": message.get("session_id"),
-                            "message": message["content"],
-                            "timestamp": rendered_timestamp,
-                        }
+                key = (
+                    str(message.get("user_name") or user_name),
+                    str(message.get("session_id") or reference_session_id),
+                    int(message["id"]),
+                )
+                hydrated = {
+                    "id": f"msg_{message['id']}",
+                    "user_name": message.get("user_name"),
+                    "session_id": message.get("session_id"),
+                    "message": message["content"],
+                    "timestamp": rendered_timestamp,
+                }
+                if message.get("role") is not None:
+                    hydrated["role"] = message["role"]
+                for index in requested_indexes.get(key, ()):
+                    results_by_idx[index] = dict(hydrated)
         return [results_by_idx[index] for index in sorted(results_by_idx)]
 
-    async def _get_visible_session_ids(self, session_id: str) -> List[str]:
-        visible = {session_id}
+    async def _hydrate_result_evidence(
+        self,
+        results: List[Dict],
+        *,
+        session_id: str,
+    ) -> List[Dict]:
+        """Replace stored evidence references with scoped durable messages."""
+
+        for result in results:
+            refs = result.pop("evidence_refs", None)
+            if refs is None:
+                refs = result.pop("evidence_ids", [])
+            else:
+                result.pop("evidence_ids", None)
+            result["evidence"] = await self._hydrate_evidence(
+                refs,
+                session_id=session_id,
+            )
+        return results
+
+    async def _get_visible_session_ids(self) -> List[str]:
         rows = await self.postgres.fetch_all(
             """
             SELECT session_id
             FROM public.sessions
             WHERE user_name = %s
               AND project_id = ANY(%s)
+              AND status = 'open'
             """,
             (self.user_name, self.readable_project_ids),
         )
-        visible.update(str(row["session_id"]) for row in rows)
-        return sorted(visible)
+        return sorted({str(row["session_id"]) for row in rows})
 
     async def _get_surrounding_context(
         self,
@@ -682,6 +553,7 @@ class KnowledgeRetrieval:
             visible_project_ids=self.readable_project_ids,
             forward=forward,
             target_total=target_total,
+            discoverable_only=True,
         )
         return [
             {
@@ -724,41 +596,15 @@ class KnowledgeRetrieval:
         self,
         episodes,
         *,
-        session_id: str,
         similarity_by_episode: Optional[Dict[str, float]] = None,
         metrics: Optional[Dict[str, int | float]] = None,
     ) -> List[Dict]:
         serialized = []
-        expansion_latency_ms = 0.0
-        expanded_count = 0
-        returned_count = 0
         for episode in episodes or []:
-            started_at = perf_counter()
-            sources = await self.knowledge_store.get_project_episode_source_messages(
+            sources_consulted = await self.knowledge_store.get_project_episode_source_refs(
                 episode.episode_id,
                 user_name=self.user_name,
-                project_id=self.project_id,
-                visible_project_ids=self.readable_project_ids,
-            )
-            expansion_latency_ms += (perf_counter() - started_at) * 1000
-            expanded_count += len(sources)
-            evidence = sorted(
-                (self._as_message_evidence(source) for source in sources),
-                key=lambda source: float(source.get("influence_weight", 0.0)),
-                reverse=True,
-            )
-            returned_count += len(evidence)
-            source_reader = getattr(
-                self.knowledge_store, "get_project_episode_source_refs", None
-            )
-            sources_consulted = (
-                await source_reader(
-                    episode.episode_id,
-                    user_name=self.user_name,
-                    project_id=episode.project_id,
-                )
-                if callable(source_reader)
-                else []
+                project_id=episode.project_id,
             )
             item = {
                 "episode_id": episode.episode_id,
@@ -766,7 +612,6 @@ class KnowledgeRetrieval:
                 "new_developments": episode.new_developments,
                 "updates": episode.updates,
                 "unresolved": episode.unresolved,
-                "importance": episode.importance,
                 "source_message_count": episode.source_message_count,
                 "first_message_at": (
                     episode.first_message_at.isoformat() if episode.first_message_at else None
@@ -777,9 +622,6 @@ class KnowledgeRetrieval:
                 "entities": [
                     {
                         "entity_id": entity.entity_id,
-                        "prominence_weight": entity.prominence_weight,
-                        "role": entity.role,
-                        "is_focus_entity": entity.is_focus_entity,
                         "source_message_count": entity.source_message_count,
                         "first_seen_at": entity.first_seen_at.isoformat() if entity.first_seen_at else None,
                         "last_seen_at": entity.last_seen_at.isoformat() if entity.last_seen_at else None,
@@ -789,16 +631,13 @@ class KnowledgeRetrieval:
                 "relationships": [
                     {
                         "relationship_id": relationship.relationship_id,
-                        "prominence_weight": relationship.prominence_weight,
-                        "is_central_relationship": relationship.is_central_relationship,
                         "source_message_count": relationship.source_message_count,
                     }
                     for relationship in episode.relationships
                 ],
-                "version_history": [
-                    version.model_dump(mode="json") for version in episode.version_history
-                ],
-                "evidence": evidence,
+                # Source messages are intentionally omitted from discovery;
+                # read_episode is the explicit hydration follow-up.
+                "evidence": [],
                 "sources_consulted": [
                     source.model_dump(mode="json") if hasattr(source, "model_dump") else source
                     for source in sources_consulted
@@ -808,17 +647,9 @@ class KnowledgeRetrieval:
                 item["similarity"] = similarity_by_episode[episode.episode_id]
             serialized.append(item)
         if metrics is not None:
-            metrics["source_message_expansion_latency_ms"] = round(
-                float(metrics.get("source_message_expansion_latency_ms", 0))
-                + expansion_latency_ms,
-                3,
-            )
-            metrics["expanded_source_message_count"] = int(
-                metrics.get("expanded_source_message_count", 0)
-            ) + expanded_count
-            metrics["returned_evidence_count"] = int(
-                metrics.get("returned_evidence_count", 0)
-            ) + returned_count
+            metrics["source_message_expansion_skipped_count"] = int(
+                metrics.get("source_message_expansion_skipped_count", 0)
+            ) + len(serialized)
         return serialized
 
     async def _emit_episode_retrieval(
@@ -828,7 +659,7 @@ class KnowledgeRetrieval:
         strategy: str,
         started_at: float,
         episode_count: int,
-        focus_episode_count: int,
+        matched_entity_episode_count: int,
         metrics: Dict[str, int | float],
     ) -> None:
         await emit(
@@ -840,8 +671,8 @@ class KnowledgeRetrieval:
                 "session_id": session_id,
                 "strategy": strategy,
                 "episode_count": episode_count,
-                "focus_episode_count": focus_episode_count,
-                "focus_entity_retrieval": strategy in {"exact_entity", "vector_entity"},
+                "matched_entity_episode_count": matched_entity_episode_count,
+                "entity_retrieval": strategy in {"exact_entity", "vector_entity"},
                 "retrieval_latency_ms": round((perf_counter() - started_at) * 1000, 3),
                 **metrics,
             },
@@ -861,12 +692,9 @@ class KnowledgeRetrieval:
         return int(raw_id)
 
     @staticmethod
-    def _focus_episode_count(episodes, entity_id: int) -> int:
+    def _matched_entity_episode_count(episodes, entity_id: int) -> int:
         return sum(
-            any(
-                entity.entity_id == entity_id and entity.is_focus_entity
-                for entity in episode.entities
-            )
+            any(entity.entity_id == entity_id for entity in episode.entities)
             for episode in episodes
         )
 
@@ -879,14 +707,12 @@ class KnowledgeRetrieval:
             "content": source.get("content", ""),
             "role": source.get("role", "assistant"),
             "timestamp_ms": source.get("timestamp_ms"),
-            "influence_weight": source.get("influence_weight", 0.0),
-            "influence_reason": source.get("influence_reason"),
             "attached_at": (
                 source["attached_at"].isoformat()
                 if source.get("attached_at") and hasattr(source["attached_at"], "isoformat")
                 else source.get("attached_at")
             ),
-            "score": source.get("influence_weight", 0.0),
+            "score": 1.0,
             "context": [
                 {
                     "role": source.get("role", "assistant"),
@@ -896,7 +722,3 @@ class KnowledgeRetrieval:
                 }
             ],
         }
-
-    @staticmethod
-    def _episode_retrieval_limit() -> int:
-        return DEFAULT_EPISODE_RETRIEVAL_LIMIT

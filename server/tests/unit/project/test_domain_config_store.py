@@ -62,9 +62,12 @@ async def test_domain_config_store_activation_assigns_next_revision_transactiona
     assert activation.previous_version == 4
     assert activation.config.version == 5
     assert activation.compiled.version == 5
-    update_call = postgres.calls[-1]
+    update_call = next(
+        call
+        for call in postgres.calls
+        if call[0] == "execute" and "domain_config =" in call[1]
+    )
     assert update_call[0] == "execute"
-    assert "domain_config =" in update_call[1]
     assert json.loads(update_call[2]["config"])["version"] == 5
     assert postgres.transaction_enters == 1
     assert postgres.transaction_exits == 1
@@ -129,25 +132,12 @@ async def test_project_state_load_and_activation_replace_runtime_snapshot():
                 previous_version=2,
             )
 
-    class Receiver:
-        def __init__(self):
-            self.snapshots = []
-
-        def set_compiled_domain(self, snapshot):
-            self.snapshots.append(snapshot)
-
     state = make_project_state()
-    pipeline_receiver = Receiver()
-    batch_receiver = Receiver()
-    state.pipeline = pipeline_receiver
-    state.batch_processor = batch_receiver
     state.domain_config_store = Store()
 
     await state.load_domain_config()
     captured_before = await state.capture_domain()
     assert captured_before.version == 2
-    assert pipeline_receiver.snapshots == [captured_before]
-    assert batch_receiver.snapshots == [captured_before]
 
     result = await state.activate_domain_config(
         make_domain(),
@@ -157,5 +147,3 @@ async def test_project_state_load_and_activation_replace_runtime_snapshot():
     assert result.config.version == 3
     assert state.domain_config.version == 3
     assert (await state.capture_domain()).version == 3
-    assert pipeline_receiver.snapshots[-1].version == 3
-    assert batch_receiver.snapshots[-1].version == 3

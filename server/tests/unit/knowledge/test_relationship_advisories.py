@@ -9,7 +9,7 @@ from core.knowledge.relationship_advisories import (
 
 
 def unknown_observation(
-    message_id,
+    observation_id,
     source_entity_id,
     target_entity_id,
     *,
@@ -18,9 +18,11 @@ def unknown_observation(
     target_type="Technology",
     observed_at_ms=None,
     domain_status="unrecognized",
+    semantic_window_id=None,
 ):
     return {
-        "message_id": message_id,
+        "observation_id": observation_id,
+        "semantic_window_id": semantic_window_id or f"window-{observation_id}",
         "source_entity_id": source_entity_id,
         "target_entity_id": target_entity_id,
         "source_type": source_type,
@@ -57,7 +59,8 @@ def test_advisories_group_repeated_unknown_evidence_and_keep_provenance():
     assert advisory.distinct_source_entities == 2
     assert advisory.distinct_target_entities == 2
     assert advisory.distinct_entities == 4
-    assert advisory.message_ids == (10, 11, 12)
+    assert advisory.observation_ids == (10, 11, 12)
+    assert advisory.semantic_window_ids == ("window-10", "window-11", "window-12")
     assert advisory.first_observed_ms == 100
     assert advisory.last_observed_ms == 300
     assert advisory.to_dict()["disposition"] == "pending"
@@ -97,20 +100,43 @@ def test_advisory_thresholds_reject_non_positive_values():
         AdvisoryThresholds(min_occurrences=0)
     with pytest.raises(ValueError, match="min_distinct_entities"):
         AdvisoryThresholds(min_distinct_entities=0)
-    with pytest.raises(ValueError, match="min_distinct_messages"):
-        AdvisoryThresholds(min_distinct_messages=0)
+    with pytest.raises(ValueError, match="min_distinct_windows"):
+        AdvisoryThresholds(min_distinct_windows=0)
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_advisories_do_not_promote_repetition_within_one_message():
+def test_advisories_do_not_promote_repetition_within_one_semantic_window():
     rows = [
-        unknown_observation(1, 1, 2),
-        unknown_observation(1, 1, 3),
-        unknown_observation(1, 2, 3),
+        unknown_observation(1, 1, 2, semantic_window_id="window-1"),
+        unknown_observation(2, 1, 3, semantic_window_id="window-1"),
+        unknown_observation(3, 2, 3, semantic_window_id="window-1"),
     ]
 
     assert build_relationship_advisories(rows) == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_only_observations_do_not_create_advisory_but_mixed_groups_survive():
+    context_rows = [
+        {**unknown_observation(index, index, index + 10), "evidence_origin": "context"}
+        for index in range(1, 4)
+    ]
+    assert build_relationship_advisories(context_rows) == []
+
+    independent_rows = [
+        {
+            **unknown_observation(index, index, index + 20),
+            "evidence_origin": "independent",
+        }
+        for index in range(4, 7)
+    ]
+    advisories = build_relationship_advisories(context_rows + independent_rows)
+
+    assert len(advisories) == 1
+    assert advisories[0].occurrence_count == 6
+    assert advisories[0].observation_ids == (1, 2, 3, 4, 5, 6)
 
 
 @pytest.mark.unit

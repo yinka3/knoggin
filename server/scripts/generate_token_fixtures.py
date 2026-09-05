@@ -631,7 +631,7 @@ def format_vp01_input(
     else:
         lines.append("(none)")
 
-    lines.append("\n## GLiNER Extractions (can override if wrong)\n")
+    lines.append("\n## VP-01 Extractions (can override if wrong)\n")
     if gliner_ents:
         for msg_id, span, label in gliner_ents:
             lines.append(f'- MSG {msg_id}: "{span}" -> {label}')
@@ -648,7 +648,7 @@ def format_vp01_input(
     lines.append("\n## Discovery (Task 2: find missed entities)")
     lines.append(
         "Scan messages above for proper nouns not listed in Known Entities or "
-        "GLiNER extractions."
+        "VP-01 extractions."
     )
     lines.append("Include the MSG id where you found each entity.")
     lines.append("Only return msg_id values from the Valid msg_id list above.")

@@ -2,7 +2,7 @@
 
 from typing import Any, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from common.schema.episode.models import EpisodeNarrative
 from common.schema.llm import (
@@ -10,29 +10,6 @@ from common.schema.llm import (
     normalize_optional_text,
     normalize_required_text,
 )
-
-
-class EpisodeMessageInfluence(BaseModel):
-    """Resolved influence for one message in an eligible episode window."""
-
-    message_id: int = Field(..., gt=0)
-    influence_weight: float = Field(..., ge=0.0)
-    influence_reason: Optional[str] = None
-
-
-class EpisodeFocusEntitySelection(BaseModel):
-    """Resolved focus marker selected from a candidate window's entities."""
-
-    entity_id: int = Field(..., gt=0)
-    prominence_weight: float = Field(..., ge=0.0)
-    role: Optional[str] = None
-
-
-class EpisodeCentralRelationshipSelection(BaseModel):
-    """Resolved central relationship selected from a candidate window."""
-
-    relationship_id: str = Field(..., min_length=1)
-    prominence_weight: float = Field(..., ge=0.0)
 
 
 def validate_episode_decision_shape(decision: Any) -> None:
@@ -47,10 +24,7 @@ def validate_episode_decision_shape(decision: Any) -> None:
             or decision.new_developments
             or decision.updates
             or decision.unresolved
-            or decision.importance
             or decision.message_influences
-            or decision.focus_entities
-            or decision.central_relationships
         ):
             raise ValueError("skip decisions must not include episode content")
         return
@@ -72,11 +46,7 @@ class EpisodeDecision(EpisodeNarrative):
 
     action: Literal["create", "consolidate", "skip"]
     target_episode_id: Optional[str] = Field(None, min_length=1)
-    message_influences: List[EpisodeMessageInfluence] = Field(default_factory=list)
-    focus_entities: List[EpisodeFocusEntitySelection] = Field(default_factory=list)
-    central_relationships: List[EpisodeCentralRelationshipSelection] = Field(
-        default_factory=list
-    )
+    message_influences: List[int] = Field(default_factory=list)
     skip_reason: Optional[str] = Field(None, min_length=1)
 
     @model_validator(mode="after")
@@ -89,34 +59,7 @@ class EpisodeConsolidation(EpisodeNarrative):
     """Resolved internal regeneration for one selected episode."""
 
     summary: str = Field(..., min_length=1)
-    message_influences: List[EpisodeMessageInfluence] = Field(..., min_length=1)
-    focus_entities: List[EpisodeFocusEntitySelection] = Field(default_factory=list)
-    central_relationships: List[EpisodeCentralRelationshipSelection] = Field(
-        default_factory=list
-    )
-
-
-class LLMEpisodeMessageInfluence(StructuredLLMOutput):
-    """One model-selected influence with a local message reference."""
-
-    message_id: str = Field(..., pattern=r"^m[1-9]\d*$")
-    influence_weight: float = Field(..., ge=0.0)
-    influence_reason: Optional[str] = None
-
-
-class LLMEpisodeFocusEntitySelection(StructuredLLMOutput):
-    """One model-selected focus entity with a local entity reference."""
-
-    entity_id: str = Field(..., pattern=r"^e[1-9]\d*$")
-    prominence_weight: float = Field(..., ge=0.0)
-    role: Optional[str] = None
-
-
-class LLMEpisodeCentralRelationshipSelection(StructuredLLMOutput):
-    """One model-selected relationship with a local relationship reference."""
-
-    relationship_id: str = Field(..., pattern=r"^r[1-9]\d*$")
-    prominence_weight: float = Field(..., ge=0.0)
+    message_influences: List[int] = Field(..., min_length=1)
 
 
 class LLMEpisodeDecision(EpisodeNarrative):
@@ -125,12 +68,8 @@ class LLMEpisodeDecision(EpisodeNarrative):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["create", "consolidate", "skip"]
-    target_episode_id: Optional[str] = Field(None, pattern=r"^ep[1-9]\d*$")
-    message_influences: List[LLMEpisodeMessageInfluence] = Field(default_factory=list)
-    focus_entities: List[LLMEpisodeFocusEntitySelection] = Field(default_factory=list)
-    central_relationships: List[LLMEpisodeCentralRelationshipSelection] = Field(
-        default_factory=list
-    )
+    target_episode_id: Optional[str] = Field(None, pattern=r"^episode:[1-9]\d*$")
+    message_influences: List[str] = Field(default_factory=list)
     skip_reason: Optional[str] = Field(None, min_length=1)
 
     @model_validator(mode="after")
@@ -142,6 +81,19 @@ class LLMEpisodeDecision(EpisodeNarrative):
     @classmethod
     def validate_optional_text(cls, value: Optional[str], info) -> Optional[str]:
         return normalize_optional_text(value, field_name=info.field_name)
+
+    @field_validator("message_influences")
+    @classmethod
+    def validate_message_references(cls, values: List[str]) -> List[str]:
+        if any(
+            not isinstance(value, str)
+            or not value.startswith("message:")
+            or not value.removeprefix("message:").isdigit()
+            or value == "message:0"
+            for value in values
+        ):
+            raise ValueError("message_influences must contain message:N references")
+        return values
 
     @field_validator("new_developments", "updates", "unresolved")
     @classmethod
@@ -172,7 +124,7 @@ class LLMEpisodeWindowDecision(StructuredLLMOutput):
             if proposal.action == "skip":
                 raise ValueError("episode window proposals cannot use skip")
             proposal_sources = {
-                influence.message_id for influence in proposal.message_influences
+                influence for influence in proposal.message_influences
             }
             if source_ids.intersection(proposal_sources):
                 raise ValueError("episode proposals cannot share source messages")
@@ -186,21 +138,18 @@ class LLMEpisodeWindowDecision(StructuredLLMOutput):
 
 
 class LLMEpisodeConsolidation(EpisodeNarrative):
-    """Model-facing episode regeneration output with local references."""
+    """Model-facing full-evidence consolidation decision."""
 
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(..., min_length=1)
-    message_influences: List[LLMEpisodeMessageInfluence] = Field(..., min_length=1)
-    focus_entities: List[LLMEpisodeFocusEntitySelection] = Field(default_factory=list)
-    central_relationships: List[LLMEpisodeCentralRelationshipSelection] = Field(
-        default_factory=list
-    )
+    action: Literal["consolidate", "keep_separate"]
+    summary: Optional[str] = Field(None, min_length=1)
+    message_influences: List[str] = Field(default_factory=list)
 
     @field_validator("summary")
     @classmethod
-    def validate_summary(cls, value: str) -> str:
-        return normalize_required_text(value, field_name="summary")
+    def validate_summary(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_optional_text(value, field_name="summary")
 
     @field_validator("new_developments", "updates", "unresolved")
     @classmethod
@@ -209,3 +158,36 @@ class LLMEpisodeConsolidation(EpisodeNarrative):
             normalize_required_text(value, field_name=info.field_name)
             for value in values
         ]
+
+    @field_validator("message_influences")
+    @classmethod
+    def validate_message_references(cls, values: List[str]) -> List[str]:
+        if any(
+            not isinstance(value, str)
+            or not value.startswith("message:")
+            or not value.removeprefix("message:").isdigit()
+            or value == "message:0"
+            for value in values
+        ):
+            raise ValueError("message_influences must contain message:N references")
+        if len(values) != len(set(values)):
+            raise ValueError("message_influences must not contain duplicates")
+        return values
+
+    @model_validator(mode="after")
+    def validate_action_shape(self) -> "LLMEpisodeConsolidation":
+        has_narrative = bool(
+            self.summary
+            or self.new_developments
+            or self.updates
+            or self.unresolved
+        )
+        if self.action == "consolidate":
+            if not self.summary or not self.message_influences:
+                raise ValueError(
+                    "consolidate results require narrative and message references"
+                )
+            return self
+        if has_narrative or self.message_influences:
+            raise ValueError("keep_separate results must not include episode content")
+        return self

@@ -25,3 +25,10 @@ def get_episode_narrative_repair_prompt(
         user_name=user_name,
         max_narrative_chars=max_narrative_chars,
     )
+
+
+def get_episode_consolidation_prompt(user_name: str) -> str:
+    return load_named_prompt(
+        "consolidate_episode",
+        user_name=user_name,
+    )

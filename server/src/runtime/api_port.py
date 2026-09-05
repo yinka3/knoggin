@@ -15,23 +15,30 @@ from uuid import uuid4
 
 from common.conf.domain_config import DomainConfig
 from common.exceptions import NotFoundError
+from common.schema.document import DocumentSelection, create_document_focus
 from common.schema.primitives import Message
 from common.schema.public import (
     ArtifactListResponse,
     ArtifactResponse,
     CreateProjectRequest,
     CreateSessionRequest,
-    MessageAcceptance,
+    DocumentFocusResponse,
+    EntityMergeRollbackRequest,
+    MaintenanceReviewDecisionRequest,
+    MaintenanceReviewDetailResponse,
+    MaintenanceReviewPreviewResponse,
+    MaintenanceReviewResponse,
     MessageDeltaEvent,
     ProjectResponse,
+    PromoteSourceRequest,
     PublicError,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
     RunStartedEvent,
+    SetDocumentFocusRequest,
     SourceAddedEvent,
     StartRunRequest,
-    SubmitMessageRequest,
     ToolCompletedEvent,
     ToolStartedEvent,
     Usage,
@@ -91,7 +98,6 @@ class ApplicationRuntimePort:
         project = await self.runtime.projects.create_project(
             name=request.name,
             description=request.description,
-            access_mode=request.access_mode,
             domain_config=self.default_domain_config,
         )
         return ProjectResponse.model_validate(
@@ -131,28 +137,268 @@ class ApplicationRuntimePort:
             raise NotFoundError("session")
         return session
 
-    async def submit_message(
+    async def get_document_focus(
         self,
         *,
         user_name: str,
         session_id: str,
-        request: SubmitMessageRequest,
-    ) -> MessageAcceptance:
-        session = await self._session(user_name=user_name, session_id=session_id)
-        message, created = await session.accept_message(
-            Message(
-                content=request.content,
-                metadata=(
-                    {"idempotency_key": request.idempotency_key}
-                    if request.idempotency_key
-                    else {}
+    ) -> DocumentFocusResponse | None:
+        self._require_user(user_name)
+        try:
+            focus = await self.runtime.sessions.get_document_focus(session_id)
+        except FileNotFoundError as exc:
+            raise NotFoundError("session") from exc
+        return None if focus is None else DocumentFocusResponse.model_validate(focus)
+
+    async def set_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+        request: SetDocumentFocusRequest,
+    ) -> DocumentFocusResponse:
+        self._require_user(user_name)
+        target = request.model_dump()
+        try:
+            focus = await self.runtime.sessions.set_document_focus(
+                session_id,
+                document_id=(
+                    target["document_id"]
+                    if target["target_type"] == "document"
+                    else None
                 ),
+                path_prefix=(
+                    target["path_prefix"]
+                    if target["target_type"] == "subtree"
+                    else None
+                ),
+                behavior=target.get("behavior", "prefer"),
             )
+        except FileNotFoundError as exc:
+            raise NotFoundError("session") from exc
+        return DocumentFocusResponse.model_validate(focus)
+
+    async def clear_document_focus(
+        self,
+        *,
+        user_name: str,
+        session_id: str,
+    ) -> None:
+        self._require_user(user_name)
+        try:
+            await self.runtime.sessions.clear_document_focus(session_id)
+        except FileNotFoundError as exc:
+            raise NotFoundError("session") from exc
+
+    async def promote_source(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        request: PromoteSourceRequest,
+    ) -> dict:
+        """Promote a cited assistant source only after an explicit user action."""
+        session = await self._session(
+            user_name=user_name,
+            session_id=request.session_id,
         )
-        return MessageAcceptance(
-            message_id=message.id,
-            accepted=True,
-            idempotent=not created,
+        if session.project_id != project_id:
+            raise PermissionError("Source promotion must target the session project")
+        source = await self.runtime.resources.knowledge_store.get_source_reference(
+            request.source_ref_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=request.session_id,
+        )
+        if source is None:
+            raise NotFoundError("source")
+        if session.document_service is None:
+            raise RuntimeError("Session document service is unavailable")
+        return await session.document_service.promote_source(
+            source,
+            title=request.title,
+            summary=request.summary,
+        )
+
+    @staticmethod
+    def _maintenance_review_response(review: Any) -> MaintenanceReviewResponse:
+        return MaintenanceReviewResponse.model_validate(
+            {
+                "review_id": review.review_id,
+                "scope": review.scope,
+                "project_id": review.project_id,
+                "kind": review.kind,
+                "reasoning": review.reasoning,
+                "proposed_plan": review.proposed_plan.model_dump(mode="json"),
+                "expected_state": review.expected_state,
+                "status": review.status,
+                "created_at": review.created_at,
+                "resolved_at": review.resolved_at,
+            }
+        )
+
+    async def list_global_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+    ) -> list[MaintenanceReviewResponse]:
+        self._require_user(user_name)
+        reviews = await self.runtime.projects.list_global_maintenance_reviews()
+        return [self._maintenance_review_response(review) for review in reviews]
+
+    async def decide_global_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> dict:
+        self._require_user(user_name)
+        if request.action == "apply":
+            return await self.runtime.projects.apply_global_entity_merge_review(
+                review_id,
+                expected_state=request.expected_state,
+            )
+        review = await self.runtime.projects.dismiss_global_maintenance_review(
+            review_id,
+            expected_state=request.expected_state,
+            reason=request.reason,
+        )
+        return {"review": self._maintenance_review_response(review).model_dump(mode="json")}
+
+    async def list_project_maintenance_reviews(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[MaintenanceReviewResponse]:
+        self._require_user(user_name)
+        reviews = await self.runtime.projects.maintenance_service.list_maintenance_reviews(
+            project_id
+        )
+        return [self._maintenance_review_response(review) for review in reviews]
+
+    async def get_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+    ) -> MaintenanceReviewDetailResponse:
+        self._require_user(user_name)
+        detail = await self.runtime.projects.maintenance_service.get_maintenance_review_detail(
+            project_id, review_id
+        )
+        return MaintenanceReviewDetailResponse(
+            review=self._maintenance_review_response(detail.review),
+            stored_snapshot=detail.stored_snapshot,
+            current_evidence=detail.current_evidence,
+            unavailable_pointers=detail.unavailable_pointers,
+            evidence_state=detail.evidence_state,
+        )
+
+    async def preview_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+    ) -> MaintenanceReviewPreviewResponse:
+        self._require_user(user_name)
+        detail, impact = await self.runtime.projects.maintenance_service.preview_maintenance_review(
+            project_id, review_id
+        )
+        return MaintenanceReviewPreviewResponse(
+            detail=MaintenanceReviewDetailResponse(
+                review=self._maintenance_review_response(detail.review),
+                stored_snapshot=detail.stored_snapshot,
+                current_evidence=detail.current_evidence,
+                unavailable_pointers=detail.unavailable_pointers,
+                evidence_state=detail.evidence_state,
+            ),
+            impact=impact,
+        )
+
+    async def decide_project_maintenance_review(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        review_id: str,
+        request: MaintenanceReviewDecisionRequest,
+    ) -> dict:
+        self._require_user(user_name)
+        review = await self.runtime.projects.maintenance_service.transition_maintenance_review(
+            project_id,
+            review_id,
+            status="applied" if request.action == "apply" else "dismissed",
+            expected_state=request.expected_state,
+            reason=request.reason,
+        )
+        return {"review": self._maintenance_review_response(review).model_dump(mode="json")}
+
+    async def preview_entity_merge_rollback(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+    ) -> dict:
+        self._require_user(user_name)
+        return await self.runtime.projects.preview_global_entity_merge_rollback(merge_id)
+
+    async def rollback_entity_merge(
+        self,
+        *,
+        user_name: str,
+        merge_id: str,
+        request: EntityMergeRollbackRequest,
+    ) -> dict:
+        self._require_user(user_name)
+        return await self.runtime.projects.rollback_global_entity_merge(
+            merge_id,
+            approved_mutation_ids=request.approved_mutation_ids,
+        )
+
+    async def _request_document_focus(
+        self,
+        *,
+        session: Any,
+        request: StartRunRequest,
+    ):
+        """Resolve untrusted run focus into the internal server-owned model."""
+        requested = request.document_focus
+        if requested is None:
+            return None
+        document_service = getattr(session, "document_service", None)
+        if document_service is None:
+            raise RuntimeError("Session document service is unavailable")
+
+        target = await document_service.resolve_focus_target(
+            document_id=(
+                requested.document_id
+                if requested.target_type == "document"
+                else None
+            ),
+            path_prefix=(
+                requested.path_prefix
+                if requested.target_type == "subtree"
+                else None
+            ),
+        )
+        if requested.target_type == "document" and requested.selection is not None:
+            resolved = await document_service.resolve_document_selection(
+                document_id=requested.document_id,
+                selection=requested.selection,
+            )
+            target["selection"] = DocumentSelection(
+                content_hash=resolved["content_hash"],
+                locator=resolved["locator"],
+            )
+        return create_document_focus(
+            mode="request",
+            behavior=requested.behavior,
+            created_at=datetime.now(timezone.utc),
+            **target,
         )
 
     async def list_artifacts(
@@ -167,7 +413,6 @@ class ApplicationRuntimePort:
         artifacts = await self.runtime.resources.knowledge_store.list_project_artifacts(
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
             limit=limit,
         )
         return ArtifactListResponse(
@@ -187,7 +432,6 @@ class ApplicationRuntimePort:
             artifact_id,
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
         )
         return None if artifact is None else self._artifact_response(artifact)
 
@@ -206,7 +450,36 @@ class ApplicationRuntimePort:
             revision,
             user_name=user_name,
             project_id=project_id,
-            session_id=session_id,
+        )
+
+    async def open_run_stream(
+        self,
+        *,
+        user_name: str,
+        request: StartRunRequest,
+    ) -> AsyncIterator[object]:
+        """Admit the run before returning its public event stream."""
+
+        session = await self._session(
+            user_name=user_name,
+            session_id=request.session_id,
+        )
+        document_focus = await self._request_document_focus(
+            session=session,
+            request=request,
+        )
+        agent_stream = await session.open_agent_run_stream(
+            Message(content=request.query),
+            model=request.model,
+            agent_id=request.agent_id,
+            enabled_tools=request.enabled_tools,
+            document_focus=document_focus,
+            research_mode=request.research_mode,
+        )
+        return self._public_run_stream(
+            session=session,
+            request=request,
+            agent_stream=agent_stream,
         )
 
     async def run_stream(
@@ -215,10 +488,17 @@ class ApplicationRuntimePort:
         user_name: str,
         request: StartRunRequest,
     ) -> AsyncIterator[object]:
-        session = await self._session(
-            user_name=user_name,
-            session_id=request.session_id,
-        )
+        stream = await self.open_run_stream(user_name=user_name, request=request)
+        async for event in stream:
+            yield event
+
+    async def _public_run_stream(
+        self,
+        *,
+        session: Any,
+        request: StartRunRequest,
+        agent_stream: AsyncIterator[dict[str, Any]],
+    ) -> AsyncIterator[object]:
         run_id = str(uuid4())
         sequence = 0
 
@@ -236,13 +516,7 @@ class ApplicationRuntimePort:
         yield event(RunStartedEvent)
         response_seen = False
         terminal_seen = False
-        async for raw_event in session.run_agent_stream(
-            Message(content=request.query),
-            model=request.model,
-            agent_id=request.agent_id,
-            enabled_tools=request.enabled_tools,
-            research_mode=request.research_mode,
-        ):
+        async for raw_event in agent_stream:
             event_name = raw_event.get("event") if isinstance(raw_event, Mapping) else None
             data = raw_event.get("data", {}) if isinstance(raw_event, Mapping) else {}
             if event_name == "token":
@@ -324,10 +598,7 @@ class ApplicationRuntimePort:
         if not isinstance(message_id, int) or message_id <= 0:
             return []
         store = self.runtime.resources.knowledge_store
-        reader = getattr(store, "get_message_source_refs", None)
-        if not callable(reader):
-            return []
-        values = await reader(
+        values = await store.get_message_source_refs(
             message_id,
             user_name=session.user_name,
             project_id=session.project_id,
@@ -338,10 +609,7 @@ class ApplicationRuntimePort:
     async def _message_artifact(self, session: Any, message_id: Any):
         if not isinstance(message_id, int) or message_id <= 0:
             return None
-        reader = getattr(self.runtime.resources.knowledge_store, "get_message_artifact", None)
-        if not callable(reader):
-            return None
-        return await reader(
+        return await self.runtime.resources.knowledge_store.get_message_artifact(
             message_id,
             user_name=session.user_name,
             project_id=session.project_id,

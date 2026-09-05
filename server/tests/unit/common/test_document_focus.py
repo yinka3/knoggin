@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from common.schema.document import (
     DocumentFocusDocument,
+    DocumentSelection,
     create_document_focus,
     dump_document_focus,
     parse_document_focus,
@@ -23,11 +24,58 @@ def test_document_focus_uses_the_document_variant_with_only_its_selectors():
     assert isinstance(focus, DocumentFocusDocument)
     assert dump_document_focus(focus) == {
         "mode": "pinned",
+        "behavior": "prefer",
         "created_at": "2026-06-22T12:00:00+00:00",
         "target_type": "document",
         "document_id": "doc-1",
         "relative_path": "docs/notes.md",
     }
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_request_document_focus_can_include_a_version_bound_selection():
+    focus = create_document_focus(
+        mode="request",
+        created_at="2026-06-22T12:00:00+00:00",
+        target_type="document",
+        document_id="doc-1",
+        relative_path="docs/notes.py",
+        selection=DocumentSelection(
+            content_hash="a" * 64,
+            locator={
+                "kind": "code_lines",
+                "start_line": 4,
+                "end_line": 8,
+            },
+        ),
+    )
+
+    assert dump_document_focus(focus)["selection"] == {
+        "content_hash": "a" * 64,
+        "locator": {
+            "kind": "code_lines",
+            "start_line": 4,
+            "end_line": 8,
+        },
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_pinned_document_focus_rejects_a_selection():
+    with pytest.raises(ValidationError, match="only valid for request focus"):
+        create_document_focus(
+            mode="pinned",
+            created_at="2026-06-22T12:00:00+00:00",
+            target_type="document",
+            document_id="doc-1",
+            relative_path="docs/notes.py",
+            selection={
+                "content_hash": "a" * 64,
+                "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+            },
+        )
 
 
 @pytest.mark.unit
@@ -50,30 +98,7 @@ def test_document_focus_rejects_mixed_selectors_and_naive_timestamps():
             {
                 "mode": "pinned",
                 "created_at": "2026-06-22T12:00:00",
-                "target_type": "folder_upload",
-                "folder_root_id": "folder-1",
+                "target_type": "subtree",
+                "path_prefix": "docs",
             }
         )
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
-def test_document_focus_reads_legacy_null_selector_fields_without_retaining_them():
-    focus = parse_document_focus(
-        {
-            "mode": "pinned",
-            "created_at": "2026-06-22T12:00:00+00:00",
-            "target_type": "folder_upload",
-            "document_id": None,
-            "relative_path": None,
-            "folder_root_id": "folder-1",
-            "path_prefix": None,
-        }
-    )
-
-    assert dump_document_focus(focus) == {
-        "mode": "pinned",
-        "created_at": "2026-06-22T12:00:00+00:00",
-        "target_type": "folder_upload",
-        "folder_root_id": "folder-1",
-    }

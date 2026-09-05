@@ -1,1248 +1,22 @@
+-- Canonical fresh-install schema for unreleased Knoggin.
+-- Extensions and the AGE graph are created by the deployment/test bootstrap.
+-- Historical upgrades and developer data cleanup do not belong in this file.
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
 CREATE SCHEMA IF NOT EXISTS public;
-
--- ==============================================================================
--- PROJECT STATE
--- ==============================================================================
-
-CREATE TABLE IF NOT EXISTS public.projects (
-    project_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT,
-    access_mode TEXT NOT NULL DEFAULT 'open',
-    status TEXT NOT NULL DEFAULT 'active'
-        CHECK (status IN ('active', 'archived', 'deleted')),
-    domain_config JSONB NOT NULL
-        CHECK (jsonb_typeof(domain_config) = 'object'),
-    episode_window_size INTEGER NOT NULL DEFAULT 24
-        CHECK (episode_window_size BETWEEN 8 AND 72),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    archived_at TIMESTAMPTZ,
-    deleted_at TIMESTAMPTZ,
-    last_activity_at TIMESTAMPTZ,
-    UNIQUE (user_name, project_id)
-);
-
-ALTER TABLE public.projects
-ADD COLUMN IF NOT EXISTS domain_config JSONB NOT NULL
-    CHECK (jsonb_typeof(domain_config) = 'object');
-
-ALTER TABLE public.projects
-ADD COLUMN IF NOT EXISTS episode_window_size INTEGER NOT NULL DEFAULT 24
-    CHECK (episode_window_size BETWEEN 8 AND 72);
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM public.projects
-        WHERE domain_config IS NULL OR domain_config = '{}'::jsonb
-    ) THEN
-        RAISE EXCEPTION
-            'Cannot remove projects.topic_config while a project lacks domain_config';
-    END IF;
-END $$;
-
-ALTER TABLE public.projects
-ALTER COLUMN domain_config DROP DEFAULT;
-
-ALTER TABLE public.projects
-DROP COLUMN IF EXISTS topic_config;
-
-CREATE TABLE IF NOT EXISTS public.project_read_scopes (
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
-    readable_project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
-    PRIMARY KEY (user_name, project_id, readable_project_id),
-    CHECK (project_id <> readable_project_id)
-);
-
-CREATE TABLE IF NOT EXISTS public.agents (
-    agent_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    name TEXT NOT NULL,
-    persona TEXT,
-    brain TEXT,
-    model TEXT,
-    temperature DOUBLE PRECISION,
-    enabled_tools JSONB,
-    is_default BOOLEAN NOT NULL DEFAULT false,
-    aac_enabled BOOLEAN NOT NULL DEFAULT false,
-    spawned_by TEXT,
-    brain_revision INTEGER NOT NULL DEFAULT 1 CHECK (brain_revision >= 1),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_turn_at TIMESTAMPTZ
-);
-
--- AAC agents are application-owned. This unreleased schema may drop the
--- former project coupling and redundant spawned flag outright.
-ALTER TABLE public.agents
-    DROP COLUMN IF EXISTS project_id,
-    DROP COLUMN IF EXISTS is_spawned,
-    ADD COLUMN IF NOT EXISTS aac_enabled BOOLEAN NOT NULL DEFAULT false,
-    ADD COLUMN IF NOT EXISTS last_turn_at TIMESTAMPTZ;
-
-CREATE UNIQUE INDEX IF NOT EXISTS agents_one_default_per_user_idx
-ON public.agents(user_name)
-WHERE is_default;
-
--- AAC is durable user-level discussion state, intentionally separate from the
--- canonical knowledge graph and from any individual project lifecycle.
-CREATE TABLE IF NOT EXISTS public.aac_discussions (
-    discussion_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    topic TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    end_reason TEXT,
-    token_budget BIGINT NOT NULL CHECK (token_budget >= 0),
-    tokens_used BIGINT NOT NULL DEFAULT 0 CHECK (tokens_used >= 0),
-    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    ended_at TIMESTAMPTZ,
-    CONSTRAINT aac_discussions_status_check
-        CHECK (status IN ('active', 'completed', 'stopped', 'interrupted', 'failed')),
-    CONSTRAINT aac_discussions_end_reason_check
-        CHECK (end_reason IS NULL OR end_reason IN (
-            'completed', 'token_budget', 'user_stopped', 'no_participants',
-            'shutdown', 'failed', 'startup_recovery', 'interrupted'
-        ))
-);
-
-ALTER TABLE public.aac_discussions
-    ADD COLUMN IF NOT EXISTS end_reason TEXT;
-
-ALTER TABLE public.aac_discussions
-    DROP CONSTRAINT IF EXISTS aac_discussions_end_reason_check,
-    ADD CONSTRAINT aac_discussions_end_reason_check
-        CHECK (end_reason IS NULL OR end_reason IN (
-            'completed', 'token_budget', 'user_stopped', 'no_participants',
-            'shutdown', 'failed', 'startup_recovery', 'interrupted'
-        ));
-
-CREATE INDEX IF NOT EXISTS aac_discussions_user_started_idx
-ON public.aac_discussions(user_name, started_at DESC);
-
-CREATE TABLE IF NOT EXISTS public.aac_timeline (
-    timeline_id TEXT PRIMARY KEY,
-    discussion_id TEXT NOT NULL REFERENCES public.aac_discussions(discussion_id)
-        ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    agent_id TEXT,
-    content TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT aac_timeline_kind_check
-        CHECK (kind IN ('agent_message', 'system_event'))
-);
-
-CREATE INDEX IF NOT EXISTS aac_timeline_discussion_created_idx
-ON public.aac_timeline(discussion_id, created_at, timeline_id);
-
-CREATE TABLE IF NOT EXISTS public.aac_insights (
-    insight_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    discussion_id TEXT REFERENCES public.aac_discussions(discussion_id)
-        ON DELETE SET NULL,
-    author_agent_id TEXT NOT NULL,
-    visibility TEXT NOT NULL DEFAULT 'shared',
-    content TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT aac_insights_visibility_check
-        CHECK (visibility IN ('shared', 'private'))
-);
-
-CREATE INDEX IF NOT EXISTS aac_insights_user_visibility_created_idx
-ON public.aac_insights(user_name, visibility, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS public.aac_insight_votes (
-    insight_id TEXT NOT NULL REFERENCES public.aac_insights(insight_id)
-        ON DELETE CASCADE,
-    voter_agent_id TEXT NOT NULL,
-    vote TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (insight_id, voter_agent_id),
-    CONSTRAINT aac_insight_votes_vote_check CHECK (vote IN ('up', 'down')),
-    CONSTRAINT aac_insight_votes_reason_check CHECK (length(trim(reason)) > 0)
-);
-
-DROP TABLE IF EXISTS public.agent_brain_revisions;
-
-CREATE TABLE IF NOT EXISTS public.agent_brain_snapshots (
-    agent_id TEXT NOT NULL REFERENCES public.agents(agent_id) ON DELETE CASCADE,
-    revision INTEGER NOT NULL CHECK (revision >= 1),
-    user_name TEXT NOT NULL,
-    content TEXT NOT NULL,
-    edited_by TEXT NOT NULL DEFAULT 'agent',
-    change_type TEXT NOT NULL DEFAULT 'initial_seed',
-    changed_section TEXT,
-    change_summary TEXT NOT NULL DEFAULT 'Initial Brain',
-    restored_from_revision INTEGER,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (agent_id, revision)
-);
-
-CREATE INDEX IF NOT EXISTS agent_brain_snapshots_user_idx
-ON public.agent_brain_snapshots(user_name, agent_id, revision DESC);
-
-INSERT INTO public.agent_brain_snapshots (
-    agent_id, revision, user_name, content, edited_by, change_type,
-    change_summary
-)
-SELECT
-    agent_id,
-    brain_revision,
-    user_name,
-    COALESCE(brain, ''),
-    'seed',
-    'initial_seed',
-    'Initial Brain'
-FROM public.agents
-ON CONFLICT (agent_id, revision) DO NOTHING;
-
-CREATE TABLE IF NOT EXISTS public.sessions (
-    session_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
-    model TEXT,
-    agent_id TEXT REFERENCES public.agents(agent_id) ON DELETE SET NULL,
-    enabled_tools JSONB,
-    document_focus JSONB,
-    status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'deleted')),
-    -- Participation controls only future project episode windows.  The
-    -- message-ID boundary is moved whenever the user changes this setting.
-    episode_participation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    episode_participation_after_message_id BIGINT NOT NULL DEFAULT 0
-        CHECK (episode_participation_after_message_id >= 0),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at TIMESTAMPTZ,
-    CONSTRAINT sessions_id_project_key UNIQUE (session_id, project_id)
-);
-
-CREATE INDEX IF NOT EXISTS sessions_project_idx
-ON public.sessions(user_name, project_id, created_at);
-
-ALTER TABLE public.sessions
-ADD COLUMN IF NOT EXISTS episode_participation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-ADD COLUMN IF NOT EXISTS episode_participation_after_message_id BIGINT NOT NULL DEFAULT 0
-    CHECK (episode_participation_after_message_id >= 0);
-
--- Sessions are either usable or tombstoned.  Older "closed" rows had no
--- supported recovery behavior, so preserve their history as deleted sessions.
-UPDATE public.sessions
-SET status = 'deleted', deleted_at = COALESCE(deleted_at, now())
-WHERE status = 'closed';
-
-ALTER TABLE public.sessions
-DROP CONSTRAINT IF EXISTS sessions_status_check;
-ALTER TABLE public.sessions
-ADD CONSTRAINT sessions_status_check
-CHECK (status IN ('open', 'deleted'));
-
--- ==============================================================================
--- KNOWLEDGE GRAPH
--- ==============================================================================
-
-CREATE SEQUENCE IF NOT EXISTS public.entity_id_seq
-AS BIGINT
-START WITH 2
-MINVALUE 2;
-
-CREATE SEQUENCE IF NOT EXISTS public.message_id_seq
-AS BIGINT
-START WITH 1
-MINVALUE 1;
-
-CREATE TABLE IF NOT EXISTS public.messages (
-    user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id BIGINT NOT NULL UNIQUE,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    search_tsvector TSVECTOR GENERATED ALWAYS AS (
-        to_tsvector('english', content)
-    ) STORED,
-    user_msg_id BIGINT,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    acceptance_key TEXT,
-    timestamp_ms BIGINT,
-    lifecycle_state TEXT NOT NULL DEFAULT 'sealed'
-        CHECK (lifecycle_state IN ('editable', 'sealed', 'superseded')),
-    editable_until_ms BIGINT,
-    sealed_at_ms BIGINT,
-    selected_revision INTEGER NOT NULL DEFAULT 1,
-    replaces_message_id BIGINT,
-    superseded_at_ms BIGINT,
-    ingestion_state TEXT NOT NULL DEFAULT 'excluded'
-        CHECK (ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'processed', 'blocked', 'excluded')),
-    ingestion_not_before_ms BIGINT,
-    ingestion_claim_id TEXT,
-    ingestion_claimed_at_ms BIGINT,
-    ingestion_attempt_count INTEGER NOT NULL DEFAULT 0
-        CHECK (ingestion_attempt_count >= 0),
-    ingestion_last_failure_stage TEXT,
-    ingestion_last_failure_code TEXT,
-    ingestion_last_failure_at_ms BIGINT,
-    ingestion_last_error_summary TEXT,
-    episode_eligible BOOLEAN NOT NULL DEFAULT FALSE,
-    episode_type TEXT,
-    PRIMARY KEY (user_name, session_id, message_id),
-    CONSTRAINT messages_scope_project_key
-        UNIQUE (user_name, session_id, message_id, project_id),
-    CONSTRAINT messages_id_project_session_key
-        UNIQUE (message_id, project_id, session_id),
-    CONSTRAINT messages_session_project_fk
-        FOREIGN KEY (session_id, project_id)
-        REFERENCES public.sessions(session_id, project_id)
-        ON DELETE CASCADE
-);
-
-ALTER TABLE public.messages
-    ADD COLUMN IF NOT EXISTS search_tsvector TSVECTOR GENERATED ALWAYS AS (
-        to_tsvector('english', content)
-    ) STORED;
-
-ALTER TABLE public.messages
-    ADD COLUMN IF NOT EXISTS acceptance_key TEXT;
-
-ALTER TABLE public.messages
-    ADD COLUMN IF NOT EXISTS ingestion_attempt_count INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS ingestion_last_failure_stage TEXT,
-    ADD COLUMN IF NOT EXISTS ingestion_last_failure_code TEXT,
-    ADD COLUMN IF NOT EXISTS ingestion_last_failure_at_ms BIGINT,
-    ADD COLUMN IF NOT EXISTS ingestion_last_error_summary TEXT;
-
-CREATE INDEX IF NOT EXISTS messages_project_idx
-ON public.messages(user_name, project_id, message_id);
-
-CREATE INDEX IF NOT EXISTS messages_search_tsvector_idx
-ON public.messages USING gin (search_tsvector);
-
-CREATE INDEX IF NOT EXISTS messages_ingestion_queue_idx
-ON public.messages(user_name, session_id, message_id)
-WHERE role = 'user' AND ingestion_state IN ('waiting_for_seal', 'ready', 'claimed', 'blocked');
-
-CREATE UNIQUE INDEX IF NOT EXISTS messages_acceptance_key_idx
-ON public.messages(user_name, session_id, acceptance_key)
-WHERE acceptance_key IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS public.message_revisions (
-    user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    message_id BIGINT NOT NULL,
-    revision INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    created_at_ms BIGINT NOT NULL,
-    PRIMARY KEY (user_name, session_id, message_id, revision),
-    FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON DELETE CASCADE
-);
-
-ALTER TABLE public.message_revisions
-ADD COLUMN IF NOT EXISTS session_id TEXT;
-UPDATE public.message_revisions AS revision
-SET session_id = message.session_id
-FROM public.messages AS message
-WHERE revision.session_id IS NULL
-  AND message.user_name = revision.user_name
-  AND message.project_id = revision.project_id
-  AND message.message_id = revision.message_id;
-ALTER TABLE public.message_revisions
-ALTER COLUMN session_id SET NOT NULL;
-
-CREATE TABLE IF NOT EXISTS public.entities (
-    entity_id BIGINT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    canonical_name TEXT NOT NULL,
-    type TEXT,
-    topic TEXT NOT NULL DEFAULT 'General',
-    last_mentioned_ms BIGINT,
-    embedding vector(1024),
-    CONSTRAINT entities_id_project_key UNIQUE (entity_id, project_id),
-    CONSTRAINT entities_id_user_project_key
-        UNIQUE (entity_id, user_name, project_id)
-);
-
-CREATE INDEX IF NOT EXISTS entities_project_idx
-ON public.entities(user_name, project_id);
-
-CREATE INDEX IF NOT EXISTS entities_topic_idx
-ON public.entities(project_id, topic);
-
-ALTER TABLE public.entities
-    DROP COLUMN IF EXISTS session_id,
-    DROP COLUMN IF EXISTS confidence,
-    DROP COLUMN IF EXISTS last_updated_ms,
-    DROP COLUMN IF EXISTS last_profiled_msg_id;
-ALTER TABLE public.entities
-    ADD COLUMN IF NOT EXISTS embedding vector(1024);
-
-CREATE INDEX IF NOT EXISTS entities_embedding_idx
-ON public.entities USING hnsw (embedding vector_cosine_ops);
-
-CREATE TABLE IF NOT EXISTS public.entity_aliases (
-    entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    alias TEXT NOT NULL,
-    PRIMARY KEY (entity_id, alias)
-);
-
-CREATE INDEX IF NOT EXISTS entity_aliases_alias_idx
-ON public.entity_aliases(alias);
-
-CREATE TABLE IF NOT EXISTS public.message_entity_refs (
-    message_id BIGINT NOT NULL REFERENCES public.messages(message_id)
-        ON DELETE CASCADE,
-    entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    PRIMARY KEY (message_id, entity_id)
-);
-
-CREATE INDEX IF NOT EXISTS message_entity_refs_entity_idx
-ON public.message_entity_refs(entity_id, message_id);
-
-CREATE TABLE IF NOT EXISTS public.relationships (
-    relationship_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    entity_a_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    entity_b_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    relationship_type TEXT NOT NULL CHECK (btrim(relationship_type) <> ''),
-    "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
-    CONSTRAINT relationships_distinct_entities
-        CHECK (entity_a_id <> entity_b_id),
-    CONSTRAINT relationships_identity_matches_fields
-        CHECK (
-            relationship_id = format(
-                '%s:%s:%s:%s',
-                project_id,
-                CASE WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
-                     ELSE entity_a_id END,
-                CASE WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
-                     ELSE entity_b_id END,
-                lower(regexp_replace(btrim(relationship_type), '\s+', ' ', 'g'))
-            )
-        ),
-    CONSTRAINT relationships_project_pair_type_key
-        UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type),
-    CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id)
-);
-
-ALTER TABLE public.relationships
-    DROP CONSTRAINT IF EXISTS relationships_domain_status_consistent,
-    DROP COLUMN IF EXISTS canonical_relationship_type,
-    DROP COLUMN IF EXISTS observed_relationship_label,
-    DROP COLUMN IF EXISTS domain_status,
-    DROP COLUMN IF EXISTS weight,
-    DROP COLUMN IF EXISTS confidence,
-    DROP COLUMN IF EXISTS context,
-    DROP COLUMN IF EXISTS last_seen_ms;
-
-CREATE INDEX IF NOT EXISTS relationships_pair_type_idx
-ON public.relationships(project_id, entity_a_id, entity_b_id, relationship_type);
-
-CREATE INDEX IF NOT EXISTS relationships_entity_a_idx
-ON public.relationships(entity_a_id);
-
-CREATE INDEX IF NOT EXISTS relationships_entity_b_idx
-ON public.relationships(entity_b_id);
-
--- One row per extracted relationship phrase and message. This preserves
--- source wording and endpoint types without turning advisories into graph
--- authority. This is the only canonical relationship-evidence record.
-CREATE TABLE IF NOT EXISTS public.relationship_observations (
-    observation_id BIGSERIAL PRIMARY KEY,
-    relationship_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    user_name TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id BIGINT NOT NULL,
-    source_entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    target_entity_id BIGINT NOT NULL REFERENCES public.entities(entity_id)
-        ON DELETE CASCADE,
-    source_type TEXT,
-    target_type TEXT,
-    observed_relationship_label TEXT NOT NULL
-        CHECK (btrim(observed_relationship_label) <> ''),
-    canonical_relationship_type TEXT,
-    domain_status TEXT NOT NULL DEFAULT 'unrecognized'
-        CHECK (domain_status IN ('recognized', 'unrecognized')),
-    domain_version INTEGER NOT NULL DEFAULT 0 CHECK (domain_version >= 0),
-    "symmetric" BOOLEAN NOT NULL DEFAULT FALSE,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0
-        CHECK (confidence >= 0.0 AND confidence <= 1.0),
-    context TEXT,
-    observed_at_ms BIGINT NOT NULL,
-    CONSTRAINT relationship_observations_distinct_entities
-        CHECK (source_entity_id <> target_entity_id),
-    CONSTRAINT relationship_observations_relationship_fk
-        FOREIGN KEY (relationship_id, project_id)
-        REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT relationship_observations_message_fk
-        FOREIGN KEY (user_name, session_id, message_id, project_id)
-        REFERENCES public.messages(user_name, session_id, message_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT relationship_observations_domain_status_consistent
-        CHECK (
-            (domain_status = 'recognized')
-            = (canonical_relationship_type IS NOT NULL)
-        ),
-    CONSTRAINT relationship_observations_unique_evidence
-        UNIQUE (
-            project_id,
-            user_name,
-            session_id,
-            message_id,
-            source_entity_id,
-            target_entity_id,
-            observed_relationship_label
-        )
-);
-
-CREATE INDEX IF NOT EXISTS relationship_observations_pattern_idx
-ON public.relationship_observations(
-    project_id,
-    user_name,
-    domain_status,
-    observed_relationship_label,
-    source_type,
-    target_type
-);
-
-CREATE INDEX IF NOT EXISTS relationship_observations_relationship_idx
-ON public.relationship_observations(relationship_id, project_id);
-
-CREATE INDEX IF NOT EXISTS relationship_observations_message_idx
-ON public.relationship_observations(project_id, user_name, session_id, message_id);
-
-ALTER TABLE public.relationship_observations
-    DROP CONSTRAINT IF EXISTS relationship_observations_confidence_range_check;
-ALTER TABLE public.relationship_observations
-    ADD CONSTRAINT relationship_observations_confidence_range_check
-        CHECK (confidence >= 0.0 AND confidence <= 1.0);
-
--- Durable advisory disposition. Evidence remains in relationship_observations;
--- this table stores only the current user decision for each pattern.
-CREATE TABLE IF NOT EXISTS public.relationship_advisories (
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    pattern_key TEXT NOT NULL,
-    disposition TEXT NOT NULL DEFAULT 'pending'
-        CHECK (disposition IN ('pending', 'accepted', 'dismissed', 'suppressed')),
-    proposed_relationship_type TEXT,
-    last_action TEXT
-        CHECK (last_action IS NULL OR last_action IN (
-            'accept', 'edit', 'dismiss', 'reopen', 'suppress', 'merge'
-        )),
-    decision_note TEXT,
-    decided_by TEXT,
-    decision_at TIMESTAMPTZ,
-    revision BIGINT NOT NULL DEFAULT 0 CHECK (revision >= 0),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_name, project_id, pattern_key),
-    CONSTRAINT relationship_advisories_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS public.relationship_advisory_decisions (
-    decision_id BIGSERIAL PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    pattern_key TEXT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN (
-        'accept', 'edit', 'dismiss', 'reopen', 'suppress', 'merge'
-    )),
-    proposed_relationship_type TEXT,
-    decision_note TEXT,
-    decided_by TEXT,
-    revision BIGINT NOT NULL CHECK (revision >= 1),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT relationship_advisory_decisions_state_fk
-        FOREIGN KEY (user_name, project_id, pattern_key)
-        REFERENCES public.relationship_advisories(
-            user_name, project_id, pattern_key
-        ) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS relationship_advisories_disposition_idx
-ON public.relationship_advisories(user_name, project_id, disposition);
-
-CREATE INDEX IF NOT EXISTS relationship_advisory_decisions_pattern_idx
-ON public.relationship_advisory_decisions(
-    user_name, project_id, pattern_key, created_at
-);
-
--- A unified inbox points to workflow-owned subjects. It deliberately has no
--- resolution payload: the subject workflow owns its state and mutations.
-CREATE TABLE IF NOT EXISTS public.human_reviews (
-    review_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    subject_type TEXT NOT NULL,
-    subject_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'resolved')),
-    priority TEXT NOT NULL DEFAULT 'normal'
-        CHECK (priority IN ('low', 'normal', 'high')),
-    title TEXT NOT NULL,
-    summary TEXT,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at TIMESTAMPTZ,
-    UNIQUE (user_name, project_id, kind, subject_id)
-);
-
-CREATE INDEX IF NOT EXISTS human_reviews_open_inbox_idx
-ON public.human_reviews(user_name, project_id, status, priority, created_at DESC);
-
--- Conflict groups never replace or rewrite relationship evidence. The group is
--- a user-visible interpretation workflow over immutable observation snapshots.
-CREATE TABLE IF NOT EXISTS public.conflict_groups (
-    conflict_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'resolved')),
-    origin TEXT NOT NULL
-        CHECK (origin IN (
-            'background_discovery', 'agent_discovery', 'user_created'
-        )),
-    kind TEXT NOT NULL
-        CHECK (kind IN (
-            'possible_contradiction', 'temporal_ambiguity',
-            'possible_state_change', 'identity_or_entity_ambiguity'
-        )),
-    rationale TEXT NOT NULL,
-    confidence DOUBLE PRECISION,
-    evidence_signature TEXT NOT NULL,
-    resolution_kind TEXT
-        CHECK (resolution_kind IS NULL OR resolution_kind IN (
-            'confirmed_conflict', 'normal_temporal_change', 'not_a_conflict',
-            'insufficient_evidence', 'custom'
-        )),
-    resolution_note TEXT,
-    resolved_by TEXT,
-    resolved_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (user_name, project_id, evidence_signature)
-);
-
-CREATE INDEX IF NOT EXISTS conflict_groups_open_idx
-ON public.conflict_groups(user_name, project_id, status, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS public.conflict_evidence_refs (
-    evidence_ref_id BIGSERIAL PRIMARY KEY,
-    conflict_id TEXT NOT NULL REFERENCES public.conflict_groups(conflict_id)
-        ON DELETE CASCADE,
-    observation_id BIGINT REFERENCES public.relationship_observations(observation_id)
-        ON DELETE SET NULL,
-    observation_snapshot JSONB NOT NULL,
-    added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (conflict_id, observation_id)
-);
-
-CREATE INDEX IF NOT EXISTS conflict_evidence_refs_observation_idx
-ON public.conflict_evidence_refs(observation_id)
-WHERE observation_id IS NOT NULL;
-
--- The cursor is durable and determines which relationship observations have
--- already been examined.
-CREATE TABLE IF NOT EXISTS public.conflict_discovery_checkpoints (
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0,
-    last_completed_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_name, project_id)
-);
-
--- Global provider-budget state survives process restarts. Reservations protect
--- concurrent requests until provider usage is recorded or their lease expires.
-CREATE TABLE IF NOT EXISTS public.llm_budget_windows (
-    reset_key TEXT PRIMARY KEY,
-    spent_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-    reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS public.llm_budget_reservations (
-    reservation_id UUID PRIMARY KEY,
-    reset_key TEXT NOT NULL REFERENCES public.llm_budget_windows(reset_key)
-        ON DELETE CASCADE,
-    reserved_usd DOUBLE PRECISION NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('active', 'recorded', 'expired')),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    recorded_at TIMESTAMPTZ
-);
-
-CREATE INDEX IF NOT EXISTS llm_budget_reservations_expiry_idx
-ON public.llm_budget_reservations(reset_key, expires_at)
-WHERE status = 'active';
-
-ALTER TABLE public.conflict_discovery_checkpoints
-ADD COLUMN IF NOT EXISTS last_reviewed_observation_id BIGINT NOT NULL DEFAULT 0;
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'conflict_discovery_checkpoints'
-          AND column_name = 'cursor_observation_id'
-    ) THEN
-        UPDATE public.conflict_discovery_checkpoints
-        SET last_reviewed_observation_id = GREATEST(
-            last_reviewed_observation_id,
-            cursor_observation_id
-        );
-    END IF;
-END $$;
-
-ALTER TABLE public.conflict_discovery_checkpoints
-    DROP COLUMN IF EXISTS cursor_observed_at_ms,
-    DROP COLUMN IF EXISTS cursor_observation_id,
-    DROP COLUMN IF EXISTS continuation,
-    DROP COLUMN IF EXISTS lease_token,
-    DROP COLUMN IF EXISTS lease_expires_at;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'messages_scope_project_key'
-          AND conrelid = 'public.messages'::regclass
-    ) THEN
-        ALTER TABLE public.messages
-        ADD CONSTRAINT messages_scope_project_key
-        UNIQUE (user_name, session_id, message_id, project_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'relationships_id_project_key'
-          AND conrelid = 'public.relationships'::regclass
-    ) THEN
-        ALTER TABLE public.relationships
-        ADD CONSTRAINT relationships_id_project_key
-        UNIQUE (relationship_id, project_id);
-    END IF;
-
-END $$;
-
-ALTER TABLE public.relationship_observations
-    ADD COLUMN IF NOT EXISTS domain_version INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS "symmetric" BOOLEAN NOT NULL DEFAULT FALSE;
-
-CREATE TABLE IF NOT EXISTS public.episodes (
-    episode_id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    session_id TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    new_developments JSONB NOT NULL DEFAULT '[]'::jsonb,
-    updates JSONB NOT NULL DEFAULT '[]'::jsonb,
-    unresolved JSONB NOT NULL DEFAULT '[]'::jsonb,
-    importance DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (importance >= 0.0 AND importance <= 1.0),
-    search_tsvector TSVECTOR GENERATED ALWAYS AS (
-        to_tsvector(
-            'simple',
-            summary || ' ' || new_developments::text || ' ' || updates::text
-            || ' ' || unresolved::text
-        )
-    ) STORED,
-    source_message_count INTEGER NOT NULL DEFAULT 0
-        CHECK (source_message_count >= 0),
-    first_message_at TIMESTAMPTZ,
-    last_message_at TIMESTAMPTZ,
-    embedding vector(1024),
-    generator_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    version_history JSONB NOT NULL DEFAULT '[]'::jsonb,
-    user_modified BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT episodes_id_project_key UNIQUE (episode_id, project_id)
-);
-
-ALTER TABLE public.episodes
-ADD COLUMN IF NOT EXISTS embedding vector(1024);
-
-ALTER TABLE public.episodes
-ADD COLUMN IF NOT EXISTS search_tsvector TSVECTOR GENERATED ALWAYS AS (
-    to_tsvector(
-        'simple',
-        summary || ' ' || new_developments::text || ' ' || updates::text
-        || ' ' || unresolved::text
-    )
-) STORED;
-
-ALTER TABLE public.episodes
-ADD COLUMN IF NOT EXISTS source_message_count INTEGER NOT NULL DEFAULT 0
-    CHECK (source_message_count >= 0),
-ADD COLUMN IF NOT EXISTS first_message_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_message_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS version_history JSONB NOT NULL DEFAULT '[]'::jsonb;
-
-CREATE INDEX IF NOT EXISTS episodes_project_updated_idx
-ON public.episodes(project_id, updated_at DESC);
-
-CREATE INDEX IF NOT EXISTS episodes_embedding_idx
-ON public.episodes USING hnsw (embedding vector_cosine_ops)
-WHERE embedding IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS episodes_search_tsvector_idx
-ON public.episodes USING GIN (search_tsvector);
-
-CREATE TABLE IF NOT EXISTS public.episode_messages (
-    episode_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id BIGINT NOT NULL,
-    influence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (influence_weight >= 0.0),
-    influence_reason TEXT,
-    message_position INTEGER NOT NULL CHECK (message_position >= 0),
-    attached_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (episode_id, message_id),
-    UNIQUE (episode_id, message_position),
-    CONSTRAINT episode_messages_episode_scope_fk
-        FOREIGN KEY (episode_id, project_id)
-        REFERENCES public.episodes(episode_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT episode_messages_message_scope_fk
-        FOREIGN KEY (message_id, project_id, session_id)
-        REFERENCES public.messages(message_id, project_id, session_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS episode_messages_message_idx
-ON public.episode_messages(message_id, episode_id);
-
-ALTER TABLE public.episode_messages
-ADD COLUMN IF NOT EXISTS attached_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-
-ALTER TABLE public.episode_messages
-ADD COLUMN IF NOT EXISTS project_id TEXT,
-ADD COLUMN IF NOT EXISTS session_id TEXT;
-
-UPDATE public.episode_messages episode_message
-SET project_id = message.project_id,
-    session_id = message.session_id
-FROM public.messages message
-WHERE message.message_id = episode_message.message_id
-  AND (episode_message.project_id IS NULL OR episode_message.session_id IS NULL);
-
-ALTER TABLE public.episode_messages
-ALTER COLUMN project_id SET NOT NULL,
-ALTER COLUMN session_id SET NOT NULL;
-
-ALTER TABLE public.episode_messages
-DROP CONSTRAINT IF EXISTS episode_messages_episode_id_fkey,
-DROP CONSTRAINT IF EXISTS episode_messages_message_id_fkey;
-
-ALTER TABLE public.episodes
-DROP CONSTRAINT IF EXISTS episodes_session_id_fkey;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'sessions_id_project_key'
-          AND conrelid = 'public.sessions'::regclass
-    ) THEN
-        ALTER TABLE public.sessions
-        ADD CONSTRAINT sessions_id_project_key
-        UNIQUE (session_id, project_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'messages_id_project_session_key'
-          AND conrelid = 'public.messages'::regclass
-    ) THEN
-        ALTER TABLE public.messages
-        ADD CONSTRAINT messages_id_project_session_key
-        UNIQUE (message_id, project_id, session_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'messages_session_project_fk'
-          AND conrelid = 'public.messages'::regclass
-    ) THEN
-        ALTER TABLE public.messages
-        ADD CONSTRAINT messages_session_project_fk
-        FOREIGN KEY (session_id, project_id)
-        REFERENCES public.sessions(session_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episodes_id_project_key'
-          AND conrelid = 'public.episodes'::regclass
-    ) THEN
-        ALTER TABLE public.episodes
-        ADD CONSTRAINT episodes_id_project_key
-        UNIQUE (episode_id, project_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_id_project_key'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_id_project_key
-        UNIQUE (entity_id, project_id);
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_messages_episode_scope_fk'
-          AND conrelid = 'public.episode_messages'::regclass
-    ) THEN
-        ALTER TABLE public.episode_messages
-        ADD CONSTRAINT episode_messages_episode_scope_fk
-        FOREIGN KEY (episode_id, project_id)
-        REFERENCES public.episodes(episode_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_messages_message_scope_fk'
-          AND conrelid = 'public.episode_messages'::regclass
-    ) THEN
-        ALTER TABLE public.episode_messages
-        ADD CONSTRAINT episode_messages_message_scope_fk
-        FOREIGN KEY (message_id, project_id, session_id)
-        REFERENCES public.messages(message_id, project_id, session_id)
-        ON DELETE CASCADE;
-    END IF;
-END $$;
-
-ALTER TABLE public.episodes DROP COLUMN IF EXISTS session_id;
-
-CREATE TABLE IF NOT EXISTS public.episode_entities (
-    episode_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    entity_id BIGINT NOT NULL,
-    prominence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (prominence_weight >= 0.0),
-    role TEXT,
-    is_focus_entity BOOLEAN NOT NULL DEFAULT FALSE,
-    source_message_count INTEGER NOT NULL DEFAULT 0
-        CHECK (source_message_count >= 0),
-    first_seen_at TIMESTAMPTZ,
-    last_seen_at TIMESTAMPTZ,
-    PRIMARY KEY (episode_id, entity_id),
-    CONSTRAINT episode_entities_episode_project_fk
-        FOREIGN KEY (episode_id, project_id)
-        REFERENCES public.episodes(episode_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT episode_entities_entity_project_fk
-        FOREIGN KEY (entity_id, project_id)
-        REFERENCES public.entities(entity_id, project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS episode_entities_focus_lookup_idx
-ON public.episode_entities(entity_id, is_focus_entity, episode_id);
-
-CREATE INDEX IF NOT EXISTS episode_entities_lookup_idx
-ON public.episode_entities(entity_id, episode_id);
-
-ALTER TABLE public.episode_entities
-ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ,
-ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
-
-ALTER TABLE public.episode_entities
-ADD COLUMN IF NOT EXISTS project_id TEXT;
-
-UPDATE public.episode_entities episode_entity
-SET project_id = episode.project_id
-FROM public.episodes episode
-WHERE episode.episode_id = episode_entity.episode_id
-  AND episode_entity.project_id IS NULL;
-
-ALTER TABLE public.episode_entities
-ALTER COLUMN project_id SET NOT NULL;
-
-ALTER TABLE public.episode_entities
-DROP CONSTRAINT IF EXISTS episode_entities_episode_id_fkey,
-DROP CONSTRAINT IF EXISTS episode_entities_entity_id_fkey;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_entities_episode_project_fk'
-          AND conrelid = 'public.episode_entities'::regclass
-    ) THEN
-        ALTER TABLE public.episode_entities
-        ADD CONSTRAINT episode_entities_episode_project_fk
-        FOREIGN KEY (episode_id, project_id)
-        REFERENCES public.episodes(episode_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_entities_entity_project_fk'
-          AND conrelid = 'public.episode_entities'::regclass
-    ) THEN
-        ALTER TABLE public.episode_entities
-        ADD CONSTRAINT episode_entities_entity_project_fk
-        FOREIGN KEY (entity_id, project_id)
-        REFERENCES public.entities(entity_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-END $$;
-
-CREATE TABLE IF NOT EXISTS public.episode_relationships (
-    episode_id TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    relationship_id TEXT NOT NULL,
-    prominence_weight DOUBLE PRECISION NOT NULL DEFAULT 0.0
-        CHECK (prominence_weight >= 0.0),
-    is_central_relationship BOOLEAN NOT NULL DEFAULT FALSE,
-    source_message_count INTEGER NOT NULL DEFAULT 0
-        CHECK (source_message_count >= 0),
-    PRIMARY KEY (episode_id, relationship_id),
-    CONSTRAINT episode_relationships_episode_project_fk
-        FOREIGN KEY (episode_id, project_id)
-        REFERENCES public.episodes(episode_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT episode_relationships_relationship_project_fk
-        FOREIGN KEY (relationship_id, project_id)
-        REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS episode_relationships_lookup_idx
-ON public.episode_relationships(relationship_id, episode_id);
-
-ALTER TABLE public.episode_relationships
-ADD COLUMN IF NOT EXISTS project_id TEXT;
-
-UPDATE public.episode_relationships episode_relationship
-SET project_id = episode.project_id
-FROM public.episodes episode
-WHERE episode.episode_id = episode_relationship.episode_id
-  AND episode_relationship.project_id IS NULL;
-
-ALTER TABLE public.episode_relationships
-ALTER COLUMN project_id SET NOT NULL;
-
-ALTER TABLE public.episode_relationships
-DROP CONSTRAINT IF EXISTS episode_relationships_episode_id_fkey,
-DROP CONSTRAINT IF EXISTS episode_relationships_relationship_id_fkey;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_relationships_episode_project_fk'
-          AND conrelid = 'public.episode_relationships'::regclass
-    ) THEN
-        ALTER TABLE public.episode_relationships
-        ADD CONSTRAINT episode_relationships_episode_project_fk
-        FOREIGN KEY (episode_id, project_id)
-        REFERENCES public.episodes(episode_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_relationships_relationship_project_fk'
-          AND conrelid = 'public.episode_relationships'::regclass
-    ) THEN
-        ALTER TABLE public.episode_relationships
-        ADD CONSTRAINT episode_relationships_relationship_project_fk
-        FOREIGN KEY (relationship_id, project_id)
-        REFERENCES public.relationships(relationship_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-END $$;
-
-CREATE TABLE IF NOT EXISTS public.episode_processing_checkpoints (
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    session_id TEXT NOT NULL REFERENCES public.sessions(session_id)
-        ON DELETE CASCADE,
-    last_evaluated_message_id BIGINT NOT NULL DEFAULT 0
-        CHECK (last_evaluated_message_id >= 0),
-    last_evaluated_timestamp_ms BIGINT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (project_id, session_id)
-);
-
-ALTER TABLE public.episode_processing_checkpoints
-ADD COLUMN IF NOT EXISTS last_evaluated_timestamp_ms BIGINT;
-
--- Durable review boundary for destructive entity merges. Proposal records do
--- not use entity foreign keys because the duplicate entity is deleted after a
--- successful merge and the historical IDs must remain auditable.
-CREATE TABLE IF NOT EXISTS public.entity_merge_proposals (
-    proposal_id TEXT PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    primary_entity_id BIGINT NOT NULL,
-    duplicate_entity_id BIGINT NOT NULL,
-    evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    reasoning TEXT NOT NULL,
-    model_confidence DOUBLE PRECISION,
-    reviewed_state_hash TEXT NOT NULL,
-    reviewed_state JSONB NOT NULL,
-    policy_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
-    status TEXT NOT NULL DEFAULT 'confirmation_required',
-    confirmation_token_hash TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    confirmed_at TIMESTAMPTZ,
-    executed_at TIMESTAMPTZ,
-    confirmed_by TEXT,
-    failure_reason TEXT,
-    CONSTRAINT entity_merge_proposals_distinct_entities
-        CHECK (primary_entity_id <> duplicate_entity_id),
-    CONSTRAINT entity_merge_proposals_status
-        CHECK (
-            status IN (
-                'confirmation_required',
-                'executing',
-                'executed',
-                'rejected',
-                'failed'
-            )
-        ),
-    CONSTRAINT entity_merge_proposals_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS entity_merge_proposals_project_idx
-ON public.entity_merge_proposals(project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS entity_merge_proposals_status_idx
-ON public.entity_merge_proposals(project_id, status);
-
-CREATE TABLE IF NOT EXISTS public.entity_merge_audits (
-    audit_id TEXT PRIMARY KEY,
-    proposal_id TEXT NOT NULL
-        REFERENCES public.entity_merge_proposals(proposal_id),
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL,
-    primary_entity_id BIGINT NOT NULL,
-    duplicate_entity_id BIGINT NOT NULL,
-    evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    reasoning TEXT NOT NULL,
-    confirmed_by TEXT NOT NULL,
-    before_state JSONB,
-    after_state JSONB,
-    status TEXT NOT NULL DEFAULT 'executing',
-    failure_reason TEXT,
-    rollback_status TEXT NOT NULL DEFAULT 'unavailable',
-    rollback_expires_at TIMESTAMPTZ,
-    rolled_back_at TIMESTAMPTZ,
-    rolled_back_by TEXT,
-    rollback_failure_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT entity_merge_audits_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-ALTER TABLE public.entity_merge_proposals
-    ADD COLUMN IF NOT EXISTS evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS reviewed_state_hash TEXT NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS reviewed_state JSONB NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS policy_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS confirmation_token_hash TEXT NOT NULL DEFAULT '',
-    ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS confirmed_by TEXT,
-    ADD COLUMN IF NOT EXISTS failure_reason TEXT;
-
-ALTER TABLE public.entity_merge_audits
-    ALTER COLUMN before_state DROP NOT NULL,
-    ADD COLUMN IF NOT EXISTS evidence_message_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS evidence_episode_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    ADD COLUMN IF NOT EXISTS rollback_status TEXT NOT NULL DEFAULT 'unavailable',
-    ADD COLUMN IF NOT EXISTS rollback_expires_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS rolled_back_at TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS rolled_back_by TEXT,
-    ADD COLUMN IF NOT EXISTS rollback_failure_reason TEXT;
-
-CREATE INDEX IF NOT EXISTS entity_merge_audits_project_idx
-ON public.entity_merge_audits(project_id, created_at DESC);
-
-CREATE UNIQUE INDEX IF NOT EXISTS entity_merge_audits_proposal_uidx
-ON public.entity_merge_audits(proposal_id);
-
-CREATE INDEX IF NOT EXISTS entity_merge_audits_rollback_expiry_idx
-ON public.entity_merge_audits(project_id, rollback_status, rollback_expires_at);
-
--- ==============================================================================
--- DOMAIN INVARIANTS
--- ==============================================================================
-
-ALTER TABLE public.entity_merge_audits
-    DROP CONSTRAINT IF EXISTS entity_merge_audits_status_check,
-    DROP CONSTRAINT IF EXISTS entity_merge_audits_rollback_status_check;
-ALTER TABLE public.entity_merge_audits
-    ADD CONSTRAINT entity_merge_audits_status_check
-        CHECK (status IN ('executing', 'executed', 'failed')),
-    ADD CONSTRAINT entity_merge_audits_rollback_status_check
-        CHECK (rollback_status IN ('unavailable', 'available', 'rolled_back', 'expired', 'failed'));
-
-ALTER TABLE public.episode_processing_checkpoints
-    DROP CONSTRAINT IF EXISTS episode_processing_checkpoints_session_id_fkey;
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'episode_processing_checkpoints_session_project_fk'
-          AND conrelid = 'public.episode_processing_checkpoints'::regclass
-    ) THEN
-        ALTER TABLE public.episode_processing_checkpoints
-        ADD CONSTRAINT episode_processing_checkpoints_session_project_fk
-        FOREIGN KEY (session_id, project_id)
-        REFERENCES public.sessions(session_id, project_id)
-        ON DELETE CASCADE;
-    END IF;
-END $$;
-
-CREATE OR REPLACE FUNCTION public.enforce_message_entity_ref_scope()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
+COMMENT ON SCHEMA public IS 'standard public schema';
+CREATE FUNCTION public.enforce_message_entity_ref_scope() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
 DECLARE
     message_user_name TEXT;
     message_project_id TEXT;
@@ -1251,17 +25,18 @@ BEGIN
     INTO message_user_name, message_project_id
     FROM public.messages
     WHERE message_id = NEW.message_id;
-
     IF NOT FOUND OR NOT EXISTS (
         SELECT 1
         FROM public.entities entity
         WHERE entity.entity_id = NEW.entity_id
           AND entity.user_name = message_user_name
           AND (
-              entity.project_id = message_project_id
-              OR (
-                  entity.entity_id = 1
-                  AND entity.project_id = '__identity__'
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts context
+                  WHERE context.entity_id = entity.entity_id
+                    AND context.project_id = message_project_id
               )
           )
     ) THEN
@@ -1272,18 +47,9 @@ BEGIN
     RETURN NEW;
 END;
 $$;
-
-DROP TRIGGER IF EXISTS message_entity_refs_scope_trigger
-    ON public.message_entity_refs;
-CREATE TRIGGER message_entity_refs_scope_trigger
-BEFORE INSERT OR UPDATE OF message_id, entity_id
-ON public.message_entity_refs
-FOR EACH ROW EXECUTE FUNCTION public.enforce_message_entity_ref_scope();
-
-CREATE OR REPLACE FUNCTION public.enforce_relationship_scope()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
+CREATE FUNCTION public.enforce_relationship_scope() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
@@ -1291,10 +57,12 @@ BEGIN
         WHERE entity.entity_id = NEW.entity_a_id
           AND entity.user_name = NEW.user_name
           AND (
-              entity.project_id = NEW.project_id
-              OR (
-                  entity.entity_id = 1
-                  AND entity.project_id = '__identity__'
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts context
+                  WHERE context.entity_id = entity.entity_id
+                    AND context.project_id = NEW.project_id
               )
           )
     ) OR NOT EXISTS (
@@ -1303,10 +71,12 @@ BEGIN
         WHERE entity.entity_id = NEW.entity_b_id
           AND entity.user_name = NEW.user_name
           AND (
-              entity.project_id = NEW.project_id
-              OR (
-                  entity.entity_id = 1
-                  AND entity.project_id = '__identity__'
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts context
+                  WHERE context.entity_id = entity.entity_id
+                    AND context.project_id = NEW.project_id
               )
           )
     ) THEN
@@ -1317,1262 +87,1170 @@ BEGIN
     RETURN NEW;
 END;
 $$;
-
-DROP TRIGGER IF EXISTS relationships_scope_trigger ON public.relationships;
-CREATE TRIGGER relationships_scope_trigger
-BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id
-ON public.relationships
-FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
-
--- Durable authorization and outcome trail for every model-initiated write.
-CREATE TABLE IF NOT EXISTS public.agent_tool_audits (
-    audit_id UUID PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    agent_id TEXT NOT NULL,
-    project_id TEXT,
-    session_id TEXT NOT NULL,
-    run_id TEXT NOT NULL,
-    tool_name TEXT NOT NULL,
-    capability TEXT NOT NULL,
-    arguments JSONB NOT NULL DEFAULT '{}'::jsonb,
-    result JSONB,
-    status TEXT NOT NULL,
-    error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMPTZ,
-    CONSTRAINT agent_tool_audits_capability_check CHECK (
-        capability IN (
-            'reversible_write',
-            'configuration_write',
-            'identity_write'
-        )
-    ),
-    CONSTRAINT agent_tool_audits_status_check CHECK (
-        status IN ('started', 'succeeded', 'rejected', 'failed')
-    ),
-    CONSTRAINT agent_tool_audits_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS agent_tool_audits_scope_idx
-ON public.agent_tool_audits(
-    user_name,
-    project_id,
-    created_at DESC
-);
-
-CREATE INDEX IF NOT EXISTS agent_tool_audits_run_idx
-ON public.agent_tool_audits(run_id, created_at);
-
--- AAC has user-level execution ownership. Its audited local writes must not
--- pretend to belong to a project or disappear when any project is deleted.
-ALTER TABLE public.agent_tool_audits
-    DROP CONSTRAINT IF EXISTS agent_tool_audits_project_fk;
-ALTER TABLE public.agent_tool_audits
-    ALTER COLUMN project_id DROP NOT NULL;
-ALTER TABLE public.agent_tool_audits
-    ADD CONSTRAINT agent_tool_audits_project_fk
-    FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-    ON DELETE CASCADE;
-
-ALTER TABLE public.agent_tool_audits
-    DROP CONSTRAINT IF EXISTS agent_tool_audits_capability_check;
-ALTER TABLE public.agent_tool_audits
-    ADD CONSTRAINT agent_tool_audits_capability_check CHECK (
-        capability IN (
-            'reversible_write',
-            'configuration_write',
-            'identity_write'
-        )
-    );
-ALTER TABLE public.agent_tool_audits
-    DROP COLUMN IF EXISTS confirmation_state;
-
--- 4. Message full-text search projection.
--- Since AGE nodes don't support pgvector indexes directly inside `agtype`,
--- we store the heavy vectors and tsvectors in standard relational tables
--- and join them against the graph using the integer `id` property.
-
-DROP TABLE IF EXISTS public.entity_search;
-DROP TABLE IF EXISTS public.message_search;
-DROP TABLE IF EXISTS public.hierarchy_edges;
-DROP TABLE IF EXISTS public.ingestion_candidate_suggestions;
-DROP TABLE IF EXISTS public.parked_dlq_items;
-DROP FUNCTION IF EXISTS public.enforce_hierarchy_edge_invariants();
-
-DO $$
+CREATE FUNCTION public.reject_entity_identity_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_id_user_project_key'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_id_user_project_key
-        UNIQUE (entity_id, user_name, project_id);
+    IF NEW.user_name IS DISTINCT FROM OLD.user_name THEN
+        RAISE EXCEPTION 'Entity user ownership is immutable';
     END IF;
-
-END $$;
-
-DROP TRIGGER IF EXISTS entities_search_revision_trigger ON public.entities;
-DROP TRIGGER IF EXISTS messages_search_revision_trigger ON public.messages;
-DROP TRIGGER IF EXISTS episodes_search_revision_trigger ON public.episodes;
-DROP FUNCTION IF EXISTS public.bump_search_index_revision() CASCADE;
-DROP FUNCTION IF EXISTS public.sync_entity_search_canonical_name() CASCADE;
-DROP TABLE IF EXISTS public.project_search_revisions;
-DROP TABLE IF EXISTS public.identity_search_revisions;
-
--- Project-owned folder upload batches.
-CREATE TABLE IF NOT EXISTS public.document_folder_uploads (
-    folder_root_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    session_id TEXT,
-    visibility_scope TEXT NOT NULL,
-    folder_name TEXT NOT NULL,
-    candidate_count INTEGER NOT NULL,
-    candidate_bytes BIGINT NOT NULL,
-    document_count INTEGER NOT NULL,
-    total_size_bytes BIGINT NOT NULL,
-    excluded_count INTEGER NOT NULL,
-    excluded_bytes BIGINT NOT NULL,
-    excluded_directory_count INTEGER NOT NULL,
-    excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
-    scan_settings JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    indexed_at TIMESTAMPTZ,
-    CONSTRAINT document_folder_uploads_visibility_scope_check
-        CHECK (visibility_scope IN ('project', 'session')),
-    CONSTRAINT document_folder_uploads_session_visibility_check
-        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
-    CONSTRAINT document_folder_uploads_counts_check
-        CHECK (
-            candidate_count >= 0
-            AND candidate_bytes >= 0
-            AND document_count >= 0
-            AND total_size_bytes >= 0
-            AND excluded_count >= 0
-            AND excluded_bytes >= 0
-            AND excluded_directory_count >= 0
-        ),
-    CONSTRAINT document_folder_uploads_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS document_folder_uploads_project_idx
-ON public.document_folder_uploads(project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS document_folder_uploads_visibility_idx
-ON public.document_folder_uploads(
-    project_id,
-    visibility_scope,
-    session_id
-);
-
-ALTER TABLE public.document_folder_uploads
-    ALTER COLUMN indexed_at DROP NOT NULL;
-
--- A durable identity for a synchronizable local workspace.  Folder uploads
--- remain immutable snapshots; a workspace source will later own repeated
--- manifest syncs and incremental indexing.
-CREATE TABLE IF NOT EXISTS public.document_workspace_sources (
-    source_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    session_id TEXT,
-    visibility_scope TEXT NOT NULL,
-    ownership_mode TEXT NOT NULL DEFAULT 'external_sync',
-    display_name TEXT NOT NULL,
-    last_synced_at TIMESTAMPTZ,
-    last_manifest_candidate_count INTEGER NOT NULL DEFAULT 0,
-    last_manifest_included_count INTEGER NOT NULL DEFAULT 0,
-    last_manifest_excluded_count INTEGER NOT NULL DEFAULT 0,
-    last_manifest_excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT document_workspace_sources_visibility_scope_check
-        CHECK (visibility_scope IN ('project', 'session')),
-    CONSTRAINT document_workspace_sources_ownership_mode_check
-        CHECK (
-            ownership_mode IN ('external_sync', 'managed_project_workspace')
-            AND (
-                ownership_mode = 'external_sync'
-                OR (visibility_scope = 'project' AND session_id IS NULL)
-            )
-        ),
-    CONSTRAINT document_workspace_sources_session_visibility_check
-        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
-    CONSTRAINT document_workspace_sources_manifest_counts_check
-        CHECK (
-            last_manifest_candidate_count >= 0
-            AND last_manifest_included_count >= 0
-            AND last_manifest_excluded_count >= 0
-        ),
-    CONSTRAINT document_workspace_sources_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE
-);
-
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS ownership_mode TEXT NOT NULL DEFAULT 'external_sync';
-ALTER TABLE public.document_workspace_sources
-    DROP CONSTRAINT IF EXISTS document_workspace_sources_ownership_mode_check;
-ALTER TABLE public.document_workspace_sources
-    ADD CONSTRAINT document_workspace_sources_ownership_mode_check
-    CHECK (
-        ownership_mode IN ('external_sync', 'managed_project_workspace')
-        AND (
-            ownership_mode = 'external_sync'
-            OR (visibility_scope = 'project' AND session_id IS NULL)
-        )
-    );
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_candidate_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_included_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_excluded_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE public.document_workspace_sources
-    ADD COLUMN IF NOT EXISTS last_manifest_excluded_reason_counts JSONB NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE public.document_workspace_sources
-    DROP CONSTRAINT IF EXISTS document_workspace_sources_manifest_counts_check;
-ALTER TABLE public.document_workspace_sources
-    ADD CONSTRAINT document_workspace_sources_manifest_counts_check
-    CHECK (
-        last_manifest_candidate_count >= 0
-        AND last_manifest_included_count >= 0
-        AND last_manifest_excluded_count >= 0
-    );
-
-CREATE INDEX IF NOT EXISTS document_workspace_sources_project_idx
-ON public.document_workspace_sources(project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS document_workspace_sources_visibility_idx
-ON public.document_workspace_sources(
-    project_id,
-    visibility_scope,
-    session_id
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS document_workspace_sources_managed_project_unique
-ON public.document_workspace_sources(project_id)
-WHERE ownership_mode = 'managed_project_workspace';
-
-CREATE TABLE IF NOT EXISTS public.project_document_scan_settings (
-    project_id TEXT PRIMARY KEY REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    settings JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Project-owned source documents and their derived retrieval chunks.
-CREATE TABLE IF NOT EXISTS public.project_documents (
-    document_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id)
-        ON DELETE CASCADE,
-    session_id TEXT,
-    visibility_scope TEXT NOT NULL,
-    folder_root_id UUID REFERENCES public.document_folder_uploads(folder_root_id)
-        ON DELETE CASCADE,
-    source_id UUID REFERENCES public.document_workspace_sources(source_id)
-        ON DELETE CASCADE,
-    source_kind TEXT NOT NULL DEFAULT 'manual_upload',
-    original_name TEXT NOT NULL,
-    relative_path TEXT NOT NULL,
-    extension TEXT NOT NULL DEFAULT '',
-    size_bytes BIGINT NOT NULL,
-    content_hash TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'queued',
-    deleted_at TIMESTAMPTZ,
-    indexed_at TIMESTAMPTZ,
-    error_message TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT project_documents_visibility_scope_check
-        CHECK (visibility_scope IN ('project', 'session')),
-    CONSTRAINT project_documents_session_visibility_check
-        CHECK (visibility_scope <> 'session' OR session_id IS NOT NULL),
-    CONSTRAINT project_documents_status_check
-        CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted')),
-    CONSTRAINT project_documents_source_kind_check
-        CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace')),
-    CONSTRAINT project_documents_folder_source_check
-        CHECK (
-            (
-                status = 'deleted'
-                AND folder_root_id IS NULL
-                AND source_id IS NULL
-            )
-            OR
-            (
-                source_kind = 'manual_upload'
-                AND folder_root_id IS NULL
-                AND source_id IS NULL
-            )
-            OR
-            (
-                source_kind = 'folder_upload'
-                AND folder_root_id IS NOT NULL
-                AND source_id IS NULL
-            )
-            OR
-            (
-                source_kind = 'workspace'
-                AND folder_root_id IS NULL
-                AND source_id IS NOT NULL
-            )
-        ),
-    CONSTRAINT project_documents_size_check
-        CHECK (size_bytes >= 0)
-);
-
--- Migration: drop storage_key if it exists from a previous schema version.
-ALTER TABLE public.project_documents DROP COLUMN IF EXISTS storage_key;
-ALTER TABLE public.project_documents
-    ADD COLUMN IF NOT EXISTS source_id UUID
-        REFERENCES public.document_workspace_sources(source_id) ON DELETE CASCADE;
-ALTER TABLE public.project_documents
-    ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
-ALTER TABLE public.project_documents
-    DROP CONSTRAINT IF EXISTS project_documents_status_check;
-ALTER TABLE public.project_documents
-    DROP CONSTRAINT IF EXISTS project_documents_source_kind_check;
-ALTER TABLE public.project_documents
-    DROP CONSTRAINT IF EXISTS project_documents_folder_source_check;
-ALTER TABLE public.project_documents
-    ALTER COLUMN status SET DEFAULT 'queued';
-UPDATE public.project_documents
-SET status = 'queued'
-WHERE status = 'uploaded';
-DROP INDEX IF EXISTS project_documents_one_replacement_per_version_idx;
-DROP INDEX IF EXISTS project_documents_replacement_candidates_idx;
-ALTER TABLE public.project_documents
-    DROP COLUMN IF EXISTS replaces_document_id;
-ALTER TABLE public.project_documents
-    DROP COLUMN IF EXISTS version_number;
-ALTER TABLE public.project_documents
-    ADD CONSTRAINT project_documents_status_check
-    CHECK (status IN ('queued', 'indexing', 'indexed', 'failed', 'deleted'));
-ALTER TABLE public.project_documents
-    ADD CONSTRAINT project_documents_source_kind_check
-    CHECK (source_kind IN ('manual_upload', 'folder_upload', 'workspace'));
-ALTER TABLE public.project_documents
-    ADD CONSTRAINT project_documents_folder_source_check
-    CHECK (
-        (
-            status = 'deleted'
-            AND folder_root_id IS NULL
-            AND source_id IS NULL
-        )
-        OR
-        (
-            source_kind = 'manual_upload'
-            AND folder_root_id IS NULL
-            AND source_id IS NULL
-        )
-        OR
-        (
-            source_kind = 'folder_upload'
-            AND folder_root_id IS NOT NULL
-            AND source_id IS NULL
-        )
-        OR
-        (
-            source_kind = 'workspace'
-            AND folder_root_id IS NULL
-            AND source_id IS NOT NULL
-        )
-    );
-ALTER TABLE public.project_documents
-    DROP CONSTRAINT IF EXISTS project_documents_relative_path_size_check;
-ALTER TABLE public.project_documents
-    ADD CONSTRAINT project_documents_relative_path_size_check
-    CHECK (octet_length(relative_path) BETWEEN 1 AND 2048);
-
-CREATE INDEX IF NOT EXISTS project_documents_project_idx
-ON public.project_documents(project_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS project_documents_visibility_idx
-ON public.project_documents(project_id, visibility_scope, session_id);
-
-CREATE INDEX IF NOT EXISTS project_documents_hash_idx
-ON public.project_documents(project_id, content_hash);
-
-CREATE INDEX IF NOT EXISTS project_documents_folder_root_idx
-ON public.project_documents(folder_root_id, relative_path);
-
-CREATE INDEX IF NOT EXISTS project_documents_source_idx
-ON public.project_documents(source_id, relative_path);
-
-CREATE UNIQUE INDEX IF NOT EXISTS project_documents_workspace_path_unique
-ON public.project_documents(source_id, relative_path)
-WHERE source_id IS NOT NULL;
-
--- Raw document bytes, stored separately to keep the project_documents table lean.
--- Deleted automatically when the parent project_documents row is removed.
-CREATE TABLE IF NOT EXISTS public.document_content (
-    document_id UUID PRIMARY KEY
-        REFERENCES public.project_documents(document_id) ON DELETE CASCADE,
-    content BYTEA NOT NULL,
-    extracted_text TEXT,
-    extracted_content_hash TEXT
-);
-
-ALTER TABLE public.document_content
-    ADD COLUMN IF NOT EXISTS extracted_text TEXT;
-ALTER TABLE public.document_content
-    ADD COLUMN IF NOT EXISTS extracted_content_hash TEXT;
-
-CREATE TABLE IF NOT EXISTS public.document_chunks (
-    chunk_id UUID PRIMARY KEY,
-    document_id UUID NOT NULL REFERENCES public.project_documents(document_id)
-        ON DELETE CASCADE,
-    chunk_index INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    relative_path TEXT NOT NULL,
-    embedding vector(1024) NOT NULL,
-    language TEXT,
-    chunk_kind TEXT NOT NULL DEFAULT 'text',
-    symbol_name TEXT,
-    page_number INTEGER,
-    start_line INTEGER,
-    end_line INTEGER,
-    start_row INTEGER,
-    end_row INTEGER,
-    section_path TEXT[],
-    start_paragraph INTEGER,
-    end_paragraph INTEGER,
-    search_vector tsvector GENERATED ALWAYS AS (
-        to_tsvector(
-            'simple',
-            content || ' ' || relative_path || ' '
-            || COALESCE(symbol_name, '') || ' '
-            || COALESCE(language, '')
-        )
-    ) STORED,
-    CONSTRAINT document_chunks_document_index_unique
-        UNIQUE (document_id, chunk_index),
-    CONSTRAINT document_chunks_index_check
-        CHECK (chunk_index >= 0),
-    CONSTRAINT document_chunks_line_range_check
-        CHECK (
-            (start_line IS NULL AND end_line IS NULL)
-            OR (start_line >= 1 AND end_line >= start_line)
-        ),
-    CONSTRAINT document_chunks_page_number_check
-        CHECK (page_number IS NULL OR page_number >= 1),
-    CONSTRAINT document_chunks_row_range_check
-        CHECK (
-            (start_row IS NULL AND end_row IS NULL)
-            OR (start_row >= 1 AND end_row >= start_row)
-    ),
-    CONSTRAINT document_chunks_paragraph_range_check
-        CHECK (
-            (start_paragraph IS NULL AND end_paragraph IS NULL)
-            OR (start_paragraph >= 1 AND end_paragraph >= start_paragraph)
-        )
-);
-
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS language TEXT;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS relative_path TEXT;
-UPDATE public.document_chunks AS dc
-SET relative_path = pd.relative_path
-FROM public.project_documents AS pd
-WHERE pd.document_id = dc.document_id
-  AND dc.relative_path IS NULL;
-ALTER TABLE public.document_chunks
-    ALTER COLUMN relative_path SET NOT NULL;
-ALTER TABLE public.document_chunks
-    ADD COLUMN IF NOT EXISTS chunk_kind TEXT NOT NULL DEFAULT 'text';
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS symbol_name TEXT;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS page_number INTEGER;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS start_line INTEGER;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_line INTEGER;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS start_row INTEGER;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_row INTEGER;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS section_path TEXT[];
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS start_paragraph INTEGER;
-ALTER TABLE public.document_chunks ADD COLUMN IF NOT EXISTS end_paragraph INTEGER;
--- Keep this migration physically idempotent.  Repeatedly dropping and
--- recreating a PostgreSQL column leaves a dropped attribute behind in the
--- table descriptor; after enough storage-fixture resets the table reaches
--- PostgreSQL's 1600-attribute limit even though it has few live columns.
-DO $$
+    IF NEW.canonical_name IS DISTINCT FROM OLD.canonical_name THEN
+        RAISE EXCEPTION 'Entity canonical_name is immutable';
+    END IF;
+    NEW.updated_at_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
+    RETURN NEW;
+END;
+$$;
+CREATE FUNCTION public.enforce_context_block_entity_scope() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    block_user_name TEXT;
 BEGIN
-    IF EXISTS (
+    SELECT project.user_name
+    INTO block_user_name
+    FROM public.project_context_blocks AS block
+    JOIN public.projects AS project ON project.project_id = block.project_id
+    WHERE block.block_id = NEW.block_id
+      AND block.project_id = NEW.project_id;
+    IF NOT FOUND OR NOT EXISTS (
         SELECT 1
-        FROM pg_attribute
-        WHERE attrelid = 'public.document_chunks'::regclass
-          AND attname = 'search_vector'
-          AND NOT attisdropped
-          AND attgenerated <> 's'
+        FROM public.entities AS entity
+        WHERE entity.entity_id = NEW.entity_id
+          AND entity.user_name = block_user_name
+          AND (
+              entity.entity_id = 1
+              OR EXISTS (
+                  SELECT 1
+                  FROM public.project_entity_contexts AS context
+                  WHERE context.project_id = NEW.project_id
+                    AND context.entity_id = entity.entity_id
+              )
+          )
     ) THEN
-        ALTER TABLE public.document_chunks DROP COLUMN search_vector;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_attribute
-        WHERE attrelid = 'public.document_chunks'::regclass
-          AND attname = 'search_vector'
-          AND NOT attisdropped
-    ) THEN
-        ALTER TABLE public.document_chunks
-            ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
-                to_tsvector(
-                    'simple',
-                    content || ' ' || relative_path || ' '
-                    || COALESCE(symbol_name, '') || ' '
-                    || COALESCE(language, '')
-                )
-            ) STORED;
-    END IF;
-END $$;
-ALTER TABLE public.document_chunks
-    DROP CONSTRAINT IF EXISTS document_chunks_line_range_check;
-ALTER TABLE public.document_chunks
-    ADD CONSTRAINT document_chunks_line_range_check
-    CHECK (
-        (start_line IS NULL AND end_line IS NULL)
-        OR (start_line >= 1 AND end_line >= start_line)
-    );
-ALTER TABLE public.document_chunks
-    DROP CONSTRAINT IF EXISTS document_chunks_paragraph_range_check;
-ALTER TABLE public.document_chunks
-    ADD CONSTRAINT document_chunks_paragraph_range_check
-    CHECK (
-        (start_paragraph IS NULL AND end_paragraph IS NULL)
-        OR (start_paragraph >= 1 AND end_paragraph >= start_paragraph)
-    );
-ALTER TABLE public.document_chunks
-    DROP CONSTRAINT IF EXISTS document_chunks_page_number_check;
-ALTER TABLE public.document_chunks
-    ADD CONSTRAINT document_chunks_page_number_check
-    CHECK (page_number IS NULL OR page_number >= 1);
-ALTER TABLE public.document_chunks
-    DROP CONSTRAINT IF EXISTS document_chunks_row_range_check;
-ALTER TABLE public.document_chunks
-    ADD CONSTRAINT document_chunks_row_range_check
-    CHECK (
-        (start_row IS NULL AND end_row IS NULL)
-        OR (start_row >= 1 AND end_row >= start_row)
-    );
-
--- Clean unreleased-system migration: indexed chunks created before locator
--- support must be rebuilt rather than served through a page-less/locator-less
--- compatibility path. New chunks satisfy the corresponding condition and are
--- therefore not requeued on subsequent schema applications.
-UPDATE public.project_documents AS pd
-SET
-    status = 'queued',
-    indexed_at = NULL,
-    error_message = NULL,
-    updated_at = NOW()
-WHERE pd.status = 'indexed'
-  AND EXISTS (
-      SELECT 1
-      FROM public.document_chunks AS dc
-      WHERE dc.document_id = pd.document_id
-        AND (
-            (pd.extension = '.pdf' AND dc.page_number IS NULL)
-            OR (pd.extension = '.csv' AND dc.start_row IS NULL)
-            OR (pd.extension = '.docx' AND dc.start_paragraph IS NULL)
-            OR (
-                pd.extension NOT IN ('.pdf', '.csv', '.docx')
-                AND dc.start_line IS NULL
-            )
-        )
-  );
-
-CREATE INDEX IF NOT EXISTS document_chunks_document_idx
-ON public.document_chunks(document_id);
-
-CREATE INDEX IF NOT EXISTS document_chunks_embedding_idx
-ON public.document_chunks USING hnsw (embedding vector_cosine_ops);
-
-CREATE INDEX IF NOT EXISTS document_chunks_search_vector_idx
-ON public.document_chunks USING gin (search_vector);
-
--- Source context supplied to an assistant response. These rows record what a
--- completed run received; they are not claim-level citations or a general
--- source/revision ledger.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'project_documents_id_project_key'
-          AND conrelid = 'public.project_documents'::regclass
-    ) THEN
-        ALTER TABLE public.project_documents
-        ADD CONSTRAINT project_documents_id_project_key
-        UNIQUE (document_id, project_id);
-    END IF;
-END $$;
-
-CREATE TABLE IF NOT EXISTS public.message_source_refs (
-    source_ref_id UUID PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    message_id BIGINT NOT NULL,
-    source_kind TEXT NOT NULL,
-    document_id UUID,
-    source_project_id TEXT,
-    canonical_url TEXT,
-    source_message_id BIGINT,
-    content_hash TEXT NOT NULL,
-    locator JSONB NOT NULL,
-    excerpt TEXT NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    encounter_kind TEXT NOT NULL,
-    agent_run_id TEXT NOT NULL,
-    tool_call_id TEXT,
-    result_position INTEGER NOT NULL,
-    idempotency_key TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT message_source_refs_message_scope_fk
-        FOREIGN KEY (message_id, project_id, session_id)
-        REFERENCES public.messages(message_id, project_id, session_id)
-        ON DELETE CASCADE,
-    CONSTRAINT message_source_refs_source_message_scope_fk
-        FOREIGN KEY (source_message_id, project_id, session_id)
-        REFERENCES public.messages(message_id, project_id, session_id)
-        ON DELETE CASCADE,
-    CONSTRAINT message_source_refs_kind_check
-        CHECK (source_kind IN (
-            'pdf_document',
-            'text_document',
-            'user_pasted_text',
-            'web_search_result',
-            'news_search_result',
-            'web_page',
-            'web_pdf'
-        )),
-    CONSTRAINT message_source_refs_encounter_check
-        CHECK (encounter_kind IN (
-            'document_search',
-            'document_read',
-            'user_pasted_text',
-            'web_search',
-            'news_search',
-            'web_read'
-        )),
-    CONSTRAINT message_source_refs_position_check
-        CHECK (result_position >= 0),
-    CONSTRAINT message_source_refs_hash_check
-        CHECK (content_hash ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT message_source_refs_excerpt_check
-        CHECK (length(btrim(excerpt)) > 0),
-    CONSTRAINT message_source_refs_source_project_shape_check
-        CHECK (
-            (source_kind IN ('pdf_document', 'text_document')
-                AND source_project_id IS NOT NULL)
-            OR (source_kind NOT IN ('pdf_document', 'text_document')
-                AND source_project_id IS NULL)
-        ),
-    CONSTRAINT message_source_refs_source_shape_check
-        CHECK (
-            (
-                source_kind = 'pdf_document'
-                AND document_id IS NOT NULL
-                AND source_project_id IS NOT NULL
-                AND canonical_url IS NULL
-                AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
-                AND locator ->> 'kind' = 'pdf_page'
-                AND jsonb_typeof(locator -> 'page') = 'number'
-                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
-                AND COALESCE(metadata ->> 'document_name', '') <> ''
-            )
-            OR (
-                source_kind = 'text_document'
-                AND document_id IS NOT NULL
-                AND source_project_id IS NOT NULL
-                AND canonical_url IS NULL
-                AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
-                AND (
-                    (
-                        locator ->> 'kind' IN ('text_lines', 'code_lines')
-                        AND jsonb_typeof(locator -> 'start_line') = 'number'
-                        AND jsonb_typeof(locator -> 'end_line') = 'number'
-                        AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
-                        AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
-                    )
-                    OR (
-                        locator ->> 'kind' = 'csv_rows'
-                        AND jsonb_typeof(locator -> 'start_row') = 'number'
-                        AND jsonb_typeof(locator -> 'end_row') = 'number'
-                        AND locator ->> 'start_row' ~ '^[1-9][0-9]*$'
-                        AND locator ->> 'end_row' ~ '^[1-9][0-9]*$'
-                    )
-                    OR (
-                        locator ->> 'kind' = 'docx_paragraphs'
-                        AND jsonb_typeof(locator -> 'start_paragraph') = 'number'
-                        AND jsonb_typeof(locator -> 'end_paragraph') = 'number'
-                        AND locator ->> 'start_paragraph' ~ '^[1-9][0-9]*$'
-                        AND locator ->> 'end_paragraph' ~ '^[1-9][0-9]*$'
-                    )
-                )
-                AND COALESCE(metadata ->> 'document_name', '') <> ''
-            )
-            OR (
-                source_kind = 'user_pasted_text'
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND canonical_url IS NULL
-                AND source_message_id IS NOT NULL
-                AND tool_call_id IS NULL
-                AND encounter_kind = 'user_pasted_text'
-                AND locator ->> 'kind' = 'character_span'
-                AND jsonb_typeof(locator -> 'start_char') = 'number'
-                AND jsonb_typeof(locator -> 'end_char') = 'number'
-                AND locator ->> 'start_char' ~ '^[0-9]+$'
-                AND locator ->> 'end_char' ~ '^[1-9][0-9]*$'
-            )
-            OR (
-                source_kind IN ('web_search_result', 'news_search_result')
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND source_message_id IS NULL
-                AND canonical_url ~ '^https?://[^[:space:]#]+$'
-                AND tool_call_id IS NOT NULL
-                AND locator ->> 'kind' = 'search_result'
-                AND COALESCE(locator ->> 'provider', '') <> ''
-                AND COALESCE(locator ->> 'query', '') <> ''
-                AND jsonb_typeof(locator -> 'rank') = 'number'
-                AND locator ->> 'rank' ~ '^[1-9][0-9]*$'
-                AND COALESCE(metadata ->> 'title', '') <> ''
-                AND metadata -> 'discovery_snippet' = 'true'::jsonb
-                AND (
-                    (source_kind = 'web_search_result' AND encounter_kind = 'web_search')
-                    OR (source_kind = 'news_search_result' AND encounter_kind = 'news_search')
-                )
-            )
-            OR (
-                source_kind = 'web_page'
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND source_message_id IS NULL
-                AND canonical_url ~ '^https?://[^[:space:]#]+$'
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind = 'web_read'
-                AND locator ->> 'kind' = 'text_lines'
-                AND jsonb_typeof(locator -> 'start_line') = 'number'
-                AND jsonb_typeof(locator -> 'end_line') = 'number'
-                AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
-                AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
-                AND (locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint
-                AND (
-                    NOT (metadata ? 'title')
-                    OR COALESCE(metadata ->> 'title', '') <> ''
-                )
-                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
-            )
-            OR (
-                source_kind = 'web_pdf'
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND source_message_id IS NULL
-                AND canonical_url ~ '^https?://[^[:space:]#]+$'
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind = 'web_read'
-                AND locator ->> 'kind' = 'pdf_page'
-                AND jsonb_typeof(locator -> 'page') = 'number'
-                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
-                AND (
-                    NOT (metadata ? 'title')
-                    OR COALESCE(metadata ->> 'title', '') <> ''
-                )
-                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
-            )
-        )
-);
-
--- Existing unreleased databases may still scope document references to the
--- answer project. Retain their history while moving document identity to the
--- actual source project. Source identity is validated when written, but cannot
--- retain an FK: deleting a source project must not delete another project's
--- historical answer provenance.
-ALTER TABLE public.message_source_refs
-ADD COLUMN IF NOT EXISTS source_project_id TEXT;
-
-UPDATE public.message_source_refs
-SET source_project_id = project_id
-WHERE document_id IS NOT NULL
-  AND source_project_id IS NULL;
-
-DO $$
-BEGIN
-    ALTER TABLE public.message_source_refs
-    DROP CONSTRAINT IF EXISTS message_source_refs_document_project_fk;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'message_source_refs_source_project_shape_check'
-          AND conrelid = 'public.message_source_refs'::regclass
-    ) THEN
-        ALTER TABLE public.message_source_refs
-        ADD CONSTRAINT message_source_refs_source_project_shape_check
-        CHECK (
-            (source_kind IN ('pdf_document', 'text_document')
-                AND source_project_id IS NOT NULL)
-            OR (source_kind NOT IN ('pdf_document', 'text_document')
-                AND source_project_id IS NULL)
-        );
-    END IF;
-END $$;
-
--- Knoggin is unreleased: replace the closed source-reference constraints with
--- the current target shape instead of carrying a compatibility variant.
-ALTER TABLE public.message_source_refs
-    DROP CONSTRAINT IF EXISTS message_source_refs_kind_check,
-    DROP CONSTRAINT IF EXISTS message_source_refs_encounter_check,
-    DROP CONSTRAINT IF EXISTS message_source_refs_source_project_shape_check,
-    DROP CONSTRAINT IF EXISTS message_source_refs_source_shape_check;
-
-ALTER TABLE public.message_source_refs
-    ADD CONSTRAINT message_source_refs_kind_check
-        CHECK (source_kind IN (
-            'pdf_document',
-            'text_document',
-            'user_pasted_text',
-            'web_search_result',
-            'news_search_result',
-            'web_page',
-            'web_pdf'
-        )),
-    ADD CONSTRAINT message_source_refs_encounter_check
-        CHECK (encounter_kind IN (
-            'document_search',
-            'document_read',
-            'user_pasted_text',
-            'web_search',
-            'news_search',
-            'web_read'
-        )),
-    ADD CONSTRAINT message_source_refs_source_project_shape_check
-        CHECK (
-            (source_kind IN ('pdf_document', 'text_document')
-                AND source_project_id IS NOT NULL)
-            OR (source_kind NOT IN ('pdf_document', 'text_document')
-                AND source_project_id IS NULL)
-        ),
-    ADD CONSTRAINT message_source_refs_source_shape_check
-        CHECK (
-            (
-                source_kind = 'pdf_document'
-                AND document_id IS NOT NULL
-                AND source_project_id IS NOT NULL
-                AND canonical_url IS NULL
-                AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
-                AND locator ->> 'kind' = 'pdf_page'
-                AND jsonb_typeof(locator -> 'page') = 'number'
-                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
-                AND COALESCE(metadata ->> 'document_name', '') <> ''
-            )
-            OR (
-                source_kind = 'text_document'
-                AND document_id IS NOT NULL
-                AND source_project_id IS NOT NULL
-                AND canonical_url IS NULL
-                AND source_message_id IS NULL
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind IN ('document_search', 'document_read')
-                AND (
-                    (
-                        locator ->> 'kind' IN ('text_lines', 'code_lines')
-                        AND jsonb_typeof(locator -> 'start_line') = 'number'
-                        AND jsonb_typeof(locator -> 'end_line') = 'number'
-                        AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
-                        AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
-                        AND (locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint
-                    )
-                    OR (
-                        locator ->> 'kind' = 'csv_rows'
-                        AND jsonb_typeof(locator -> 'start_row') = 'number'
-                        AND jsonb_typeof(locator -> 'end_row') = 'number'
-                        AND locator ->> 'start_row' ~ '^[1-9][0-9]*$'
-                        AND locator ->> 'end_row' ~ '^[1-9][0-9]*$'
-                        AND (locator ->> 'end_row')::bigint >= (locator ->> 'start_row')::bigint
-                    )
-                    OR (
-                        locator ->> 'kind' = 'docx_paragraphs'
-                        AND jsonb_typeof(locator -> 'start_paragraph') = 'number'
-                        AND jsonb_typeof(locator -> 'end_paragraph') = 'number'
-                        AND locator ->> 'start_paragraph' ~ '^[1-9][0-9]*$'
-                        AND locator ->> 'end_paragraph' ~ '^[1-9][0-9]*$'
-                        AND (locator ->> 'end_paragraph')::bigint >= (locator ->> 'start_paragraph')::bigint
-                    )
-                )
-                AND COALESCE(metadata ->> 'document_name', '') <> ''
-            )
-            OR (
-                source_kind = 'user_pasted_text'
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND canonical_url IS NULL
-                AND source_message_id IS NOT NULL
-                AND tool_call_id IS NULL
-                AND encounter_kind = 'user_pasted_text'
-                AND locator ->> 'kind' = 'character_span'
-                AND jsonb_typeof(locator -> 'start_char') = 'number'
-                AND jsonb_typeof(locator -> 'end_char') = 'number'
-                AND locator ->> 'start_char' ~ '^[0-9]+$'
-                AND locator ->> 'end_char' ~ '^[1-9][0-9]*$'
-                AND (locator ->> 'end_char')::bigint > (locator ->> 'start_char')::bigint
-            )
-            OR (
-                source_kind IN ('web_search_result', 'news_search_result')
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND source_message_id IS NULL
-                AND canonical_url ~ '^https?://[^[:space:]#]+$'
-                AND tool_call_id IS NOT NULL
-                AND locator ->> 'kind' = 'search_result'
-                AND COALESCE(locator ->> 'provider', '') <> ''
-                AND COALESCE(locator ->> 'query', '') <> ''
-                AND jsonb_typeof(locator -> 'rank') = 'number'
-                AND locator ->> 'rank' ~ '^[1-9][0-9]*$'
-                AND COALESCE(metadata ->> 'title', '') <> ''
-                AND metadata -> 'discovery_snippet' = 'true'::jsonb
-                AND (
-                    (source_kind = 'web_search_result' AND encounter_kind = 'web_search')
-                    OR (source_kind = 'news_search_result' AND encounter_kind = 'news_search')
-                )
-            )
-            OR (
-                source_kind = 'web_page'
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND source_message_id IS NULL
-                AND canonical_url ~ '^https?://[^[:space:]#]+$'
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind = 'web_read'
-                AND locator ->> 'kind' = 'text_lines'
-                AND jsonb_typeof(locator -> 'start_line') = 'number'
-                AND jsonb_typeof(locator -> 'end_line') = 'number'
-                AND locator ->> 'start_line' ~ '^[1-9][0-9]*$'
-                AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
-                AND (locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint
-                AND (
-                    NOT (metadata ? 'title')
-                    OR COALESCE(metadata ->> 'title', '') <> ''
-                )
-                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
-            )
-            OR (
-                source_kind = 'web_pdf'
-                AND document_id IS NULL
-                AND source_project_id IS NULL
-                AND source_message_id IS NULL
-                AND canonical_url ~ '^https?://[^[:space:]#]+$'
-                AND tool_call_id IS NOT NULL
-                AND encounter_kind = 'web_read'
-                AND locator ->> 'kind' = 'pdf_page'
-                AND jsonb_typeof(locator -> 'page') = 'number'
-                AND locator ->> 'page' ~ '^[1-9][0-9]*$'
-                AND (
-                    NOT (metadata ? 'title')
-                    OR COALESCE(metadata ->> 'title', '') <> ''
-                )
-                AND (metadata -> 'discovery_snippet') IS DISTINCT FROM 'true'::jsonb
-            )
-        );
-
-CREATE INDEX IF NOT EXISTS message_source_refs_message_scope_idx
-ON public.message_source_refs(message_id, project_id, session_id);
-
-CREATE INDEX IF NOT EXISTS message_source_refs_episode_lookup_idx
-ON public.message_source_refs(project_id, session_id, message_id, created_at);
-
--- Structured artifacts are durable project history, separate from editable
--- workspace documents.  One assistant completion owns at most one artifact;
--- revisions remain immutable so later edits can be added without rewriting
--- the originating message.
-CREATE TABLE IF NOT EXISTS public.project_artifacts (
-    artifact_id UUID PRIMARY KEY,
-    user_name TEXT NOT NULL,
-    project_id TEXT NOT NULL REFERENCES public.projects(project_id) ON DELETE CASCADE,
-    session_id TEXT NOT NULL,
-    originating_message_id BIGINT NOT NULL,
-    kind TEXT NOT NULL,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'complete',
-    current_revision INTEGER NOT NULL DEFAULT 1,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT project_artifacts_origin_message_unique
-        UNIQUE (originating_message_id),
-    CONSTRAINT project_artifacts_message_scope_fk
-        FOREIGN KEY (originating_message_id, project_id, session_id)
-        REFERENCES public.messages(message_id, project_id, session_id)
-        ON DELETE CASCADE,
-    CONSTRAINT project_artifacts_session_scope_fk
-        FOREIGN KEY (session_id, project_id)
-        REFERENCES public.sessions(session_id, project_id)
-        ON DELETE CASCADE,
-    CONSTRAINT project_artifacts_kind_check
-        CHECK (kind IN ('general', 'research_brief', 'research_report')),
-    CONSTRAINT project_artifacts_status_check
-        CHECK (status IN ('complete', 'incomplete')),
-    CONSTRAINT project_artifacts_title_check
-        CHECK (length(btrim(title)) > 0 AND length(title) <= 200),
-    CONSTRAINT project_artifacts_revision_check
-        CHECK (current_revision >= 1)
-);
-
-CREATE TABLE IF NOT EXISTS public.project_artifact_revisions (
-    artifact_id UUID NOT NULL REFERENCES public.project_artifacts(artifact_id)
-        ON DELETE CASCADE,
-    revision INTEGER NOT NULL,
-    schema_version INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL,
-    blocks JSONB NOT NULL,
-    markdown TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (artifact_id, revision),
-    CONSTRAINT project_artifact_revisions_revision_check
-        CHECK (revision >= 1 AND schema_version >= 1),
-    CONSTRAINT project_artifact_revisions_kind_check
-        CHECK (kind IN ('general', 'research_brief', 'research_report')),
-    CONSTRAINT project_artifact_revisions_status_check
-        CHECK (status IN ('complete', 'incomplete')),
-    CONSTRAINT project_artifact_revisions_blocks_check
-        CHECK (jsonb_typeof(blocks) = 'array' AND jsonb_array_length(blocks) > 0),
-    CONSTRAINT project_artifact_revisions_markdown_check
-        CHECK (length(btrim(markdown)) > 0 AND length(markdown) <= 100000),
-    CONSTRAINT project_artifact_revisions_hash_check
-        CHECK (content_hash ~ '^[0-9a-f]{64}$')
-);
-
-CREATE INDEX IF NOT EXISTS project_artifacts_project_updated_idx
-ON public.project_artifacts(project_id, updated_at DESC);
-
-CREATE INDEX IF NOT EXISTS project_artifacts_session_updated_idx
-ON public.project_artifacts(session_id, updated_at DESC);
-
--- ============================================================================
--- ADDITIVE INTEGRITY CONSTRAINTS
---
--- These constraints are intentionally NOT VALID for existing deployments: they
--- protect all new writes without silently rewriting legacy rows. Validate them
--- after the deployment-specific legacy-data repair has completed.
--- ============================================================================
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_id_positive_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_id_positive_check
-        CHECK (entity_id > 0) NOT VALID;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_canonical_name_nonblank_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_canonical_name_nonblank_check
-        CHECK (btrim(canonical_name) <> '') NOT VALID;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_type_nonblank_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_type_nonblank_check
-        CHECK (type IS NULL OR btrim(type) <> '') NOT VALID;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entities_topic_nonblank_check'
-          AND conrelid = 'public.entities'::regclass
-    ) THEN
-        ALTER TABLE public.entities
-        ADD CONSTRAINT entities_topic_nonblank_check
-        CHECK (btrim(topic) <> '') NOT VALID;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'messages_id_positive_check'
-          AND conrelid = 'public.messages'::regclass
-    ) THEN
-        ALTER TABLE public.messages
-        ADD CONSTRAINT messages_id_positive_check
-        CHECK (message_id > 0) NOT VALID;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'message_source_refs_locator_range_check'
-          AND conrelid = 'public.message_source_refs'::regclass
-    ) THEN
-        ALTER TABLE public.message_source_refs
-        ADD CONSTRAINT message_source_refs_locator_range_check
-        CHECK (
-            CASE locator ->> 'kind'
-                WHEN 'text_lines' THEN
-                    CASE
-                        WHEN locator ->> 'start_line' ~ '^[1-9][0-9]*$'
-                         AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
-                        THEN (locator ->> 'end_line')::BIGINT
-                             >= (locator ->> 'start_line')::BIGINT
-                        ELSE FALSE
-                    END
-                WHEN 'code_lines' THEN
-                    CASE
-                        WHEN locator ->> 'start_line' ~ '^[1-9][0-9]*$'
-                         AND locator ->> 'end_line' ~ '^[1-9][0-9]*$'
-                        THEN (locator ->> 'end_line')::BIGINT
-                             >= (locator ->> 'start_line')::BIGINT
-                        ELSE FALSE
-                    END
-                WHEN 'csv_rows' THEN
-                    CASE
-                        WHEN locator ->> 'start_row' ~ '^[1-9][0-9]*$'
-                         AND locator ->> 'end_row' ~ '^[1-9][0-9]*$'
-                        THEN (locator ->> 'end_row')::BIGINT
-                             >= (locator ->> 'start_row')::BIGINT
-                        ELSE FALSE
-                    END
-                WHEN 'docx_paragraphs' THEN
-                    CASE
-                        WHEN locator ->> 'start_paragraph' ~ '^[1-9][0-9]*$'
-                         AND locator ->> 'end_paragraph' ~ '^[1-9][0-9]*$'
-                        THEN (locator ->> 'end_paragraph')::BIGINT
-                             >= (locator ->> 'start_paragraph')::BIGINT
-                        ELSE FALSE
-                    END
-                WHEN 'character_span' THEN
-                    CASE
-                        WHEN locator ->> 'start_char' ~ '^[0-9]+$'
-                         AND locator ->> 'end_char' ~ '^[1-9][0-9]*$'
-                        THEN (locator ->> 'end_char')::BIGINT
-                             > (locator ->> 'start_char')::BIGINT
-                        ELSE FALSE
-                    END
-                ELSE TRUE
-            END
-        ) NOT VALID;
-    END IF;
-END $$;
-
-CREATE OR REPLACE FUNCTION public.enforce_episode_focus_entity_limit()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF NEW.is_focus_entity AND (
-        SELECT count(*)
-        FROM public.episode_entities
-        WHERE episode_id = NEW.episode_id
-          AND is_focus_entity
-    ) > 2 THEN
         RAISE EXCEPTION
-            'episodes may contain at most two focus entities'
+            'context block entity must be visible to its project scope'
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
 END;
 $$;
-
-DROP TRIGGER IF EXISTS episode_entities_focus_limit_trigger
-    ON public.episode_entities;
-CREATE TRIGGER episode_entities_focus_limit_trigger
-AFTER INSERT OR UPDATE OF episode_id, is_focus_entity
-ON public.episode_entities
-FOR EACH ROW EXECUTE FUNCTION public.enforce_episode_focus_entity_limit();
-
--- Existing unreleased databases may predate the direct project foreign keys
--- above.  Make project deletion one cascade root rather than a handwritten
--- list of every descendant table.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'agent_tool_audits_project_fk'
-    ) THEN
-        ALTER TABLE public.agent_tool_audits
-        ADD CONSTRAINT agent_tool_audits_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entity_merge_proposals_project_fk'
-    ) THEN
-        ALTER TABLE public.entity_merge_proposals
-        ADD CONSTRAINT entity_merge_proposals_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'entity_merge_audits_project_fk'
-    ) THEN
-        ALTER TABLE public.entity_merge_audits
-        ADD CONSTRAINT entity_merge_audits_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'document_folder_uploads_project_fk'
-    ) THEN
-        ALTER TABLE public.document_folder_uploads
-        ADD CONSTRAINT document_folder_uploads_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'document_workspace_sources_project_fk'
-    ) THEN
-        ALTER TABLE public.document_workspace_sources
-        ADD CONSTRAINT document_workspace_sources_project_fk
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'project_document_scan_settings_project_id_fkey'
-    ) THEN
-        ALTER TABLE public.project_document_scan_settings
-        ADD CONSTRAINT project_document_scan_settings_project_id_fkey
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'project_documents_project_id_fkey'
-    ) THEN
-        ALTER TABLE public.project_documents
-        ADD CONSTRAINT project_documents_project_id_fkey
-        FOREIGN KEY (project_id) REFERENCES public.projects(project_id)
-        ON DELETE CASCADE;
-    END IF;
-END $$;
-
--- Preserve the session-owned episode shape while adding the current user-edit
--- marker to databases created before that field was introduced.
-ALTER TABLE public.episodes
-ADD COLUMN IF NOT EXISTS user_modified BOOLEAN NOT NULL DEFAULT FALSE;
+SET default_tablespace = '';
+SET default_table_access_method = heap;
+CREATE TABLE public.aac_discussions (
+    discussion_id text NOT NULL,
+    user_name text NOT NULL,
+    topic text NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    end_reason text,
+    token_budget bigint NOT NULL,
+    tokens_used bigint DEFAULT 0 NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    ended_at timestamp with time zone,
+    CONSTRAINT aac_discussions_end_reason_check CHECK (((end_reason IS NULL) OR (end_reason = ANY (ARRAY['completed'::text, 'token_budget'::text, 'user_stopped'::text, 'no_participants'::text, 'shutdown'::text, 'failed'::text, 'startup_recovery'::text, 'interrupted'::text])))),
+    CONSTRAINT aac_discussions_status_check CHECK ((status = ANY (ARRAY['active'::text, 'completed'::text, 'stopped'::text, 'interrupted'::text, 'failed'::text]))),
+    CONSTRAINT aac_discussions_token_budget_check CHECK ((token_budget >= 0)),
+    CONSTRAINT aac_discussions_tokens_used_check CHECK ((tokens_used >= 0))
+);
+CREATE TABLE public.aac_insight_votes (
+    insight_id text NOT NULL,
+    voter_agent_id text NOT NULL,
+    vote text NOT NULL,
+    reason text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT aac_insight_votes_reason_check CHECK ((length(TRIM(BOTH FROM reason)) > 0)),
+    CONSTRAINT aac_insight_votes_vote_check CHECK ((vote = ANY (ARRAY['up'::text, 'down'::text])))
+);
+CREATE TABLE public.aac_insights (
+    insight_id text NOT NULL,
+    user_name text NOT NULL,
+    discussion_id text,
+    author_agent_id text NOT NULL,
+    visibility text DEFAULT 'shared'::text NOT NULL,
+    content text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT aac_insights_visibility_check CHECK ((visibility = ANY (ARRAY['shared'::text, 'private'::text])))
+);
+CREATE TABLE public.aac_timeline (
+    timeline_id text NOT NULL,
+    discussion_id text NOT NULL,
+    kind text NOT NULL,
+    agent_id text,
+    content text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT aac_timeline_kind_check CHECK ((kind = ANY (ARRAY['agent_message'::text, 'system_event'::text])))
+);
+CREATE TABLE public.agent_brain_snapshots (
+    agent_id text NOT NULL,
+    revision integer NOT NULL,
+    user_name text NOT NULL,
+    content text NOT NULL,
+    edited_by text DEFAULT 'agent'::text NOT NULL,
+    change_type text DEFAULT 'initial_seed'::text NOT NULL,
+    changed_section text,
+    change_summary text DEFAULT 'Initial Brain'::text NOT NULL,
+    restored_from_revision integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT agent_brain_snapshots_revision_check CHECK ((revision >= 1))
+);
+CREATE TABLE public.agent_tool_audits (
+    audit_id uuid NOT NULL,
+    user_name text NOT NULL,
+    agent_id text NOT NULL,
+    project_id text,
+    session_id text NOT NULL,
+    run_id text NOT NULL,
+    tool_name text NOT NULL,
+    capability text NOT NULL,
+    arguments jsonb DEFAULT '{}'::jsonb NOT NULL,
+    result jsonb,
+    status text NOT NULL,
+    error text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT agent_tool_audits_capability_check CHECK ((capability = ANY (ARRAY['reversible_write'::text, 'configuration_write'::text, 'identity_write'::text]))),
+    CONSTRAINT agent_tool_audits_status_check CHECK ((status = ANY (ARRAY['started'::text, 'succeeded'::text, 'rejected'::text, 'failed'::text])))
+);
+CREATE TABLE public.agents (
+    agent_id text NOT NULL,
+    user_name text NOT NULL,
+    name text NOT NULL,
+    persona text,
+    brain text,
+    model text,
+    temperature double precision,
+    enabled_tools jsonb,
+    is_default boolean DEFAULT false NOT NULL,
+    aac_enabled boolean DEFAULT false NOT NULL,
+    spawned_by text,
+    brain_revision integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_turn_at timestamp with time zone,
+    CONSTRAINT agents_brain_revision_check CHECK ((brain_revision >= 1))
+);
+CREATE TABLE public.document_chunks (
+    chunk_id uuid NOT NULL,
+    document_id uuid NOT NULL,
+    chunk_index integer NOT NULL,
+    content text NOT NULL,
+    relative_path text NOT NULL,
+    embedding public.vector(1024) NOT NULL,
+    language text,
+    chunk_kind text DEFAULT 'text'::text NOT NULL,
+    symbol_name text,
+    page_number integer,
+    start_line integer,
+    end_line integer,
+    start_row integer,
+    end_row integer,
+    section_path text[],
+    start_paragraph integer,
+    end_paragraph integer,
+    search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, ((((((content || ' '::text) || relative_path) || ' '::text) || COALESCE(symbol_name, ''::text)) || ' '::text) || COALESCE(language, ''::text)))) STORED,
+    CONSTRAINT document_chunks_index_check CHECK ((chunk_index >= 0)),
+    CONSTRAINT document_chunks_line_range_check CHECK ((((start_line IS NULL) AND (end_line IS NULL)) OR ((start_line >= 1) AND (end_line >= start_line)))),
+    CONSTRAINT document_chunks_page_number_check CHECK (((page_number IS NULL) OR (page_number >= 1))),
+    CONSTRAINT document_chunks_paragraph_range_check CHECK ((((start_paragraph IS NULL) AND (end_paragraph IS NULL)) OR ((start_paragraph >= 1) AND (end_paragraph >= start_paragraph)))),
+    CONSTRAINT document_chunks_row_range_check CHECK ((((start_row IS NULL) AND (end_row IS NULL)) OR ((start_row >= 1) AND (end_row >= start_row))))
+);
+CREATE TABLE public.document_extractions (
+    document_id uuid NOT NULL,
+    extracted_text text,
+    extracted_content_hash text
+);
+CREATE TABLE public.entities (
+    entity_id bigint NOT NULL,
+    user_name text NOT NULL,
+    canonical_name text NOT NULL,
+    embedding public.vector(1024),
+    status text DEFAULT 'active'::text NOT NULL,
+    redirect_entity_id bigint,
+    created_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,
+    updated_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,
+    CONSTRAINT entities_redirect_status_check CHECK (((status = 'redirected'::text) = (redirect_entity_id IS NOT NULL))),
+    CONSTRAINT entities_status_check CHECK ((status = ANY (ARRAY['active'::text, 'redirected'::text, 'retired'::text])))
+);
+CREATE TABLE public.entity_aliases (
+    entity_id bigint NOT NULL,
+    alias text NOT NULL
+);
+CREATE TABLE public.entity_global_merge_audits (
+    merge_id text NOT NULL,
+    user_name text NOT NULL,
+    survivor_entity_id bigint NOT NULL,
+    retired_entity_id bigint NOT NULL,
+    plan jsonb NOT NULL,
+    affected_project_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
+    status text DEFAULT 'executed'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    failure_reason text,
+    CONSTRAINT entity_global_merge_audits_affected_project_ids_check CHECK ((jsonb_typeof(affected_project_ids) = 'array'::text)),
+    CONSTRAINT entity_global_merge_audits_distinct_entities CHECK ((survivor_entity_id <> retired_entity_id)),
+    CONSTRAINT entity_global_merge_audits_plan_check CHECK ((jsonb_typeof(plan) = 'object'::text)),
+    CONSTRAINT entity_global_merge_audits_status_check CHECK ((status = ANY (ARRAY['executing'::text, 'executed'::text, 'rolled_back'::text, 'failed'::text])))
+);
+CREATE TABLE public.entity_global_merge_mutations (
+    mutation_id bigint NOT NULL,
+    merge_id text NOT NULL,
+    object_kind text NOT NULL,
+    object_key text NOT NULL,
+    before_value jsonb,
+    after_value jsonb,
+    inverse_status text DEFAULT 'safe'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT entity_global_merge_mutations_inverse_status_check CHECK ((inverse_status = ANY (ARRAY['safe'::text, 'conflict'::text, 'applied'::text])))
+);
+CREATE SEQUENCE public.entity_global_merge_mutations_mutation_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.entity_global_merge_mutations_mutation_id_seq OWNED BY public.entity_global_merge_mutations.mutation_id;
+CREATE SEQUENCE public.entity_id_seq
+    START WITH 2
+    INCREMENT BY 1
+    MINVALUE 2
+    NO MAXVALUE
+    CACHE 1;
+CREATE TABLE public.episode_entities (
+    episode_id text NOT NULL,
+    project_id text NOT NULL,
+    entity_id bigint NOT NULL,
+    source_message_count integer DEFAULT 0 NOT NULL,
+    first_seen_at timestamp with time zone,
+    last_seen_at timestamp with time zone,
+    CONSTRAINT episode_entities_source_message_count_check CHECK ((source_message_count >= 0))
+);
+CREATE TABLE public.episode_messages (
+    episode_id text NOT NULL,
+    project_id text NOT NULL,
+    session_id text NOT NULL,
+    message_id bigint NOT NULL,
+    message_position integer NOT NULL,
+    attached_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT episode_messages_message_position_check CHECK ((message_position >= 0))
+);
+CREATE TABLE public.episode_relationships (
+    episode_id text NOT NULL,
+    project_id text NOT NULL,
+    relationship_id text NOT NULL,
+    source_message_count integer DEFAULT 0 NOT NULL,
+    CONSTRAINT episode_relationships_source_message_count_check CHECK ((source_message_count >= 0))
+);
+CREATE TABLE public.episodes (
+    episode_id text NOT NULL,
+    project_id text NOT NULL,
+    summary text NOT NULL,
+    new_developments jsonb DEFAULT '[]'::jsonb NOT NULL,
+    updates jsonb DEFAULT '[]'::jsonb NOT NULL,
+    unresolved jsonb DEFAULT '[]'::jsonb NOT NULL,
+    search_tsvector tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, ((((((summary || ' '::text) || (new_developments)::text) || ' '::text) || (updates)::text) || ' '::text) || (unresolved)::text))) STORED,
+    source_message_count integer DEFAULT 0 NOT NULL,
+    first_message_at timestamp with time zone,
+    last_message_at timestamp with time zone,
+    embedding public.vector(1024),
+    generator_metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    user_modified boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT episodes_source_message_count_check CHECK ((source_message_count >= 0))
+);
+CREATE TABLE public.llm_budget_reservations (
+    reservation_id uuid NOT NULL,
+    reset_key text NOT NULL,
+    reserved_usd double precision NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    recorded_at timestamp with time zone,
+    CONSTRAINT llm_budget_reservations_status_check CHECK ((status = ANY (ARRAY['active'::text, 'recorded'::text, 'expired'::text])))
+);
+CREATE TABLE public.llm_budget_windows (
+    reset_key text NOT NULL,
+    spent_usd double precision DEFAULT 0 NOT NULL,
+    reserved_usd double precision DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE TABLE public.maintenance_frontiers (
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    frontier_message_id bigint DEFAULT 0 NOT NULL,
+    frontier_timestamp_ms bigint,
+    frontier_token text NOT NULL,
+    captured_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT maintenance_frontiers_frontier_message_id_check CHECK ((frontier_message_id >= 0))
+);
+CREATE TABLE public.maintenance_reinterpretation_audits (
+    audit_id uuid NOT NULL,
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    observation_ids jsonb NOT NULL,
+    changes jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT maintenance_reinterpretation_audits_changes_check CHECK ((jsonb_typeof(changes) = 'array'::text)),
+    CONSTRAINT maintenance_reinterpretation_audits_observation_ids_check CHECK ((jsonb_typeof(observation_ids) = 'array'::text))
+);
+CREATE TABLE public.maintenance_review_checkpoints (
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    last_reviewed_observation_id bigint DEFAULT 0 NOT NULL,
+    last_completed_at timestamp with time zone,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT maintenance_review_checkpoin_last_reviewed_observation_id_check CHECK ((last_reviewed_observation_id >= 0))
+);
+CREATE TABLE public.maintenance_review_events (
+    event_id bigint NOT NULL,
+    review_id text NOT NULL,
+    status text NOT NULL,
+    actor text NOT NULL,
+    reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT maintenance_review_events_status_check CHECK ((status = ANY (ARRAY['open'::text, 'applied'::text, 'dismissed'::text, 'stale'::text])))
+);
+CREATE SEQUENCE public.maintenance_review_events_event_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.maintenance_review_events_event_id_seq OWNED BY public.maintenance_review_events.event_id;
+CREATE TABLE public.maintenance_review_evidence (
+    review_id text NOT NULL,
+    evidence_kind text NOT NULL,
+    evidence_id text NOT NULL,
+    observation_id bigint,
+    snapshot jsonb DEFAULT '{}'::jsonb NOT NULL
+);
+CREATE TABLE public.maintenance_reviews (
+    review_id text NOT NULL,
+    user_name text NOT NULL,
+    scope text NOT NULL,
+    project_id text,
+    kind text NOT NULL,
+    dedupe_key text,
+    evidence_refs jsonb DEFAULT '[]'::jsonb NOT NULL,
+    evidence_snapshot jsonb DEFAULT '{}'::jsonb NOT NULL,
+    reasoning text NOT NULL,
+    proposed_plan jsonb NOT NULL,
+    expected_state jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    signature text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    resolved_at timestamp with time zone,
+    CONSTRAINT maintenance_reviews_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text)),
+    CONSTRAINT maintenance_reviews_evidence_snapshot_check CHECK ((jsonb_typeof(evidence_snapshot) = 'object'::text)),
+    CONSTRAINT maintenance_reviews_expected_state_check CHECK ((jsonb_typeof(expected_state) = 'object'::text)),
+    CONSTRAINT maintenance_reviews_project_scope_fk CHECK (((scope = 'user-global'::text) OR (project_id IS NOT NULL))),
+    CONSTRAINT maintenance_reviews_proposed_plan_check CHECK ((jsonb_typeof(proposed_plan) = 'object'::text)),
+    CONSTRAINT maintenance_reviews_reasoning_check CHECK ((btrim(reasoning) <> ''::text)),
+    CONSTRAINT maintenance_reviews_scope_check CHECK ((scope = ANY (ARRAY['project'::text, 'user-global'::text]))),
+    CONSTRAINT maintenance_reviews_status_check CHECK ((status = ANY (ARRAY['open'::text, 'applied'::text, 'dismissed'::text, 'stale'::text])))
+);
+CREATE TABLE public.message_entity_refs (
+    message_id bigint NOT NULL,
+    entity_id bigint NOT NULL
+);
+CREATE SEQUENCE public.message_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+CREATE TABLE public.message_revisions (
+    user_name text NOT NULL,
+    session_id text NOT NULL,
+    project_id text NOT NULL,
+    message_id bigint NOT NULL,
+    revision integer NOT NULL,
+    content text NOT NULL,
+    created_at_ms bigint NOT NULL
+);
+CREATE TABLE public.message_source_refs (
+    source_ref_id uuid NOT NULL,
+    project_id text NOT NULL,
+    session_id text NOT NULL,
+    message_id bigint NOT NULL,
+    source_kind text NOT NULL,
+    document_id uuid,
+    source_project_id text,
+    canonical_url text,
+    source_message_id bigint,
+    content_hash text NOT NULL,
+    locator jsonb NOT NULL,
+    excerpt text NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    encounter_kind text NOT NULL,
+    agent_run_id text NOT NULL,
+    tool_call_id text,
+    result_position integer NOT NULL,
+    idempotency_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT message_source_refs_encounter_check CHECK ((encounter_kind = ANY (ARRAY['document_search'::text, 'document_read'::text, 'document_selection'::text, 'user_pasted_text'::text, 'web_search'::text, 'news_search'::text, 'web_read'::text]))),
+    CONSTRAINT message_source_refs_excerpt_check CHECK ((length(btrim(excerpt)) > 0)),
+    CONSTRAINT message_source_refs_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT message_source_refs_kind_check CHECK ((source_kind = ANY (ARRAY['pdf_document'::text, 'text_document'::text, 'user_pasted_text'::text, 'web_search_result'::text, 'news_search_result'::text, 'web_page'::text, 'web_pdf'::text]))),
+    CONSTRAINT message_source_refs_position_check CHECK ((result_position >= 0)),
+    CONSTRAINT message_source_refs_source_project_shape_check CHECK ((((source_kind = ANY (ARRAY['pdf_document'::text, 'text_document'::text])) AND (source_project_id IS NOT NULL)) OR ((source_kind <> ALL (ARRAY['pdf_document'::text, 'text_document'::text])) AND (source_project_id IS NULL)))),
+    CONSTRAINT message_source_refs_source_shape_check CHECK ((((source_kind = 'pdf_document'::text) AND (document_id IS NOT NULL) AND (source_project_id IS NOT NULL) AND (canonical_url IS NULL) AND (source_message_id IS NULL) AND (((tool_call_id IS NOT NULL) AND (encounter_kind = ANY (ARRAY['document_search'::text, 'document_read'::text]))) OR ((tool_call_id IS NULL) AND (encounter_kind = 'document_selection'::text))) AND ((locator ->> 'kind'::text) = 'pdf_page'::text) AND (jsonb_typeof((locator -> 'page'::text)) = 'number'::text) AND ((locator ->> 'page'::text) ~ '^[1-9][0-9]*$'::text) AND (COALESCE((metadata ->> 'document_name'::text), ''::text) <> ''::text)) OR ((source_kind = 'text_document'::text) AND (document_id IS NOT NULL) AND (source_project_id IS NOT NULL) AND (canonical_url IS NULL) AND (source_message_id IS NULL) AND (((tool_call_id IS NOT NULL) AND (encounter_kind = ANY (ARRAY['document_search'::text, 'document_read'::text]))) OR ((tool_call_id IS NULL) AND (encounter_kind = 'document_selection'::text))) AND ((((locator ->> 'kind'::text) = ANY (ARRAY['text_lines'::text, 'code_lines'::text])) AND (jsonb_typeof((locator -> 'start_line'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_line'::text)) = 'number'::text) AND ((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint)) OR (((locator ->> 'kind'::text) = 'csv_rows'::text) AND (jsonb_typeof((locator -> 'start_row'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_row'::text)) = 'number'::text) AND ((locator ->> 'start_row'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_row'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_row'::text))::bigint >= ((locator ->> 'start_row'::text))::bigint)) OR (((locator ->> 'kind'::text) = 'docx_paragraphs'::text) AND (jsonb_typeof((locator -> 'start_paragraph'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_paragraph'::text)) = 'number'::text) AND ((locator ->> 'start_paragraph'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_paragraph'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_paragraph'::text))::bigint >= ((locator ->> 'start_paragraph'::text))::bigint))) AND (COALESCE((metadata ->> 'document_name'::text), ''::text) <> ''::text)) OR ((source_kind = 'user_pasted_text'::text) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (canonical_url IS NULL) AND (source_message_id IS NOT NULL) AND (tool_call_id IS NULL) AND (encounter_kind = 'user_pasted_text'::text) AND ((locator ->> 'kind'::text) = 'character_span'::text) AND (jsonb_typeof((locator -> 'start_char'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_char'::text)) = 'number'::text) AND ((locator ->> 'start_char'::text) ~ '^[0-9]+$'::text) AND ((locator ->> 'end_char'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_char'::text))::bigint > ((locator ->> 'start_char'::text))::bigint)) OR ((source_kind = ANY (ARRAY['web_search_result'::text, 'news_search_result'::text])) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (source_message_id IS NULL) AND (canonical_url ~ '^https?://[^[:space:]#]+$'::text) AND (tool_call_id IS NOT NULL) AND ((locator ->> 'kind'::text) = 'search_result'::text) AND (COALESCE((locator ->> 'provider'::text), ''::text) <> ''::text) AND (COALESCE((locator ->> 'query'::text), ''::text) <> ''::text) AND (jsonb_typeof((locator -> 'rank'::text)) = 'number'::text) AND ((locator ->> 'rank'::text) ~ '^[1-9][0-9]*$'::text) AND (COALESCE((metadata ->> 'title'::text), ''::text) <> ''::text) AND ((metadata -> 'discovery_snippet'::text) = 'true'::jsonb) AND (((source_kind = 'web_search_result'::text) AND (encounter_kind = 'web_search'::text)) OR ((source_kind = 'news_search_result'::text) AND (encounter_kind = 'news_search'::text)))) OR ((source_kind = 'web_page'::text) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (source_message_id IS NULL) AND (canonical_url ~ '^https?://[^[:space:]#]+$'::text) AND (tool_call_id IS NOT NULL) AND (encounter_kind = 'web_read'::text) AND ((locator ->> 'kind'::text) = 'text_lines'::text) AND (jsonb_typeof((locator -> 'start_line'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_line'::text)) = 'number'::text) AND ((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint) AND ((NOT (metadata ? 'title'::text)) OR (COALESCE((metadata ->> 'title'::text), ''::text) <> ''::text)) AND ((metadata -> 'discovery_snippet'::text) IS DISTINCT FROM 'true'::jsonb)) OR ((source_kind = 'web_pdf'::text) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (source_message_id IS NULL) AND (canonical_url ~ '^https?://[^[:space:]#]+$'::text) AND (tool_call_id IS NOT NULL) AND (encounter_kind = 'web_read'::text) AND ((locator ->> 'kind'::text) = 'pdf_page'::text) AND (jsonb_typeof((locator -> 'page'::text)) = 'number'::text) AND ((locator ->> 'page'::text) ~ '^[1-9][0-9]*$'::text) AND ((NOT (metadata ? 'title'::text)) OR (COALESCE((metadata ->> 'title'::text), ''::text) <> ''::text)) AND ((metadata -> 'discovery_snippet'::text) IS DISTINCT FROM 'true'::jsonb))))
+);
+CREATE TABLE public.messages (
+    user_name text NOT NULL,
+    session_id text NOT NULL,
+    message_id bigint NOT NULL,
+    project_id text NOT NULL,
+    role text NOT NULL,
+    content text NOT NULL,
+    search_tsvector tsvector GENERATED ALWAYS AS (to_tsvector('english'::regconfig, content)) STORED,
+    user_msg_id bigint,
+    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+    acceptance_key text,
+    timestamp_ms bigint,
+    lifecycle_state text DEFAULT 'sealed'::text NOT NULL,
+    editable_until_ms bigint,
+    sealed_at_ms bigint,
+    selected_revision integer DEFAULT 1 NOT NULL,
+    replaces_message_id bigint,
+    superseded_at_ms bigint,
+    exchange_state text DEFAULT 'open'::text NOT NULL,
+    exchange_outcome text,
+    exchange_closed_at_ms bigint,
+    CONSTRAINT messages_lifecycle_state_check CHECK ((lifecycle_state = ANY (ARRAY['editable'::text, 'sealed'::text, 'superseded'::text]))),
+    CONSTRAINT messages_exchange_state_check CHECK ((exchange_state = ANY (ARRAY['open'::text, 'closed'::text]))),
+    CONSTRAINT messages_exchange_user_shape_check CHECK (((role = 'user'::text) AND (((exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)) OR ((exchange_state = 'closed'::text) AND (exchange_outcome = ANY (ARRAY['assistant_final'::text, 'clarification'::text, 'failed'::text, 'cancelled'::text, 'user_only'::text])) AND (exchange_closed_at_ms IS NOT NULL) AND (exchange_closed_at_ms >= 0)))) OR ((role <> 'user'::text) AND (exchange_state = 'open'::text) AND (exchange_outcome IS NULL) AND (exchange_closed_at_ms IS NULL)))
+);
+CREATE TABLE public.project_artifact_revisions (
+    artifact_id uuid NOT NULL,
+    revision integer NOT NULL,
+    schema_version integer NOT NULL,
+    kind text NOT NULL,
+    title text NOT NULL,
+    status text NOT NULL,
+    blocks jsonb NOT NULL,
+    markdown text NOT NULL,
+    content_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_artifact_revisions_blocks_check CHECK (((jsonb_typeof(blocks) = 'array'::text) AND (jsonb_array_length(blocks) > 0))),
+    CONSTRAINT project_artifact_revisions_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT project_artifact_revisions_kind_check CHECK ((kind = ANY (ARRAY['general'::text, 'research_brief'::text, 'research_report'::text]))),
+    CONSTRAINT project_artifact_revisions_markdown_check CHECK (((length(btrim(markdown)) > 0) AND (length(markdown) <= 100000))),
+    CONSTRAINT project_artifact_revisions_revision_check CHECK (((revision >= 1) AND (schema_version >= 1))),
+    CONSTRAINT project_artifact_revisions_status_check CHECK ((status = ANY (ARRAY['complete'::text, 'incomplete'::text])))
+);
+CREATE TABLE public.project_artifacts (
+    artifact_id uuid NOT NULL,
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    session_id text NOT NULL,
+    originating_message_id bigint NOT NULL,
+    kind text NOT NULL,
+    title text NOT NULL,
+    status text DEFAULT 'complete'::text NOT NULL,
+    current_revision integer DEFAULT 1 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_artifacts_kind_check CHECK ((kind = ANY (ARRAY['general'::text, 'research_brief'::text, 'research_report'::text]))),
+    CONSTRAINT project_artifacts_revision_check CHECK ((current_revision >= 1)),
+    CONSTRAINT project_artifacts_status_check CHECK ((status = ANY (ARRAY['complete'::text, 'incomplete'::text]))),
+    CONSTRAINT project_artifacts_title_check CHECK (((length(btrim(title)) > 0) AND (length(title) <= 200)))
+);
+CREATE TABLE public.project_document_scan_settings (
+    project_id text NOT NULL,
+    settings jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE TABLE public.project_documents (
+    document_id uuid NOT NULL,
+    project_id text NOT NULL,
+    original_name text NOT NULL,
+    relative_path text NOT NULL,
+    extension text DEFAULT ''::text NOT NULL,
+    size_bytes bigint NOT NULL,
+    content_hash text NOT NULL,
+    status text DEFAULT 'queued'::text NOT NULL,
+    deleted_at timestamp with time zone,
+    indexed_at timestamp with time zone,
+    error_message text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_documents_relative_path_size_check CHECK (((octet_length(relative_path) >= 1) AND (octet_length(relative_path) <= 2048))),
+    CONSTRAINT project_documents_size_check CHECK ((size_bytes >= 0)),
+    CONSTRAINT project_documents_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'indexing'::text, 'indexed'::text, 'failed'::text, 'deleted'::text])))
+);
+CREATE TABLE public.project_entity_contexts (
+    project_id text NOT NULL,
+    entity_id bigint NOT NULL,
+    user_name text NOT NULL,
+    entity_type text NOT NULL,
+    topic text DEFAULT 'General'::text NOT NULL,
+    last_mentioned_ms bigint,
+    created_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,
+    updated_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,
+    CONSTRAINT project_entity_contexts_topic_nonblank_check CHECK ((btrim(topic) <> ''::text)),
+    CONSTRAINT project_entity_contexts_type_nonblank_check CHECK ((btrim(entity_type) <> ''::text))
+);
+CREATE TABLE public.project_read_scopes (
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    readable_project_id text NOT NULL,
+    CONSTRAINT project_read_scopes_check CHECK ((project_id <> readable_project_id))
+);
+CREATE TABLE public.projects (
+    project_id text NOT NULL,
+    user_name text NOT NULL,
+    name text NOT NULL,
+    description text,
+    status text DEFAULT 'active'::text NOT NULL,
+    domain_config jsonb NOT NULL,
+    episode_window_size integer DEFAULT 24 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    archived_at timestamp with time zone,
+    deleted_at timestamp with time zone,
+    last_activity_at timestamp with time zone,
+    CONSTRAINT projects_domain_config_check CHECK ((jsonb_typeof(domain_config) = 'object'::text)),
+    CONSTRAINT projects_episode_window_size_check CHECK (((episode_window_size >= 8) AND (episode_window_size <= 72))),
+    CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text, 'deleted'::text])))
+);
+CREATE TABLE public.project_contexts (
+    project_id text NOT NULL,
+    user_name text NOT NULL,
+    current_revision_id uuid,
+    projection_revision_id uuid,
+    projection_hash text,
+    projection_pending_revision_id uuid,
+    projection_pending_hash text,
+    projection_failure_code text,
+    projection_failure_summary text,
+    projection_failure_at timestamp with time zone,
+    projection_synced_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_contexts_projection_failure_shape_check CHECK (((projection_failure_code IS NULL) = (projection_failure_summary IS NULL))),
+    CONSTRAINT project_contexts_projection_hash_check CHECK (((projection_hash IS NULL) OR (projection_hash ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT project_contexts_projection_pending_hash_check CHECK (((projection_pending_hash IS NULL) OR (projection_pending_hash ~ '^[0-9a-f]{64}$'::text)))
+);
+CREATE TABLE public.project_semantic_windows (
+    window_id uuid NOT NULL,
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    origin text DEFAULT 'conversation'::text NOT NULL,
+    stage text DEFAULT 'claimed'::text NOT NULL,
+    domain_version integer NOT NULL,
+    policy_snapshot jsonb NOT NULL,
+    source_token_count bigint DEFAULT 0 NOT NULL,
+    token_estimator text NOT NULL,
+    token_estimator_version text NOT NULL,
+    overfill_tokens bigint DEFAULT 0 NOT NULL,
+    overfill_ratio double precision DEFAULT 0 NOT NULL,
+    episode_result_recorded boolean DEFAULT false NOT NULL,
+    context_revision_id uuid,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    last_failure_stage text,
+    last_failure_code text,
+    last_failure_at_ms bigint,
+    last_error_summary text,
+    next_retry_at_ms bigint,
+    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT project_semantic_windows_attempt_count_check CHECK ((attempt_count >= 0)),
+    CONSTRAINT project_semantic_windows_domain_version_check CHECK ((domain_version >= 0)),
+    CONSTRAINT project_semantic_windows_failure_shape_check CHECK ((((last_failure_stage IS NULL) AND (last_failure_code IS NULL) AND (last_failure_at_ms IS NULL) AND (last_error_summary IS NULL)) OR ((last_failure_stage IS NOT NULL) AND (last_failure_code IS NOT NULL) AND (last_failure_at_ms IS NOT NULL) AND (last_error_summary IS NOT NULL)))),
+    CONSTRAINT project_semantic_windows_origin_check CHECK ((origin = ANY (ARRAY['conversation'::text, 'human_edit'::text]))),
+    CONSTRAINT project_semantic_windows_overfill_check CHECK (((overfill_tokens >= 0) AND (overfill_ratio >= (0)::double precision))),
+    CONSTRAINT project_semantic_windows_policy_snapshot_check CHECK ((jsonb_typeof(policy_snapshot) = 'object'::text)),
+    CONSTRAINT project_semantic_windows_source_token_count_check CHECK ((source_token_count >= 0)),
+    CONSTRAINT project_semantic_windows_stage_check CHECK ((stage = ANY (ARRAY['claimed'::text, 'context_committed'::text, 'knowledge_committed'::text, 'completed'::text]))),
+    CONSTRAINT project_semantic_windows_terminal_shape_check CHECK ((((stage = 'completed'::text) AND (completed_at IS NOT NULL)) OR ((stage <> 'completed'::text) AND (completed_at IS NULL)))),
+    CONSTRAINT project_semantic_windows_token_estimator_check CHECK (((btrim(token_estimator) <> ''::text) AND (btrim(token_estimator_version) <> ''::text)))
+);
+CREATE TABLE public.project_semantic_window_messages (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    message_id bigint NOT NULL,
+    session_id text NOT NULL,
+    exchange_user_message_id bigint NOT NULL,
+    role text NOT NULL,
+    ordinal integer NOT NULL,
+    CONSTRAINT project_semantic_window_messages_exchange_message_check CHECK ((exchange_user_message_id > 0)),
+    CONSTRAINT project_semantic_window_messages_ordinal_check CHECK ((ordinal >= 0)),
+    CONSTRAINT project_semantic_window_messages_role_check CHECK ((role = ANY (ARRAY['user'::text, 'assistant'::text])))
+);
+CREATE TABLE public.project_semantic_window_episodes (
+    window_id uuid NOT NULL,
+    project_id text NOT NULL,
+    episode_id text NOT NULL,
+    ordinal integer NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_semantic_window_episodes_ordinal_check CHECK ((ordinal >= 0))
+);
+CREATE TABLE public.project_context_revisions (
+    revision_id uuid NOT NULL,
+    project_id text NOT NULL,
+    revision_number integer NOT NULL,
+    parent_revision_id uuid,
+    window_id uuid,
+    origin text NOT NULL,
+    domain_version integer NOT NULL,
+    edit_summary text DEFAULT ''::text NOT NULL,
+    content_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_context_revisions_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT project_context_revisions_domain_version_check CHECK ((domain_version >= 0)),
+    CONSTRAINT project_context_revisions_edit_summary_check CHECK ((length(edit_summary) <= 2000)),
+    CONSTRAINT project_context_revisions_origin_check CHECK ((origin = ANY (ARRAY['conversation'::text, 'human_edit'::text]))),
+    CONSTRAINT project_context_revisions_revision_number_check CHECK ((revision_number >= 1))
+);
+CREATE TABLE public.project_context_blocks (
+    block_id uuid NOT NULL,
+    project_id text NOT NULL,
+    section_key text NOT NULL,
+    markdown text NOT NULL,
+    content_hash text NOT NULL,
+    assertion_kind text NOT NULL,
+    supersedes_block_id uuid,
+    source_time_ms bigint,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_context_blocks_assertion_kind_check CHECK ((assertion_kind = ANY (ARRAY['user_asserted'::text, 'source_grounded'::text, 'agent_derived'::text, 'human_asserted'::text]))),
+    CONSTRAINT project_context_blocks_content_hash_check CHECK ((content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT project_context_blocks_markdown_check CHECK (((length(btrim(markdown)) > 0) AND (length(markdown) <= 50000))),
+    CONSTRAINT project_context_blocks_section_key_check CHECK ((section_key ~ '^[a-z][a-z0-9_]{0,39}$'::text)),
+    CONSTRAINT project_context_blocks_source_time_check CHECK (((source_time_ms IS NULL) OR (source_time_ms >= 0)))
+);
+CREATE TABLE public.project_context_revision_blocks (
+    revision_id uuid NOT NULL,
+    project_id text NOT NULL,
+    block_id uuid NOT NULL,
+    ordinal integer NOT NULL,
+    CONSTRAINT project_context_revision_blocks_ordinal_check CHECK ((ordinal >= 0))
+);
+CREATE TABLE public.project_context_block_supports (
+    block_id uuid NOT NULL,
+    project_id text NOT NULL,
+    message_id bigint NOT NULL,
+    session_id text NOT NULL,
+    source_ref_id uuid,
+    support_kind text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_context_block_supports_kind_check CHECK ((support_kind = ANY (ARRAY['user_message'::text, 'assistant_message'::text, 'assistant_source'::text]))),
+    CONSTRAINT project_context_block_supports_source_shape_check CHECK ((((support_kind = 'assistant_source'::text) AND (source_ref_id IS NOT NULL)) OR ((support_kind <> 'assistant_source'::text) AND (source_ref_id IS NULL))))
+);
+CREATE TABLE public.project_context_revision_impact_blocks (
+    revision_id uuid NOT NULL,
+    project_id text NOT NULL,
+    block_id uuid NOT NULL
+);
+CREATE TABLE public.context_block_entities (
+    block_id uuid NOT NULL,
+    project_id text NOT NULL,
+    entity_id bigint NOT NULL,
+    mention_text text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT context_block_entities_mention_text_check CHECK ((btrim(mention_text) <> ''::text))
+);
+CREATE TABLE public.relationship_observation_blocks (
+    observation_id bigint NOT NULL,
+    project_id text NOT NULL,
+    block_id uuid NOT NULL
+);
+CREATE TABLE public.relationship_observations (
+    observation_id bigint NOT NULL,
+    relationship_id text,
+    project_id text NOT NULL,
+    user_name text NOT NULL,
+    semantic_window_id uuid NOT NULL,
+    source_entity_id bigint NOT NULL,
+    target_entity_id bigint NOT NULL,
+    observed_relationship_label text NOT NULL,
+    interpretation_source text DEFAULT 'observed'::text NOT NULL,
+    context text,
+    observed_at_ms bigint NOT NULL,
+    retired_at timestamp with time zone,
+    retired_reason text,
+    CONSTRAINT relationship_observations_distinct_entities CHECK ((source_entity_id <> target_entity_id)),
+    CONSTRAINT relationship_observations_interpretation_source_check CHECK ((interpretation_source = ANY (ARRAY['observed'::text, 'domain'::text, 'review'::text]))),
+    CONSTRAINT relationship_observations_observed_relationship_label_check CHECK ((btrim(observed_relationship_label) <> ''::text)),
+    CONSTRAINT relationship_observations_retirement_shape_check CHECK ((((retired_at IS NULL) AND (retired_reason IS NULL)) OR ((retired_at IS NOT NULL) AND (btrim(retired_reason) <> ''::text))))
+);
+CREATE SEQUENCE public.relationship_observations_observation_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+ALTER SEQUENCE public.relationship_observations_observation_id_seq OWNED BY public.relationship_observations.observation_id;
+CREATE TABLE public.relationships (
+    relationship_id text NOT NULL,
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    entity_a_id bigint NOT NULL,
+    entity_b_id bigint NOT NULL,
+    relationship_type text NOT NULL,
+    "symmetric" boolean DEFAULT false NOT NULL,
+    CONSTRAINT relationships_distinct_entities CHECK ((entity_a_id <> entity_b_id)),
+    CONSTRAINT relationships_identity_matches_fields CHECK ((relationship_id = format('%s:%s:%s:%s'::text, project_id,
+CASE
+    WHEN "symmetric" THEN LEAST(entity_a_id, entity_b_id)
+    ELSE entity_a_id
+END,
+CASE
+    WHEN "symmetric" THEN GREATEST(entity_a_id, entity_b_id)
+    ELSE entity_b_id
+END, lower(regexp_replace(btrim(relationship_type), '\s+'::text, ' '::text, 'g'::text))))),
+    CONSTRAINT relationships_relationship_type_check CHECK ((btrim(relationship_type) <> ''::text))
+);
+CREATE TABLE public.saved_web_links (
+    link_id uuid NOT NULL,
+    project_id text NOT NULL,
+    url text NOT NULL,
+    title text,
+    summary text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT saved_web_links_url_check CHECK ((url ~* '^https?://[^[:space:]]+$'::text))
+);
+CREATE TABLE public.sessions (
+    session_id text NOT NULL,
+    user_name text NOT NULL,
+    project_id text NOT NULL,
+    model text,
+    agent_id text,
+    enabled_tools jsonb,
+    document_focus jsonb,
+    status text DEFAULT 'open'::text NOT NULL,
+    episode_participation_enabled boolean DEFAULT true NOT NULL,
+    episode_participation_after_message_id bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_active_at timestamp with time zone DEFAULT now() NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT sessions_episode_participation_after_message_id_check CHECK ((episode_participation_after_message_id >= 0)),
+    CONSTRAINT sessions_status_check CHECK ((status = ANY (ARRAY['open'::text, 'deleted'::text])))
+);
+ALTER TABLE ONLY public.entity_global_merge_mutations ALTER COLUMN mutation_id SET DEFAULT nextval('public.entity_global_merge_mutations_mutation_id_seq'::regclass);
+ALTER TABLE ONLY public.maintenance_review_events ALTER COLUMN event_id SET DEFAULT nextval('public.maintenance_review_events_event_id_seq'::regclass);
+ALTER TABLE ONLY public.relationship_observations ALTER COLUMN observation_id SET DEFAULT nextval('public.relationship_observations_observation_id_seq'::regclass);
+ALTER TABLE ONLY public.aac_discussions
+    ADD CONSTRAINT aac_discussions_pkey PRIMARY KEY (discussion_id);
+ALTER TABLE ONLY public.aac_insight_votes
+    ADD CONSTRAINT aac_insight_votes_pkey PRIMARY KEY (insight_id, voter_agent_id);
+ALTER TABLE ONLY public.aac_insights
+    ADD CONSTRAINT aac_insights_pkey PRIMARY KEY (insight_id);
+ALTER TABLE ONLY public.aac_timeline
+    ADD CONSTRAINT aac_timeline_pkey PRIMARY KEY (timeline_id);
+ALTER TABLE ONLY public.agent_brain_snapshots
+    ADD CONSTRAINT agent_brain_snapshots_pkey PRIMARY KEY (agent_id, revision);
+ALTER TABLE ONLY public.agent_tool_audits
+    ADD CONSTRAINT agent_tool_audits_pkey PRIMARY KEY (audit_id);
+ALTER TABLE ONLY public.agents
+    ADD CONSTRAINT agents_pkey PRIMARY KEY (agent_id);
+ALTER TABLE ONLY public.document_chunks
+    ADD CONSTRAINT document_chunks_document_index_unique UNIQUE (document_id, chunk_index);
+ALTER TABLE ONLY public.document_chunks
+    ADD CONSTRAINT document_chunks_pkey PRIMARY KEY (chunk_id);
+ALTER TABLE ONLY public.document_extractions
+    ADD CONSTRAINT document_extractions_pkey PRIMARY KEY (document_id);
+ALTER TABLE public.entities
+    ADD CONSTRAINT entities_canonical_name_nonblank_check CHECK ((btrim(canonical_name) <> ''::text));
+ALTER TABLE public.entities
+    ADD CONSTRAINT entities_id_positive_check CHECK ((entity_id > 0));
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_id_user_key UNIQUE (entity_id, user_name);
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_pkey PRIMARY KEY (entity_id);
+ALTER TABLE ONLY public.entity_aliases
+    ADD CONSTRAINT entity_aliases_pkey PRIMARY KEY (entity_id, alias);
+ALTER TABLE ONLY public.entity_global_merge_audits
+    ADD CONSTRAINT entity_global_merge_audits_pkey PRIMARY KEY (merge_id);
+ALTER TABLE ONLY public.entity_global_merge_mutations
+    ADD CONSTRAINT entity_global_merge_mutations_merge_id_object_kind_object_k_key UNIQUE (merge_id, object_kind, object_key);
+ALTER TABLE ONLY public.entity_global_merge_mutations
+    ADD CONSTRAINT entity_global_merge_mutations_pkey PRIMARY KEY (mutation_id);
+ALTER TABLE ONLY public.episode_entities
+    ADD CONSTRAINT episode_entities_pkey PRIMARY KEY (episode_id, entity_id);
+ALTER TABLE ONLY public.episode_messages
+    ADD CONSTRAINT episode_messages_episode_id_message_position_key UNIQUE (episode_id, message_position);
+ALTER TABLE ONLY public.episode_messages
+    ADD CONSTRAINT episode_messages_pkey PRIMARY KEY (episode_id, message_id);
+ALTER TABLE ONLY public.episode_relationships
+    ADD CONSTRAINT episode_relationships_pkey PRIMARY KEY (episode_id, relationship_id);
+ALTER TABLE ONLY public.episodes
+    ADD CONSTRAINT episodes_id_project_key UNIQUE (episode_id, project_id);
+ALTER TABLE ONLY public.episodes
+    ADD CONSTRAINT episodes_pkey PRIMARY KEY (episode_id);
+ALTER TABLE ONLY public.llm_budget_reservations
+    ADD CONSTRAINT llm_budget_reservations_pkey PRIMARY KEY (reservation_id);
+ALTER TABLE ONLY public.llm_budget_windows
+    ADD CONSTRAINT llm_budget_windows_pkey PRIMARY KEY (reset_key);
+ALTER TABLE ONLY public.maintenance_frontiers
+    ADD CONSTRAINT maintenance_frontiers_pkey PRIMARY KEY (user_name, project_id);
+ALTER TABLE ONLY public.maintenance_reinterpretation_audits
+    ADD CONSTRAINT maintenance_reinterpretation_audits_pkey PRIMARY KEY (audit_id);
+ALTER TABLE ONLY public.maintenance_review_checkpoints
+    ADD CONSTRAINT maintenance_review_checkpoints_pkey PRIMARY KEY (user_name, project_id);
+ALTER TABLE ONLY public.maintenance_review_events
+    ADD CONSTRAINT maintenance_review_events_pkey PRIMARY KEY (event_id);
+ALTER TABLE ONLY public.maintenance_review_evidence
+    ADD CONSTRAINT maintenance_review_evidence_pkey PRIMARY KEY (review_id, evidence_kind, evidence_id);
+ALTER TABLE ONLY public.maintenance_reviews
+    ADD CONSTRAINT maintenance_reviews_pkey PRIMARY KEY (review_id);
+ALTER TABLE ONLY public.maintenance_reviews
+    ADD CONSTRAINT maintenance_reviews_signature_key UNIQUE (signature);
+ALTER TABLE ONLY public.message_entity_refs
+    ADD CONSTRAINT message_entity_refs_pkey PRIMARY KEY (message_id, entity_id);
+ALTER TABLE ONLY public.message_revisions
+    ADD CONSTRAINT message_revisions_pkey PRIMARY KEY (user_name, session_id, message_id, revision);
+ALTER TABLE ONLY public.message_source_refs
+    ADD CONSTRAINT message_source_refs_idempotency_key_key UNIQUE (idempotency_key);
+ALTER TABLE ONLY public.message_source_refs
+    ADD CONSTRAINT message_source_refs_id_message_scope_key UNIQUE (source_ref_id, message_id, project_id, session_id);
+ALTER TABLE public.message_source_refs
+    ADD CONSTRAINT message_source_refs_locator_range_check CHECK (
+CASE (locator ->> 'kind'::text)
+    WHEN 'text_lines'::text THEN
+    CASE
+        WHEN (((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint)
+        ELSE false
+    END
+    WHEN 'code_lines'::text THEN
+    CASE
+        WHEN (((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint)
+        ELSE false
+    END
+    WHEN 'csv_rows'::text THEN
+    CASE
+        WHEN (((locator ->> 'start_row'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_row'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_row'::text))::bigint >= ((locator ->> 'start_row'::text))::bigint)
+        ELSE false
+    END
+    WHEN 'docx_paragraphs'::text THEN
+    CASE
+        WHEN (((locator ->> 'start_paragraph'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_paragraph'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_paragraph'::text))::bigint >= ((locator ->> 'start_paragraph'::text))::bigint)
+        ELSE false
+    END
+    WHEN 'character_span'::text THEN
+    CASE
+        WHEN (((locator ->> 'start_char'::text) ~ '^[0-9]+$'::text) AND ((locator ->> 'end_char'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_char'::text))::bigint > ((locator ->> 'start_char'::text))::bigint)
+        ELSE false
+    END
+    ELSE true
+END);
+ALTER TABLE ONLY public.message_source_refs
+    ADD CONSTRAINT message_source_refs_pkey PRIMARY KEY (source_ref_id);
+ALTER TABLE public.messages
+    ADD CONSTRAINT messages_id_positive_check CHECK ((message_id > 0));
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_id_project_session_key UNIQUE (message_id, project_id, session_id);
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_message_id_key UNIQUE (message_id);
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_pkey PRIMARY KEY (user_name, session_id, message_id);
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_scope_project_key UNIQUE (user_name, session_id, message_id, project_id);
+ALTER TABLE ONLY public.project_artifact_revisions
+    ADD CONSTRAINT project_artifact_revisions_pkey PRIMARY KEY (artifact_id, revision);
+ALTER TABLE ONLY public.project_artifacts
+    ADD CONSTRAINT project_artifacts_origin_message_unique UNIQUE (originating_message_id);
+ALTER TABLE ONLY public.project_artifacts
+    ADD CONSTRAINT project_artifacts_pkey PRIMARY KEY (artifact_id);
+ALTER TABLE ONLY public.project_document_scan_settings
+    ADD CONSTRAINT project_document_scan_settings_pkey PRIMARY KEY (project_id);
+ALTER TABLE ONLY public.project_documents
+    ADD CONSTRAINT project_documents_id_project_key UNIQUE (document_id, project_id);
+ALTER TABLE ONLY public.project_documents
+    ADD CONSTRAINT project_documents_pkey PRIMARY KEY (document_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_pkey PRIMARY KEY (project_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_project_user_key UNIQUE (project_id, user_name);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_pkey PRIMARY KEY (revision_id);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_id_project_key UNIQUE (revision_id, project_id);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_project_number_key UNIQUE (project_id, revision_number);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_window_key UNIQUE (window_id);
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_pkey PRIMARY KEY (block_id);
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_id_project_key UNIQUE (block_id, project_id);
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_pkey PRIMARY KEY (revision_id, block_id);
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_ordinal_key UNIQUE (revision_id, ordinal);
+ALTER TABLE ONLY public.project_context_revision_impact_blocks
+    ADD CONSTRAINT project_context_revision_impact_blocks_pkey PRIMARY KEY (revision_id, block_id);
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_pkey PRIMARY KEY (window_id);
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_id_project_key UNIQUE (window_id, project_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_pkey PRIMARY KEY (window_id, message_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_message_key UNIQUE (message_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_ordinal_key UNIQUE (window_id, ordinal);
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_pkey PRIMARY KEY (window_id, episode_id);
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_ordinal_key UNIQUE (window_id, ordinal);
+ALTER TABLE ONLY public.context_block_entities
+    ADD CONSTRAINT context_block_entities_pkey PRIMARY KEY (block_id, entity_id);
+ALTER TABLE ONLY public.relationship_observation_blocks
+    ADD CONSTRAINT relationship_observation_blocks_pkey PRIMARY KEY (observation_id, block_id);
+ALTER TABLE ONLY public.project_entity_contexts
+    ADD CONSTRAINT project_entity_contexts_pkey PRIMARY KEY (project_id, entity_id);
+ALTER TABLE ONLY public.project_read_scopes
+    ADD CONSTRAINT project_read_scopes_pkey PRIMARY KEY (user_name, project_id, readable_project_id);
+ALTER TABLE ONLY public.projects
+    ADD CONSTRAINT projects_pkey PRIMARY KEY (project_id);
+ALTER TABLE ONLY public.projects
+    ADD CONSTRAINT projects_user_name_project_id_key UNIQUE (user_name, project_id);
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_pkey PRIMARY KEY (observation_id);
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_id_project_key UNIQUE (observation_id, project_id);
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_unique_semantic_window_evidence UNIQUE (project_id, semantic_window_id, source_entity_id, target_entity_id, observed_relationship_label);
+ALTER TABLE ONLY public.relationships
+    ADD CONSTRAINT relationships_id_project_key UNIQUE (relationship_id, project_id);
+ALTER TABLE ONLY public.relationships
+    ADD CONSTRAINT relationships_pkey PRIMARY KEY (relationship_id);
+ALTER TABLE ONLY public.relationships
+    ADD CONSTRAINT relationships_project_pair_type_key UNIQUE (project_id, entity_a_id, entity_b_id, relationship_type);
+ALTER TABLE ONLY public.saved_web_links
+    ADD CONSTRAINT saved_web_links_pkey PRIMARY KEY (link_id);
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_id_project_key UNIQUE (session_id, project_id);
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (session_id);
+CREATE INDEX aac_discussions_user_started_idx ON public.aac_discussions USING btree (user_name, started_at DESC);
+CREATE INDEX aac_insights_user_visibility_created_idx ON public.aac_insights USING btree (user_name, visibility, created_at DESC);
+CREATE INDEX aac_timeline_discussion_created_idx ON public.aac_timeline USING btree (discussion_id, created_at, timeline_id);
+CREATE INDEX agent_brain_snapshots_user_idx ON public.agent_brain_snapshots USING btree (user_name, agent_id, revision DESC);
+CREATE INDEX agent_tool_audits_run_idx ON public.agent_tool_audits USING btree (run_id, created_at);
+CREATE INDEX agent_tool_audits_scope_idx ON public.agent_tool_audits USING btree (user_name, project_id, created_at DESC);
+CREATE UNIQUE INDEX agents_one_default_per_user_idx ON public.agents USING btree (user_name) WHERE is_default;
+CREATE INDEX document_chunks_document_idx ON public.document_chunks USING btree (document_id);
+CREATE INDEX document_chunks_embedding_idx ON public.document_chunks USING hnsw (embedding public.vector_cosine_ops);
+CREATE INDEX document_chunks_search_vector_idx ON public.document_chunks USING gin (search_vector);
+CREATE INDEX context_block_entities_entity_idx ON public.context_block_entities USING btree (project_id, entity_id);
+CREATE INDEX entities_embedding_idx ON public.entities USING hnsw (embedding public.vector_cosine_ops);
+CREATE INDEX entities_user_name_idx ON public.entities USING btree (user_name, canonical_name);
+CREATE INDEX entity_aliases_alias_idx ON public.entity_aliases USING btree (alias);
+CREATE INDEX entity_global_merge_audits_user_idx ON public.entity_global_merge_audits USING btree (user_name, created_at DESC);
+CREATE INDEX entity_global_merge_mutations_merge_idx ON public.entity_global_merge_mutations USING btree (merge_id, mutation_id);
+CREATE INDEX episode_entities_lookup_idx ON public.episode_entities USING btree (entity_id, episode_id);
+CREATE INDEX episode_messages_message_idx ON public.episode_messages USING btree (message_id, episode_id);
+CREATE INDEX episode_relationships_lookup_idx ON public.episode_relationships USING btree (relationship_id, episode_id);
+CREATE INDEX episodes_embedding_idx ON public.episodes USING hnsw (embedding public.vector_cosine_ops) WHERE (embedding IS NOT NULL);
+CREATE INDEX episodes_project_updated_idx ON public.episodes USING btree (project_id, updated_at DESC);
+CREATE INDEX episodes_search_tsvector_idx ON public.episodes USING gin (search_tsvector);
+CREATE INDEX llm_budget_reservations_expiry_idx ON public.llm_budget_reservations USING btree (reset_key, expires_at) WHERE (status = 'active'::text);
+CREATE INDEX maintenance_frontiers_updated_idx ON public.maintenance_frontiers USING btree (user_name, updated_at DESC);
+CREATE INDEX maintenance_reinterpretation_audits_project_idx ON public.maintenance_reinterpretation_audits USING btree (project_id, created_at DESC);
+CREATE INDEX maintenance_review_events_review_idx ON public.maintenance_review_events USING btree (review_id, created_at, event_id);
+CREATE INDEX maintenance_review_evidence_observation_idx ON public.maintenance_review_evidence USING btree (observation_id) WHERE (observation_id IS NOT NULL);
+CREATE INDEX maintenance_reviews_key_idx ON public.maintenance_reviews USING btree (user_name, project_id, kind, dedupe_key, created_at DESC);
+CREATE INDEX maintenance_reviews_open_idx ON public.maintenance_reviews USING btree (user_name, project_id, status, created_at DESC);
+CREATE INDEX message_entity_refs_entity_idx ON public.message_entity_refs USING btree (entity_id, message_id);
+CREATE INDEX message_source_refs_episode_lookup_idx ON public.message_source_refs USING btree (project_id, session_id, message_id, created_at);
+CREATE INDEX message_source_refs_message_scope_idx ON public.message_source_refs USING btree (message_id, project_id, session_id);
+CREATE UNIQUE INDEX messages_acceptance_key_idx ON public.messages USING btree (user_name, session_id, acceptance_key) WHERE (acceptance_key IS NOT NULL);
+CREATE INDEX messages_project_idx ON public.messages USING btree (user_name, project_id, message_id);
+CREATE INDEX messages_search_tsvector_idx ON public.messages USING gin (search_tsvector);
+CREATE INDEX project_context_blocks_project_section_idx ON public.project_context_blocks USING btree (project_id, section_key, created_at);
+CREATE INDEX project_context_revision_blocks_snapshot_idx ON public.project_context_revision_blocks USING btree (revision_id, ordinal);
+CREATE INDEX project_context_revision_impact_blocks_project_idx ON public.project_context_revision_impact_blocks USING btree (project_id, block_id);
+CREATE UNIQUE INDEX project_context_block_supports_without_source_unique_idx ON public.project_context_block_supports USING btree (block_id, message_id, session_id, support_kind) WHERE (source_ref_id IS NULL);
+CREATE UNIQUE INDEX project_context_block_supports_with_source_unique_idx ON public.project_context_block_supports USING btree (block_id, message_id, session_id, source_ref_id, support_kind) WHERE (source_ref_id IS NOT NULL);
+CREATE UNIQUE INDEX messages_one_assistant_per_exchange_idx ON public.messages USING btree (user_name, project_id, session_id, user_msg_id) WHERE (role = 'assistant'::text);
+CREATE INDEX project_context_revisions_project_created_idx ON public.project_context_revisions USING btree (project_id, revision_number DESC);
+CREATE INDEX project_semantic_window_messages_window_ordinal_idx ON public.project_semantic_window_messages USING btree (window_id, ordinal);
+CREATE INDEX project_semantic_window_episodes_window_ordinal_idx ON public.project_semantic_window_episodes USING btree (window_id, ordinal);
+CREATE UNIQUE INDEX project_semantic_windows_one_active_per_project_idx ON public.project_semantic_windows USING btree (project_id) WHERE (stage <> 'completed'::text);
+CREATE INDEX project_semantic_windows_retry_idx ON public.project_semantic_windows USING btree (project_id, next_retry_at_ms) WHERE (stage <> 'completed'::text);
+CREATE INDEX project_artifacts_project_updated_idx ON public.project_artifacts USING btree (project_id, updated_at DESC);
+CREATE INDEX project_artifacts_session_updated_idx ON public.project_artifacts USING btree (session_id, updated_at DESC);
+CREATE INDEX project_documents_hash_idx ON public.project_documents USING btree (project_id, content_hash);
+CREATE UNIQUE INDEX project_documents_live_path_idx ON public.project_documents USING btree (project_id, relative_path) WHERE (status <> 'deleted'::text);
+CREATE INDEX project_documents_project_idx ON public.project_documents USING btree (project_id, created_at DESC);
+CREATE INDEX project_entity_contexts_activity_idx ON public.project_entity_contexts USING btree (project_id, last_mentioned_ms DESC NULLS LAST);
+CREATE INDEX project_entity_contexts_entity_idx ON public.project_entity_contexts USING btree (user_name, entity_id);
+CREATE INDEX project_entity_contexts_topic_idx ON public.project_entity_contexts USING btree (project_id, topic);
+CREATE INDEX relationship_observations_pattern_idx ON public.relationship_observations USING btree (project_id, user_name, interpretation_source, observed_relationship_label);
+CREATE INDEX relationship_observations_relationship_idx ON public.relationship_observations USING btree (relationship_id, project_id);
+CREATE INDEX relationship_observations_active_support_idx ON public.relationship_observations USING btree (project_id, relationship_id) WHERE (retired_at IS NULL);
+CREATE INDEX relationship_observation_blocks_block_idx ON public.relationship_observation_blocks USING btree (project_id, block_id, observation_id);
+CREATE INDEX relationships_entity_a_idx ON public.relationships USING btree (entity_a_id);
+CREATE INDEX relationships_entity_b_idx ON public.relationships USING btree (entity_b_id);
+CREATE INDEX relationships_pair_type_idx ON public.relationships USING btree (project_id, entity_a_id, entity_b_id, relationship_type);
+CREATE INDEX saved_web_links_project_updated_idx ON public.saved_web_links USING btree (project_id, updated_at DESC, link_id DESC);
+CREATE UNIQUE INDEX saved_web_links_project_url_idx ON public.saved_web_links USING btree (project_id, url);
+CREATE INDEX sessions_project_idx ON public.sessions USING btree (user_name, project_id, created_at);
+CREATE TRIGGER entities_identity_immutable_trigger BEFORE UPDATE ON public.entities FOR EACH ROW EXECUTE FUNCTION public.reject_entity_identity_mutation();
+CREATE TRIGGER message_entity_refs_scope_trigger BEFORE INSERT OR UPDATE OF message_id, entity_id ON public.message_entity_refs FOR EACH ROW EXECUTE FUNCTION public.enforce_message_entity_ref_scope();
+CREATE TRIGGER context_block_entities_scope_trigger BEFORE INSERT OR UPDATE OF block_id, project_id, entity_id ON public.context_block_entities FOR EACH ROW EXECUTE FUNCTION public.enforce_context_block_entity_scope();
+CREATE TRIGGER relationships_scope_trigger BEFORE INSERT OR UPDATE OF user_name, project_id, entity_a_id, entity_b_id ON public.relationships FOR EACH ROW EXECUTE FUNCTION public.enforce_relationship_scope();
+ALTER TABLE ONLY public.aac_insight_votes
+    ADD CONSTRAINT aac_insight_votes_insight_id_fkey FOREIGN KEY (insight_id) REFERENCES public.aac_insights(insight_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.aac_insights
+    ADD CONSTRAINT aac_insights_discussion_id_fkey FOREIGN KEY (discussion_id) REFERENCES public.aac_discussions(discussion_id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.aac_timeline
+    ADD CONSTRAINT aac_timeline_discussion_id_fkey FOREIGN KEY (discussion_id) REFERENCES public.aac_discussions(discussion_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.agent_brain_snapshots
+    ADD CONSTRAINT agent_brain_snapshots_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agents(agent_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.agent_tool_audits
+    ADD CONSTRAINT agent_tool_audits_project_fk FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.document_chunks
+    ADD CONSTRAINT document_chunks_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.project_documents(document_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.document_extractions
+    ADD CONSTRAINT document_extractions_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.project_documents(document_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.entities
+    ADD CONSTRAINT entities_redirect_entity_fk FOREIGN KEY (redirect_entity_id) REFERENCES public.entities(entity_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.entity_aliases
+    ADD CONSTRAINT entity_aliases_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.entity_global_merge_mutations
+    ADD CONSTRAINT entity_global_merge_mutations_merge_id_fkey FOREIGN KEY (merge_id) REFERENCES public.entity_global_merge_audits(merge_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.episode_entities
+    ADD CONSTRAINT episode_entities_entity_context_fk FOREIGN KEY (project_id, entity_id) REFERENCES public.project_entity_contexts(project_id, entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.episode_entities
+    ADD CONSTRAINT episode_entities_episode_project_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.episode_messages
+    ADD CONSTRAINT episode_messages_episode_scope_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.episode_messages
+    ADD CONSTRAINT episode_messages_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.episode_relationships
+    ADD CONSTRAINT episode_relationships_episode_project_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.episode_relationships
+    ADD CONSTRAINT episode_relationships_relationship_project_fk FOREIGN KEY (relationship_id, project_id) REFERENCES public.relationships(relationship_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.episodes
+    ADD CONSTRAINT episodes_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.llm_budget_reservations
+    ADD CONSTRAINT llm_budget_reservations_reset_key_fkey FOREIGN KEY (reset_key) REFERENCES public.llm_budget_windows(reset_key) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_frontiers
+    ADD CONSTRAINT maintenance_frontiers_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_reinterpretation_audits
+    ADD CONSTRAINT maintenance_reinterpretation_audits_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_review_checkpoints
+    ADD CONSTRAINT maintenance_review_checkpoints_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_review_events
+    ADD CONSTRAINT maintenance_review_events_review_id_fkey FOREIGN KEY (review_id) REFERENCES public.maintenance_reviews(review_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_review_evidence
+    ADD CONSTRAINT maintenance_review_evidence_observation_id_fkey FOREIGN KEY (observation_id) REFERENCES public.relationship_observations(observation_id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.maintenance_review_evidence
+    ADD CONSTRAINT maintenance_review_evidence_review_id_fkey FOREIGN KEY (review_id) REFERENCES public.maintenance_reviews(review_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_reviews
+    ADD CONSTRAINT maintenance_reviews_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.message_entity_refs
+    ADD CONSTRAINT message_entity_refs_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.message_entity_refs
+    ADD CONSTRAINT message_entity_refs_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.messages(message_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.message_revisions
+    ADD CONSTRAINT message_revisions_user_name_session_id_message_id_project__fkey FOREIGN KEY (user_name, session_id, message_id, project_id) REFERENCES public.messages(user_name, session_id, message_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.message_source_refs
+    ADD CONSTRAINT message_source_refs_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.message_source_refs
+    ADD CONSTRAINT message_source_refs_source_message_scope_fk FOREIGN KEY (source_message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_session_project_fk FOREIGN KEY (session_id, project_id) REFERENCES public.sessions(session_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_current_revision_scope_fk FOREIGN KEY (current_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (current_revision_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_projection_revision_scope_fk FOREIGN KEY (projection_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (projection_revision_id);
+ALTER TABLE ONLY public.project_contexts
+    ADD CONSTRAINT project_contexts_projection_pending_revision_scope_fk FOREIGN KEY (projection_pending_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (projection_pending_revision_id);
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_parent_scope_fk FOREIGN KEY (parent_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_revisions
+    ADD CONSTRAINT project_context_revisions_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE SET NULL (window_id);
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_blocks
+    ADD CONSTRAINT project_context_blocks_supersedes_scope_fk FOREIGN KEY (supersedes_block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_revision_scope_fk FOREIGN KEY (revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_revision_blocks
+    ADD CONSTRAINT project_context_revision_blocks_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_revision_impact_blocks
+    ADD CONSTRAINT project_context_revision_impact_blocks_revision_scope_fk FOREIGN KEY (revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_revision_impact_blocks
+    ADD CONSTRAINT project_context_revision_impact_blocks_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_context_block_supports
+    ADD CONSTRAINT project_context_block_supports_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_block_supports
+    ADD CONSTRAINT project_context_block_supports_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_context_block_supports
+    ADD CONSTRAINT project_context_block_supports_source_scope_fk FOREIGN KEY (source_ref_id, message_id, project_id, session_id) REFERENCES public.message_source_refs(source_ref_id, message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.context_block_entities
+    ADD CONSTRAINT context_block_entities_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.context_block_entities
+    ADD CONSTRAINT context_block_entities_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_project_scope_fk FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_windows
+    ADD CONSTRAINT project_semantic_windows_context_revision_scope_fk FOREIGN KEY (context_revision_id, project_id) REFERENCES public.project_context_revisions(revision_id, project_id) ON DELETE SET NULL (context_revision_id);
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_message_scope_fk FOREIGN KEY (message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_window_messages
+    ADD CONSTRAINT project_semantic_window_messages_exchange_scope_fk FOREIGN KEY (exchange_user_message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_window_scope_fk FOREIGN KEY (window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_semantic_window_episodes
+    ADD CONSTRAINT project_semantic_window_episodes_episode_scope_fk FOREIGN KEY (episode_id, project_id) REFERENCES public.episodes(episode_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.project_artifact_revisions
+    ADD CONSTRAINT project_artifact_revisions_artifact_id_fkey FOREIGN KEY (artifact_id) REFERENCES public.project_artifacts(artifact_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_artifacts
+    ADD CONSTRAINT project_artifacts_message_scope_fk FOREIGN KEY (originating_message_id, project_id, session_id) REFERENCES public.messages(message_id, project_id, session_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_artifacts
+    ADD CONSTRAINT project_artifacts_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_artifacts
+    ADD CONSTRAINT project_artifacts_session_scope_fk FOREIGN KEY (session_id, project_id) REFERENCES public.sessions(session_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_document_scan_settings
+    ADD CONSTRAINT project_document_scan_settings_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_documents
+    ADD CONSTRAINT project_documents_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_entity_contexts
+    ADD CONSTRAINT project_entity_contexts_entity_id_user_name_fkey FOREIGN KEY (entity_id, user_name) REFERENCES public.entities(entity_id, user_name) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_entity_contexts
+    ADD CONSTRAINT project_entity_contexts_user_name_project_id_fkey FOREIGN KEY (user_name, project_id) REFERENCES public.projects(user_name, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_read_scopes
+    ADD CONSTRAINT project_read_scopes_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_read_scopes
+    ADD CONSTRAINT project_read_scopes_readable_project_id_fkey FOREIGN KEY (readable_project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_semantic_window_scope_fk FOREIGN KEY (semantic_window_id, project_id) REFERENCES public.project_semantic_windows(window_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_relationship_fk FOREIGN KEY (relationship_id, project_id) REFERENCES public.relationships(relationship_id, project_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_source_entity_id_fkey FOREIGN KEY (source_entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationship_observations
+    ADD CONSTRAINT relationship_observations_target_entity_id_fkey FOREIGN KEY (target_entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationship_observation_blocks
+    ADD CONSTRAINT relationship_observation_blocks_observation_scope_fk FOREIGN KEY (observation_id, project_id) REFERENCES public.relationship_observations(observation_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationship_observation_blocks
+    ADD CONSTRAINT relationship_observation_blocks_block_scope_fk FOREIGN KEY (block_id, project_id) REFERENCES public.project_context_blocks(block_id, project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationships
+    ADD CONSTRAINT relationships_entity_a_id_fkey FOREIGN KEY (entity_a_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.relationships
+    ADD CONSTRAINT relationships_entity_b_id_fkey FOREIGN KEY (entity_b_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.saved_web_links
+    ADD CONSTRAINT saved_web_links_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agents(agent_id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;

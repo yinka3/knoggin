@@ -28,6 +28,17 @@ class FakeLimits:
     max_attempts = 8
     agent_history_turns = 3
     max_accumulated_messages = 12
+    max_accumulated_profiles = 8
+    max_accumulated_graph = 16
+    max_accumulated_paths = 4
+    max_accumulated_episodes = 6
+    max_accumulated_documents = 10
+    max_accumulated_web_discoveries = 5
+    max_accumulated_web_reads = 5
+    max_accumulated_actions = 6
+    max_accumulated_next_steps = 6
+    max_accumulated_summary_chars = 2000
+    max_notebook_render_tokens = 5000
     max_consecutive_errors = 2
     tool_limit_overrides = {"search_entity": 4}
 
@@ -60,8 +71,8 @@ class FakeTools:
     async def close(self):
         self.closed = True
 
-    async def get_hot_topic_context(self, hot_topics, slim=False):
-        self.hot_topic_calls.append((hot_topics, slim))
+    async def get_hot_topic_context(self, hot_topics):
+        self.hot_topic_calls.append(hot_topics)
         return {
             topic: {"entities": [{"name": f"{topic} entity"}], "messages": []}
             for topic in hot_topics
@@ -142,8 +153,6 @@ async def test_orchestrator_resolves_durable_agent_identity():
 
     identity = await make_orchestrator(context)._resolve_agent_identity(
         agent_id="agent-1",
-        name_override=None,
-        persona_override=None,
     )
 
     assert identity.config.id == "agent-1"
@@ -153,7 +162,7 @@ async def test_orchestrator_resolves_durable_agent_identity():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_orchestrator_identity_overrides_take_precedence():
+async def test_orchestrator_uses_durable_agent_identity():
     context = FakeSession()
     context.resources.postgres.upsert_agent(
         AgentConfig(
@@ -166,13 +175,11 @@ async def test_orchestrator_identity_overrides_take_precedence():
 
     identity = await make_orchestrator(context)._resolve_agent_identity(
         agent_id=None,
-        name_override="Custom",
-        persona_override="Direct",
     )
 
     assert identity.config.id == "agent-1"
-    assert identity.name == "Custom"
-    assert identity.persona == "Direct"
+    assert identity.name == "Researcher"
+    assert "Careful" in identity.persona
 
 
 @pytest.mark.runtime
@@ -258,17 +265,14 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.limits.tool_timeout == 1.5
     assert executor.ctx.limits.get_tool_limit("search_entity") == 4
     assert executor.ctx.hot_topics == []
-    assert executor.ctx.active_topics == ["Research", "Identity"]
+    assert not hasattr(executor.ctx, "active_topics")
     assert executor.ctx.hot_topic_context == {}
     assert tools.hot_topic_calls == []
     assert executor.ctx.model == "agent-model"
     assert executor.ctx.temperature == 0.25
     assert "Use memory" in executor.ctx.brain
     assert executor.ctx.enabled_tools == ("episode_check",)
-    assert executor.execute_kwargs == {
-        "user_timezone": None,
-        "simulated_date": None,
-    }
+    assert executor.execute_kwargs == {"user_timezone": None}
     assert tools.closed is True
 
 
@@ -322,14 +326,8 @@ async def test_orchestrator_resolves_request_then_session_then_agent_config(
     assert request_run.ctx.enabled_tools == ("graph_query",)
     assert session_run.ctx.model == "session-model"
     assert session_run.ctx.enabled_tools == ("message_search",)
-    assert request_run.execute_kwargs == {
-        "user_timezone": None,
-        "simulated_date": None,
-    }
-    assert session_run.execute_kwargs == {
-        "user_timezone": None,
-        "simulated_date": None,
-    }
+    assert request_run.execute_kwargs == {"user_timezone": None}
+    assert session_run.execute_kwargs == {"user_timezone": None}
 
 
 @pytest.mark.runtime
@@ -473,7 +471,7 @@ async def test_orchestrator_explicit_hot_topics_override_config_and_are_validate
             "messages": [],
         }
     }
-    assert tools.hot_topic_calls == [(["Identity"], True)]
+    assert tools.hot_topic_calls == [["Identity"]]
 
 
 @pytest.mark.runtime
@@ -485,23 +483,20 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
         "target_type": "subtree",
         "document_id": None,
         "relative_path": None,
-        "folder_root_id": "folder-1",
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
+
     class FocusDocumentService:
         async def resolve_focus_target(self, **kwargs):
             assert kwargs == {
-                "session_id": "session-1",
                 "document_id": None,
-                "folder_root_id": "folder-1",
                 "path_prefix": "src",
             }
             return {
                 "target_type": "subtree",
                 "document_id": None,
                 "relative_path": None,
-                "folder_root_id": "folder-1",
                 "path_prefix": "src",
             }
 
@@ -516,7 +511,6 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
     assert loaded is not None
     assert loaded.mode == "pinned"
     assert loaded.target_type == "subtree"
-    assert loaded.folder_root_id == "folder-1"
     assert loaded.path_prefix == "src"
 
 
@@ -532,8 +526,8 @@ async def test_orchestrator_ignores_stale_document_focus():
     context.document_service = MissingFocusService()
     context.document_focus = {
         "mode": "pinned",
-        "target_type": "folder_upload",
-        "folder_root_id": "missing-folder",
+        "target_type": "subtree",
+        "path_prefix": "missing-folder",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
 
@@ -541,6 +535,76 @@ async def test_orchestrator_ignores_stale_document_focus():
         context,
         context.document_focus,
     ) is None
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_orchestrator_preserves_canonical_request_document_selection():
+    context = FakeSession()
+
+    class FocusDocumentService:
+        async def resolve_focus_target(self, **kwargs):
+            assert kwargs == {
+                "document_id": "document-1",
+                "path_prefix": None,
+            }
+            return {
+                "target_type": "document",
+                "document_id": "document-1",
+                "relative_path": "docs/notes.py",
+            }
+
+        async def resolve_document_selection(self, **kwargs):
+            return {
+                "document_id": "document-1",
+                "project_id": "project-1",
+                "relative_path": "docs/notes.py",
+                "document_name": "notes.py",
+                "extension": ".py",
+                "chunk_index": "lines:2-3",
+                "content_hash": "a" * 64,
+                "locator": {
+                    "kind": "code_lines",
+                    "start_line": 2,
+                    "end_line": 3,
+                },
+                "content": "2: def useful():\n3:     return 42",
+            }
+
+    context.document_service = FocusDocumentService()
+    focus = {
+        "mode": "request",
+        "target_type": "document",
+        "document_id": "document-1",
+        "relative_path": "docs/notes.py",
+        "selection": {
+            "content_hash": "a" * 64,
+            "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
+        },
+        "created_at": "2026-06-22T12:00:00+00:00",
+    }
+
+    loaded = await make_orchestrator(context)._resolve_document_focus(context, focus)
+
+    assert loaded is not None
+    assert loaded.mode == "request"
+    assert loaded.selection is not None
+    assert loaded.selection.locator.kind == "code_lines"
+    selection_context = await make_orchestrator(context)._resolve_document_selection_context(
+        context,
+        loaded,
+    )
+    assert selection_context == {
+        "document_id": "document-1",
+        "project_id": "project-1",
+        "relative_path": "docs/notes.py",
+        "document_name": "notes.py",
+        "extension": ".py",
+        "chunk_index": "lines:2-3",
+        "content_hash": "a" * 64,
+        "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
+        "excerpt": "2: def useful():\n3:     return 42",
+    }
 
 
 @pytest.mark.runtime

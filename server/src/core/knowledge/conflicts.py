@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from common.schema.evidence import EvidenceBundle
+
 ConflictOrigin = Literal[
     "background_discovery",
     "agent_discovery",
@@ -72,6 +74,7 @@ class ConflictDiscoveryPackage:
     prompt: str
     estimated_tokens: int
     compacted: bool = False
+    evidence_bundles: tuple[EvidenceBundle, ...] = ()
 
 
 class LLMConflictCandidate(BaseModel):

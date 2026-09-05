@@ -4,13 +4,12 @@ import pytest
 
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.documents.storage import DocumentChunk
 
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
-async def test_document_content_is_deleted_with_parent_document(
+async def test_document_extraction_is_deleted_with_parent_document(
     real_postgres_client,
 ):
     document_id = str(uuid.uuid4())
@@ -18,20 +17,21 @@ async def test_document_content_is_deleted_with_parent_document(
     await real_postgres_client.execute(
         """
         INSERT INTO project_documents (
-            document_id, project_id, visibility_scope, original_name,
+            document_id, project_id, original_name,
             relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-1', 'project', 'notes.md',
+        VALUES (%s, 'project-1', 'notes.md',
                 'notes.md', '.md', 5, 'hash')
         """,
         (document_id,),
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO document_content (document_id, content)
-        VALUES (%s, %s)
+        INSERT INTO document_extractions (
+            document_id, extracted_text, extracted_content_hash
+        ) VALUES (%s, %s, 'hash')
         """,
-        (document_id, b"hello"),
+        (document_id, "hello"),
     )
 
     await real_postgres_client.execute(
@@ -39,7 +39,7 @@ async def test_document_content_is_deleted_with_parent_document(
         (document_id,),
     )
     rows = await real_postgres_client.fetch_all(
-        "SELECT document_id FROM document_content WHERE document_id = %s",
+        "SELECT document_id FROM document_extractions WHERE document_id = %s",
         (document_id,),
     )
 
@@ -59,10 +59,10 @@ async def test_document_chunks_are_deleted_with_parent_document(
     await real_postgres_client.execute(
         """
         INSERT INTO project_documents (
-            document_id, project_id, visibility_scope, original_name,
+            document_id, project_id, original_name,
             relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-1', 'project', 'notes.md',
+        VALUES (%s, 'project-1', 'notes.md',
                 'notes.md', '.md', 5, 'hash')
         """,
         (document_id,),
@@ -92,51 +92,61 @@ async def test_document_chunks_are_deleted_with_parent_document(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_document_reader_cannot_cross_project_scope(real_postgres_client):
+async def test_document_reader_cannot_cross_project_catalog_scope(real_postgres_client):
     document_id = str(uuid.uuid4())
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-2', 'project', 'manual_upload',
+        VALUES (%s, 'project-2',
                 'private.md', 'private.md', '.md', 7, 'private-hash')
         """,
         (document_id,),
     )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO public.document_content (document_id, content)
-        VALUES (%s, %s)
-        """,
-        (document_id, b"private"),
-    )
-
     project_one = DocumentReader(real_postgres_client, "project-1")
     project_two = DocumentReader(real_postgres_client, "project-2")
 
     assert await project_one.fetch_documents_by_reference(
         document_id=document_id,
         relative_path=None,
-        session_id=None,
     ) == []
-    assert await project_one.fetch_document_content(
-        document_id=document_id,
-        session_id=None,
-    ) is None
     assert str((await project_two.fetch_documents_by_reference(
         document_id=document_id,
         relative_path=None,
-        session_id=None,
     ))[0]["document_id"]) == document_id
 
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks(
+async def test_document_catalog_has_no_folder_batch_identity(real_postgres_client):
+    assert await real_postgres_client.fetch_one(
+        "SELECT to_regclass('public.document_folder_uploads') IS NULL AS missing"
+    ) == {"missing": True}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'project_documents'
+              AND column_name IN (
+                  'folder_root_id',
+                  'session_id',
+                  'visibility_scope',
+                  'source_kind'
+              )
+        ) AS missing
+        """
+    ) == {"missing": True}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+async def test_document_writer_tombstones_metadata_and_purges_extractions_and_chunks(
     real_postgres_client,
 ):
     document_id = str(uuid.uuid4())
@@ -145,18 +155,22 @@ async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks
     await real_postgres_client.execute(
         """
         INSERT INTO public.project_documents (
-            document_id, project_id, visibility_scope, source_kind,
+            document_id, project_id,
             original_name, relative_path, extension, size_bytes, content_hash,
             status
         )
-        VALUES (%s, 'project-1', 'project', 'manual_upload',
+        VALUES (%s, 'project-1',
                 'notes.md', 'notes.md', '.md', 5, 'a'::text, 'indexed')
         """,
         (document_id,),
     )
     await real_postgres_client.execute(
-        "INSERT INTO public.document_content (document_id, content) VALUES (%s, %s)",
-        (document_id, b"hello"),
+        """
+        INSERT INTO public.document_extractions (
+            document_id, extracted_text, extracted_content_hash
+        ) VALUES (%s, %s, 'a')
+        """,
+        (document_id, "hello"),
     )
     await real_postgres_client.execute(
         """
@@ -169,7 +183,6 @@ async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks
 
     deleted = await DocumentWriter(real_postgres_client, "project-1").delete_document(
         document_id=document_id,
-        session_id=None,
     )
 
     assert deleted is not None
@@ -183,190 +196,10 @@ async def test_document_writer_tombstones_metadata_and_purges_content_and_chunks
         (document_id,),
     ) == {"status": "deleted", "has_deleted_at": True}
     assert await real_postgres_client.fetch_all(
-        "SELECT document_id FROM public.document_content WHERE document_id = %s",
+        "SELECT document_id FROM public.document_extractions WHERE document_id = %s",
         (document_id,),
     ) == []
     assert await real_postgres_client.fetch_all(
         "SELECT chunk_id FROM public.document_chunks WHERE document_id = %s",
         (document_id,),
     ) == []
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.no_network
-async def test_document_tombstone_unlinks_folder_ownership(
-    real_postgres_client,
-):
-    folder_root_id = str(uuid.uuid4())
-    document_id = str(uuid.uuid4())
-    await real_postgres_client.execute(
-        """
-        INSERT INTO document_folder_uploads (
-            folder_root_id, project_id, visibility_scope, folder_name,
-            candidate_count, candidate_bytes, document_count, total_size_bytes,
-            excluded_count, excluded_bytes, excluded_directory_count,
-            excluded_reason_counts, scan_settings
-        ) VALUES (%s, 'project-1', 'project', 'repo', 1, 5, 1, 5, 0, 0, 0,
-                  '{}'::jsonb, '{}'::jsonb)
-        """,
-        (folder_root_id,),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO project_documents (
-            document_id, project_id, visibility_scope, folder_root_id,
-            source_kind, original_name, relative_path, extension, size_bytes,
-            content_hash
-        ) VALUES (%s, 'project-1', 'project', %s, 'folder_upload',
-                  'notes.md', 'notes.md', '.md', 5, 'hash')
-        """,
-        (document_id, folder_root_id),
-    )
-    await real_postgres_client.execute(
-        "INSERT INTO document_content (document_id, content) VALUES (%s, %s)",
-        (document_id, b"hello"),
-    )
-
-    deleted = await DocumentWriter(real_postgres_client, "project-1").delete_document(
-        document_id=document_id,
-        session_id=None,
-    )
-
-    assert deleted is not None
-    assert deleted["status"] == "deleted"
-    assert deleted["folder_root_id"] is None
-    assert await real_postgres_client.fetch_one(
-        "SELECT folder_root_id, source_id FROM project_documents WHERE document_id = %s",
-        (document_id,),
-    ) == {"folder_root_id": None, "source_id": None}
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-@pytest.mark.no_network
-async def test_workspace_index_publication_rejects_a_non_indexing_claim(
-    real_postgres_client,
-):
-    source_id = str(uuid.uuid4())
-    document_id = str(uuid.uuid4())
-    await real_postgres_client.execute(
-        """
-        INSERT INTO document_workspace_sources (
-            source_id, project_id, visibility_scope, display_name
-        ) VALUES (%s, 'project-1', 'project', 'workspace')
-        """,
-        (source_id,),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO project_documents (
-            document_id, project_id, visibility_scope, source_id, source_kind,
-            original_name, relative_path, extension, size_bytes, content_hash,
-            status
-        ) VALUES (%s, 'project-1', 'project', %s, 'workspace', 'notes.md',
-                  'notes.md', '.md', 5, 'a', 'failed')
-        """,
-        (document_id, source_id),
-    )
-    await real_postgres_client.execute(
-        "INSERT INTO document_content (document_id, content) VALUES (%s, %s)",
-        (document_id, b"hello"),
-    )
-
-    published = await DocumentWriter(
-        real_postgres_client,
-        "project-1",
-    ).persist_workspace_indexed_documents(
-        documents=[
-            {
-                "document_id": document_id,
-                "relative_path": "notes.md",
-                "content_hash": "a",
-                "extracted_text": "hello",
-                "chunks": [DocumentChunk(content="hello")],
-                "embeddings": [[0.0] * 1024],
-            }
-        ],
-        indexed_at="2026-08-21T00:00:00+00:00",
-    )
-
-    assert published == []
-    assert await real_postgres_client.fetch_one(
-        "SELECT status FROM project_documents WHERE document_id = %s",
-        (document_id,),
-    ) == {"status": "failed"}
-    assert await real_postgres_client.fetch_all(
-        "SELECT chunk_id FROM document_chunks WHERE document_id = %s",
-        (document_id,),
-    ) == []
-
-
-@pytest.mark.storage
-@pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
-async def test_folder_upload_delete_cascades_documents_and_chunks(
-    real_postgres_client,
-):
-    folder_root_id = str(uuid.uuid4())
-    document_id = str(uuid.uuid4())
-    chunk_id = str(uuid.uuid4())
-    embedding = "[" + ",".join(["0"] * 1024) + "]"
-
-    await real_postgres_client.execute(
-        """
-        INSERT INTO document_folder_uploads (
-            folder_root_id, project_id, visibility_scope, folder_name,
-            candidate_count, candidate_bytes, document_count,
-            total_size_bytes, excluded_count, excluded_bytes,
-            excluded_directory_count, excluded_reason_counts,
-            scan_settings, indexed_at
-        )
-        VALUES (
-            %s, 'project-1', 'project', 'repo', 1, 5, 1, 5,
-            0, 0, 0, '{}'::jsonb, '{}'::jsonb, NOW()
-        )
-        """,
-        (folder_root_id,),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO project_documents (
-            document_id, project_id, visibility_scope, folder_root_id,
-            source_kind, original_name, relative_path, extension,
-            size_bytes, content_hash, status, indexed_at
-        )
-        VALUES (
-            %s, 'project-1', 'project', %s, 'folder_upload',
-            'notes.md', 'notes.md', '.md', 5, 'hash', 'indexed', NOW()
-        )
-        """,
-        (document_id, folder_root_id),
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO document_chunks (
-            chunk_id, document_id, chunk_index, content, relative_path, embedding
-        )
-        VALUES (%s, %s, 0, 'alpha', 'notes.md', %s::vector)
-        """,
-        (chunk_id, document_id, embedding),
-    )
-
-    await real_postgres_client.execute(
-        "DELETE FROM document_folder_uploads WHERE folder_root_id = %s",
-        (folder_root_id,),
-    )
-    documents = await real_postgres_client.fetch_all(
-        "SELECT document_id FROM project_documents WHERE document_id = %s",
-        (document_id,),
-    )
-    chunks = await real_postgres_client.fetch_all(
-        "SELECT chunk_id FROM document_chunks WHERE chunk_id = %s",
-        (chunk_id,),
-    )
-
-    assert documents == []
-    assert chunks == []

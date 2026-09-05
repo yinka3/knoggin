@@ -1,16 +1,11 @@
-import asyncio
 import json
 
 import pytest
 
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.documents import DocumentService
-from core.project.workspace_service import (
-    PROJECT_FILE_PATH,
-    ProjectWorkspaceService,
-    build_project_markdown,
-)
+from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
+from core.project.project_files import PROJECT_FILE_PATH, build_project_markdown
 from tests.unit.core.knowledge.test_document_service import MemoryPostgres
 
 
@@ -34,7 +29,9 @@ async def run_inline(function, *args, **kwargs):
 
 @pytest.mark.integration
 @pytest.mark.no_network
-async def test_project_workspace_context_is_readable_before_indexing_and_searchable_after():
+async def test_native_project_context_is_readable_before_indexing_and_searchable_after(
+    tmp_path,
+):
     postgres = MemoryPostgres()
     reader = DocumentReader(postgres, "project-a", ["project-a"])
     writer = DocumentWriter(postgres, "project-a")
@@ -47,31 +44,24 @@ async def test_project_workspace_context_is_readable_before_indexing_and_searcha
         document_rerank_enabled=False,
         reader=reader,
         writer=writer,
-    )
-    workspace = ProjectWorkspaceService(
-        project_id="project-a",
-        reader=reader,
-        writer=writer,
-        indexer=document_service.indexer,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
     )
     content = build_project_markdown(
         "Research",
         "Investigate bounded workspace indexing.",
     )
 
-    created = await workspace.create_file(PROJECT_FILE_PATH, content)
-    assert created["status"] == "queued"
-    assert await workspace.read_project_context() == content
+    created = await document_service.create_project_file(PROJECT_FILE_PATH, content)
+    assert created["relative_path"] == PROJECT_FILE_PATH
+    assert await document_service.read_project_brief() == content
 
-    pending_tasks = list(document_service.indexer._background_tasks)
-    assert pending_tasks
-    await asyncio.gather(*pending_tasks)
+    await document_service.index_document(document_id=postgres.rows[0]["document_id"])
 
     assert postgres.rows[0]["status"] == "indexed"
     assert await document_service.pending_index_count() == 0
     postgres.search_results = [
         {
-            "document_id": created["document_id"],
+            "document_id": postgres.rows[0]["document_id"],
             "relative_path": PROJECT_FILE_PATH,
             "original_name": PROJECT_FILE_PATH,
             "extension": ".md",
@@ -81,7 +71,6 @@ async def test_project_workspace_context_is_readable_before_indexing_and_searcha
     ]
     results = await document_service.search(
         "bounded workspace indexing",
-        session_id="session-a",
         n_results=3,
     )
     assert results[0]["relative_path"] == PROJECT_FILE_PATH

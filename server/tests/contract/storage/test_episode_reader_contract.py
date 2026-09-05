@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from common.schema.episode.models import EpisodeCheckpoint
 from core.knowledge.db.readers.episode_reader import EpisodeReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -18,7 +17,6 @@ def episode_row(episode_id="episode-1"):
         "new_developments": '["Episode tables are available."]',
         "updates": "[]",
         "unresolved": "[]",
-        "importance": 0.8,
         "source_message_count": 1,
         "first_message_at": now,
         "last_message_at": now,
@@ -34,8 +32,6 @@ def attachment_results(*, focus=False):
             {
                 "message_id": 11,
                 "session_id": "session-1",
-                "influence_weight": 0.9,
-                "influence_reason": "introduced the decision",
                 "message_position": 0,
                 "attached_at": datetime.now(timezone.utc),
             }
@@ -43,9 +39,6 @@ def attachment_results(*, focus=False):
         [
             {
                 "entity_id": 2,
-                "prominence_weight": 0.9,
-                "role": "subject",
-                "is_focus_entity": focus,
                 "source_message_count": 1,
                 "first_seen_at": datetime.now(timezone.utc),
                 "last_seen_at": datetime.now(timezone.utc),
@@ -54,12 +47,62 @@ def attachment_results(*, focus=False):
         [
             {
                 "relationship_id": "project-1:2:3",
-                "prominence_weight": 0.7,
-                "is_central_relationship": True,
                 "source_message_count": 1,
             }
         ],
     ]
+
+
+def card_attachment_results():
+    return [
+        [
+            {
+                "entity_id": 2,
+                "source_message_count": 1,
+                "first_seen_at": datetime.now(timezone.utc),
+                "last_seen_at": datetime.now(timezone.utc),
+            }
+        ],
+        [
+            {
+                "relationship_id": "project-1:2:3",
+                "source_message_count": 1,
+            }
+        ],
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_merge_evidence_selects_episode_session_before_serializing_it():
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [],
+            [
+                {
+                    "entity_id": 2,
+                    "episode_id": "episode-1",
+                    "session_id": "session-1",
+                    "summary": "Ada chose the episodic-memory approach.",
+                }
+            ],
+            [],
+        ]
+    )
+
+    evidence = await EpisodeReader(client).get_merge_evidence_for_entities(
+        [2], project_id="project-1"
+    )
+
+    assert evidence[2] == [
+        {
+            "kind": "episode",
+            "episode_id": "episode-1",
+            "text": "Ada chose the episodic-memory approach.",
+        }
+    ]
+    _, query, _ = client.calls[1]
+    assert "e.session_id" not in query
 
 
 @pytest.mark.storage
@@ -84,9 +127,7 @@ async def test_episode_reader_hydrates_one_complete_episode_aggregate():
     assert episode.first_message_at is not None
     assert episode.messages[0].message_id == 11
     assert episode.messages[0].attached_at is not None
-    assert episode.entities[0].is_focus_entity is True
     assert episode.entities[0].first_seen_at is not None
-    assert episode.relationships[0].is_central_relationship is True
     query, params = client.calls[0][1], client.calls[0][2]
     assert "JOIN sessions s" in query
     assert params == ("episode-1", "ada", "project-1", "session-1")
@@ -96,7 +137,7 @@ async def test_episode_reader_hydrates_one_complete_episode_aggregate():
 @pytest.mark.no_network
 async def test_episode_reader_entity_lookup_includes_non_focus_memberships():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results(focus=False)],
+        fetch_all_results=[[episode_row()], *card_attachment_results()],
     )
     reader = EpisodeReader(client)
 
@@ -108,10 +149,11 @@ async def test_episode_reader_entity_lookup_includes_non_focus_memberships():
     )
 
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
-    assert episodes[0].entities[0].is_focus_entity is False
+    assert not hasattr(episodes[0], "messages")
+    assert len(client.calls) == 3
+    assert all("FROM messages" not in call[1] for call in client.calls)
     query, params = client.calls[0][1], client.calls[0][2]
-    assert "ee.is_focus_entity DESC" in query
-    assert "ee.is_focus_entity = TRUE" not in query
+    assert "e.last_message_at DESC" in query
     assert params == (2, "ada", "project-1", "session-1", 10)
 
 
@@ -121,7 +163,7 @@ async def test_episode_reader_returns_scoped_semantic_matches():
     client = RecordingPostgresClient(
         fetch_all_results=[
             [{**episode_row(), "similarity": 0.86}],
-            *attachment_results(),
+            *card_attachment_results(),
         ]
     )
     reader = EpisodeReader(client)
@@ -151,7 +193,7 @@ async def test_episode_reader_returns_scoped_semantic_matches():
 @pytest.mark.no_network
 async def test_episode_reader_uses_the_stored_lexical_search_vector():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results()]
+        fetch_all_results=[[episode_row()], *card_attachment_results()]
     )
     reader = EpisodeReader(client)
 
@@ -175,7 +217,7 @@ async def test_episode_reader_uses_the_stored_lexical_search_vector():
 @pytest.mark.no_network
 async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results()]
+        fetch_all_results=[[episode_row()], *card_attachment_results()]
     )
     reader = EpisodeReader(client)
 
@@ -190,7 +232,7 @@ async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
     query, params = client.calls[0][1], client.calls[0][2]
     assert "COUNT(DISTINCT ee.entity_id) AS entity_overlap" in query
-    assert "ORDER BY entity_overlap DESC, e.updated_at DESC" in query
+    assert "ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST" in query
     assert params == ([2, 3], "ada", "project-1", "session-1", 3)
 
 
@@ -198,7 +240,7 @@ async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
 @pytest.mark.no_network
 async def test_episode_reader_loads_the_immediately_previous_episode():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results()]
+        fetch_all_results=[[episode_row()], *card_attachment_results()]
     )
     reader = EpisodeReader(client)
 
@@ -210,8 +252,45 @@ async def test_episode_reader_loads_the_immediately_previous_episode():
 
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
     query, params = client.calls[0][1], client.calls[0][2]
-    assert "ORDER BY e.updated_at DESC" in query
+    assert "ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC" in query
     assert params == ("ada", "project-1", "session-1", 1)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_episode_reader_selects_nearby_candidates_by_source_session_and_time():
+    client = RecordingPostgresClient(
+        fetch_all_results=[[episode_row()], *attachment_results()]
+    )
+    reader = EpisodeReader(client)
+
+    episodes = await reader.get_nearby_project_episodes(
+        user_name="ada",
+        project_id="project-1",
+        session_ids=["session-1"],
+        before_message_id=20,
+        before_timestamp_ms=1700000001000,
+        limit=3,
+    )
+
+    assert [episode.episode_id for episode in episodes] == ["episode-1"]
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "m.session_id = ANY(%s)" in query
+    assert "m.timestamp_ms < %s" in query
+    assert "e.user_modified = FALSE" in query
+    assert "entity_overlap" not in query
+    assert params == (
+        "project-1",
+        "ada",
+        ["session-1"],
+        1700000001000,
+        1700000001000,
+        1700000001000,
+        20,
+        1700000001000,
+        20,
+        3,
+    )
 
 
 @pytest.mark.storage
@@ -225,8 +304,6 @@ async def test_episode_reader_expands_source_messages_in_episode_order():
                     "role": "user",
                     "content": "Build the storage slice first.",
                     "timestamp_ms": 1700000000000,
-                    "influence_weight": 0.9,
-                    "influence_reason": "introduced the decision",
                     "message_position": 0,
                     "attached_at": datetime.now(timezone.utc),
                 }
@@ -250,229 +327,6 @@ async def test_episode_reader_expands_source_messages_in_episode_order():
         "ada",
         "project-1",
         "session-1",
-        "ada",
-        "project-1",
-        "session-1",
-    )
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_returns_resolved_generation_catalogs():
-    client = RecordingPostgresClient(
-        fetch_all_results=[
-            [
-                {
-                    "entity_id": 2,
-                    "canonical_name": "Ada",
-                    "type": "person",
-                    "aliases": ["Ada Lovelace"],
-                }
-            ],
-            [
-                {
-                    "relationship_id": "project-1:2:3",
-                    "entity_a_id": 2,
-                    "entity_a_name": "Ada",
-                    "entity_a_type": "person",
-                    "entity_b_id": 3,
-                    "entity_b_name": "episodic memory",
-                    "entity_b_type": "concept",
-                    "relationship_type": "adopted",
-                    "confidence": 0.9,
-                    "context": "Ada selected episodic memory.",
-                    "evidence_message_ids": [11, 12],
-                }
-            ],
-        ]
-    )
-    reader = EpisodeReader(client)
-
-    entities, relationships = await reader.get_episode_generation_catalog(
-        [12, 11, 12],
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert entities == [
-        {
-            "entity_id": 2,
-            "canonical_name": "Ada",
-            "type": "person",
-            "aliases": ["Ada Lovelace"],
-        }
-    ]
-    assert relationships[0]["relationship_type"] == "adopted"
-    assert relationships[0]["entity_b"]["canonical_name"] == "episodic memory"
-    assert relationships[0]["evidence_message_ids"] == [11, 12]
-    entity_query, entity_params = client.calls[0][1], client.calls[0][2]
-    relationship_query, relationship_params = client.calls[1][1], client.calls[1][2]
-    assert "entity_aliases" in entity_query
-    assert entity_params == ([11, 12], "ada", "project-1", "session-1", "project-1", 1)
-    assert "relationship_type" in relationship_query
-    assert relationship_params == (
-        [11, 12],
-        "ada",
-        "session-1",
-        "ada",
-        "project-1",
-        "session-1",
-        "project-1",
-    )
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_returns_initial_checkpoint_before_any_episode_work():
-    client = RecordingPostgresClient(
-        fetch_one_results=[{"message_id": 0, "last_evaluated_timestamp_ms": None}]
-    )
-    reader = EpisodeReader(client)
-
-    checkpoint = await reader.get_episode_checkpoint(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert checkpoint == EpisodeCheckpoint()
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "LEFT JOIN episode_processing_checkpoints" in query
-    assert params == ("ada", "project-1", "session-1")
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_requires_a_complete_eligible_window():
-    client = RecordingPostgresClient(
-        fetch_all_results=[
-            [
-                {
-                    "message_id": 11,
-                    "role": "user",
-                    "content": "First complete message.",
-                    "timestamp_ms": 1700000000000,
-                    "is_episode_eligible": True,
-                },
-                {
-                    "message_id": 12,
-                    "role": "assistant",
-                    "content": "Second complete message.",
-                    "timestamp_ms": 1700000001000,
-                    "is_episode_eligible": True,
-                },
-            ]
-        ]
-    )
-    reader = EpisodeReader(client)
-
-    messages = await reader.get_next_episode_window(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        checkpoint=EpisodeCheckpoint(
-            last_evaluated_message_id=10,
-            last_evaluated_timestamp_ms=1700000000000,
-        ),
-        message_count=2,
-    )
-
-    assert [message["message_id"] for message in messages] == [11, 12]
-    assert all("is_episode_eligible" not in message for message in messages)
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "m.episode_eligible AS is_episode_eligible" in query
-    assert "m.episode_type" in query
-    assert "episode_eligible_messages" not in query
-    assert "ORDER BY m.timestamp_ms ASC NULLS LAST, m.message_id" in query
-    assert "m.timestamp_ms > %s" in query
-    assert params == (
-        "ada",
-        "project-1",
-        "session-1",
-        10,
-        1700000000000,
-        1700000000000,
-        1700000000000,
-        1700000000000,
-        10,
-        1700000000000,
-        10,
-        10,
-        2,
-    )
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_rejects_window_with_ineligible_message():
-    client = RecordingPostgresClient(
-        fetch_all_results=[
-            [
-                {
-                    "message_id": 11,
-                    "role": "user",
-                    "content": "Processed.",
-                    "timestamp_ms": 1700000000000,
-                    "is_episode_eligible": True,
-                },
-                {
-                    "message_id": 12,
-                    "role": "assistant",
-                    "content": "Still processing.",
-                    "timestamp_ms": 1700000001000,
-                    "is_episode_eligible": False,
-                },
-            ]
-        ]
-    )
-    reader = EpisodeReader(client)
-
-    messages = await reader.get_next_episode_window(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        checkpoint=EpisodeCheckpoint(
-            last_evaluated_message_id=10,
-            last_evaluated_timestamp_ms=1700000000000,
-        ),
-        message_count=2,
-    )
-
-    assert messages == []
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_loads_relationship_evidence_for_source_messages():
-    client = RecordingPostgresClient(
-        fetch_all_results=[
-            [
-                {"message_id": 11, "relationship_id": "project-1:2:3"},
-                {"message_id": 11, "relationship_id": "project-1:2:4"},
-            ]
-        ]
-    )
-    reader = EpisodeReader(client)
-
-    relationships = await reader.get_relationship_ids_for_messages(
-        [12, 11],
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert relationships == {
-        11: ["project-1:2:3", "project-1:2:4"],
-        12: [],
-    }
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "FROM relationship_observations" in query
-    assert params == (
-        [11, 12],
-        "ada",
-        "session-1",
-        "project-1",
         "ada",
         "project-1",
         "session-1",
@@ -504,18 +358,18 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
 
         INSERT INTO messages (
             user_name, session_id, message_id, project_id, role, content,
-            timestamp_ms, episode_eligible
+            timestamp_ms
         ) VALUES
-            ('ada', 'session-1', 101, 'project-1', 'user', 'Project one source', 1000, TRUE),
-            ('ada', 'session-2', 102, 'project-2', 'user', 'Project two source', 2000, TRUE),
-            ('bob', 'session-3', 103, 'project-3', 'user', 'Bob project source', 3000, TRUE);
+            ('ada', 'session-1', 101, 'project-1', 'user', 'Project one source', 1000),
+            ('ada', 'session-2', 102, 'project-2', 'user', 'Project two source', 2000),
+            ('bob', 'session-3', 103, 'project-3', 'user', 'Bob project source', 3000);
 
         INSERT INTO episodes (
-            episode_id, project_id, session_id, summary, source_message_count,
+            episode_id, project_id, summary, source_message_count,
             first_message_at, last_message_at, created_at, updated_at
         ) VALUES
             (
-                'episode-1', 'project-1', 'session-1',
+                'episode-1', 'project-1',
                 'Visible project one memory', 1,
                 TIMESTAMPTZ '2026-01-01 00:00:01+00',
                 TIMESTAMPTZ '2026-01-01 00:00:01+00',
@@ -523,7 +377,7 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
                 TIMESTAMPTZ '2026-01-01 00:00:01+00'
             ),
             (
-                'episode-2', 'project-2', 'session-2',
+                'episode-2', 'project-2',
                 'Private project two memory', 1,
                 TIMESTAMPTZ '2026-01-02 00:00:01+00',
                 TIMESTAMPTZ '2026-01-02 00:00:01+00',
@@ -531,7 +385,7 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
                 TIMESTAMPTZ '2026-01-02 00:00:01+00'
             ),
             (
-                'episode-3', 'project-3', 'session-3',
+                'episode-3', 'project-3',
                 'Private Bob memory', 1,
                 TIMESTAMPTZ '2026-01-03 00:00:01+00',
                 TIMESTAMPTZ '2026-01-03 00:00:01+00',
@@ -540,12 +394,11 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
             );
 
         INSERT INTO episode_messages (
-            episode_id, project_id, session_id, message_id,
-            influence_weight, message_position
+            episode_id, project_id, session_id, message_id, message_position
         ) VALUES
-            ('episode-1', 'project-1', 'session-1', 101, 1.0, 0),
-            ('episode-2', 'project-2', 'session-2', 102, 1.0, 0),
-            ('episode-3', 'project-3', 'session-3', 103, 1.0, 0);
+            ('episode-1', 'project-1', 'session-1', 101, 0),
+            ('episode-2', 'project-2', 'session-2', 102, 0),
+            ('episode-3', 'project-3', 'session-3', 103, 0);
         """
     )
 

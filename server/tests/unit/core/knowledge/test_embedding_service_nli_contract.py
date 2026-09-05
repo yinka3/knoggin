@@ -42,6 +42,16 @@ class FakeCrossEncoder:
         )
 
 
+@pytest.fixture
+def inline_fake_model_work(monkeypatch):
+    """Keep fake model contract tests independent of the thread executor."""
+
+    async def run_inline(self, operation, **_kwargs):
+        return operation()
+
+    monkeypatch.setattr(EmbeddingService, "_run_blocking", run_inline)
+
+
 @pytest.mark.no_network
 @pytest.mark.parametrize(
     ("platform", "available", "expected"),
@@ -95,6 +105,7 @@ def test_embedding_service_rejects_unavailable_explicit_onnx_provider(monkeypatc
 @pytest.mark.no_network
 async def test_embedding_service_classifies_text_pairs_with_lazy_cross_encoder(
     monkeypatch,
+    inline_fake_model_work,
 ):
     FakeCrossEncoder.init_calls = []
     FakeCrossEncoder.predict_calls = []
@@ -139,7 +150,10 @@ async def test_embedding_service_classifies_text_pairs_with_lazy_cross_encoder(
 
 
 @pytest.mark.no_network
-async def test_embedding_service_reuses_loaded_nli_model(monkeypatch):
+async def test_embedding_service_reuses_loaded_nli_model(
+    monkeypatch,
+    inline_fake_model_work,
+):
     FakeCrossEncoder.init_calls = []
     FakeCrossEncoder.predict_calls = []
     monkeypatch.setattr(embedding_module, "CrossEncoder", FakeCrossEncoder)
@@ -159,6 +173,7 @@ async def test_embedding_service_reuses_loaded_nli_model(monkeypatch):
 @pytest.mark.no_network
 async def test_embedding_service_loads_embedder_before_lazy_onnx_reranker(
     monkeypatch,
+    inline_fake_model_work,
 ):
     sentence_transformer_calls = []
 

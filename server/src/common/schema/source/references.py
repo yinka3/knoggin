@@ -36,6 +36,7 @@ SourceKind = Literal[
 EncounterKind = Literal[
     "document_search",
     "document_read",
+    "document_selection",
     "user_pasted_text",
     "web_search",
     "news_search",
@@ -123,9 +124,16 @@ class SourceReferenceCandidate(BaseModel):
                 raise ValueError(
                     "document sources cannot include URL or source message"
                 )
-            if self.tool_call_id is None:
+            if self.encounter_kind == "document_selection":
+                if self.tool_call_id is not None:
+                    raise ValueError("document selections must not include tool_call_id")
+            elif self.tool_call_id is None:
                 raise ValueError("tool-derived sources require tool_call_id")
-            if self.encounter_kind not in {"document_search", "document_read"}:
+            if self.encounter_kind not in {
+                "document_search",
+                "document_read",
+                "document_selection",
+            }:
                 raise ValueError("document sources require a document encounter kind")
             if self.source_kind == "pdf_document" and not isinstance(
                 self.locator, PdfPageLocator

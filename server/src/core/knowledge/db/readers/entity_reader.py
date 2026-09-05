@@ -110,14 +110,21 @@ class EntityReader:
         if not entity_ids:
             return {}
         emb_query = """
-        SELECT entity_id, embedding
-        FROM entities
-        WHERE entity_id = ANY(%s)
-          AND (project_id = ANY(%s) OR entity_id = %s)
+        SELECT e.entity_id, e.embedding
+        FROM entities e
+        WHERE e.entity_id = ANY(%s)
+          AND (
+              e.entity_id = %s
+              OR EXISTS (
+                  SELECT 1 FROM project_entity_contexts context
+                  WHERE context.entity_id = e.entity_id
+                    AND context.project_id = ANY(%s)
+              )
+          )
         """
         emb_res = await self.client.fetch_all(
             emb_query,
-            (entity_ids, visible_project_ids, IDENTITY_ENTITY_ID),
+            (entity_ids, IDENTITY_ENTITY_ID, visible_project_ids),
         )
         return {
             int(row["entity_id"]): self._parse_vector(row["embedding"])
@@ -128,20 +135,43 @@ class EntityReader:
         self,
         row: Dict,
         embedding: List[float] = None,
-        include_project_id: bool = True,
+        contexts: List[Dict] | None = None,
     ) -> Dict:
         entity = {
             "id": int(row["id"]) if row["id"] else None,
             "canonical_name": self._clean_string(row["canonical_name"]),
             "aliases": self._parse_aliases(row.get("aliases")),
-            "type": self._clean_string(row["type"]),
-            "topic": self._clean_string(row["topic"]),
-            "last_mentioned": self._ms_to_seconds(row.get("last_mentioned")),
+            "user_name": self._clean_string(row.get("user_name")),
             "embedding": embedding or [],
+            "contexts": contexts or [],
         }
-        if include_project_id:
-            entity["project_id"] = self._clean_string(row["project_id"])
         return entity
+
+    async def _fetch_contexts(
+        self, entity_ids: List[int], visible_project_ids: List[str]
+    ) -> Dict[int, List[Dict]]:
+        if not entity_ids:
+            return {}
+        rows = await self.client.fetch_all(
+            """
+            SELECT entity_id, project_id, entity_type, topic, last_mentioned_ms
+            FROM project_entity_contexts
+            WHERE entity_id = ANY(%s) AND project_id = ANY(%s)
+            ORDER BY entity_id, project_id
+            """,
+            (entity_ids, visible_project_ids),
+        )
+        contexts: Dict[int, List[Dict]] = {}
+        for row in rows:
+            contexts.setdefault(int(row["entity_id"]), []).append(
+                {
+                    "project_id": self._clean_string(row["project_id"]),
+                    "entity_type": self._clean_string(row["entity_type"]),
+                    "topic": self._clean_string(row["topic"]),
+                    "last_mentioned_ms": row.get("last_mentioned_ms"),
+                }
+            )
+        return contexts
 
     def _parse_vector(self, val) -> List[float]:
         """Normalize pgvector values across adapter and text-returning drivers."""
@@ -171,15 +201,19 @@ class EntityReader:
             "get_entity_embedding",
         )
         query = """
-        SELECT embedding
-        FROM entities
-        WHERE entity_id = %s
-          AND (project_id = ANY(%s) OR entity_id = %s)
+        SELECT e.embedding
+        FROM entities e
+        WHERE e.entity_id = %s
+          AND (e.entity_id = %s OR EXISTS (
+              SELECT 1 FROM project_entity_contexts context
+              WHERE context.entity_id = e.entity_id
+                AND context.project_id = ANY(%s)
+          ))
         """
         try:
             row = await self.client.fetch_one(
                 query,
-                (entity_id, visible_project_ids, IDENTITY_ENTITY_ID),
+                (entity_id, IDENTITY_ENTITY_ID, visible_project_ids),
             )
             if row and row["embedding"]:
                 return self._parse_vector(row["embedding"])
@@ -204,13 +238,11 @@ class EntityReader:
             visible_project_ids,
             "list_entities",
         )
-        where_clauses = [
-            "(e.project_id = ANY(%s) OR e.entity_id = %s)"
-        ]
-        params = [visible_project_ids, IDENTITY_ENTITY_ID]
+        where_clauses = ["context.project_id = ANY(%s)"]
+        params = [visible_project_ids]
 
         if entity_type:
-            where_clauses.append("e.type = %s")
+            where_clauses.append("context.entity_type = %s")
             params.append(entity_type)
 
         if search:
@@ -218,21 +250,23 @@ class EntityReader:
             params.append(f"%{search}%")
 
         if topic:
-            where_clauses.append("e.topic = %s")
+            where_clauses.append("context.topic = %s")
             params.append(topic)
 
         where_str = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
-        count_query = f"SELECT count(*) AS total FROM entities e {where_str}"
+        count_query = f"""SELECT count(DISTINCT e.entity_id) AS total
+        FROM entities e JOIN project_entity_contexts context
+          ON context.entity_id = e.entity_id {where_str}"""
         data_query = f"""
         SELECT
             e.entity_id AS id,
             e.canonical_name,
-            e.type,
-            e.topic,
-            e.last_mentioned_ms AS last_mentioned
+            max(context.last_mentioned_ms) AS last_mentioned
         FROM entities e
+        JOIN project_entity_contexts context ON context.entity_id = e.entity_id
         {where_str}
-        ORDER BY e.last_mentioned_ms DESC NULLS LAST
+        GROUP BY e.entity_id, e.canonical_name
+        ORDER BY max(context.last_mentioned_ms) DESC NULLS LAST
         OFFSET %s
         LIMIT %s
         """
@@ -261,8 +295,6 @@ class EntityReader:
                     {
                         "id": int(row["id"]),
                         "canonical_name": row["canonical_name"],
-                        "type": row["type"],
-                        "topic": row["topic"],
                         "last_mentioned": self._ms_to_seconds(
                             row["last_mentioned"]
                         ),
@@ -283,38 +315,10 @@ class EntityReader:
             visible_project_ids,
             "get_entity_by_id",
         )
-        params = [entity_id, visible_project_ids, IDENTITY_ENTITY_ID]
-
-        query = """
-        SELECT
-            e.entity_id AS id,
-            e.project_id,
-            e.canonical_name,
-            COALESCE(
-                array_agg(a.alias ORDER BY a.alias)
-                    FILTER (WHERE a.alias IS NOT NULL),
-                '{}'
-            ) AS aliases,
-            e.type,
-            e.topic,
-            e.last_mentioned_ms AS last_mentioned
-        FROM entities e
-        LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
-        WHERE e.entity_id = %s
-          AND (e.project_id = ANY(%s) OR e.entity_id = %s)
-        GROUP BY e.entity_id
-        """
-        try:
-            row = await self.client.fetch_one(query, tuple(params))
-            if not row:
-                return None
-            embedding = await self.get_entity_embedding(
-                entity_id,
-                visible_project_ids=visible_project_ids,
-            )
-            return self._hydrate_entity_row(row, embedding=embedding)
-        except Exception as e:
-            self._raise_storage_read("get_entity_by_id", e)
+        entities = await self.get_entities_by_ids(
+            [entity_id], visible_project_ids=visible_project_ids
+        )
+        return entities[0] if entities else None
 
     async def get_entities_by_ids(
         self,
@@ -332,20 +336,21 @@ class EntityReader:
         query = """
         SELECT
             e.entity_id AS id,
-            e.project_id,
+            e.user_name,
             e.canonical_name,
             COALESCE(
                 array_agg(a.alias ORDER BY a.alias)
                     FILTER (WHERE a.alias IS NOT NULL),
                 '{}'
-            ) AS aliases,
-            e.type,
-            e.topic,
-            e.last_mentioned_ms AS last_mentioned
+            ) AS aliases
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE e.entity_id = ANY(%s)
-          AND (e.project_id = ANY(%s) OR e.entity_id = %s)
+          AND (e.entity_id = %s OR EXISTS (
+              SELECT 1 FROM project_entity_contexts context
+              WHERE context.entity_id = e.entity_id
+                AND context.project_id = ANY(%s)
+          ))
         GROUP BY e.entity_id
         ORDER BY e.entity_id
         """
@@ -353,12 +358,13 @@ class EntityReader:
         try:
             res = await self.client.fetch_all(
                 query,
-                (entity_ids, visible_project_ids, IDENTITY_ENTITY_ID),
+                (entity_ids, IDENTITY_ENTITY_ID, visible_project_ids),
             )
             embeddings_map = await self._fetch_embeddings(
                 entity_ids,
                 visible_project_ids,
             )
+            contexts_map = await self._fetch_contexts(entity_ids, visible_project_ids)
 
             entities = []
             for row in res:
@@ -367,7 +373,7 @@ class EntityReader:
                     self._hydrate_entity_row(
                         row,
                         embedding=embeddings_map.get(eid, []),
-                        include_project_id=True,
+                        contexts=contexts_map.get(eid, []),
                     )
                 )
             return entities
@@ -406,7 +412,10 @@ class EntityReader:
           AND m.user_name = %s
           AND m.session_id = %s
           AND m.project_id = %s
-          AND (e.project_id = %s OR e.entity_id = %s)
+          AND (e.entity_id = %s OR EXISTS (
+              SELECT 1 FROM project_entity_contexts context
+              WHERE context.entity_id = e.entity_id AND context.project_id = %s
+          ))
         ORDER BY mer.message_id, mer.entity_id
         """
         try:
@@ -417,8 +426,8 @@ class EntityReader:
                     user_name,
                     session_id,
                     project_id,
-                    project_id,
                     IDENTITY_ENTITY_ID,
+                    project_id,
                 ),
             )
         except Exception as e:
@@ -445,21 +454,12 @@ class EntityReader:
             return []
 
         lower_names = [n.lower() for n in names]
-        params = [lower_names, lower_names, visible_project_ids, IDENTITY_ENTITY_ID]
+        params = [lower_names, lower_names, IDENTITY_ENTITY_ID, visible_project_ids]
 
         query = """
         SELECT
-            e.entity_id AS id,
-            e.project_id,
-            e.canonical_name,
-            e.type,
-            COALESCE(
-                array_agg(DISTINCT a.alias ORDER BY a.alias)
-                    FILTER (WHERE a.alias IS NOT NULL),
-                '{}'
-            ) AS aliases
+            e.entity_id AS id
         FROM entities e
-        LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE (
             lower(e.canonical_name) = ANY(%s)
             OR EXISTS (
@@ -469,24 +469,21 @@ class EntityReader:
                   AND lower(ea.alias) = ANY(%s)
             )
         )
-        AND (e.project_id = ANY(%s) OR e.entity_id = %s)
-        GROUP BY e.entity_id
+        AND (e.entity_id = %s OR EXISTS (
+            SELECT 1 FROM project_entity_contexts context
+            WHERE context.entity_id = e.entity_id
+              AND context.project_id = ANY(%s)
+        ))
         """
         try:
             res = await self.client.fetch_all(
                 query,
                 params,
             )
-            return [
-                {
-                    "id": int(row["id"]),
-                    "project_id": self._clean_string(row["project_id"]),
-                    "canonical_name": self._clean_string(row["canonical_name"]),
-                    "type": self._clean_string(row["type"]),
-                    "aliases": self._parse_aliases(row["aliases"]),
-                }
-                for row in res
-            ]
+            return await self.get_entities_by_ids(
+                [int(row["id"]) for row in res],
+                visible_project_ids=visible_project_ids,
+            )
         except Exception as e:
             self._raise_storage_read("get_entities_by_names", e)
 
@@ -495,12 +492,9 @@ class EntityReader:
         query: str,
         *,
         visible_project_ids: List[str],
-        active_topics: Optional[List[str]] = None,
         limit: int = 5,
-        connections_limit: int = 5,
-        evidence_limit: int = 5,
     ) -> List[Dict]:
-        """Search entities and hydrate their observed graph connections."""
+        """Discover visible global identities and their project contexts."""
 
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
@@ -515,14 +509,13 @@ class EntityReader:
         SELECT
             entity.entity_id AS id,
             entity.canonical_name,
-            entity.type,
-            entity.topic,
-            entity.last_mentioned_ms AS last_mentioned,
+            max(context.last_mentioned_ms) AS last_mentioned,
             COALESCE(
                 array_agg(DISTINCT alias.alias) FILTER (WHERE alias.alias IS NOT NULL),
                 '{}'::text[]
             ) AS aliases
         FROM entities entity
+        JOIN project_entity_contexts context ON context.entity_id = entity.entity_id
         LEFT JOIN entity_aliases alias ON alias.entity_id = entity.entity_id
         WHERE (
             entity.canonical_name ILIKE %s
@@ -533,100 +526,35 @@ class EntityReader:
                   AND entity_alias.alias ILIKE %s
             )
         )
-          AND (entity.project_id = ANY(%s) OR entity.entity_id = %s)
+          AND context.project_id = ANY(%s)
         """
         params: tuple = (
             f"%{clean_query}%",
             f"%{clean_query}%",
             visible_project_ids,
-            IDENTITY_ENTITY_ID,
         )
-        if active_topics:
-            entity_query += " AND entity.topic = ANY(%s)"
-            params = (*params, active_topics)
         entity_query += """
         GROUP BY entity.entity_id
-        ORDER BY entity.last_mentioned_ms DESC NULLS LAST
+        ORDER BY max(context.last_mentioned_ms) DESC NULLS LAST
         LIMIT %s
         """
         params = (*params, limit)
 
         try:
             entity_rows = await self.client.fetch_all(entity_query, params)
-            results: list[Dict] = []
-            for row in entity_rows:
-                entity_id = int(row["id"])
-                connections = await self.get_entity_relationships(
-                    entity_id,
-                    visible_project_ids=visible_project_ids,
-                )
-                results.append(
-                    {
-                        "id": entity_id,
-                        "canonical_name": row["canonical_name"],
-                        "aliases": row["aliases"] or [],
-                        "type": row["type"],
-                        "topic": row["topic"],
-                        "last_mentioned": row["last_mentioned"],
-                        "top_connections": [
-                            {
-                                "canonical_name": connection["neighbor_name"],
-                                "aliases": [],
-                                "weight": connection["evidence_count"],
-                                "evidence_refs": connection["message_refs"][:evidence_limit],
-                                "context": connection["context"],
-                            }
-                            for connection in connections[:connections_limit]
-                        ],
-                    }
-                )
-            return results
+            entity_ids = [int(row["id"]) for row in entity_rows]
+            contexts_map = await self._fetch_contexts(entity_ids, visible_project_ids)
+            return [
+                {
+                    "entity_id": int(row["id"]),
+                    "canonical_name": self._clean_string(row["canonical_name"]),
+                    "aliases": self._parse_aliases(row["aliases"]),
+                    "contexts": contexts_map.get(int(row["id"]), []),
+                }
+                for row in entity_rows
+            ]
         except Exception as exc:
             self._raise_storage_read("search_by_name", exc)
-
-    async def search_similar_entities(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-        limit: int = 50,
-    ) -> List[Tuple[int, float]]:
-        limit = self._validate_query_limit(limit, "search_similar_entities")
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "search_similar_entities",
-        )
-        """Find similar entities using Postgres pgvector."""
-        # 1. Get the source vector
-        emb = await self.get_entity_embedding(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
-        if not emb:
-            return []
-
-        # 2. Search using pgvector cosine distance `<=>`
-        # `<=>` returns distance, so we do 1 - distance for similarity
-        params = [
-            emb,
-            entity_id,
-            visible_project_ids,
-            IDENTITY_ENTITY_ID,
-        ]
-        query = """
-        SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
-        FROM entities
-        WHERE entity_id != %s
-          AND (project_id = ANY(%s) OR entity_id = %s)
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-        """
-        try:
-            params.extend([emb, limit])
-            res = await self.client.fetch_all(query, tuple(params))
-            return [(r["entity_id"], r["similarity"]) for r in res]
-        except Exception as e:
-            self._raise_storage_read("search_similar_entities", e)
 
     async def search_entities_by_embedding(
         self,
@@ -648,14 +576,18 @@ class EntityReader:
             embedding,
             embedding,
             score_threshold,
-            visible_project_ids,
             IDENTITY_ENTITY_ID,
+            visible_project_ids,
         ]
         query = """
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entities
         WHERE 1 - (embedding <=> %s::vector) >= %s
-          AND (project_id = ANY(%s) OR entity_id = %s)
+          AND (entity_id = %s OR EXISTS (
+              SELECT 1 FROM project_entity_contexts context
+              WHERE context.entity_id = entities.entity_id
+                AND context.project_id = ANY(%s)
+          ))
         ORDER BY embedding <=> %s::vector
         LIMIT %s
         """
@@ -682,12 +614,16 @@ class EntityReader:
         SELECT entity_id AS id
         FROM entities
         WHERE entity_id = ANY(%s)
-          AND (project_id = ANY(%s) OR entity_id = %s)
+          AND (entity_id = %s OR EXISTS (
+              SELECT 1 FROM project_entity_contexts context
+              WHERE context.entity_id = entities.entity_id
+                AND context.project_id = ANY(%s)
+          ))
         """
         try:
             res = await self.client.fetch_all(
                 query,
-                (ids, visible_project_ids, IDENTITY_ENTITY_ID),
+                (ids, IDENTITY_ENTITY_ID, visible_project_ids),
             )
             return {int(r["id"]) for r in res}
         except Exception as e:
@@ -714,33 +650,35 @@ class EntityReader:
         SELECT
             e.entity_id,
             e.canonical_name,
-            e.type,
-            e.topic,
+            context.entity_type AS type,
+            context.topic,
             COALESCE(array_agg(DISTINCT alias.alias)
                 FILTER (WHERE alias.alias IS NOT NULL), ARRAY[]::TEXT[]) AS aliases,
-            e.last_mentioned_ms,
+            context.last_mentioned_ms,
             COUNT(DISTINCT mer.message_id) AS message_reference_count,
             COUNT(DISTINCT relationship.relationship_id) AS relationship_count,
             COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count
         FROM public.entities e
+        JOIN public.project_entity_contexts context
+            ON context.entity_id = e.entity_id
         LEFT JOIN public.entity_aliases alias
             ON alias.entity_id = e.entity_id
         LEFT JOIN public.message_entity_refs mer
             ON mer.entity_id = e.entity_id
         LEFT JOIN public.relationships relationship
-            ON relationship.project_id = e.project_id
+            ON relationship.project_id = context.project_id
            AND (
                 relationship.entity_a_id = e.entity_id
                 OR relationship.entity_b_id = e.entity_id
            )
         LEFT JOIN public.episode_entities episode_entity
-            ON episode_entity.project_id = e.project_id
+            ON episode_entity.project_id = context.project_id
            AND episode_entity.entity_id = e.entity_id
         WHERE e.user_name = %s
-          AND e.project_id = %s
+          AND context.project_id = %s
           AND e.entity_id <> %s
-        GROUP BY e.entity_id, e.canonical_name, e.type, e.topic, e.last_mentioned_ms
-        ORDER BY e.last_mentioned_ms NULLS FIRST, e.entity_id
+        GROUP BY e.entity_id, e.canonical_name, context.entity_type, context.topic, context.last_mentioned_ms
+        ORDER BY context.last_mentioned_ms NULLS FIRST, e.entity_id
         LIMIT %s
         """
         try:
@@ -760,17 +698,16 @@ class EntityReader:
             "get_entity_count_by_type",
         )
         query = """
-        SELECT type, count(*) AS count
-        FROM entities
-        WHERE type IS NOT NULL
-          AND (project_id = ANY(%s) OR entity_id = %s)
-        GROUP BY type
+        SELECT entity_type AS type, count(*) AS count
+        FROM project_entity_contexts
+        WHERE project_id = ANY(%s)
+        GROUP BY entity_type
         ORDER BY count DESC
         """
         try:
             res = await self.client.fetch_all(
                 query,
-                (visible_project_ids, IDENTITY_ENTITY_ID),
+                (visible_project_ids,),
             )
             return [
                 {
@@ -791,16 +728,15 @@ class EntityReader:
         )
         query = """
         SELECT topic, count(*) AS count
-        FROM entities
-        WHERE topic IS NOT NULL
-          AND (project_id = ANY(%s) OR entity_id = %s)
+        FROM project_entity_contexts
+        WHERE project_id = ANY(%s)
         GROUP BY topic
         ORDER BY count DESC
         """
         try:
             res = await self.client.fetch_all(
                 query,
-                (visible_project_ids, IDENTITY_ENTITY_ID),
+                (visible_project_ids,),
             )
             return [
                 {
@@ -832,18 +768,21 @@ class EntityReader:
         )
         SELECT
             e.canonical_name AS name,
-            e.type,
+            min(context.entity_type) AS type,
             count(*) AS connections
         FROM edge_ends ee
         JOIN entities e ON e.entity_id = ee.entity_id
-        GROUP BY e.entity_id, e.canonical_name, e.type
+        JOIN project_entity_contexts context
+          ON context.entity_id = e.entity_id
+         AND context.project_id = ANY(%s)
+        GROUP BY e.entity_id, e.canonical_name
         ORDER BY connections DESC, e.canonical_name
         LIMIT %s
         """
         try:
             res = await self.client.fetch_all(
                 query,
-                (visible_project_ids, visible_project_ids, limit),
+                (visible_project_ids, visible_project_ids, visible_project_ids, limit),
             )
             return [
                 {
@@ -856,93 +795,100 @@ class EntityReader:
         except Exception as e:
             self._raise_storage_read("get_top_connected_entities", e)
 
-    async def get_related_entities_by_name(
+    async def get_related_entities(
         self,
-        entity_names: List[str],
+        entity_ids: List[int],
         *,
         visible_project_ids: List[str],
-        active_topics: Optional[List[str]] = None,
         limit: int = 25,
     ) -> List[Dict]:
-        """Return relationship identities and their canonical observations."""
+        """Return relationships from their durable stored endpoints.
+
+        The queried IDs only select the incident relationships.  They do not
+        change endpoint order: for directional relationships ``source`` is
+        always ``relationships.entity_a_id`` and ``target`` is always
+        ``relationships.entity_b_id``.
+        """
 
         visible_project_ids = require_visible_project_ids(
             visible_project_ids,
-            "get_related_entities_by_name",
+            "get_related_entities",
         )
-        limit = self._validate_query_limit(limit, "get_related_entities_by_name")
-        if not entity_names:
+        limit = self._validate_query_limit(limit, "get_related_entities")
+        if not entity_ids:
             return []
 
         query = """
         SELECT
+            relationship.project_id,
+            relationship.entity_a_id AS source_entity_id,
+            relationship.entity_b_id AS target_entity_id,
             source.canonical_name AS source,
             target.canonical_name AS target,
             relationship.relationship_id,
             relationship.relationship_type,
             relationship."symmetric",
-            COUNT(observation.observation_id)::INTEGER AS observation_count,
-            COUNT(DISTINCT observation.message_id)::INTEGER AS evidence_message_count,
+            COUNT(DISTINCT observation.observation_id)::INTEGER AS observation_count,
+            COUNT(DISTINCT support.message_id)::INTEGER AS evidence_message_count,
             COALESCE(
-                jsonb_agg(
+                jsonb_agg(DISTINCT
                     jsonb_build_object(
+                        'project_id', observation.project_id,
                         'user_name', observation.user_name,
-                        'session_id', observation.session_id,
-                        'message_id', observation.message_id
+                        'session_id', support.session_id,
+                        'message_id', support.message_id
                     )
-                    ORDER BY observation.observed_at_ms DESC,
-                             observation.observation_id DESC
                 ) FILTER (WHERE observation.observation_id IS NOT NULL),
                 '[]'::jsonb
             ) AS evidence_refs,
             COALESCE(
-                jsonb_agg(
+                jsonb_agg(DISTINCT
                     jsonb_build_object(
                         'observation_id', observation.observation_id,
                         'observed_relationship_label', observation.observed_relationship_label,
-                        'canonical_relationship_type', observation.canonical_relationship_type,
+                        'relationship_type', relationship.relationship_type,
                         'observed_at_ms', observation.observed_at_ms,
-                        'confidence', observation.confidence,
                         'context', left(COALESCE(observation.context, ''), 600)
                     )
-                    ORDER BY observation.observed_at_ms DESC,
-                             observation.observation_id DESC
                 ) FILTER (WHERE observation.observation_id IS NOT NULL),
                 '[]'::jsonb
             ) AS observation_refs,
             MIN(observation.observed_at_ms) AS first_observed,
             MAX(observation.observed_at_ms) AS last_observed
-        FROM entities source
-        JOIN relationships relationship
-          ON relationship.entity_a_id = source.entity_id
-          OR relationship.entity_b_id = source.entity_id
-        JOIN entities target
-          ON target.entity_id = CASE
-              WHEN relationship.entity_a_id = source.entity_id
-              THEN relationship.entity_b_id
-              ELSE relationship.entity_a_id
-          END
+        FROM relationships relationship
+        JOIN entities source ON source.entity_id = relationship.entity_a_id
+        JOIN entities target ON target.entity_id = relationship.entity_b_id
+        JOIN project_entity_contexts source_context
+          ON source_context.entity_id = source.entity_id
+         AND source_context.project_id = relationship.project_id
+        JOIN project_entity_contexts target_context
+          ON target_context.entity_id = target.entity_id
+         AND target_context.project_id = relationship.project_id
         LEFT JOIN relationship_observations observation
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
-        WHERE source.canonical_name = ANY(%s)
-          AND (source.project_id = ANY(%s) OR source.entity_id = %s)
-          AND (target.project_id = ANY(%s) OR target.entity_id = %s)
+        LEFT JOIN relationship_observation_blocks observation_block
+          ON observation_block.observation_id = observation.observation_id
+         AND observation_block.project_id = observation.project_id
+        LEFT JOIN project_context_block_supports support
+          ON support.block_id = observation_block.block_id
+         AND support.project_id = observation_block.project_id
+        WHERE (
+              relationship.entity_a_id = ANY(%s)
+              OR relationship.entity_b_id = ANY(%s)
+          )
           AND relationship.project_id = ANY(%s)
         """
         params: tuple = (
-            entity_names,
-            visible_project_ids,
-            IDENTITY_ENTITY_ID,
-            visible_project_ids,
-            IDENTITY_ENTITY_ID,
+            entity_ids,
+            entity_ids,
             visible_project_ids,
         )
-        if active_topics is not None:
-            query += " AND target.topic = ANY(%s)"
-            params = (*params, active_topics)
         query += """
         GROUP BY
+            relationship.project_id,
+            relationship.entity_a_id,
+            relationship.entity_b_id,
             source.canonical_name,
             target.canonical_name,
             relationship.relationship_id,
@@ -957,6 +903,9 @@ class EntityReader:
             rows = await self.client.fetch_all(query, params)
             return [
                 {
+                    "project_id": row["project_id"],
+                    "source_entity_id": int(row["source_entity_id"]),
+                    "target_entity_id": int(row["target_entity_id"]),
                     "source": row["source"],
                     "target": row["target"],
                     "relationship_id": row["relationship_id"],
@@ -976,7 +925,7 @@ class EntityReader:
                 for row in rows
             ]
         except Exception as exc:
-            self._raise_storage_read("get_related_entities_by_name", exc)
+            self._raise_storage_read("get_related_entities", exc)
 
     async def get_entity_relationships(
         self,
@@ -1009,7 +958,7 @@ class EntityReader:
             ) AS message_refs,
             (array_agg(ref.context ORDER BY ref.observed_at_ms DESC)
                 FILTER (WHERE ref.context IS NOT NULL))[1] AS context,
-            MAX(ref.confidence) AS confidence
+            COUNT(ref.observation_id) AS observation_count
         FROM relationships r
         JOIN entities neighbor
           ON neighbor.entity_id = CASE
@@ -1021,7 +970,6 @@ class EntityReader:
          AND ref.project_id = r.project_id
         WHERE %s IN (r.entity_a_id, r.entity_b_id)
           AND r.project_id = ANY(%s)
-          AND (neighbor.project_id = ANY(%s) OR neighbor.entity_id = %s)
         GROUP BY
             r.relationship_id,
             r.entity_a_id,
@@ -1037,8 +985,6 @@ class EntityReader:
                     entity_id,
                     entity_id,
                     visible_project_ids,
-                    visible_project_ids,
-                    IDENTITY_ENTITY_ID,
                 ),
             )
             return [
@@ -1048,7 +994,7 @@ class EntityReader:
                     "evidence_count": int(r["evidence_count"] or 0),
                     "message_refs": r["message_refs"] or [],
                     "context": self._clean_string(r["context"]),
-                    "confidence": float(r["confidence"] or 1.0),
+                    "observation_count": int(r["observation_count"] or 0),
                 }
                 for r in res
             ]
@@ -1073,19 +1019,20 @@ class EntityReader:
         SELECT
             e.entity_id AS id,
             e.canonical_name AS name,
-            e.type,
-            e.topic,
+            context.entity_type AS type,
+            context.topic,
             count(DISTINCT episode_entity.episode_id) AS recent_episode_count,
             max(episode.updated_at) AS last_activity
         FROM entities e
+        JOIN project_entity_contexts context ON context.entity_id = e.entity_id
         JOIN episode_entities episode_entity
           ON episode_entity.entity_id = e.entity_id
         JOIN episodes episode
           ON episode.episode_id = episode_entity.episode_id
-        WHERE e.project_id = ANY(%s)
+        WHERE context.project_id = ANY(%s)
           AND episode.project_id = ANY(%s)
           AND episode.updated_at > %s
-        GROUP BY e.entity_id
+        GROUP BY e.entity_id, context.entity_type, context.topic
         ORDER BY recent_episode_count DESC, last_activity DESC
         LIMIT %s
         """
@@ -1120,8 +1067,8 @@ class EntityReader:
         SELECT
             e.entity_id AS id,
             e.canonical_name AS name,
-            e.type,
-            e.topic,
+            context.entity_type AS type,
+            context.topic,
             (
                 SELECT count(*)
                 FROM relationships relationship
@@ -1139,8 +1086,9 @@ class EntityReader:
                   AND episode.project_id = ANY(%s)
             ) AS episode_count
         FROM entities e
+        JOIN project_entity_contexts context ON context.entity_id = e.entity_id
         WHERE e.canonical_name IS NOT NULL
-          AND (e.project_id = ANY(%s) OR e.entity_id = %s)
+          AND context.project_id = ANY(%s)
         ORDER BY connection_count DESC, episode_count DESC
         LIMIT %s
         """
@@ -1151,7 +1099,6 @@ class EntityReader:
                     visible_project_ids,
                     visible_project_ids,
                     visible_project_ids,
-                    IDENTITY_ENTITY_ID,
                     limit,
                 ),
             )

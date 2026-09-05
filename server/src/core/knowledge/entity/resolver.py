@@ -12,11 +12,15 @@ from loguru import logger
 from rapidfuzz import fuzz, process
 from wordfreq import word_frequency
 
-from common.schema.ingestion.contracts import EntityWrite, ValidationIssue
+from common.schema.ingestion.contracts import (
+    ContextBlockEntityAssociation,
+    ContextBlockMention,
+    EntityWrite,
+    ResolvedContextBlockMention,
+    ValidationIssue,
+)
 from common.schema.settings import EntityResolutionSettings
 from common.scoping import require_scope_value, require_visible_project_ids
-from common.utils.core_utils import is_substring_match
-from common.utils.data_utils import cosine_similarity
 from common.utils.events import emit_sync
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.embedding import (
@@ -28,11 +32,6 @@ from core.knowledge.services.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:
     from core.knowledge.store import KnowledgeStore
-
-
-VECTOR_MERGE_SIM_THRESHOLD = 0.90
-VECTOR_MERGE_SPARSE_EVIDENCE_SIM_THRESHOLD = 0.97
-MERGE_EVIDENCE_NLI_PAIR_LIMIT = 8
 
 
 @dataclass
@@ -148,18 +147,11 @@ class EntityResolver:
         mention_type: str,
         topic: str,
         policy: IngestionPolicy,
-    ) -> Tuple[str, str, str]:
-        """Return the policy-aware identity of a mention decision."""
+    ) -> str:
+        """Return the conservative in-batch identity key for one mention."""
 
-        normalized_topic = policy.domain.normalize_topic(topic)
-        canonical_type = policy.domain.canonical_entity_type(mention_type) or (
-            policy.domain.resolve_entity_type(mention_type)
-        )
-        return (
-            name.strip().casefold(),
-            (canonical_type or mention_type or "").strip().casefold(),
-            (normalized_topic or "").casefold(),
-        )
+        del mention_type, topic, policy
+        return name.strip().casefold()
 
     async def candidate_entries_for_mentions(
         self,
@@ -333,6 +325,198 @@ class EntityResolver:
                 "alias_updates": alias_updates,
                 "pending_entity_writes": pending_entity_writes,
             }
+
+    async def resolve_context_block_mentions(
+        self,
+        mentions: list[ContextBlockMention],
+        *,
+        block_text_by_id: dict[object, str],
+        policy: IngestionPolicy,
+        parent_work_record=None,
+        allocate_entity_id,
+        issues: Optional[List[ValidationIssue]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve typed Context-block mentions without manufacturing message refs.
+
+        Context-first callers use this boundary: block associations are returned
+        independently, and literal message evidence is deliberately left to the
+        result assembler.
+        """
+
+        if any(not isinstance(mention, ContextBlockMention) for mention in mentions):
+            raise TypeError("Context entity resolution requires ContextBlockMention values")
+        if not isinstance(block_text_by_id, dict) or any(
+            not isinstance(text, str) for text in block_text_by_id.values()
+        ):
+            raise TypeError("Context entity resolution requires block text by ID")
+
+        async with self.resolution_lock:
+            entity_ids: List[int] = []
+            new_ids: set[int] = set()
+            alias_ids: set[int] = set()
+            created_in_build: Dict[Tuple[str, str, str], int] = {}
+            alias_updates: Dict[int, List[str]] = {}
+            pending_entity_writes: Dict[int, EntityWrite] = {}
+            resolved_mentions: list[ResolvedContextBlockMention] = []
+            associations: list[ContextBlockEntityAssociation] = []
+
+            candidate_entries = await self.candidate_entries_for_context_block_mentions(
+                mentions,
+                policy=policy,
+                parent_work_record=parent_work_record,
+            )
+
+            for index, mention in enumerate(mentions):
+                entry = candidate_entries[index]
+                if entry is None:
+                    continue
+                dedupe_key = self.mention_dedupe_key(
+                    mention.name,
+                    mention.entity_type,
+                    mention.topic,
+                    policy,
+                )
+                entity_id: int | None = None
+                support_text = "\n".join(
+                    block_text_by_id.get(block_id, "") for block_id in mention.block_ids
+                )
+
+                if entry[0] == "candidates":
+                    for candidate in entry[1]:
+                        candidate_id = candidate.entity_id
+                        profile = await self.get_profile(candidate_id)
+                        compatibility = (
+                            self.schema_compatibility(
+                                mention.entity_type,
+                                mention.topic,
+                                profile,
+                                policy,
+                            )
+                            if profile
+                            else "missing_profile"
+                        )
+                        if (
+                            candidate.score < policy.resolution_threshold
+                            or profile is None
+                            or not self.is_profile_visible(profile)
+                        ):
+                            continue
+                        if self.should_accept_candidate(
+                            mention.name,
+                            mention.entity_type,
+                            mention.topic,
+                            support_text,
+                            profile,
+                            candidate_id,
+                            policy=policy,
+                            compatibility=compatibility,
+                            candidate=candidate,
+                        ):
+                            entity_id = candidate_id
+                            existing_id, aliases_added, new_aliases = (
+                                self.validate_existing(
+                                    profile.canonical_name,
+                                    [mention.name.strip()],
+                                )
+                            )
+                            if existing_id and aliases_added:
+                                alias_ids.add(existing_id)
+                                alias_updates.setdefault(existing_id, []).extend(
+                                    new_aliases
+                                )
+                            break
+
+                if entity_id is None:
+                    if dedupe_key in created_in_build:
+                        entity_id = created_in_build[dedupe_key]
+                    else:
+                        entity_id = await allocate_entity_id()
+                        pending_entity_writes[entity_id] = await self.prepare_pending_entity(
+                            entity_id,
+                            mention.name.strip(),
+                            [mention.name.strip()],
+                            mention.entity_type,
+                            mention.topic,
+                        )
+                        new_ids.add(entity_id)
+                        created_in_build[dedupe_key] = entity_id
+
+                if entity_id not in entity_ids:
+                    entity_ids.append(entity_id)
+                resolved_mentions.append(
+                    ResolvedContextBlockMention(mention=mention, entity_id=entity_id)
+                )
+                associations.extend(
+                    ContextBlockEntityAssociation(
+                        block_id=block_id,
+                        entity_id=entity_id,
+                        mention_text=mention.name,
+                    )
+                    for block_id in mention.block_ids
+                )
+
+            unique_associations = tuple(
+                {
+                    (association.block_id, association.entity_id, association.mention_text.casefold()): association
+                    for association in associations
+                }.values()
+            )
+            return {
+                "entity_ids": tuple(entity_ids),
+                "new_entity_ids": frozenset(new_ids),
+                "alias_updated_ids": frozenset(alias_ids),
+                "alias_updates": {
+                    entity_id: tuple(dict.fromkeys(aliases))
+                    for entity_id, aliases in alias_updates.items()
+                },
+                "pending_entity_writes": pending_entity_writes,
+                "resolved_mentions": tuple(resolved_mentions),
+                "block_entity_associations": unique_associations,
+            }
+
+    async def candidate_entries_for_context_block_mentions(
+        self,
+        mentions: list[ContextBlockMention],
+        *,
+        policy: IngestionPolicy,
+        parent_work_record=None,
+    ) -> list[Optional[Tuple[str, Any]]]:
+        """Build candidate searches for Context-block mention identity decisions."""
+
+        unique_names = list({mention.name for mention in mentions if mention.name})
+        embedding_map = {}
+        if unique_names:
+            if getattr(self.embedding_service, "supports_model_work_records", False):
+                embeddings = await self.embedding_service.encode(
+                    unique_names,
+                    parent_work_record=parent_work_record,
+                )
+            else:
+                embeddings = await self.embedding_service.encode(unique_names)
+            embedding_map = dict(zip(unique_names, embeddings))
+
+        entries: list[Optional[Tuple[str, Any]]] = []
+        seen: Dict[Tuple[str, str, str], Tuple[str, Any]] = {}
+        for mention in mentions:
+            dedupe_key = self.mention_dedupe_key(
+                mention.name,
+                mention.entity_type,
+                mention.topic,
+                policy,
+            )
+            if dedupe_key not in seen:
+                candidates = await self.get_candidate_ids(
+                    mention.name,
+                    precomputed_embedding=embedding_map.get(mention.name),
+                    candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
+                    candidate_vector_threshold=policy.candidate_vector_threshold,
+                    strict=True,
+                )
+                seen[dedupe_key] = (
+                    ("candidates", candidates) if candidates else ("new", None)
+                )
+            entries.append(seen[dedupe_key])
+        return entries
 
     def is_profile_visible(self, profile: EntityProfile) -> bool:
         return profile.project_id in set(self.readable_project_ids)
@@ -580,6 +764,22 @@ class EntityResolver:
 
     def _populate_cache(self, entity: dict) -> EntityProfile:
         """Hydrate internal indexes from a KnowledgeStore entity record."""
+        contexts = entity.get("contexts")
+        if contexts:
+            context = next(
+                (
+                    item
+                    for item in contexts
+                    if item.get("project_id") == self.project_id
+                ),
+                contexts[0],
+            )
+            entity = {
+                **entity,
+                "project_id": context.get("project_id"),
+                "type": context.get("entity_type"),
+                "topic": context.get("topic"),
+            }
         with self._lock:
             profile, aliases_changed = self._index.populate(entity)
             if aliases_changed:
@@ -851,6 +1051,28 @@ class EntityResolver:
                     "vector", vec_score
                 )
 
+        # The durable vector index can contain a visible identity that has not
+        # yet been loaded into this process. Hydrate those rows before applying
+        # the cache membership filter; otherwise vector-only matches disappear.
+        with self._lock:
+            missing_ids = [
+                entity_id
+                for entity_id in candidates
+                if not self._index.has_entity(entity_id)
+            ]
+        if missing_ids:
+            try:
+                hydrated = await self.knowledge_store.get_entities_by_ids(
+                    missing_ids,
+                    visible_project_ids=self.readable_project_ids,
+                )
+                for entity in hydrated:
+                    self._populate_cache(entity)
+            except Exception as exc:
+                if strict:
+                    raise
+                logger.warning("Candidate hydration failed: {}", exc)
+
         with self._lock:
             valid_candidates = [
                 candidate
@@ -878,7 +1100,9 @@ class EntityResolver:
         """
 
         project_id = project_id or self.project_id
-        text_to_embed = build_entity_embedding_text(canonical_name, entity_type)
+        # Identity vectors are shared across every project context.  A context
+        # type must not alter the vector persisted for the same identity.
+        text_to_embed = build_entity_embedding_text(canonical_name, None)
         embedding = await self.embedding_service.encode_single(text_to_embed)
 
         with self._lock:
@@ -1001,128 +1225,6 @@ class EntityResolver:
 
         return embedding
 
-    def merge_into(
-        self,
-        primary_id: int,
-        secondary_id: int,
-        primary_profile_updates: dict = None,
-    ):
-        """Transfer secondary aliases to primary and remove secondary indexes."""
-        with self._lock:
-            aliases_transferred = self._index.merge_into(
-                primary_id,
-                secondary_id,
-                primary_profile_updates,
-            )
-            if aliases_transferred:
-                self._bump_alias_version()
-
-            logger.info(
-                f"Merged entity {secondary_id} into {primary_id}, "
-                f"transferred {aliases_transferred} aliases"
-            )
-            emit_sync(
-                self.project_id,
-                "entities",
-                "entity_merged",
-                {
-                    "primary_id": primary_id,
-                    "secondary_id": secondary_id,
-                    "aliases_transferred": aliases_transferred,
-                },
-            )
-
-    async def find_alias_collisions_targeted(
-        self, target_ids: set
-    ) -> List[Tuple[int, int]]:
-        """Check alias collisions only involving the given entity IDs."""
-        collisions = []
-
-        # Hydrate targets first
-        profiles = {}
-        for eid in target_ids:
-            p = await self.get_profile(eid)
-            if p:
-                profiles[eid] = p
-
-        for eid, profile in profiles.items():
-            names = list(self.get_mentions_for_id(eid))
-            names.append(profile.canonical_lower)
-
-            for name in names:
-                with self._lock:
-                    mapped_ids = self._index.get_entity_ids_for_name(name)
-                for mapped_id in mapped_ids - {eid}:
-                    pair = tuple(sorted((eid, mapped_id)))
-                    if pair not in collisions:
-                        collisions.append(pair)
-
-        return collisions
-
-    async def resolve_entity_name(self, entity: str) -> Optional[str]:
-        """Resolve user input to canonical entity name via exact or fuzzy match."""
-        candidates = await self.get_candidate_ids(entity)
-
-        if not candidates:
-            return None
-
-        for candidate in candidates:
-            if "exact" in candidate.signals and "ambiguous_alias" in candidate.signals:
-                continue
-            profile = await self.get_profile(candidate.entity_id)
-            if profile:
-                return profile.canonical_name
-        return None
-
-    async def detect_merge_entity_candidates(self, dirty_ids: set = None) -> list:
-        """Detect potential entity merges using vector search + fuzzy matching."""
-        # With lazy loading, scan memory or the specifically passed IDs.
-        # If dirty_ids is None, we scan the current memory cache.
-        with self._lock:
-            scan_targets = dirty_ids if dirty_ids else self._index.iter_profile_ids()
-
-        if not scan_targets:
-            logger.debug("Merge detection skipped: No entities to check.")
-            return []
-
-        logger.info(
-            "Merge detection started. "
-            f"Scanning {len(scan_targets)} entities against graph."
-        )
-
-        generic_tokens = self._build_generic_tokens(self.get_alias_version())
-        candidate_pairs = await self._collect_candidate_pairs(
-            scan_targets, generic_tokens
-        )
-
-        if not candidate_pairs:
-            return []
-
-        entity_ids = set()
-        for id_a, id_b in candidate_pairs.keys():
-            entity_ids.add(id_a)
-            entity_ids.add(id_b)
-
-        evidence_by_entity = await self.knowledge_store.get_merge_evidence_for_entities(
-            sorted(entity_ids),
-            project_id=self.project_id,
-        )
-
-        candidates = []
-        for (id_a, id_b), candidate_meta in candidate_pairs.items():
-            result = await self._classify_pair(
-                id_a,
-                id_b,
-                candidate_meta,
-                evidence_by_entity,
-            )
-            if result:
-                result["reasons"] = list(candidate_meta["reasons"])
-                candidates.append(result)
-
-        logger.info(f"Detection complete: {len(candidates)} candidates found")
-        return candidates
-
     def remove_entities(self, entity_ids: List[int]) -> int:
         """Remove entities from entities indexes. Call after KnowledgeStore deletion."""
         if not entity_ids:
@@ -1143,283 +1245,3 @@ class EntityResolver:
                 {"requested": len(entity_ids), "removed": removed},
             )
         return removed
-
-    async def _collect_candidate_pairs(
-        self, target_ids: list, generic_tokens: set
-    ) -> Dict[Tuple[int, int], dict]:
-        """
-        Vector search + fuzzy filter.
-        Returns {(id_a, id_b): {"fuzz_score": score, "reasons": [...]}}
-        """
-        seen_pairs = {}
-
-        for primary_id in target_ids:
-            primary_profile = await self.get_profile(primary_id)
-            if not primary_profile:
-                continue
-
-            primary_name = primary_profile.canonical_name
-
-            neighbors = await self.knowledge_store.search_similar_entities(
-                primary_id,
-                visible_project_ids=self.readable_project_ids,
-                limit=50,
-            )
-
-            for neighbor_id, _ in neighbors:
-                if neighbor_id == primary_id:
-                    continue
-
-                pair_key = tuple(sorted((primary_id, neighbor_id)))
-
-                if pair_key in seen_pairs:
-                    continue
-
-                neighbor_profile = await self.get_profile(neighbor_id)
-                if not neighbor_profile:
-                    continue
-
-                neighbor_name = neighbor_profile.canonical_name
-                score = fuzz.WRatio(primary_name, neighbor_name)
-                is_substring = is_substring_match(primary_name, neighbor_name)
-                primary_tokens = set(primary_name.lower().split()) - generic_tokens
-                neighbor_tokens = set(neighbor_name.lower().split()) - generic_tokens
-                sparse_substring_name = is_substring and (
-                    len(primary_tokens) == 1 or len(neighbor_tokens) == 1
-                )
-
-                passes_threshold = (
-                    is_substring
-                    and score >= self.fuzzy_substring_threshold
-                    and not sparse_substring_name
-                ) or score >= self.fuzzy_non_substring_threshold
-
-                if not passes_threshold:
-                    emb_a = (
-                        primary_profile.embedding
-                        or await self.get_embedding_for_id(primary_id)
-                    )
-                    emb_b = (
-                        neighbor_profile.embedding
-                        or await self.get_embedding_for_id(neighbor_id)
-                    )
-                    if emb_a and emb_b:
-                        cos_sim = cosine_similarity(emb_a, emb_b)
-                        if cos_sim >= VECTOR_MERGE_SIM_THRESHOLD:
-                            logger.info(
-                                "Cosine-first candidate: "
-                                f"({primary_id}, {neighbor_id}) "
-                                f"names='{primary_name}'/'{neighbor_name}' "
-                                f"cos={cos_sim:.3f}"
-                            )
-                            seen_pairs[pair_key] = {
-                                "fuzz_score": 0,
-                                "is_substring": False,
-                                "cosine_score": cos_sim,
-                                "reasons": ["vector_similarity"],
-                            }
-                            continue
-                    continue
-
-                if not (primary_tokens & neighbor_tokens):
-                    continue
-
-                if (
-                    pair_key not in seen_pairs
-                    or score > seen_pairs[pair_key]["fuzz_score"]
-                ):
-                    seen_pairs[pair_key] = {
-                        "fuzz_score": score,
-                        "is_substring": is_substring,
-                        "reasons": ["name_similarity"],
-                    }
-
-        return {
-            pair: {
-                "fuzz_score": metadata["fuzz_score"],
-                "cosine_score": metadata.get("cosine_score"),
-                "reasons": metadata["reasons"],
-            }
-            for pair, metadata in seen_pairs.items()
-        }
-
-    async def _classify_pair(
-        self,
-        id_a: int,
-        id_b: int,
-        candidate_meta: dict,
-        evidence_by_entity: Dict[int, List[dict]],
-    ) -> Optional[dict]:
-        """
-        Evaluate one pair for merge candidacy.
-        Returns candidate dict or None to skip.
-        """
-        direct_edge = await self.knowledge_store.has_direct_edge(
-            id_a,
-            id_b,
-            visible_project_ids=self.readable_project_ids,
-        )
-        if direct_edge:
-            return None
-        profile_a = await self.get_profile(id_a)
-        profile_b = await self.get_profile(id_b)
-
-        if not profile_a or not profile_b:
-            return None
-
-        type_a = profile_a.entity_type
-        type_b = profile_b.entity_type
-        topic_a = profile_a.topic
-        topic_b = profile_b.topic
-        fuzz_score = candidate_meta["fuzz_score"]
-        cosine_score = candidate_meta.get("cosine_score")
-        reasons = set(candidate_meta.get("reasons") or [])
-        vector_only = (
-            "vector_similarity" in reasons and "name_similarity" not in reasons
-        )
-
-        type_compatible = self._merge_type_compatible(type_a, type_b)
-        topic_compatible = self._merge_topic_compatible(topic_a, topic_b)
-
-        if vector_only and not (type_compatible and topic_compatible):
-            return None
-
-        is_cross_topic = topic_a != topic_b
-        if is_cross_topic:
-            if not (fuzz_score >= 85 and type_a == type_b):
-                return None
-
-        neighbors_a = await self.knowledge_store.get_neighbor_ids(
-            id_a,
-            visible_project_ids=self.readable_project_ids,
-        )
-        neighbors_b = await self.knowledge_store.get_neighbor_ids(
-            id_b,
-            visible_project_ids=self.readable_project_ids,
-        )
-        neighbors_a.discard(1)  # ignore user node
-        neighbors_b.discard(1)
-
-        shared_neighbors = neighbors_a & neighbors_b
-        if shared_neighbors:
-            # Shared neighbors often imply these entities are already distinct
-            # and connected within the graph (e.g., co-occurring), so we require
-            # extremely high confidence to suggest a merge.
-            high_confidence = (
-                fuzz_score >= 95 and type_a and type_b and type_a == type_b
-            )
-            if not high_confidence:
-                return None
-
-        evidence_a = evidence_by_entity.get(id_a, [])
-        evidence_b = evidence_by_entity.get(id_b, [])
-        (
-            evidence_support,
-            evidence_support_pairs,
-        ) = await self._classify_evidence_support(
-            evidence_a,
-            evidence_b,
-        )
-
-        if vector_only:
-            if evidence_support == "contradiction":
-                return None
-            if evidence_support == "neutral":
-                return None
-            if evidence_support == "insufficient_evidence" and (
-                cosine_score is None
-                or cosine_score < VECTOR_MERGE_SPARSE_EVIDENCE_SIM_THRESHOLD
-            ):
-                return None
-
-        return {
-            "primary_id": id_a,
-            "secondary_id": id_b,
-            "primary_name": profile_a.canonical_name or "Unknown",
-            "secondary_name": profile_b.canonical_name or "Unknown",
-            "primary_type": type_a,
-            "secondary_type": type_b,
-            "topic_a": topic_a,
-            "topic_b": topic_b,
-            "evidence_a": evidence_a,
-            "evidence_b": evidence_b,
-            "fuzz_score": fuzz_score,
-            "cosine_score": cosine_score,
-            "evidence_support": evidence_support,
-            "evidence_support_pairs": evidence_support_pairs,
-            "shared_neighbor_count": len(shared_neighbors),
-        }
-
-    @staticmethod
-    def _merge_type_compatible(type_a: str, type_b: str) -> bool:
-        norm_a = (type_a or "").strip().casefold()
-        norm_b = (type_b or "").strip().casefold()
-        return not norm_a or not norm_b or norm_a == norm_b
-
-    @staticmethod
-    def _merge_topic_compatible(topic_a: str, topic_b: str) -> bool:
-        norm_a = (topic_a or "General").strip().casefold()
-        norm_b = (topic_b or "General").strip().casefold()
-        return norm_a == norm_b or "general" in {norm_a, norm_b}
-
-    async def _classify_evidence_support(
-        self,
-        evidence_a: List[dict],
-        evidence_b: List[dict],
-    ) -> Tuple[str, List[dict]]:
-        pairs = self._evidence_text_pairs(evidence_a, evidence_b)
-        if not pairs:
-            return "insufficient_evidence", []
-
-        try:
-            classifications = await self.embedding_service.classify_text_pairs(
-                [(left["text"], right["text"]) for left, right in pairs]
-            )
-        except Exception as exc:
-            logger.warning(f"Merge evidence NLI support failed: {exc}")
-            return "neutral", []
-
-        support_pairs = []
-        labels = []
-        for (left, right), classification in zip(pairs, classifications):
-            label = str(classification.label or "").casefold()
-            labels.append(label)
-            support_pairs.append(
-                {
-                    "evidence_a": self._evidence_reference(left),
-                    "evidence_b": self._evidence_reference(right),
-                    "label": label,
-                    "scores": dict(classification.scores or {}),
-                }
-            )
-
-        if "contradiction" in labels:
-            return "contradiction", support_pairs
-        if "entailment" in labels:
-            return "entailment", support_pairs
-        return "neutral", support_pairs
-
-    @staticmethod
-    def _evidence_text_pairs(
-        evidence_a: List[dict],
-        evidence_b: List[dict],
-    ) -> List[Tuple[dict, dict]]:
-        active_a = [item for item in evidence_a if str(item.get("text") or "").strip()]
-        active_b = [item for item in evidence_b if str(item.get("text") or "").strip()]
-        pairs = []
-        for item_a in active_a:
-            for item_b in active_b:
-                pairs.append((item_a, item_b))
-                if len(pairs) >= MERGE_EVIDENCE_NLI_PAIR_LIMIT:
-                    return pairs
-        return pairs
-
-    @staticmethod
-    def _evidence_reference(item: dict) -> dict:
-        """Keep provenance identifiers while excluding raw text from diagnostics."""
-
-        reference = {"kind": item.get("kind")}
-        for key in ("message_id", "episode_id", "session_id"):
-            if item.get(key) is not None:
-                reference[key] = item[key]
-        return reference

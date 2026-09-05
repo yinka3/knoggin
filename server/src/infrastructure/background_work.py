@@ -18,6 +18,7 @@ class QueuedBackgroundWork:
     """One globally queued operation tagged with its owning project."""
 
     project_id: str
+    owner: str
     future: asyncio.Future
     operation: Callable[[], Awaitable]
     name: str
@@ -99,6 +100,7 @@ class BackgroundWorkCoordinator:
         operation: Callable[[], Awaitable[ResultT]],
         *,
         name: str,
+        owner: str | None = None,
         coalesce_key: str | None = None,
     ) -> ResultT:
         if not project_id:
@@ -128,6 +130,7 @@ class BackgroundWorkCoordinator:
                 future = loop.create_future()
                 work = QueuedBackgroundWork(
                     project_id=project_id,
+                    owner=owner or f"project:{project_id}:{name}",
                     future=future,
                     operation=operation,
                     name=name,
@@ -203,16 +206,16 @@ class BackgroundWorkCoordinator:
         if self._coalesced_futures.get(key) is work.future:
             del self._coalesced_futures[key]
 
-    async def cancel_project(self, project_id: str) -> None:
-        """Cancel and join all work tagged as owned by one project."""
-
-        if not project_id:
-            raise ValueError("project_id is required for background-work cancellation")
+    async def cancel_owner(self, owner: str) -> None:
+        """Cancel and join one subsystem owner's work without broad project teardown."""
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("owner is required for background-work cancellation")
+        normalized_owner = owner.strip()
         async with self._condition:
             retained: deque[QueuedBackgroundWork] = deque()
             while self._queue:
                 work = self._queue.popleft()
-                if work.project_id != project_id:
+                if work.owner != normalized_owner:
                     retained.append(work)
                     continue
                 if not work.future.done():
@@ -223,7 +226,7 @@ class BackgroundWorkCoordinator:
             active = [
                 task
                 for task, work in self._active_operations.items()
-                if work.project_id == project_id and not task.done()
+                if work.owner == normalized_owner and not task.done()
             ]
             for task in active:
                 task.cancel()
@@ -245,9 +248,12 @@ class BackgroundWorkCoordinator:
                 queued_categories_by_project[work.project_id].append(work.name[:100])
 
         active_by_project: dict[str, list[str]] = defaultdict(list)
+        active_by_owner: dict[str, list[str]] = defaultdict(list)
         for task, work in self._active_operations.items():
             if not task.done() and len(active_by_project[work.project_id]) < 20:
                 active_by_project[work.project_id].append(work.name[:100])
+            if not task.done() and len(active_by_owner[work.owner]) < 20:
+                active_by_owner[work.owner].append(work.name[:100])
 
         return {
             "max_concurrency": self._max_concurrency,
@@ -256,6 +262,7 @@ class BackgroundWorkCoordinator:
             "queued_by_project": dict(queued_by_project),
             "queued_categories_by_project": dict(queued_categories_by_project),
             "active_by_project": dict(active_by_project),
+            "active_by_owner": dict(active_by_owner),
             "submitted": self._submitted,
             "completed": self._completed,
             "failed": self._failed,
@@ -274,6 +281,7 @@ class BackgroundWorkCoordinator:
         queued_by_project = snapshot.pop("queued_by_project", {})
         queued_categories = snapshot.pop("queued_categories_by_project", {})
         active_by_project = snapshot.pop("active_by_project", {})
+        snapshot.pop("active_by_owner", None)
         if project_id is not None:
             snapshot["queued_for_project"] = (
                 queued_by_project.get(project_id, 0)

@@ -144,13 +144,17 @@ async def test_episode_derived_attachments_must_share_project_scope(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO entities (
-            entity_id, user_name, project_id, canonical_name, topic
-        )
+        INSERT INTO entities (entity_id, user_name, canonical_name)
         VALUES
-            (2, 'ada', 'project-1', 'In project one', 'General'),
-            (3, 'ada', 'project-2', 'In project two', 'General'),
-            (4, 'ada', 'project-2', 'Also in project two', 'General')
+            (2, 'ada', 'In project one'),
+            (3, 'ada', 'In project two'),
+            (4, 'ada', 'Also in project two');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 2, 'ada', 'concept', 'General'),
+            ('project-2', 3, 'ada', 'concept', 'General'),
+            ('project-2', 4, 'ada', 'concept', 'General')
         """
     )
     await real_postgres_client.execute(

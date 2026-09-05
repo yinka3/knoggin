@@ -115,9 +115,9 @@ async def test_postgres_artifact_round_trip_is_visible_through_project_and_messa
         """
         INSERT INTO messages (
             user_name, session_id, message_id, project_id, role, content,
-            lifecycle_state, ingestion_state
+            lifecycle_state
         ) VALUES ('ada', 'session-artifact', 9001, 'project-1', 'assistant',
-                  'A durable answer', 'sealed', 'excluded')
+                  'A durable answer', 'sealed')
         """
     )
     draft = ArtifactDraft(

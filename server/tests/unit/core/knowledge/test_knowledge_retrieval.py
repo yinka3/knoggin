@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from common.exceptions import ToolExecutionError
 from core.agent.tools.registry import Tools
 from core.knowledge.retrieval import KnowledgeRetrieval
 
@@ -20,6 +21,7 @@ async def test_message_context_uses_durable_storage():
         async def get_surrounding_messages(self, message_id, **kwargs):
             assert message_id == 7
             assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
+            assert kwargs["discoverable_only"] is True
             return [
                 {
                     "id": 7,
@@ -49,23 +51,24 @@ async def test_message_context_uses_durable_storage():
 
 
 @pytest.mark.no_network
-async def test_entity_search_hydrates_visible_relationship_evidence():
+async def test_entity_search_returns_stable_identity_and_project_contexts():
     class Store:
         async def search_entity(self, query, **kwargs):
             assert query == "Ada"
             assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
-            return [{"name": "Ada", "top_connections": [{"evidence_refs": [9]}]}]
-
-        async def get_messages_by_ids(self, message_ids, **kwargs):
-            assert message_ids == [9]
-            assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
             return [
                 {
-                    "id": 9,
-                    "user_name": "ada",
-                    "session_id": "session-1",
-                    "content": "Observed relationship",
-                    "timestamp": 1_700_000_000_000,
+                    "entity_id": 9,
+                    "canonical_name": "Ada Lovelace",
+                    "aliases": ["Ada"],
+                    "contexts": [
+                        {
+                            "project_id": "project-1",
+                            "entity_type": "person",
+                            "topic": "Identity",
+                            "last_mentioned_ms": 1_700_000_000_000,
+                        }
+                    ],
                 }
             ]
 
@@ -79,17 +82,94 @@ async def test_entity_search_hydrates_visible_relationship_evidence():
         postgres=_Postgres(),
     )
 
-    results = await retrieval.search_entities("Ada", session_id="session-1")
+    results = await retrieval.search_entities("Ada")
 
-    assert results[0]["top_connections"][0]["evidence"] == [
+    assert results == [
         {
-            "id": "msg_9",
-            "user_name": "ada",
-            "session_id": "session-1",
-            "message": "Observed relationship",
-            "timestamp": "2023-11-14T22:13:20+00:00",
+            "entity_id": 9,
+            "canonical_name": "Ada Lovelace",
+            "aliases": ["Ada"],
+            "contexts": [
+                {
+                    "project_id": "project-1",
+                    "entity_type": "person",
+                    "topic": "Identity",
+                    "last_mentioned_ms": 1_700_000_000_000,
+                }
+            ],
         }
     ]
+
+
+@pytest.mark.no_network
+async def test_hot_topic_context_hydrates_current_project_entity_mentions():
+    class Store:
+        def __init__(self):
+            self.calls = []
+
+        async def get_hot_topic_context_with_messages(self, topics, **kwargs):
+            self.calls.append((topics, kwargs))
+            return {
+                "Identity": {
+                    "entities": [{"name": "Ada"}],
+                    "message_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 7,
+                        }
+                    ],
+                }
+            }
+
+        async def get_messages_by_ids(self, message_ids, **kwargs):
+            assert message_ids == [7]
+            assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
+            return [
+                {
+                    "id": 7,
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "content": "Identity evidence",
+                    "timestamp": 1_700_000_000_000,
+                }
+            ]
+
+    store = Store()
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1", "project-2"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=store,
+        postgres=_Postgres(),
+    )
+
+    hydrated = await retrieval.get_hot_topic_context(
+        ["Identity"], session_id="session-1"
+    )
+
+    assert store.calls == [
+        (
+            ["Identity"],
+            {"msg_limit": 5, "project_id": "project-1"},
+        ),
+    ]
+    assert hydrated == {
+        "Identity": {
+            "entities": [{"name": "Ada"}],
+            "messages": [
+                {
+                    "id": "msg_7",
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "message": "Identity evidence",
+                    "timestamp": "2023-11-14T22:13:20+00:00",
+                }
+            ],
+        }
+    }
 
 
 @pytest.mark.no_network
@@ -124,6 +204,175 @@ async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
         await tools.close()
 
     assert retrieval.calls == [("project memory", "session-1", 3)]
+
+
+@pytest.mark.no_network
+async def test_recent_episode_tool_passes_its_session_to_retrieval():
+    class Retrieval:
+        def __init__(self):
+            self.calls = []
+
+        async def read_recent_episodes(self, *, session_id, limit):
+            self.calls.append((session_id, limit))
+            return {"resolution": "recent", "results": []}
+
+    retrieval = Retrieval()
+    entities = SimpleNamespace(
+        embedding_service=SimpleNamespace(),
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+    )
+    tools = Tools(
+        user_name="ada",
+        entities=entities,
+        session_id="session-1",
+        knowledge_retrieval=retrieval,
+        knowledge_store=SimpleNamespace(),
+        postgres=SimpleNamespace(),
+    )
+    try:
+        assert await tools.read_recent_episodes(limit=3) == {
+            "resolution": "recent",
+            "results": [],
+        }
+    finally:
+        await tools.close()
+
+    assert retrieval.calls == [("session-1", 3)]
+
+
+@pytest.mark.no_network
+async def test_exact_entity_episode_lookup_uses_the_store_contract_without_session_id():
+    class Entities:
+        async def get_profile(self, entity_id):
+            assert entity_id == 2
+            return SimpleNamespace(canonical_name="Ada Lovelace")
+
+    class Store:
+        def __init__(self):
+            self.calls = []
+
+        async def get_project_episodes_for_entities(
+            self,
+            entity_ids,
+            *,
+            user_name,
+            project_id,
+            limit,
+            visible_project_ids,
+        ):
+            self.calls.append(
+                {
+                    "entity_ids": entity_ids,
+                    "user_name": user_name,
+                    "project_id": project_id,
+                    "limit": limit,
+                    "visible_project_ids": visible_project_ids,
+                }
+            )
+            return []
+
+    store = Store()
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=Entities(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=store,
+        postgres=_Postgres(),
+    )
+
+    result = await retrieval.episode_check(
+        "What did Ada decide?", session_id="session-1", entity_id=2
+    )
+
+    assert result["resolution"] == "exact"
+    assert result["results"][0]["entity_id"] == 2
+    assert store.calls == [
+        {
+            "entity_ids": [2],
+            "user_name": "ada",
+            "project_id": "project-1",
+            "limit": 5,
+            "visible_project_ids": ["project-1"],
+        }
+    ]
+
+
+@pytest.mark.no_network
+async def test_message_discovery_session_scope_only_includes_open_sessions():
+    class Postgres:
+        def __init__(self):
+            self.query = ""
+
+        async def fetch_all(self, query, _params):
+            self.query = query
+            return [{"session_id": "open-session"}]
+
+    postgres = Postgres()
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+        postgres=postgres,
+    )
+
+    assert await retrieval._get_visible_session_ids() == ["open-session"]
+    assert "status = 'open'" in postgres.query
+
+
+@pytest.mark.no_network
+async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
+    class Domain:
+        active_topics = ("Work", "Finance")
+
+        @staticmethod
+        def normalize_topic(topic):
+            return {"work": "Work", "career": "Work", "finance": "Finance"}.get(
+                topic.strip().casefold()
+            )
+
+    class Retrieval:
+        def __init__(self):
+            self.calls = []
+
+        async def get_hot_topic_context(self, topics, *, session_id):
+            self.calls.append((topics, session_id))
+            return {
+                topic: {"entities": [{"name": topic}], "messages": []}
+                for topic in topics
+            }
+
+    retrieval = Retrieval()
+    entities = SimpleNamespace(
+        embedding_service=SimpleNamespace(),
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+    )
+    tools = Tools(
+        user_name="ada",
+        entities=entities,
+        session_id="session-1",
+        compiled_domain=Domain(),
+        knowledge_retrieval=retrieval,
+        knowledge_store=SimpleNamespace(),
+        postgres=SimpleNamespace(),
+    )
+    try:
+        assert await tools.load_topic_context(["career", "Finance", "Work"]) == {
+            "Work": {"entities": [{"name": "Work"}], "messages": []},
+            "Finance": {"entities": [{"name": "Finance"}], "messages": []},
+        }
+        with pytest.raises(ToolExecutionError, match="Unknown or inactive"):
+            await tools.load_topic_context(["Work", "Unknown"])
+    finally:
+        await tools.close()
+
+    assert retrieval.calls == [(["Work", "Finance"], "session-1")]
 
 
 @pytest.mark.no_network

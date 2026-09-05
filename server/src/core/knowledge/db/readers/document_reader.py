@@ -27,21 +27,13 @@ class DocumentReader:
             raise ValueError("DocumentReader readable_project_ids must include project_id")
 
     def _document_visibility_sql(self, alias: str = "pd") -> str:
-        """Return the active-session and cross-project document read policy."""
+        """Return the readable-project document policy."""
         return f"""
               AND {alias}.project_id = ANY(%s)
-              AND (
-                  {alias}.visibility_scope = 'project'
-                  OR (
-                      {alias}.project_id = %s
-                      AND {alias}.visibility_scope = 'session'
-                      AND {alias}.session_id = %s
-                  )
-              )
         """
 
-    def _document_visibility_params(self, session_id: Optional[str]) -> tuple:
-        return (self._readable_project_ids, self._project_id, session_id)
+    def _document_visibility_params(self) -> tuple:
+        return (self._readable_project_ids,)
 
     @staticmethod
     def _escape_like(value: str) -> str:
@@ -63,207 +55,43 @@ class DocumentReader:
         )
         return rows[0] if rows else None
 
-    async def fetch_workspace_source(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-    ) -> Optional[Dict]:
-        """Return one workspace source visible to this project/session."""
-        rows = await self._client.fetch_all(
+    async def list_saved_web_links(self, *, limit: int) -> List[Dict]:
+        """List the active project's lightweight saved web links."""
+        return await self._client.fetch_all(
             """
             SELECT
-                source_id,
+                link_id,
                 project_id,
-                session_id,
-                visibility_scope,
-                ownership_mode,
-                display_name,
-                last_synced_at,
-                last_manifest_candidate_count,
-                last_manifest_included_count,
-                last_manifest_excluded_count,
-                last_manifest_excluded_reason_counts,
+                url,
+                title,
+                summary,
                 created_at,
                 updated_at
-            FROM public.document_workspace_sources
-            WHERE source_id = %s
-              AND project_id = %s
-              AND (
-                  visibility_scope = 'project'
-                  OR (
-                      visibility_scope = 'session'
-                      AND session_id = %s
-                  )
-              )
-            """,
-            (source_id, self._project_id, session_id),
-        )
-        return rows[0] if rows else None
-
-    async def fetch_managed_workspace_source(self) -> Optional[Dict]:
-        """Return the one project-owned managed workspace source, if present."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT
-                source_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                ownership_mode,
-                display_name,
-                last_synced_at,
-                last_manifest_candidate_count,
-                last_manifest_included_count,
-                last_manifest_excluded_count,
-                last_manifest_excluded_reason_counts,
-                created_at,
-                updated_at
-            FROM public.document_workspace_sources
+            FROM public.saved_web_links
             WHERE project_id = %s
-              AND ownership_mode = 'managed_project_workspace'
-            ORDER BY created_at ASC, source_id ASC
-            LIMIT 1
+            ORDER BY updated_at DESC, link_id DESC
+            LIMIT %s
             """,
-            (self._project_id,),
+            (self._project_id, limit),
         )
-        return rows[0] if rows else None
 
-    async def list_managed_workspace_documents(
-        self,
-        *,
-        path_prefix: Optional[str],
-        limit: int,
-    ) -> List[Dict]:
-        """List managed workspace files without exposing other projects."""
-        query = """
-            SELECT
-                pd.document_id,
-                pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.source_kind,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.content_hash,
-                pd.status,
-                pd.created_at,
-                pd.updated_at,
-                pd.indexed_at,
-                pd.error_message,
-                0::INTEGER AS chunk_count
-            FROM public.project_documents AS pd
-            JOIN public.document_workspace_sources AS ws
-              ON ws.source_id = pd.source_id
-             AND ws.project_id = pd.project_id
-            WHERE pd.project_id = %s
-              AND ws.ownership_mode = 'managed_project_workspace'
-              AND pd.status <> 'deleted'
-        """
-        params: list = [self._project_id]
-        if path_prefix is not None:
-            escaped = self._escape_like(path_prefix)
-            query += " AND (pd.relative_path = %s OR pd.relative_path LIKE %s ESCAPE '\\')"
-            params.extend([path_prefix, f"{escaped}/%"])
-        query += " ORDER BY pd.relative_path ASC, pd.document_id ASC LIMIT %s"
-        params.append(limit)
-        return await self._client.fetch_all(query, tuple(params))
-
-    async def fetch_managed_workspace_file(
-        self,
-        *,
-        relative_path: str,
-    ) -> Optional[Dict]:
-        """Fetch one managed file and its raw UTF-8 bytes."""
+    async def fetch_saved_web_link(self, *, link_id: str) -> Optional[Dict]:
+        """Return one bookmark only when it belongs to the active project."""
         rows = await self._client.fetch_all(
             """
             SELECT
-                pd.document_id,
-                pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.source_kind,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.content_hash,
-                pd.status,
-                pd.created_at,
-                pd.updated_at,
-                pd.indexed_at,
-                pd.error_message,
-                dc.content
-            FROM public.project_documents AS pd
-            JOIN public.document_workspace_sources AS ws
-              ON ws.source_id = pd.source_id
-             AND ws.project_id = pd.project_id
-            JOIN public.document_content AS dc
-              ON dc.document_id = pd.document_id
-            WHERE pd.project_id = %s
-              AND ws.ownership_mode = 'managed_project_workspace'
-              AND pd.relative_path = %s
-              AND pd.status <> 'deleted'
-            LIMIT 1
+                link_id,
+                project_id,
+                url,
+                title,
+                summary,
+                created_at,
+                updated_at
+            FROM public.saved_web_links
+            WHERE link_id = %s
+              AND project_id = %s
             """,
-            (self._project_id, relative_path),
-        )
-        return rows[0] if rows else None
-
-    async def fetch_workspace_indexing_status(
-        self,
-        *,
-        source_id: str,
-        session_id: Optional[str],
-    ) -> Optional[Dict]:
-        """Return source metadata and cheap aggregate document status counts."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT
-                ws.source_id,
-                ws.project_id,
-                ws.session_id,
-                ws.visibility_scope,
-                ws.ownership_mode,
-                ws.display_name,
-                ws.last_synced_at,
-                ws.last_manifest_candidate_count,
-                ws.last_manifest_included_count,
-                ws.last_manifest_excluded_count,
-                ws.last_manifest_excluded_reason_counts,
-                ws.created_at,
-                ws.updated_at,
-                COUNT(pd.document_id)::INTEGER AS document_count,
-                COUNT(pd.document_id) FILTER (
-                    WHERE pd.status = 'queued'
-                )::INTEGER AS queued_count,
-                COUNT(pd.document_id) FILTER (
-                    WHERE pd.status = 'indexing'
-                )::INTEGER AS indexing_count,
-                COUNT(pd.document_id) FILTER (
-                    WHERE pd.status = 'indexed'
-                )::INTEGER AS indexed_count,
-                COUNT(pd.document_id) FILTER (
-                    WHERE pd.status = 'failed'
-                )::INTEGER AS failed_count
-            FROM public.document_workspace_sources AS ws
-            LEFT JOIN public.project_documents AS pd
-                ON pd.source_id = ws.source_id
-               AND pd.status <> 'deleted'
-            WHERE ws.source_id = %s
-              AND ws.project_id = %s
-              AND (
-                  ws.visibility_scope = 'project'
-                  OR (
-                      ws.visibility_scope = 'session'
-                      AND ws.session_id = %s
-                  )
-              )
-            GROUP BY ws.source_id
-            """,
-            (source_id, self._project_id, session_id),
+            (link_id, self._project_id),
         )
         return rows[0] if rows else None
 
@@ -272,7 +100,6 @@ class DocumentReader:
         *,
         document_id: Optional[str],
         relative_path: Optional[str],
-        session_id: Optional[str],
     ) -> List[Dict]:
         """
         Return up to 2 visible document rows matching either document_id or
@@ -295,10 +122,6 @@ class DocumentReader:
             SELECT
                 pd.document_id,
                 pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.folder_root_id,
-                pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
                 pd.extension,
@@ -325,58 +148,32 @@ class DocumentReader:
             ORDER BY pd.created_at DESC, pd.document_id DESC
             LIMIT 2
             """,
-            (selector_value, *self._document_visibility_params(session_id)),
+            (selector_value, *self._document_visibility_params()),
         )
-
-    async def fetch_document_content(
-        self,
-        *,
-        document_id: str,
-        session_id: Optional[str],
-    ) -> Optional[bytes]:
-        """Return raw bytes only when the document is visible in this scope."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT dc.content
-            FROM public.document_content AS dc
-            JOIN public.project_documents AS pd
-                ON pd.document_id = dc.document_id
-            WHERE dc.document_id = %s
-              AND pd.status <> 'deleted'
-            """
-            + self._document_visibility_sql()
-            + """
-            """,
-            (document_id, *self._document_visibility_params(session_id)),
-        )
-        if not rows:
-            return None
-        return bytes(rows[0]["content"])
 
     async def fetch_extracted_text(
         self,
         *,
         document_id: str,
         content_hash: str,
-        session_id: Optional[str],
     ) -> Optional[str]:
         """Return visible derived text only when it matches the source hash."""
         rows = await self._client.fetch_all(
             """
-            SELECT dc.extracted_text
-            FROM public.document_content AS dc
+            SELECT de.extracted_text
+            FROM public.document_extractions AS de
             JOIN public.project_documents AS pd
-                ON pd.document_id = dc.document_id
-            WHERE dc.document_id = %s
+                ON pd.document_id = de.document_id
+            WHERE de.document_id = %s
               AND pd.content_hash = %s
-              AND dc.extracted_content_hash = pd.content_hash
-              AND dc.extracted_text IS NOT NULL
+              AND de.extracted_content_hash = pd.content_hash
+              AND de.extracted_text IS NOT NULL
               AND pd.status <> 'deleted'
             """
             + self._document_visibility_sql()
             + """
             """,
-            (document_id, content_hash, *self._document_visibility_params(session_id)),
+            (document_id, content_hash, *self._document_visibility_params()),
         )
         return rows[0]["extracted_text"] if rows else None
 
@@ -387,10 +184,6 @@ class DocumentReader:
             SELECT
                 document_id,
                 project_id,
-                session_id,
-                visibility_scope,
-                folder_root_id,
-                source_kind,
                 original_name,
                 relative_path,
                 extension,
@@ -405,8 +198,38 @@ class DocumentReader:
             FROM public.project_documents
             WHERE project_id = %s
               AND status = 'queued'
-              AND source_id IS NULL
             ORDER BY created_at ASC, document_id ASC
+            LIMIT %s
+            """,
+            (self._project_id, limit),
+        )
+
+    async def list_documents_for_reconciliation(
+        self,
+        *,
+        limit: int,
+    ) -> List[Dict]:
+        """Return this project's active catalog in path order."""
+        return await self._client.fetch_all(
+            """
+            SELECT
+                pd.document_id,
+                pd.project_id,
+                pd.original_name,
+                pd.relative_path,
+                pd.extension,
+                pd.size_bytes,
+                pd.content_hash,
+                pd.status,
+                pd.created_at,
+                pd.updated_at,
+                pd.indexed_at,
+                pd.error_message,
+                0::INTEGER AS chunk_count
+            FROM public.project_documents AS pd
+            WHERE pd.project_id = %s
+              AND pd.status <> 'deleted'
+            ORDER BY pd.relative_path ASC, pd.document_id ASC
             LIMIT %s
             """,
             (self._project_id, limit),
@@ -419,56 +242,6 @@ class DocumentReader:
             FROM public.project_documents
             WHERE project_id = %s
               AND status = 'queued'
-              AND source_id IS NULL
-            """,
-            (self._project_id,),
-        )
-        return int(rows[0]["count"]) if rows else 0
-
-    async def list_workspace_sources_for_index_recovery(
-        self,
-        limit: int = 16,
-    ) -> List[Dict]:
-        """Return workspace sources with queued files after a restart."""
-        return await self._client.fetch_all(
-            """
-            SELECT
-                source_id,
-                MIN(session_id) AS session_id
-            FROM public.project_documents
-            WHERE project_id = %s
-              AND source_id IS NOT NULL
-              AND status = 'queued'
-            GROUP BY source_id
-            ORDER BY MIN(updated_at) ASC, source_id ASC
-            LIMIT %s
-            """,
-            (self._project_id, limit),
-        )
-
-    async def count_queued_workspace_documents(self, source_id: str) -> int:
-        """Return the number of queued files for one workspace source."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT COUNT(*)::INTEGER AS count
-            FROM public.project_documents
-            WHERE project_id = %s
-              AND source_id = %s
-              AND status = 'queued'
-            """,
-            (self._project_id, source_id),
-        )
-        return int(rows[0]["count"]) if rows else 0
-
-    async def count_workspace_documents_for_index_recovery(self) -> int:
-        """Return all queued workspace files in this project."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT COUNT(*)::INTEGER AS count
-            FROM public.project_documents
-            WHERE project_id = %s
-              AND source_id IS NOT NULL
-              AND status = 'queued'
             """,
             (self._project_id,),
         )
@@ -477,21 +250,14 @@ class DocumentReader:
     async def list_documents(
         self,
         *,
-        session_id: Optional[str],
-        visibility_scope: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         path_prefix: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict]:
-        """Paginated list of documents visible to this project/session."""
+        """Paginated list of documents visible to this project."""
         query = """
             SELECT
                 pd.document_id,
                 pd.project_id,
-                pd.session_id,
-                pd.visibility_scope,
-                pd.folder_root_id,
-                pd.source_kind,
                 pd.original_name,
                 pd.relative_path,
                 pd.extension,
@@ -508,14 +274,8 @@ class DocumentReader:
                 ON dc.document_id = pd.document_id
             WHERE pd.status <> 'deleted'
         """
-        params: list = list(self._document_visibility_params(session_id))
+        params: list = list(self._document_visibility_params())
         query += self._document_visibility_sql()
-        if visibility_scope is not None:
-            query += " AND pd.visibility_scope = %s"
-            params.append(visibility_scope)
-        if folder_root_id is not None:
-            query += " AND pd.folder_root_id = %s"
-            params.append(folder_root_id)
         if path_prefix is not None:
             escaped = self._escape_like(path_prefix)
             query += (
@@ -530,134 +290,14 @@ class DocumentReader:
         """
         params.append(limit)
         return await self._client.fetch_all(query, tuple(params))
-
-    async def fetch_folder_upload(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-    ) -> Optional[Dict]:
-        """Return one visible folder-upload row, or None."""
-        rows = await self._client.fetch_all(
-            """
-            SELECT
-                folder_root_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_name,
-                candidate_count,
-                candidate_bytes,
-                document_count,
-                total_size_bytes,
-                excluded_count,
-                excluded_bytes,
-                excluded_directory_count,
-                excluded_reason_counts,
-                scan_settings,
-                created_at,
-                indexed_at
-            FROM public.document_folder_uploads
-            WHERE folder_root_id = %s
-            """
-            + self._document_visibility_sql(alias="document_folder_uploads")
-            + """
-            """,
-            (folder_root_id, *self._document_visibility_params(session_id)),
-        )
-        return rows[0] if rows else None
-
-    async def list_folder_uploads(
-        self,
-        *,
-        session_id: Optional[str],
-        visibility_scope: Optional[str] = None,
-        limit: int = 25,
-    ) -> List[Dict]:
-        """Paginated list of folder-upload batches visible to this project/session."""
-        query = """
-            SELECT
-                folder_root_id,
-                project_id,
-                session_id,
-                visibility_scope,
-                folder_name,
-                candidate_count,
-                candidate_bytes,
-                document_count,
-                total_size_bytes,
-                excluded_count,
-                excluded_bytes,
-                excluded_directory_count,
-                excluded_reason_counts,
-                scan_settings,
-                created_at,
-                indexed_at
-            FROM public.document_folder_uploads
-            WHERE TRUE
-        """
-        params: list = list(self._document_visibility_params(session_id))
-        query += self._document_visibility_sql(alias="document_folder_uploads")
-        if visibility_scope is not None:
-            query += " AND visibility_scope = %s"
-            params.append(visibility_scope)
-        query += " ORDER BY created_at DESC, folder_root_id DESC LIMIT %s"
-        params.append(limit)
-        return await self._client.fetch_all(query, tuple(params))
-
-    async def fetch_folder_documents(
-        self,
-        *,
-        folder_root_id: str,
-        session_id: Optional[str],
-        path_prefix: Optional[str] = None,
-    ) -> List[Dict]:
-        """
-        Return lightweight document rows for a folder upload, used for tree
-        construction.  Optionally filtered to a path prefix subtree.
-        """
-        query = """
-            SELECT
-                pd.document_id,
-                pd.project_id,
-                pd.folder_root_id,
-                pd.original_name,
-                pd.relative_path,
-                pd.extension,
-                pd.size_bytes,
-                pd.status,
-                COUNT(dc.chunk_id)::INTEGER AS chunk_count
-            FROM public.project_documents AS pd
-            LEFT JOIN public.document_chunks AS dc
-                ON dc.document_id = pd.document_id
-            WHERE pd.folder_root_id = %s
-              AND pd.status <> 'deleted'
-        """
-        query += self._document_visibility_sql()
-        params: list = [folder_root_id, *self._document_visibility_params(session_id)]
-        if path_prefix is not None:
-            escaped = self._escape_like(path_prefix)
-            query += (
-                " AND (pd.relative_path = %s "
-                "OR pd.relative_path LIKE %s ESCAPE '\\')"
-            )
-            params.extend([path_prefix, f"{escaped}/%"])
-        query += """
-            GROUP BY pd.document_id
-            ORDER BY pd.relative_path, pd.document_id
-        """
-        return await self._client.fetch_all(query, tuple(params))
-
     async def search_chunks(
         self,
         *,
-        session_id: Optional[str],
         query_text: str,
         query_embedding: List[float],
         n_results: int,
         candidate_limit: int,
         document_filter: Optional[str] = None,
-        folder_root_id: Optional[str] = None,
         relative_path: Optional[str] = None,
         path_prefix: Optional[str] = None,
     ) -> List[Dict]:
@@ -679,7 +319,6 @@ class DocumentReader:
                     dc.chunk_id,
                     dc.document_id,
                     pd.project_id,
-                    pd.folder_root_id,
                     pd.original_name,
                     pd.relative_path,
                     pd.extension,
@@ -706,13 +345,10 @@ class DocumentReader:
         """
         params: list = [query_text, embedding_json]
         sql += self._document_visibility_sql()
-        params.extend(self._document_visibility_params(session_id))
+        params.extend(self._document_visibility_params())
         if document_filter is not None:
             sql += " AND pd.document_id = %s"
             params.append(document_filter)
-        if folder_root_id is not None:
-            sql += " AND pd.folder_root_id = %s"
-            params.append(folder_root_id)
         if relative_path is not None:
             sql += " AND pd.relative_path = %s"
             params.append(relative_path)
@@ -766,7 +402,6 @@ class DocumentReader:
             SELECT
                 vc.document_id,
                 vc.project_id,
-                vc.folder_root_id,
                 vc.original_name,
                 vc.relative_path,
                 vc.extension,

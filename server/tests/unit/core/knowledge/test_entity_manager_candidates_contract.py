@@ -134,7 +134,7 @@ async def test_duplicate_exact_and_vector_candidates_keep_max_score(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_unhydrated_vector_candidate_ids_are_dropped(entity_manager_harness):
+async def test_missing_vector_candidate_ids_are_dropped(entity_manager_harness):
     entities, knowledge_store, embedding = entity_manager_harness
     vector = embedding.vector_for("unknown but similar")
     knowledge_store.vector_results[tuple(vector)] = [(999, 0.95)]
@@ -142,6 +142,20 @@ async def test_unhydrated_vector_candidate_ids_are_dropped(entity_manager_harnes
     candidates = await entities.get_candidate_ids("unknown but similar")
 
     assert candidates == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_vector_candidate_is_hydrated_from_durable_store(entity_manager_harness):
+    entities, knowledge_store, embedding = entity_manager_harness
+    knowledge_store.add_entity(999, "Persisted Similar", entity_type="concept")
+    vector = embedding.vector_for("persisted similar")
+    knowledge_store.vector_results[tuple(vector)] = [(999, 0.95)]
+
+    candidates = await entities.get_candidate_ids("persisted similar")
+
+    assert candidates == [(999, 0.95)]
+    assert entities.has_cached_entity(999)
 
 
 @pytest.mark.storage

@@ -51,10 +51,16 @@ class Scheduler:
         self._last_successful_runs: dict[str, float] = {}
         self._job_runs: dict[str, dict[str, object]] = {}
         self._recent_outcomes: deque[dict[str, object]] = deque(maxlen=20)
+        self._wake_event = asyncio.Event()
 
     @property
     def running(self) -> bool:
         return self._is_running
+
+    @property
+    def registered_job_names(self) -> tuple[str, ...]:
+        """Return the bounded names used to cancel scheduler-owned queue work."""
+        return tuple(self._jobs)
 
     def register(self, job: BaseJob) -> "Scheduler":
         """Register one project-owned job before scheduler startup."""
@@ -66,6 +72,18 @@ class Scheduler:
         self._jobs[job.name] = job
         logger.info(f"Registered job: {job.name}")
         return self
+
+    def wake(self) -> bool:
+        """Request a prompt check without making the event authoritative.
+
+        Polling remains the recovery path when a local wake is missed.  The
+        durable stores still decide whether any job is actually due.
+        """
+
+        if not self._is_running or self._admissions_closed:
+            return False
+        self._wake_event.set()
+        return True
 
     def _capture_job_policy(self) -> ScheduledJobPolicy:
         timeout = self.JOB_EXECUTION_TIMEOUT
@@ -166,7 +184,14 @@ class Scheduler:
     async def _monitor_loop(self) -> None:
         while self._is_running:
             try:
-                await asyncio.sleep(self.CHECK_INTERVAL)
+                try:
+                    await asyncio.wait_for(
+                        self._wake_event.wait(),
+                        timeout=self.CHECK_INTERVAL,
+                    )
+                except TimeoutError:
+                    pass
+                self._wake_event.clear()
                 await self._check_jobs()
             except asyncio.CancelledError:
                 raise

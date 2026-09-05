@@ -26,7 +26,7 @@ async def test_session_metadata_update_persists_an_allowed_configuration_change(
         project_manager=None,
     )
 
-    await manager.update_session_metadata(
+    await manager.update_session(
         "metadata-session",
         {"model": "gpt-5", "enabled_tools": ["search_documents"]},
     )

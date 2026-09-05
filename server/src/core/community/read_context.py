@@ -73,7 +73,6 @@ class AACReadContext:
             knowledge_store=knowledge_store,
             postgres=postgres,
             search_config=search_config,
-            active_topics=None,
         )
         reader = DocumentReader(
             postgres,
