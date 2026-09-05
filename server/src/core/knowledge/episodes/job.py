@@ -7,26 +7,15 @@ from typing import Awaitable, Callable
 
 from loguru import logger
 
-from common.schema.episode.generation import (
-    LLMEpisodeConsolidation,
-    LLMEpisodeWindowDecision,
-)
-from common.schema.episode.models import EpisodeNarrativeLimitError
 from common.schema.settings import EpisodeSettings
-from common.utils.diagnostic_context import diagnostic_scope
 from common.utils.events import emit
 from core.knowledge.episodes.build import ProjectEpisodeBuild
-from core.knowledge.episodes.embedding import build_episode_embedding_text
+from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from core.knowledge.episodes.ports import (
     EmbeddingEncoder,
     EpisodeStore,
     StructuredGenerator,
-)
-from core.knowledge.episodes.prompts import (
-    get_episode_consolidation_prompt,
-    get_episode_generation_prompt,
-    get_episode_narrative_repair_prompt,
 )
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 
@@ -47,6 +36,11 @@ class EpisodeJob(BaseJob):
         self.knowledge_store = knowledge_store
         self.llm = llm
         self.embedding_service = embedding_service
+        self.generator = EpisodeGenerator(
+            knowledge_store,
+            llm=llm,
+            embedding_service=embedding_service,
+        )
         self.episode_window_size_provider = episode_window_size_provider
         self.update_settings(settings, episode_window_size=episode_window_size)
 
@@ -104,25 +98,11 @@ class EpisodeJob(BaseJob):
         )
         if not messages:
             return None
-        first_message = min(
-            messages,
-            key=lambda item: (
-                item.get("timestamp_ms") is None,
-                item.get("timestamp_ms") or 0,
-                int(item["message_id"]),
-            ),
-        )
-        prior = await self.knowledge_store.get_nearby_project_episodes(
+        return await self.generator.build_for_messages(
             user_name=user_name,
             project_id=project_id,
-            session_ids=sorted({str(item["session_id"]) for item in messages}),
-            before_message_id=int(first_message["message_id"]),
-            before_timestamp_ms=first_message.get("timestamp_ms"),
-            limit=policy.prior_episode_candidate_count,
-        )
-        return ProjectEpisodeBuild(
-            project_id=project_id, policy=policy, messages=messages,
-            prior_episodes=prior[:policy.prior_episode_candidate_count],
+            messages=messages,
+            policy=policy,
         )
 
     async def process_next_window(self, *, user_name: str, project_id: str) -> ProjectEpisodeBuild | None:
@@ -133,99 +113,20 @@ class EpisodeJob(BaseJob):
         )
         if build is None:
             return None
-        if self.llm is None or self.embedding_service is None:
-            raise RuntimeError("EpisodeJob requires an LLM and embedding service")
-        with diagnostic_scope(user_name=user_name, project_id=project_id, episode_build_id=build.build_id):
-            build.prepare_local_references()
-            output = await self.llm.generate_structured(
-                response_model=LLMEpisodeWindowDecision,
-                system=get_episode_generation_prompt(
-                    user_name,
-                    prompt_narrative_chars=policy.prompt_narrative_chars,
-                    max_narrative_chars=policy.max_narrative_chars,
-                ),
-                user=build.evidence_brief(), temperature=0.0,
-            )
-            try:
-                build.apply_llm_output(output)
-            except EpisodeNarrativeLimitError:
-                output = await self.llm.generate_structured(
-                    response_model=LLMEpisodeWindowDecision,
-                    system=get_episode_narrative_repair_prompt(
-                        user_name,
-                        max_narrative_chars=policy.max_narrative_chars,
-                    ),
-                    user=build.repair_brief(output),
-                    temperature=0.0,
-                )
-                build.apply_llm_output(output)
-            await self._regenerate_consolidations(
-                build,
-                user_name=user_name,
-                project_id=project_id,
-            )
-            episodes = build.create_episodes()
-            if episodes:
-                build.attach_embeddings(await self.embedding_service.encode([
-                    build_episode_embedding_text(episode) for episode in episodes
-                ]))
-            persisted = await self.knowledge_store.write_project_episode_window(
-                build.final_episodes, build.messages,
-                user_name=user_name, project_id=project_id,
-            )
-            if not persisted:
-                return None
-            return build
-
-    async def _regenerate_consolidations(
-        self,
-        build: ProjectEpisodeBuild,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> None:
-        """Re-ground each consolidation proposal in complete source evidence."""
-
-        if self.llm is None:
-            raise RuntimeError("EpisodeJob requires an LLM")
-        for decision in build.decisions:
-            if decision.action != "consolidate" or not decision.target_episode_id:
-                continue
-            try:
-                source_messages = await self.knowledge_store.get_project_episode_source_messages(
-                    decision.target_episode_id,
-                    user_name=user_name,
-                    project_id=project_id,
-                )
-                if not build.preflight_consolidation(decision, source_messages):
-                    build.keep_consolidation_separate(decision)
-                    continue
-                output = await self.llm.generate_structured(
-                    response_model=LLMEpisodeConsolidation,
-                    system=get_episode_consolidation_prompt(user_name),
-                    user=build.consolidation_brief(decision),
-                    temperature=0.0,
-                )
-                message_ids = build.resolve_consolidation_references(
-                    decision, output.message_influences
-                )
-                build.apply_consolidation_output(
-                    decision,
-                    action=output.action,
-                    summary=output.summary,
-                    new_developments=output.new_developments,
-                    updates=output.updates,
-                    unresolved=output.unresolved,
-                    message_ids=message_ids,
-                )
-            except Exception as exc:
-                # A stale packet, capacity change, provider failure, or invalid
-                # second-pass response must not block the new completed units.
-                logger.warning(
-                    "Episode consolidation fell back to a separate Episode: {}",
-                    exc,
-                )
-                build.keep_consolidation_separate(decision)
+        build = await self.generator.generate_build(
+            build,
+            user_name=user_name,
+            project_id=project_id,
+        )
+        persisted = await self.knowledge_store.write_project_episode_window(
+            build.final_episodes,
+            build.messages,
+            user_name=user_name,
+            project_id=project_id,
+        )
+        if not persisted:
+            return None
+        return build
 
     async def execute(self, ctx: JobContext) -> JobResult:
         started = perf_counter()

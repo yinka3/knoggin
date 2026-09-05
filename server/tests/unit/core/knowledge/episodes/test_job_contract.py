@@ -8,6 +8,7 @@ from common.schema.episode.generation import (
 )
 from common.schema.episode.models import Episode, MessageEpisode
 from common.schema.settings import EpisodeSettings
+from core.knowledge.episodes.generator import EpisodeGenerator
 from core.knowledge.episodes.job import EpisodeJob
 from core.knowledge.episodes.policy import EpisodeGenerationPolicy
 from infrastructure.job.base import JobContext
@@ -191,6 +192,35 @@ def test_episode_policy_only_snapshots_current_generation_controls():
     }
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         EpisodeSettings(max_message_count=12)
+
+
+@pytest.mark.no_network
+async def test_episode_generator_uses_supplied_frozen_messages_without_selecting_or_persisting():
+    store = _WindowStore()
+    generator = EpisodeGenerator(
+        store,
+        llm=_EmptyWindowLLM(),
+        embedding_service=_ConsolidationEmbedding(),
+    )
+    policy = EpisodeGenerationPolicy.capture(
+        settings=EpisodeSettings(),
+        episode_window_size=8,
+    )
+    messages = await store.get_next_project_episode_window()
+
+    build = await generator.generate(
+        user_name="ada",
+        project_id="project-1",
+        messages=messages,
+        policy=policy,
+    )
+
+    assert [message["message_id"] for message in build.messages] == [10, 11]
+    assert build.final_episodes == []
+    assert store.written is None
+    assert EpisodeGenerationPolicy.from_semantic_window_snapshot(
+        policy.semantic_window_snapshot()
+    ) == policy
 
 
 @pytest.mark.no_network
