@@ -69,6 +69,49 @@ class RelationshipObservationReader:
             (user_name, project_id),
         )
 
+    async def get_active_context_supports(
+        self,
+        relationship_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return current active Context support rows for one relationship.
+
+        Retired observations are deliberately excluded.  The caller receives
+        only immutable block-version IDs and durable observation identities;
+        the Context reader remains responsible for rendering block content.
+        """
+
+        user_name = require_scope_value(
+            user_name, "user_name", "get_active_context_relationship_supports"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "get_active_context_relationship_supports"
+        )
+        relationship_id = require_scope_value(
+            relationship_id,
+            "relationship_id",
+            "get_active_context_relationship_supports",
+        )
+        return await self.client.fetch_all(
+            """
+            SELECT observation.observation_id,
+                   observation.semantic_window_id,
+                   support.block_id
+            FROM public.relationship_observations AS observation
+            JOIN public.relationship_observation_blocks AS support
+              ON support.observation_id = observation.observation_id
+             AND support.project_id = observation.project_id
+            WHERE observation.relationship_id = %s
+              AND observation.project_id = %s
+              AND observation.user_name = %s
+              AND observation.retired_at IS NULL
+            ORDER BY observation.observation_id, support.block_id
+            """,
+            (relationship_id, project_id, user_name),
+        )
+
     async def get_advisories(
         self,
         *,
