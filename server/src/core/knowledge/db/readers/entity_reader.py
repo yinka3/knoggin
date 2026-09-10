@@ -867,6 +867,7 @@ class EntityReader:
         LEFT JOIN relationship_observations observation
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
+         AND observation.retired_at IS NULL
         LEFT JOIN relationship_observation_blocks observation_block
           ON observation_block.observation_id = observation.observation_id
          AND observation_block.project_id = observation.project_id

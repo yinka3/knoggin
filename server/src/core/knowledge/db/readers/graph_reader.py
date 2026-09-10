@@ -124,10 +124,11 @@ class GraphReader:
                     )
                     ORDER BY observed_at_ms, observation_id
                 ) AS evidence_refs
-            FROM relationship_observations
-            WHERE relationship_id = ANY(%s)
-              AND project_id = ANY(%s)
-            GROUP BY relationship_id
+            FROM relationship_observations AS observation
+            WHERE observation.relationship_id = ANY(%s)
+              AND observation.project_id = ANY(%s)
+              AND observation.retired_at IS NULL
+            GROUP BY observation.relationship_id
             """,
             (relationship_ids, visible_project_ids),
         )

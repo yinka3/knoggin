@@ -166,6 +166,7 @@ class KnowledgeQueryReader:
         LEFT JOIN relationship_observations observation
           ON observation.observation_id = observation_block.observation_id
          AND observation.project_id = observation_block.project_id
+         AND observation.retired_at IS NULL
          AND (
              observation.source_entity_id = mention.entity_id
              OR observation.target_entity_id = mention.entity_id

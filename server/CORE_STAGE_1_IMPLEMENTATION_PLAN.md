@@ -1,6 +1,6 @@
 # Core Stage 1 — Canonical Knowledge and Context
 
-Status: Chunk A complete; Chunks B and C remain planned.
+Status: Chunks A and B complete; Chunk C remains planned.
 
 Baseline inspected: `aadedewe/refactor`, `acc0cac33b74759d07880a8b6fffeeee0cdee282`, 2026-09-09. Recheck HEAD and working-tree changes before implementation. Preserve unrelated changes, including the existing edit to `PROJECT_SEMANTIC_OPERATIONS.md`.
 
@@ -108,6 +108,25 @@ Preserve current relationships with surviving active support. Keep retired rows 
 | `src/core/knowledge/db/readers/knowledge_query_reader.py` | Remove retired observation attachments from current activity while retaining independently valid message activity. |
 | `src/core/knowledge/db/readers/relationship_observation_reader.py` | Verify existing active-only behavior; edit only if a current-read omission is demonstrated. |
 
+### Completed implementation — 2026-09-10
+
+- `EntityReader.get_related_entities()` now excludes retired observations from
+  its relationship counts, supporting-message count, evidence payloads, and
+  first/last observed aggregates while retaining the relationship outer join.
+- `GraphReader` now returns only active observation references for current
+  path edges, and `KnowledgeQueryReader` keeps a canonical message activity
+  row when its attached observation has retired but omits that observation.
+- Historical `EvidenceTraversalReader` behavior remains unfiltered and
+  `RelationshipObservationReader` already had the required active-only
+  predicates, so neither historical evidence nor the existing current reader
+  needed a semantic change.
+- Added SQL-shape guards and a real-PostgreSQL matrix covering active and
+  retired support on one surviving relationship, cross-project scope,
+  message activity, path references, and retired provenance presentation.
+- `EntityReader.get_entity_relationships()` was inspected but remains a
+  separate cleanup: it has no callers and references obsolete observation
+  columns, so it is not treated as a supported current-read path here.
+
 ### Gate B
 
 - A relationship with one active and one retired observation reports only the active support and its timestamps in every touched current-read path.
@@ -173,7 +192,7 @@ No timings or test results in the earlier reviews count as validation of the fut
 ## Work and documentation checkpoints
 
 - [x] A: window-specific impact and no-op/retry regressions.
-- [ ] B: active-only current reads plus historical evidence regression.
+- [x] B: active-only current reads plus historical evidence regression.
 - [ ] C: authoritative event time and human accepted-time regression.
 - [ ] Combined correction → no-op → restart scenario passes.
 - [ ] Update this checklist with changed files, validation evidence, and commit IDs if commits are requested.
