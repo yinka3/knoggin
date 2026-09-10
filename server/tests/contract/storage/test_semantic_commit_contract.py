@@ -64,7 +64,7 @@ def _policy():
     )
 
 
-def _block(markdown: str, *, supersedes_block_id=None):
+def _block(markdown: str, *, supersedes_block_id=None, source_time_ms=1_000):
     return ContextBlockRecord(
         block_id=uuid4(),
         project_id="project-1",
@@ -73,6 +73,7 @@ def _block(markdown: str, *, supersedes_block_id=None):
         content_hash=context_block_hash(markdown),
         assertion_kind=AssertionKind.SOURCE_GROUNDED,
         supersedes_block_id=supersedes_block_id,
+        source_time_ms=source_time_ms,
     )
 
 
@@ -174,7 +175,8 @@ def _build(
     entity_ids,
     entities,
     associations,
-    relationship,
+    relationship=None,
+    relationship_writes=None,
     support_message_id=101,
 ):
     result = ContextEntityResult(
@@ -209,7 +211,11 @@ def _build(
         message_text_by_id={support_message_id: "Sarah owns Delta."},
     )
     build.set_entity_result(result)
-    build.set_relationship_writes((relationship,))
+    if relationship is not None and relationship_writes is not None:
+        raise ValueError("test build accepts either relationship or relationship_writes")
+    if relationship_writes is None:
+        relationship_writes = () if relationship is None else (relationship,)
+    build.set_relationship_writes(relationship_writes)
     return build
 
 
@@ -659,6 +665,322 @@ async def test_semantic_commit_rolls_back_every_write_when_endpoint_validation_f
 
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.entities WHERE entity_id = 10"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"stage": "context_committed"}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_uses_persisted_context_source_times(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    early_block = _block("Sarah owns EarlyCo.", source_time_ms=600_000)
+    later_block = _block("John owns LaterCo.", source_time_ms=602_000)
+    unrelated_block = _block("IgnoreCo is mentioned separately.", source_time_ms=604_000)
+    context = await _commit_context(
+        real_postgres_client,
+        window,
+        (early_block, later_block, unrelated_block),
+    )
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    forged_context = context.model_copy(
+        update={
+            "blocks": [
+                block.model_copy(update={"source_time_ms": 999_999})
+                for block in context.blocks
+            ]
+        }
+    )
+    build = _build(
+        _WindowContext(window.window_id, forged_context),
+        impact=(early_block.block_id, later_block.block_id, unrelated_block.block_id),
+        entity_ids=(10, 11, 12, 13, 14),
+        entities={
+            10: _entity(10, "Sarah", "Person"),
+            11: _entity(11, "EarlyCo", "Company"),
+            12: _entity(12, "John", "Person"),
+            13: _entity(13, "LaterCo", "Company"),
+            14: _entity(14, "IgnoreCo", "Company"),
+        },
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=early_block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=early_block.block_id, entity_id=11, mention_text="EarlyCo"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=later_block.block_id, entity_id=12, mention_text="John"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=later_block.block_id, entity_id=13, mention_text="LaterCo"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=unrelated_block.block_id,
+                entity_id=14,
+                mention_text="IgnoreCo",
+            ),
+        ),
+        relationship_writes=(
+            ContextRelationshipWrite(
+                support_block_ids=(early_block.block_id,),
+                entity_a_id=10,
+                entity_b_id=11,
+                relationship_type="owns",
+                canonical_type="OWNS",
+                source_type="Person",
+                target_type="Company",
+                domain_version=1,
+            ),
+            ContextRelationshipWrite(
+                support_block_ids=(early_block.block_id, later_block.block_id),
+                entity_a_id=12,
+                entity_b_id=13,
+                relationship_type="owns",
+                canonical_type="OWNS",
+                source_type="Person",
+                target_type="Company",
+                domain_version=1,
+            ),
+        ),
+    )
+
+    summary = await SemanticCommitWriter(real_postgres_client).commit(build)
+
+    assert summary.relationships_written == 2
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT source_entity_id, target_entity_id, observed_at_ms
+        FROM public.relationship_observations
+        ORDER BY source_entity_id, target_entity_id
+        """
+    ) == [
+        {"source_entity_id": 10, "target_entity_id": 11, "observed_at_ms": 600_000},
+        {"source_entity_id": 12, "target_entity_id": 13, "observed_at_ms": 602_000},
+    ]
+    entity_rows = await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id, last_mentioned_ms
+        FROM public.project_entity_contexts
+        WHERE project_id = 'project-1'
+        ORDER BY entity_id
+        """
+    )
+    assert {row["entity_id"]: row["last_mentioned_ms"] for row in entity_rows} == {
+        10: 600_000,
+        11: 600_000,
+        12: 602_000,
+        13: 602_000,
+        14: 604_000,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_updates_existing_entity_recency_monotonically(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.entities (entity_id, user_name, canonical_name)
+        VALUES (10, 'ada', 'Sarah');
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic, last_mentioned_ms
+        ) VALUES ('project-1', 10, 'ada', 'Person', 'Work', 700000);
+        """
+    )
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    first_window = _window()
+    assert (await window_writer.claim_window(first_window, _membership())).claimed
+    older_block = _block("Sarah was mentioned earlier.", source_time_ms=600_000)
+    first_context = await _commit_context(
+        real_postgres_client, first_window, (older_block,)
+    )
+    assert await window_writer.advance_stage(
+        window_id=first_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=first_context.revision_id,
+    )
+    older_build = _build(
+        _WindowContext(first_window.window_id, first_context),
+        impact=(older_block.block_id,),
+        entity_ids=(10,),
+        entities={},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=older_block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+        ),
+    )
+    await SemanticCommitWriter(real_postgres_client).commit(older_build)
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT last_mentioned_ms
+        FROM public.project_entity_contexts
+        WHERE project_id = 'project-1' AND entity_id = 10
+        """
+    ) == {"last_mentioned_ms": 700_000}
+    assert await window_writer.advance_stage(
+        window_id=first_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.KNOWLEDGE_COMMITTED,
+        next_stage=SemanticWindowStage.COMPLETED,
+    )
+
+    second_window = _window()
+    assert (await window_writer.claim_window(second_window, _membership(102))).claimed
+    newer_block = _block("Sarah was mentioned later.", source_time_ms=800_000)
+    second_context = await _commit_context(
+        real_postgres_client,
+        second_window,
+        (older_block, newer_block),
+        parent=first_context,
+        impact=(newer_block.block_id,),
+        support_message_id=102,
+    )
+    assert await window_writer.advance_stage(
+        window_id=second_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=second_context.revision_id,
+    )
+    newer_build = _build(
+        _WindowContext(second_window.window_id, second_context),
+        impact=(newer_block.block_id,),
+        entity_ids=(10,),
+        entities={},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=newer_block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+        ),
+    )
+    await SemanticCommitWriter(real_postgres_client).commit(newer_build)
+
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT canonical_name
+        FROM public.entities
+        WHERE entity_id = 10
+        """
+    ) == {"canonical_name": "Sarah"}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT last_mentioned_ms
+        FROM public.project_entity_contexts
+        WHERE project_id = 'project-1' AND entity_id = 10
+        """
+    ) == {"last_mentioned_ms": 800_000}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.entities WHERE entity_id = 10"
+    ) == {"count": 1}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_rejects_wholly_untimed_context_support(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    timed_block = _block("Sarah owns Delta.", source_time_ms=1_000)
+    untimed_block = _block("Sarah owns Delta without a timestamp.", source_time_ms=None)
+    context = await _commit_context(
+        real_postgres_client, window, (timed_block, untimed_block)
+    )
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    entities = {
+        10: _entity(10, "Sarah", "Person"),
+        11: _entity(11, "Delta", "Company"),
+    }
+    relationship_build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(timed_block.block_id, untimed_block.block_id),
+        entity_ids=(10, 11),
+        entities=entities,
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=timed_block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=timed_block.block_id, entity_id=11, mention_text="Delta"
+            ),
+        ),
+        relationship=ContextRelationshipWrite(
+            support_block_ids=(untimed_block.block_id,),
+            entity_a_id=10,
+            entity_b_id=11,
+            relationship_type="owns",
+            canonical_type="OWNS",
+            source_type="Person",
+            target_type="Company",
+            domain_version=1,
+        ),
+    )
+    with pytest.raises(ValueError, match="source time"):
+        await SemanticCommitWriter(real_postgres_client).commit(relationship_build)
+
+    entity_build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(timed_block.block_id, untimed_block.block_id),
+        entity_ids=(10, 11),
+        entities=entities,
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=untimed_block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=untimed_block.block_id, entity_id=11, mention_text="Delta"
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="source time"):
+        await SemanticCommitWriter(real_postgres_client).commit(entity_build)
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.entities WHERE entity_id IN (10, 11)"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.project_entity_contexts WHERE project_id = 'project-1'"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.context_block_entities"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.relationship_observations"
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
         "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",

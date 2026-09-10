@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 from psycopg.errors import CheckViolation, ForeignKeyViolation, UniqueViolation
 
+import core.knowledge.db.writers.project_context_writer as project_context_writer
 from common.conf.domain_config import DomainConfig
 from common.schema.context import (
     AssertionKind,
@@ -911,7 +912,9 @@ async def test_context_revision_persists_impact_closure_and_typed_support_reads(
 async def test_context_revision_retry_and_projection_import_are_durable(
     real_postgres_client,
     tmp_path,
+    monkeypatch,
 ):
+    monkeypatch.setattr(project_context_writer, "get_now_ms", lambda: 1_000)
     await _seed_messages(real_postgres_client)
     writer = ProjectContextWriter(real_postgres_client)
     reader = ProjectContextReader(real_postgres_client)
@@ -957,6 +960,14 @@ async def test_context_revision_retry_and_projection_import_are_durable(
     assert imported.reconciliation_window_id is not None
     assert imported.snapshot.blocks[0].assertion_kind is AssertionKind.HUMAN_ASSERTED
     assert imported.snapshot.blocks[0].supersedes_block_id == initial_block.block_id
+    assert imported.snapshot.blocks[0].source_time_ms == 1_000
+    reloaded_human_snapshot = await reader.get_snapshot(
+        imported.snapshot.revision_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert reloaded_human_snapshot is not None
+    assert reloaded_human_snapshot.blocks[0].source_time_ms == 1_000
     assert await real_postgres_client.fetch_one(
         """
         SELECT origin, stage, context_revision_id
@@ -996,6 +1007,7 @@ async def test_context_revision_retry_and_projection_import_are_durable(
             new_block_ids=frozenset({stale_block.block_id}),
         ),
     )
+    assert stale.blocks[0].source_time_ms == 1_000
     file_before_stale_import = filesystem.read_bytes("CONTEXT.md")
     filesystem.write_bytes(
         "CONTEXT.md",
@@ -1078,10 +1090,118 @@ async def test_context_revision_retry_by_window_returns_the_existing_snapshot(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_human_context_revision_retry_preserves_accepted_source_time(
+    real_postgres_client,
+    monkeypatch,
+):
+    clock = {"now": 1_000}
+    monkeypatch.setattr(project_context_writer, "get_now_ms", lambda: clock["now"])
+    await _seed_messages(real_postgres_client)
+    writer = ProjectContextWriter(real_postgres_client)
+    initial = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Initial Context",
+        materialization=_materialization(_context_block("Initial Context.")),
+    )
+    window = _window().model_copy(
+        update={
+            "origin": SemanticWindowOrigin.HUMAN_EDIT,
+            "stage": SemanticWindowStage.CONTEXT_COMMITTED,
+        }
+    )
+    accepted_block = _context_block("Accepted human change.").model_copy(
+        update={"assertion_kind": AssertionKind.HUMAN_ASSERTED}
+    )
+    second_accepted_block = _context_block("Second accepted human change.").model_copy(
+        update={"assertion_kind": AssertionKind.HUMAN_ASSERTED}
+    )
+    explicitly_timed_block = _context_block("Imported human evidence.").model_copy(
+        update={
+            "assertion_kind": AssertionKind.HUMAN_ASSERTED,
+            "source_time_ms": 777,
+        }
+    )
+    materialization = ContextMaterialization(
+        blocks=(
+            initial.blocks[0],
+            accepted_block,
+            second_accepted_block,
+            explicitly_timed_block,
+        ),
+        content_hash=context_document_hash(
+            (
+                initial.blocks[0],
+                accepted_block,
+                second_accepted_block,
+                explicitly_timed_block,
+            ),
+            _domain(),
+        ),
+        new_block_ids=frozenset(
+            {
+                accepted_block.block_id,
+                second_accepted_block.block_id,
+                explicitly_timed_block.block_id,
+            }
+        ),
+    )
+    committed = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=initial.revision_id,
+        window_id=window.window_id,
+        origin=ContextRevisionOrigin.HUMAN_EDIT,
+        domain_version=1,
+        edit_summary="Human Context update",
+        materialization=materialization,
+        new_human_edit_window=window,
+        accepted_projection_hash=_HASH,
+    )
+    clock["now"] = 9_000
+    retried = await writer.commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=window.window_id,
+        origin=ContextRevisionOrigin.HUMAN_EDIT,
+        domain_version=1,
+        edit_summary="Ignored retry payload",
+        materialization=materialization,
+        new_human_edit_window=window,
+        accepted_projection_hash=_HASH,
+    )
+
+    assert committed.revision_id == retried.revision_id
+    accepted_times = {block.block_id: block.source_time_ms for block in retried.blocks}
+    assert accepted_times[accepted_block.block_id] == 1_000
+    assert accepted_times[second_accepted_block.block_id] == 1_000
+    assert accepted_times[explicitly_timed_block.block_id] == 777
+    persisted = await ProjectContextReader(real_postgres_client).get_window_snapshot(
+        window.window_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert persisted is not None
+    assert {
+        block.block_id: block.source_time_ms for block in persisted.blocks
+    } == accepted_times
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_projection_write_failure_keeps_the_committed_context_revision(
     real_postgres_client,
     tmp_path,
+    monkeypatch,
 ):
+    clock = {"now": 1_000}
+    monkeypatch.setattr(project_context_writer, "get_now_ms", lambda: clock["now"])
     await _seed_messages(real_postgres_client)
     writer = ProjectContextWriter(real_postgres_client)
     reader = ProjectContextReader(real_postgres_client)
@@ -1130,6 +1250,13 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
     assert current is not None
     assert current.revision_number == 2
     assert current.parent_revision_id == initial.revision_id
+    current_snapshot = await reader.get_snapshot(
+        current.revision_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert current_snapshot is not None
+    assert current_snapshot.blocks[0].source_time_ms == 1_000
     assert filesystem.read_bytes("CONTEXT.md") != previous_file
     failed_state = await reader.get_projection_state(user_name="ada", project_id="project-1")
     assert failed_state is not None
@@ -1138,6 +1265,7 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
         filesystem.read_bytes("CONTEXT.md")
     ).hexdigest()
 
+    clock["now"] = 9_000
     repaired = await ContextProjection(
         reader=reader,
         writer=writer,
@@ -1156,6 +1284,13 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
     assert repaired_state.projection_revision_id == current.revision_id
     assert repaired_state.projection_pending_hash is None
     assert repaired_state.projection_failure_code is None
+    persisted = await reader.get_snapshot(
+        current.revision_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert persisted is not None
+    assert persisted.blocks[0].source_time_ms == 1_000
 
 
 @pytest.mark.storage

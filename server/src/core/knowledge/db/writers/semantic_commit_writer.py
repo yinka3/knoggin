@@ -17,7 +17,6 @@ from common.schema.ingestion.contracts import (
 )
 from common.schema.semantic_window import SemanticWindowStage
 from common.scoping import IDENTITY_ENTITY_ID, require_scope_value
-from common.utils.time_utils import get_now_ms
 from core.ingestion.batch import SemanticWindowBuild
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from infrastructure.postgres_client import PostgresClient
@@ -42,6 +41,7 @@ class _VerifiedContextInput:
     """Durably verified Context input for one semantic publication."""
 
     eligible_blocks: set[UUID]
+    source_time_by_block_id: dict[UUID, int | None]
     reuses_published_context: bool
 
 
@@ -118,6 +118,13 @@ class SemanticCommitWriter:
                         project_id=project_id,
                         eligible_blocks=context_input.eligible_blocks,
                     )
+                    await self._update_entity_recency(
+                        cur,
+                        entity_result,
+                        user_name=user_name,
+                        project_id=project_id,
+                        source_time_by_block_id=context_input.source_time_by_block_id,
+                    )
                     refs_written = await self._write_message_entity_refs(
                         cur,
                         entity_result,
@@ -137,6 +144,7 @@ class SemanticCommitWriter:
                         user_name=user_name,
                         project_id=project_id,
                         eligible_blocks=context_input.eligible_blocks,
+                        source_time_by_block_id=context_input.source_time_by_block_id,
                         domain=build.policy.domain,
                     )
                     relationships_removed = await self._remove_orphan_relationships(
@@ -214,7 +222,7 @@ class SemanticCommitWriter:
             raise ValueError("Semantic Knowledge Context snapshot owner does not match storage")
         await cur.execute(
             """
-            SELECT block.block_id, block.assertion_kind
+            SELECT block.block_id, block.assertion_kind, block.source_time_ms
             FROM public.project_context_revision_blocks AS membership
             JOIN public.project_context_blocks AS block
               ON block.block_id = membership.block_id
@@ -223,7 +231,17 @@ class SemanticCommitWriter:
             """,
             (build.context.revision_id, build.project_id),
         )
-        current_blocks = {UUID(str(row["block_id"])): row["assertion_kind"] for row in await cur.fetchall()}
+        persisted_blocks = {
+            UUID(str(row["block_id"])): (
+                row["assertion_kind"],
+                None if row["source_time_ms"] is None else int(row["source_time_ms"]),
+            )
+            for row in await cur.fetchall()
+        }
+        current_blocks = {
+            block_id: assertion_kind
+            for block_id, (assertion_kind, _) in persisted_blocks.items()
+        }
         if set(current_blocks) != {block.block_id for block in build.context.blocks}:
             raise ValueError("Semantic Knowledge build no longer matches its Context snapshot")
         await cur.execute(
@@ -277,6 +295,10 @@ class SemanticCommitWriter:
             raise ValueError("Semantic Knowledge input includes non-current or non-extractable blocks")
         return _VerifiedContextInput(
             eligible_blocks=eligible,
+            source_time_by_block_id={
+                block_id: persisted_blocks[block_id][1]
+                for block_id in eligible
+            },
             reuses_published_context=reuses_published_context,
         )
 
@@ -430,6 +452,64 @@ class SemanticCommitWriter:
         return count
 
     @staticmethod
+    def _require_source_time(
+        source_time_by_block_id: dict[UUID, int | None],
+        block_ids: set[UUID] | tuple[UUID, ...],
+        *,
+        subject: str,
+    ) -> int:
+        source_times = [
+            source_time_by_block_id.get(block_id)
+            for block_id in block_ids
+            if source_time_by_block_id.get(block_id) is not None
+        ]
+        if not source_times:
+            raise ValueError(f"Context {subject} has no persisted source time")
+        return max(source_times)
+
+    @classmethod
+    async def _update_entity_recency(
+        cls,
+        cur,
+        result: ContextEntityResult,
+        *,
+        user_name: str,
+        project_id: str,
+        source_time_by_block_id: dict[UUID, int | None],
+    ) -> None:
+        block_ids_by_entity: dict[int, set[UUID]] = {}
+        for association in result.block_entity_associations:
+            if association.entity_id == IDENTITY_ENTITY_ID:
+                continue
+            block_ids_by_entity.setdefault(association.entity_id, set()).add(
+                association.block_id
+            )
+        for entity_id, block_ids in sorted(block_ids_by_entity.items()):
+            source_time_ms = cls._require_source_time(
+                source_time_by_block_id,
+                block_ids,
+                subject="entity association",
+            )
+            await cur.execute(
+                """
+                UPDATE public.project_entity_contexts
+                SET last_mentioned_ms = CASE
+                        WHEN last_mentioned_ms IS NULL OR last_mentioned_ms < %s
+                            THEN %s
+                        ELSE last_mentioned_ms
+                    END,
+                    updated_at_ms = floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+                WHERE project_id = %s AND user_name = %s AND entity_id = %s
+                RETURNING entity_id
+                """,
+                (source_time_ms, source_time_ms, project_id, user_name, entity_id),
+            )
+            if await cur.fetchone() is None:
+                raise ValueError(
+                    "Context entity recency requires a local project classification"
+                )
+
+    @staticmethod
     async def _write_message_entity_refs(
         cur,
         result: ContextEntityResult,
@@ -545,13 +625,18 @@ class SemanticCommitWriter:
         user_name: str,
         project_id: str,
         eligible_blocks: set[UUID],
+        source_time_by_block_id: dict[UUID, int | None],
         domain,
     ) -> int:
-        now_ms = get_now_ms()
         count = 0
         for write in writes:
             if not set(write.support_block_ids).issubset(eligible_blocks):
                 raise ValueError("Context relationship cites an ineligible block")
+            observed_at_ms = self._require_source_time(
+                source_time_by_block_id,
+                write.support_block_ids,
+                subject="relationship",
+            )
             endpoint_types = await self._verify_relationship_endpoints(
                 cur,
                 entity_ids=(write.entity_a_id, write.entity_b_id),
@@ -625,7 +710,7 @@ class SemanticCommitWriter:
                     write.observed_label,
                     write.interpretation_source,
                     write.context,
-                    now_ms,
+                    observed_at_ms,
                 ),
             )
             observation = await cur.fetchone()

@@ -1,6 +1,6 @@
 # Core Stage 1 — Canonical Knowledge and Context
 
-Status: Chunks A and B complete; Chunk C remains planned.
+Status: Chunks A, B, and C complete; the combined final Stage 1 scenario remains.
 
 Baseline inspected: `aadedewe/refactor`, `acc0cac33b74759d07880a8b6fffeeee0cdee282`, 2026-09-09. Recheck HEAD and working-tree changes before implementation. Preserve unrelated changes, including the existing edit to `PROJECT_SEMANTIC_OPERATIONS.md`.
 
@@ -151,14 +151,34 @@ Primary tests: `tests/contract/storage/test_graph_reader_contract.py`, `test_ent
 
 **Missing-time policy:** use available non-null cited times. Never silently substitute extraction time for missing conversation/source evidence. For wholly untimed extractable support, fail with a clear source-time diagnostic until valid provenance is supplied. Existing untimed human blocks can use their immutable acceptance metadata only through an explicit, tested repair decision; do not backfill them with today's date. Recheck canonical message timestamp guarantees before tightening validation. No automatic historical data rewrite is part of this plan.
 
+### Completed implementation — 2026-09-10
+
+- `ProjectContextWriter` assigns one accepted timestamp only to newly inserted,
+  untimed `human_asserted` blocks. Explicit source times and retained block
+  records remain unchanged. Its normal return now reloads the persisted
+  snapshot, so the importer, retry path, and projection repair share the
+  authoritative value.
+- Human Context window creation/recommit is idempotent for the same persisted
+  human window and revision, while rejecting an attempt to reuse a conversation
+  window as a human reconciliation.
+- `SemanticCommitWriter` loads `source_time_ms` from persisted Context block
+  rows rather than the caller's snapshot. It updates non-identity local entity
+  contexts monotonically from their associated block times and derives each
+  relationship observation time from exactly its cited support blocks.
+- Wholly untimed entity associations and relationship support fail with a clear
+  source-time error. The transaction rolls back and leaves the window at
+  `context_committed`; no processing-time fallback or historical backfill was
+  added.
+
 ### Files
 
-| File under `server/` | Planned change |
+| File under `server/` | Result |
 | --- | --- |
-| `src/core/knowledge/db/writers/project_context_writer.py` | Assign/persist accepted time for new untimed human blocks and return authoritative values. |
-| `src/core/knowledge/context/projection.py` | Confirm importer uses committed timestamps; adjust only if needed to avoid generating a different time during replay/repair. |
+| `src/core/knowledge/db/writers/project_context_writer.py` | Assign/persist accepted time for new untimed human blocks, reload authoritative snapshots, and make same-window human retry safe. |
+| `src/core/knowledge/context/projection.py` | Verified existing importer already consumes the committed snapshot and repair reloads it; no source change needed. |
 | `src/core/knowledge/db/writers/semantic_commit_writer.py` | Load authoritative block times, update associated project entity recency, and derive per-observation source time. |
-| `src/core/ingestion/batch.py` | Conditional: small derived time helpers only if they reduce duplication; no second persisted timestamp map. |
+| `src/core/ingestion/batch.py` | Verified no change needed; it carries the Context snapshot without owning a second timestamp map. |
+| `tests/contract/storage/test_project_context_window_contract.py` / `test_semantic_commit_contract.py` | Added deterministic real-PostgreSQL regressions for accepted time, retry/repair, durable authority, entity recency, per-relationship timing, and untimed rollback. |
 
 ### Gate C
 
@@ -172,6 +192,20 @@ Primary tests: `tests/contract/storage/test_graph_reader_contract.py`, `test_ent
 - Missing-time behavior is explicit; `created_at`/operational timestamps remain separate.
 
 Primary tests: `tests/contract/storage/test_project_context_window_contract.py`, `test_semantic_commit_contract.py`, current entity-reader storage checks, and human-import cases in `tests/integration/ingestion/test_project_semantic_postgres_flow.py`.
+
+### Chunk C validation — 2026-09-10
+
+- Focused Context and semantic-commit PostgreSQL contracts: 23 passed.
+- Production-style ingestion PostgreSQL flow: 2 passed.
+- Full PostgreSQL storage contract suite: 72 passed, 106 deselected.
+- Context updater/render unit tests: 12 passed.
+- Touched-path Ruff, Python compilation, `git diff --check`, and the
+  architecture import check passed.
+- Each pytest invocation emitted the existing third-party
+  `RequestsDependencyWarning`; no source-test failure resulted.
+- The broad no-service suite could not collect API tests because this local
+  environment lacks `fastapi`; focused non-API and PostgreSQL suites above ran
+  successfully.
 
 ## Final Stage 1 validation
 
@@ -193,7 +227,7 @@ No timings or test results in the earlier reviews count as validation of the fut
 
 - [x] A: window-specific impact and no-op/retry regressions.
 - [x] B: active-only current reads plus historical evidence regression.
-- [ ] C: authoritative event time and human accepted-time regression.
+- [x] C: authoritative event time and human accepted-time regression.
 - [ ] Combined correction → no-op → restart scenario passes.
 - [ ] Update this checklist with changed files, validation evidence, and commit IDs if commits are requested.
 - [ ] Annotate the corresponding locked Knowledge/Ingestion and core-review items with completion references; preserve their rationale and untouched later-stage work.

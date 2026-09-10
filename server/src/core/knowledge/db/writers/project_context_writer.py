@@ -9,6 +9,7 @@ from psycopg import Error as PsycopgError
 
 from common.exceptions import StorageWriteError
 from common.schema.context import (
+    AssertionKind,
     ContextRevisionOrigin,
     ContextRevisionRecord,
     ContextSnapshot,
@@ -20,6 +21,7 @@ from common.schema.semantic_window import (
     SemanticWindowStage,
 )
 from common.scoping import require_scope_value
+from common.utils.time_utils import get_now_ms
 from core.knowledge.context.models import (
     ContextMaterialization,
     ContextProjectionConflictError,
@@ -209,7 +211,28 @@ class ProjectContextWriter:
                     window_id=window_id,
                     project_id=project_id,
                 )
-                for block in materialization.blocks:
+                accepted_time_ms = (
+                    get_now_ms()
+                    if any(
+                        block.block_id in new_ids
+                        and block.assertion_kind is AssertionKind.HUMAN_ASSERTED
+                        and block.source_time_ms is None
+                        for block in materialization.blocks
+                    )
+                    else None
+                )
+                persisted_blocks = tuple(
+                    block.model_copy(update={"source_time_ms": accepted_time_ms})
+                    if (
+                        accepted_time_ms is not None
+                        and block.block_id in new_ids
+                        and block.assertion_kind is AssertionKind.HUMAN_ASSERTED
+                        and block.source_time_ms is None
+                    )
+                    else block
+                    for block in materialization.blocks
+                )
+                for block in persisted_blocks:
                     if block.block_id not in new_ids:
                         continue
                     await cur.execute(
@@ -280,7 +303,7 @@ class ProjectContextWriter:
                     ),
                 )
                 revision_row = await cur.fetchone()
-                for ordinal, block in enumerate(materialization.blocks):
+                for ordinal, block in enumerate(persisted_blocks):
                     await cur.execute(
                         """
                         INSERT INTO public.project_context_revision_blocks (
@@ -327,9 +350,11 @@ class ProjectContextWriter:
                         window_id=window_id,
                         revision_id=revision_id,
                     )
-                return ContextSnapshot(
-                    **ContextRevisionRecord.model_validate(revision_row).model_dump(),
-                    blocks=list(materialization.blocks),
+                return await self._load_revision_snapshot(
+                    cur,
+                    revision_id=revision_id,
+                    project_id=project_id,
+                    revision_row=revision_row,
                 )
         except (ContextProjectionConflictError, ContextRevisionConflictError, TypeError, ValueError):
             raise
@@ -660,6 +685,22 @@ class ProjectContextWriter:
             raise ValueError("Project is unavailable while creating Context reconciliation")
         await cur.execute(
             """
+            SELECT window_id, origin
+            FROM public.project_semantic_windows
+            WHERE window_id = %s AND project_id = %s AND user_name = %s
+            FOR UPDATE
+            """,
+            (window.window_id, window.project_id, window.user_name),
+        )
+        existing_window = await cur.fetchone()
+        if existing_window is not None:
+            if existing_window["origin"] != SemanticWindowOrigin.HUMAN_EDIT.value:
+                raise ContextProjectionConflictError(
+                    "Context reconciliation window does not belong to a human edit"
+                )
+            return
+        await cur.execute(
+            """
             SELECT window_id
             FROM public.project_semantic_windows
             WHERE project_id = %s AND user_name = %s AND stage <> 'completed'
@@ -667,10 +708,13 @@ class ProjectContextWriter:
             """,
             (window.project_id, window.user_name),
         )
-        if await cur.fetchone() is not None:
-            raise ContextProjectionConflictError(
-                "Context reconciliation is already active for this project"
-            )
+        active_window = await cur.fetchone()
+        if active_window is not None:
+            if UUID(str(active_window["window_id"])) != window.window_id:
+                raise ContextProjectionConflictError(
+                    "Context reconciliation is already active for this project"
+                )
+            return
         await cur.execute(
             """
             INSERT INTO public.project_semantic_windows (
@@ -721,10 +765,33 @@ class ProjectContextWriter:
             """,
             (revision_id, window_id),
         )
-        if await cur.fetchone() is None:
-            raise ContextProjectionConflictError(
-                "Context reconciliation changed while the human edit was committed"
-            )
+        if await cur.fetchone() is not None:
+            return
+        await cur.execute(
+            """
+            SELECT stage, context_revision_id
+            FROM public.project_semantic_windows
+            WHERE window_id = %s
+            FOR KEY SHARE
+            """,
+            (window_id,),
+        )
+        existing = await cur.fetchone()
+        if (
+            existing is not None
+            and existing["stage"]
+            in {
+                SemanticWindowStage.CONTEXT_COMMITTED.value,
+                SemanticWindowStage.KNOWLEDGE_COMMITTED.value,
+                SemanticWindowStage.COMPLETED.value,
+            }
+            and existing["context_revision_id"] is not None
+            and UUID(str(existing["context_revision_id"])) == revision_id
+        ):
+            return
+        raise ContextProjectionConflictError(
+            "Context reconciliation changed while the human edit was committed"
+        )
 
     async def _validate_supports(
         self,
