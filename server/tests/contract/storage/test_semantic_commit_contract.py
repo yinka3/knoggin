@@ -213,6 +213,22 @@ def _build(
     return build
 
 
+def _empty_build(window_id, context):
+    build = SemanticWindowBuild(
+        window_id=window_id,
+        user_name="ada",
+        project_id="project-1",
+        context=context,
+        impact_block_ids=frozenset(),
+        policy=_policy(),
+        policy_snapshot={"ingestion_policy": _policy().semantic_window_snapshot()},
+        block_supports={},
+        message_text_by_id={},
+    )
+    build.set_empty_knowledge_result()
+    return build
+
+
 class _WindowContext:
     def __init__(self, window_id, context):
         self.window_id = window_id
@@ -376,6 +392,226 @@ async def test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_suppor
         max_span_days=60,
     )
     assert [row["source_entity_id"] for row in seeds] == [12]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_reuses_published_context_without_replaying_its_impact(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    owner_window = _window()
+    assert (await window_writer.claim_window(owner_window, _membership())).claimed
+    block = _block("Sarah owns Delta.")
+    context = await _commit_context(real_postgres_client, owner_window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=owner_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    writer = SemanticCommitWriter(real_postgres_client)
+    owner_build = _build(
+        _WindowContext(owner_window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(10, 11),
+        entities={10: _entity(10, "Sarah", "Person"), 11: _entity(11, "Delta", "Company")},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=block.block_id, entity_id=11, mention_text="Delta"
+            ),
+        ),
+        relationship=ContextRelationshipWrite(
+            support_block_ids=(block.block_id,),
+            entity_a_id=10,
+            entity_b_id=11,
+            relationship_type="owns",
+            canonical_type="OWNS",
+            source_type="Person",
+            target_type="Company",
+            domain_version=1,
+        ),
+    )
+    assert (await writer.commit(owner_build)).relationships_written == 1
+    assert await window_writer.advance_stage(
+        window_id=owner_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.KNOWLEDGE_COMMITTED,
+        next_stage=SemanticWindowStage.COMPLETED,
+    )
+
+    no_op_window = _window()
+    assert (await window_writer.claim_window(no_op_window, _membership(102))).claimed
+    assert await window_writer.advance_stage(
+        window_id=no_op_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+
+    replayed_build = _build(
+        _WindowContext(no_op_window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(10, 11),
+        entities={10: _entity(10, "Sarah", "Person"), 11: _entity(11, "Delta", "Company")},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=block.block_id, entity_id=10, mention_text="Sarah"
+            ),
+            ContextBlockEntityAssociation(
+                block_id=block.block_id, entity_id=11, mention_text="Delta"
+            ),
+        ),
+        relationship=ContextRelationshipWrite(
+            support_block_ids=(block.block_id,),
+            entity_a_id=10,
+            entity_b_id=11,
+            relationship_type="owns",
+            canonical_type="OWNS",
+            source_type="Person",
+            target_type="Company",
+            domain_version=1,
+        ),
+    )
+    with pytest.raises(ValueError, match="impact closure"):
+        await writer.commit(replayed_build)
+
+    malformed_empty_build = _empty_build(no_op_window.window_id, context)
+    malformed_empty_build.set_entity_result(
+        ContextEntityResult(
+            entity_ids=(10,),
+            new_entity_ids=frozenset(),
+            alias_updated_ids=frozenset(),
+            alias_updates={},
+            pending_entity_writes={},
+            block_entity_associations=(),
+            message_entity_refs=(),
+        )
+    )
+    with pytest.raises(ValueError, match="empty Knowledge build"):
+        await writer.commit(malformed_empty_build)
+
+    no_op_build = _empty_build(no_op_window.window_id, context)
+    committed = await writer.commit(no_op_build)
+    resumed = await writer.commit(no_op_build)
+
+    assert committed.resumed is False
+    assert committed.relationships_written == 0
+    assert resumed.resumed is True
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.relationship_observations"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.relationship_observation_blocks"
+    ) == {"count": 1}
+    assert await window_writer.advance_stage(
+        window_id=no_op_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.KNOWLEDGE_COMMITTED,
+        next_stage=SemanticWindowStage.COMPLETED,
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_rejects_an_unowned_context_revision(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    context = await ProjectContextWriter(real_postgres_client).commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=None,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Unowned initial Context",
+        materialization=ContextMaterialization(
+            blocks=(),
+            content_hash=context_document_hash((), _domain()),
+            new_block_ids=frozenset(),
+            impacted_block_ids=frozenset(),
+        ),
+    )
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+
+    with pytest.raises(ValueError, match="has no owning window"):
+        await SemanticCommitWriter(real_postgres_client).commit(
+            _empty_build(window.window_id, context)
+        )
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"stage": "context_committed"}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_accepts_an_owned_empty_context_revision(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    context = await ProjectContextWriter(real_postgres_client).commit_revision(
+        user_name="ada",
+        project_id="project-1",
+        expected_parent_revision_id=None,
+        window_id=window.window_id,
+        origin=ContextRevisionOrigin.CONVERSATION,
+        domain_version=1,
+        edit_summary="Initial empty Context",
+        materialization=ContextMaterialization(
+            blocks=(),
+            content_hash=context_document_hash((), _domain()),
+            new_block_ids=frozenset(),
+            impacted_block_ids=frozenset(),
+        ),
+    )
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+
+    summary = await SemanticCommitWriter(real_postgres_client).commit(
+        _empty_build(window.window_id, context)
+    )
+
+    assert summary.resumed is False
+    assert summary.relationships_written == 0
+    assert await real_postgres_client.fetch_one(
+        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        (window.window_id,),
+    ) == {"stage": "knowledge_committed"}
 
 
 @pytest.mark.storage

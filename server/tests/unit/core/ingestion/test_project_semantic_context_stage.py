@@ -59,11 +59,12 @@ def _block(markdown: str) -> ContextBlockRecord:
     )
 
 
-def _snapshot(*blocks: ContextBlockRecord) -> ContextSnapshot:
+def _snapshot(*blocks: ContextBlockRecord, window_id=None) -> ContextSnapshot:
     return ContextSnapshot(
         revision_id=uuid4(),
         project_id="project-1",
         revision_number=1,
+        window_id=window_id,
         origin=ContextRevisionOrigin.CONVERSATION,
         domain_version=1,
         content_hash="a" * 64,
@@ -131,7 +132,7 @@ class _ContextStore:
             project_id="project-1",
             revision_number=1 if parent is None else parent.revision_number + 1,
             parent_revision_id=None if parent is None else parent.revision_id,
-            window_id=uuid4(),
+            window_id=kwargs["window_id"],
             origin=ContextRevisionOrigin.CONVERSATION,
             domain_version=1,
             edit_summary=kwargs["edit_summary"],
@@ -311,8 +312,9 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_context_stage_resumes_a_durable_revision_without_recalling_the_llm():
-    committed = _snapshot(_block("Already durable."))
-    store = _ContextStore(_window(), current_snapshot=committed, committed_snapshot=committed)
+    window = _window()
+    committed = _snapshot(_block("Already durable."), window_id=window.window_id)
+    store = _ContextStore(window, current_snapshot=committed, committed_snapshot=committed)
     updater = _Updater()
     job = _job(store, updater)
 
@@ -328,7 +330,9 @@ async def test_context_stage_resumes_a_durable_revision_without_recalling_the_ll
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_context_noop_records_the_current_revision_without_creating_a_child():
-    current = _snapshot(_block("Current Context is already sufficient."))
+    current = _snapshot(
+        _block("Current Context is already sufficient."), window_id=uuid4()
+    )
     store = _ContextStore(_window(), current_snapshot=current)
     updater = _NoopUpdater()
     job = _job(store, updater)

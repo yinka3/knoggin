@@ -508,23 +508,35 @@ class ProjectSemanticJob(BaseJob):
             )
             if context is None:
                 raise RuntimeError("Context checkpoint was not materialized")
+            # The revision-owned window is the only window allowed to replay
+            # its persisted impact.  A later no-op window checkpoints the
+            # same immutable revision with an empty effective impact; the
+            # writer rechecks that durable ownership before advancing it.
             impact_block_ids = (
                 await self.knowledge_store.get_project_context_revision_impact_block_ids(
                     str(context.revision_id),
                     user_name=ctx.user_name,
                     project_id=ctx.project_id,
                 )
+                if context.window_id == window.window_id
+                else frozenset()
             )
-            supports = await self.knowledge_store.get_project_context_block_supports(
-                [str(block.block_id) for block in context.blocks],
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
-            messages = await self.knowledge_store.get_project_semantic_window_evidence_messages(
-                str(window.window_id),
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
+            if impact_block_ids:
+                supports = await self.knowledge_store.get_project_context_block_supports(
+                    [str(block.block_id) for block in context.blocks],
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                )
+                messages = (
+                    await self.knowledge_store.get_project_semantic_window_evidence_messages(
+                        str(window.window_id),
+                        user_name=ctx.user_name,
+                        project_id=ctx.project_id,
+                    )
+                )
+            else:
+                supports = {}
+                messages = []
             build = SemanticWindowBuild.from_committed_window(
                 window=window,
                 context=context,
@@ -535,8 +547,11 @@ class ProjectSemanticJob(BaseJob):
                     for message in messages
                 },
             )
-            await self._context_entity_builder.build(build)
-            await self._context_relationship_extractor.extract(build)
+            if build.impact_block_ids:
+                await self._context_entity_builder.build(build)
+                await self._context_relationship_extractor.extract(build)
+            else:
+                build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)
             return JobResult(
                 success=True,

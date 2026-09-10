@@ -37,6 +37,14 @@ class SemanticCommitSummary:
     relationships_removed: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _VerifiedContextInput:
+    """Durably verified Context input for one semantic publication."""
+
+    eligible_blocks: set[UUID]
+    reuses_published_context: bool
+
+
 class SemanticCommitWriter:
     """Make a ``context_committed`` window's Knowledge change indivisible.
 
@@ -84,54 +92,63 @@ class SemanticCommitWriter:
                 if UUID(str(window["context_revision_id"])) != build.context.revision_id:
                     raise ValueError("Semantic window Context checkpoint does not match build")
 
-                eligible_blocks = await self._verify_context_input(cur, build)
+                context_input = await self._verify_context_input(cur, build)
                 entity_result = build.entity_result
-                await self._write_entities(
-                    cur,
-                    entity_result,
-                    user_name=user_name,
-                    project_id=project_id,
-                )
-                aliases_written = await self._write_aliases(
-                    cur, entity_result, project_id=project_id
-                )
-                associations_written = await self._write_block_entity_associations(
-                    cur,
-                    entity_result,
-                    project_id=project_id,
-                    eligible_blocks=eligible_blocks,
-                )
-                refs_written = await self._write_message_entity_refs(
-                    cur,
-                    entity_result,
-                    user_name=user_name,
-                    project_id=project_id,
-                )
-                observations_retired = await self._retire_noncurrent_observations(
-                    cur,
-                    user_name=user_name,
-                    project_id=project_id,
-                    revision_id=build.context.revision_id,
-                )
-                relationships_written = await self._write_relationships(
-                    cur,
-                    build.relationship_writes,
-                    window_id=build.window_id,
-                    user_name=user_name,
-                    project_id=project_id,
-                    eligible_blocks=eligible_blocks,
-                    domain=build.policy.domain,
-                )
-                relationships_removed = await self._remove_orphan_relationships(
-                    cur, project_id=project_id
-                )
-                # AGE is a rebuildable projection, but it must reflect the same
-                # committed SQL snapshot before this window advertises Knowledge.
-                await self._projection.rebuild_project_projection(
-                    project_id,
-                    user_name,
-                    cur=cur,
-                )
+                if context_input.reuses_published_context:
+                    self._require_empty_reused_context_build(build)
+                    aliases_written = 0
+                    associations_written = 0
+                    refs_written = 0
+                    observations_retired = 0
+                    relationships_written = 0
+                    relationships_removed = 0
+                else:
+                    await self._write_entities(
+                        cur,
+                        entity_result,
+                        user_name=user_name,
+                        project_id=project_id,
+                    )
+                    aliases_written = await self._write_aliases(
+                        cur, entity_result, project_id=project_id
+                    )
+                    associations_written = await self._write_block_entity_associations(
+                        cur,
+                        entity_result,
+                        project_id=project_id,
+                        eligible_blocks=context_input.eligible_blocks,
+                    )
+                    refs_written = await self._write_message_entity_refs(
+                        cur,
+                        entity_result,
+                        user_name=user_name,
+                        project_id=project_id,
+                    )
+                    observations_retired = await self._retire_noncurrent_observations(
+                        cur,
+                        user_name=user_name,
+                        project_id=project_id,
+                        revision_id=build.context.revision_id,
+                    )
+                    relationships_written = await self._write_relationships(
+                        cur,
+                        build.relationship_writes,
+                        window_id=build.window_id,
+                        user_name=user_name,
+                        project_id=project_id,
+                        eligible_blocks=context_input.eligible_blocks,
+                        domain=build.policy.domain,
+                    )
+                    relationships_removed = await self._remove_orphan_relationships(
+                        cur, project_id=project_id
+                    )
+                    # AGE is a rebuildable projection, but it must reflect the same
+                    # committed SQL snapshot before this window advertises Knowledge.
+                    await self._projection.rebuild_project_projection(
+                        project_id,
+                        user_name,
+                        cur=cur,
+                    )
                 await cur.execute(
                     """
                     UPDATE public.project_semantic_windows
@@ -170,10 +187,12 @@ class SemanticCommitWriter:
                 details={"error_type": type(exc).__name__},
             ) from exc
 
-    async def _verify_context_input(self, cur, build: SemanticWindowBuild) -> set[UUID]:
+    async def _verify_context_input(
+        self, cur, build: SemanticWindowBuild
+    ) -> _VerifiedContextInput:
         await cur.execute(
             """
-            SELECT revision.revision_id
+            SELECT revision.revision_id, revision.window_id
             FROM public.project_context_revisions AS revision
             JOIN public.projects AS project ON project.project_id = revision.project_id
             WHERE revision.revision_id = %s
@@ -183,8 +202,16 @@ class SemanticCommitWriter:
             """,
             (build.context.revision_id, build.project_id, build.user_name),
         )
-        if await cur.fetchone() is None:
+        revision = await cur.fetchone()
+        if revision is None:
             raise ValueError("Semantic Knowledge Context revision is unavailable")
+        revision_owner_id = (
+            None
+            if revision["window_id"] is None
+            else UUID(str(revision["window_id"]))
+        )
+        if revision_owner_id != build.context.window_id:
+            raise ValueError("Semantic Knowledge Context snapshot owner does not match storage")
         await cur.execute(
             """
             SELECT block.block_id, block.assertion_kind
@@ -208,17 +235,70 @@ class SemanticCommitWriter:
             (build.context.revision_id, build.project_id),
         )
         persisted_impact = {UUID(str(row["block_id"])) for row in await cur.fetchall()}
-        if persisted_impact != set(build.impact_block_ids):
+        reuses_published_context = revision_owner_id != build.window_id
+        if reuses_published_context:
+            if revision_owner_id is None:
+                raise ValueError("Semantic Knowledge Context revision has no owning window")
+            await cur.execute(
+                """
+                SELECT stage, context_revision_id
+                FROM public.project_semantic_windows
+                WHERE window_id = %s AND user_name = %s AND project_id = %s
+                FOR KEY SHARE
+                """,
+                (revision_owner_id, build.user_name, build.project_id),
+            )
+            owner = await cur.fetchone()
+            if owner is None:
+                raise ValueError("Semantic Knowledge Context owner is unavailable")
+            owner_revision_id = owner["context_revision_id"]
+            if (
+                owner_revision_id is None
+                or UUID(str(owner_revision_id)) != build.context.revision_id
+            ):
+                raise ValueError("Semantic Knowledge Context owner checkpoint does not match revision")
+            if owner["stage"] not in {
+                SemanticWindowStage.KNOWLEDGE_COMMITTED.value,
+                SemanticWindowStage.COMPLETED.value,
+            }:
+                raise ValueError("Semantic Knowledge Context owner has not published Knowledge")
+            expected_impact: set[UUID] = set()
+        else:
+            expected_impact = persisted_impact
+        if expected_impact != set(build.impact_block_ids):
             raise ValueError("Semantic Knowledge build no longer matches its impact closure")
         extractable_kinds = {"user_asserted", "source_grounded", "human_asserted"}
         eligible = {
             block_id
-            for block_id in persisted_impact
+            for block_id in expected_impact
             if current_blocks.get(block_id) in extractable_kinds
         }
         if eligible != {block.block_id for block in build.knowledge_input_blocks}:
             raise ValueError("Semantic Knowledge input includes non-current or non-extractable blocks")
-        return eligible
+        return _VerifiedContextInput(
+            eligible_blocks=eligible,
+            reuses_published_context=reuses_published_context,
+        )
+
+    @staticmethod
+    def _require_empty_reused_context_build(build: SemanticWindowBuild) -> None:
+        """Prevent a later no-op window from changing published Knowledge."""
+
+        result = build.entity_result
+        if result is None:
+            raise ValueError("Reused Context revision requires a resolved entity result")
+        if (
+            build.mentions
+            or build.relationship_writes
+            or result.entity_ids
+            or result.new_entity_ids
+            or result.alias_updated_ids
+            or result.alias_updates
+            or result.pending_entity_writes
+            or result.block_entity_associations
+            or result.message_entity_refs
+        ):
+            raise ValueError("Reused Context revision requires an empty Knowledge build")
 
     @staticmethod
     async def _write_entities(

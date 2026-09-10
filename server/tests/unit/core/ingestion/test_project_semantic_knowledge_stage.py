@@ -74,9 +74,28 @@ class _Relationships:
         return ()
 
 
+class _UnexpectedBuilder:
+    def __init__(self):
+        self.calls = 0
+
+    async def build(self, _build):
+        self.calls += 1
+        raise AssertionError("no-op Context reuse must not invoke entity extraction")
+
+
+class _UnexpectedRelationships:
+    def __init__(self):
+        self.calls = 0
+
+    async def extract(self, _build):
+        self.calls += 1
+        raise AssertionError("no-op Context reuse must not invoke relationship extraction")
+
+
 class _Store:
     def __init__(self):
         domain = _domain()
+        window_id = uuid4()
         self.block = ContextBlockRecord(
             block_id=uuid4(),
             project_id="project-1",
@@ -89,13 +108,14 @@ class _Store:
             revision_id=uuid4(),
             project_id="project-1",
             revision_number=1,
+            window_id=window_id,
             origin=ContextRevisionOrigin.CONVERSATION,
             domain_version=domain.version,
             content_hash="b" * 64,
             blocks=[self.block],
         )
         self.window = SemanticWindowRecord(
-            window_id=uuid4(),
+            window_id=window_id,
             user_name="ada",
             project_id="project-1",
             origin=SemanticWindowOrigin.CONVERSATION,
@@ -109,6 +129,10 @@ class _Store:
             context_revision_id=self.snapshot.revision_id,
         )
         self.commit_calls = []
+        self.impact_reads = 0
+        self.support_reads = 0
+        self.evidence_message_reads = 0
+        self.impact_block_ids = frozenset({self.block.block_id})
         self.enrich_calls = 0
         self.fail_commit = False
         self.fail_enrichment = False
@@ -121,9 +145,13 @@ class _Store:
         return self.snapshot
 
     async def get_project_context_revision_impact_block_ids(self, _revision_id, **_kwargs):
-        return frozenset({self.block.block_id})
+        self.impact_reads += 1
+        return self.impact_block_ids
 
-    async def get_project_context_block_supports(self, _block_ids, **_kwargs):
+    async def get_project_context_block_supports(self, block_ids, **_kwargs):
+        self.support_reads += 1
+        if str(self.block.block_id) not in set(block_ids):
+            return {}
         return {
             self.block.block_id: (
                 ContextBlockSupportRecord(
@@ -137,6 +165,7 @@ class _Store:
         }
 
     async def get_project_semantic_window_evidence_messages(self, _window_id, **_kwargs):
+        self.evidence_message_reads += 1
         return [{"message_id": 101, "content": "The active Context is grounded."}]
 
     async def commit_project_semantic_knowledge(self, build):
@@ -285,3 +314,112 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
     assert result.success is False
     assert store.window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
     assert store.failures[0]["failure_stage"] == "episode_enrichment"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restart():
+    store = _Store()
+    owner_window_id = store.window.window_id
+    store.window = store.window.model_copy(
+        update={"window_id": uuid4()}
+    )
+    store.fail_commit = True
+    now = [1_000]
+    builder = _UnexpectedBuilder()
+    relationships = _UnexpectedRelationships()
+
+    async def capture_domain():
+        return _domain()
+
+    job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_entity_builder=builder,
+        context_relationship_extractor=relationships,
+        now_ms=lambda: now[0],
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    failed = await job.execute(context)
+
+    assert failed.success is False
+    assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
+    assert store.snapshot.window_id == owner_window_id
+    assert store.snapshot.window_id != store.window.window_id
+    assert store.impact_reads == 0
+    assert store.support_reads == 0
+    assert store.evidence_message_reads == 0
+    assert builder.calls == 0
+    assert relationships.calls == 0
+
+    now[0] = 31_001
+    store.fail_commit = False
+    restarted = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_entity_builder=builder,
+        context_relationship_extractor=relationships,
+        now_ms=lambda: now[0],
+    )
+    committed = await restarted.execute(context)
+    completed = await restarted.execute(context)
+
+    assert committed.success
+    assert completed.success
+    assert len(store.commit_calls) == 1
+    build = store.commit_calls[0]
+    assert build.impact_block_ids == frozenset()
+    assert build.entity_result is not None
+    assert build.entity_result.entity_ids == ()
+    assert build.relationship_writes == ()
+    assert store.impact_reads == 0
+    assert store.support_reads == 0
+    assert store.evidence_message_reads == 0
+    assert builder.calls == 0
+    assert relationships.calls == 0
+    assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_owned_empty_context_checkpoint_completes_without_extraction():
+    store = _Store()
+    store.snapshot = store.snapshot.model_copy(update={"blocks": []})
+    store.impact_block_ids = frozenset()
+    builder = _UnexpectedBuilder()
+    relationships = _UnexpectedRelationships()
+
+    async def capture_domain():
+        return _domain()
+
+    job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_entity_builder=builder,
+        context_relationship_extractor=relationships,
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    knowledge = await job.execute(context)
+    completed = await job.execute(context)
+
+    assert knowledge.success
+    assert completed.success
+    assert store.impact_reads == 1
+    assert store.support_reads == 0
+    assert store.evidence_message_reads == 0
+    assert len(store.commit_calls) == 1
+    assert store.commit_calls[0].impact_block_ids == frozenset()
+    assert builder.calls == 0
+    assert relationships.calls == 0
+    assert store.window.stage is SemanticWindowStage.COMPLETED

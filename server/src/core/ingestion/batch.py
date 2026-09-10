@@ -23,8 +23,8 @@ class SemanticWindowBuild:
     """Non-writing Context-first entity build for one committed semantic window.
 
     It has no session transcript and owns only a frozen Context revision, its
-    durable impact closure, evidence catalog, policy snapshot, trace, and
-    pending Knowledge changes.
+    window-specific effective impact closure, evidence catalog, policy snapshot,
+    trace, and pending Knowledge changes.
     """
 
     window_id: UUID
@@ -52,7 +52,14 @@ class SemanticWindowBuild:
         block_supports: Mapping[UUID, tuple[ContextBlockSupportRecord, ...]],
         message_text_by_id: Mapping[int, str],
     ) -> "SemanticWindowBuild":
-        """Reopen the exact Context-first entity build after a process restart."""
+        """Reopen the exact Context-first entity build after a process restart.
+
+        The revision's persisted impact belongs to the window that created the
+        revision.  A later window may checkpoint that already-published
+        revision after a no-op Context update, but has no new Knowledge work.
+        The semantic writer verifies this ownership rule again against durable
+        state before it advances the later window.
+        """
 
         if not isinstance(window, SemanticWindowRecord):
             raise TypeError("Semantic window build requires a SemanticWindowRecord")
@@ -69,12 +76,17 @@ class SemanticWindowBuild:
         )
         if policy.domain.version != window.domain_version:
             raise ValueError("Semantic window policy and domain versions differ")
+        effective_impact_block_ids = (
+            impact_block_ids
+            if context.window_id == window.window_id
+            else frozenset()
+        )
         return cls(
             window_id=window.window_id,
             user_name=window.user_name,
             project_id=window.project_id,
             context=context,
-            impact_block_ids=impact_block_ids,
+            impact_block_ids=effective_impact_block_ids,
             policy=policy,
             policy_snapshot=window.policy_snapshot,
             block_supports=block_supports,
@@ -95,8 +107,8 @@ class SemanticWindowBuild:
         if not isinstance(self.policy_snapshot, Mapping):
             raise TypeError("SemanticWindowBuild.policy_snapshot must be a mapping")
         current_ids = {block.block_id for block in self.context.blocks}
-        if not self.impact_block_ids:
-            raise ValueError("SemanticWindowBuild requires a durable impact closure")
+        if not isinstance(self.impact_block_ids, frozenset):
+            raise TypeError("SemanticWindowBuild impact block IDs must be a frozenset")
         if not all(isinstance(block_id, UUID) for block_id in self.impact_block_ids):
             raise TypeError("SemanticWindowBuild impact block IDs must be UUIDs")
         for block_id, supports in self.block_supports.items():
@@ -150,6 +162,24 @@ class SemanticWindowBuild:
         ):
             raise ValueError("Context associations must cite eligible current blocks")
         self.entity_result = result
+
+    def set_empty_knowledge_result(self) -> ContextEntityResult:
+        """Attach the valid no-work result for an empty effective impact."""
+
+        if self.impact_block_ids:
+            raise ValueError("Empty Knowledge result requires an empty effective impact")
+        result = ContextEntityResult(
+            entity_ids=(),
+            new_entity_ids=frozenset(),
+            alias_updated_ids=frozenset(),
+            alias_updates={},
+            pending_entity_writes={},
+            block_entity_associations=(),
+            message_entity_refs=(),
+        )
+        self.set_entity_result(result)
+        self.set_relationship_writes(())
+        return result
 
     def set_relationship_writes(
         self, writes: Iterable[ContextRelationshipWrite]
