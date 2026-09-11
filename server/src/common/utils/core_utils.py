@@ -374,12 +374,16 @@ def format_context_vp02_input(
     """Format Context-native VP-02 evidence with stable local block handles."""
 
     lines = ["## Candidate Entities"]
-    names = [candidate["canonical_name"] for candidate in candidates]
-    lines.append(f"Valid canonical entity names: {names}")
+    handles = [candidate["handle"] for candidate in candidates]
+    lines.append(f"Allowed entity handles: {handles}")
     for candidate in candidates:
         source_blocks = candidate.get("source_blocks", [])
         source = f" (introduced in {', '.join(source_blocks)})" if source_blocks else ""
-        lines.append(f"{candidate['canonical_name']} [{candidate['type']}]{source}")
+        identity = " (reserved user identity)" if candidate.get("is_identity") else ""
+        lines.append(
+            f"{candidate['handle']} = {candidate['canonical_name']} "
+            f"[{candidate['type']}]{identity}{source}"
+        )
         if candidate.get("mentions"):
             lines.append(f"  Mentions: {', '.join(candidate['mentions'])}")
     if not candidates:
@@ -399,7 +403,11 @@ def format_context_vp02_input(
         lines.append("(none)")
 
     lines.append("\n## Output Constraints")
-    lines.append("Use only Valid canonical entity names for entity_a and entity_b.")
+    lines.append("Use only Allowed entity handles (`eN`) for entity_a and entity_b.")
+    lines.append(
+        "Canonical names, mentions, types, and source blocks are descriptive only; "
+        "never use a name, alias, or durable entity ID as an endpoint."
+    )
     lines.append("Each connection must cite one or more Valid block_ids.")
     lines.append(
         "Cite the smallest current block set that proves the relation; neighboring "

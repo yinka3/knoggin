@@ -31,6 +31,7 @@ from common.schema.settings import (
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_job import ProjectSemanticJob
+from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.knowledge.context.projection import ContextProjection
 from core.knowledge.context.render import apply_context_edits, render_context_markdown
@@ -251,25 +252,122 @@ class _RelationshipEntityBuilder:
         return result
 
 
-class _OwnershipRelationshipExtractor:
-    async def extract(self, build):
-        block = build.knowledge_input_blocks[0]
-        sarah_id, delta_id = build.entity_result.entity_ids
-        writes = (
-            ContextRelationshipWrite(
-                support_block_ids=(block.block_id,),
-                entity_a_id=sarah_id,
-                entity_b_id=delta_id,
-                relationship_type="owns",
-                canonical_type="OWNS",
-                domain_status="recognized",
-                source_type="Person",
-                target_type="Company",
-                domain_version=build.policy.domain.version,
-            ),
+class _PendingContextEntities:
+    async def get_profile(self, _entity_id):
+        raise AssertionError("new Context entities do not require profile hydration")
+
+    def get_mentions_for_id(self, _entity_id):
+        return []
+
+
+class _ContextRelationshipLLM:
+    extraction_model = "test-vp02"
+
+    def __init__(self, connections) -> None:
+        self.connections = connections
+
+    async def generate_structured(self, *, response_model, **_kwargs):
+        return response_model.model_validate({"connections": self.connections})
+
+
+class _HomonymSourceGroundedContextModel:
+    async def generate_structured(self, **_kwargs):
+        return LLMContextUpdate(
+            operations=[
+                ContextAdd(
+                    section_key="current_state",
+                    markdown="Alex owns Delta.",
+                    assertion_kind=AssertionKind.SOURCE_GROUNDED,
+                    evidence=[{"handle": "S1"}],
+                )
+            ],
+            edit_summary="Recorded homonymous source-grounded ownership",
         )
-        build.set_relationship_writes(writes)
-        return writes
+
+
+class _HomonymRelationshipEntityBuilder:
+    def __init__(self, store) -> None:
+        self.store = store
+        self.first_alex_id = None
+        self.second_alex_id = None
+        self.delta_id = None
+
+    async def build(self, build):
+        first_alex_id = await self.store.allocate_entity_id()
+        second_alex_id = await self.store.allocate_entity_id()
+        delta_id = await self.store.allocate_entity_id()
+        self.first_alex_id = first_alex_id
+        self.second_alex_id = second_alex_id
+        self.delta_id = delta_id
+        block = build.knowledge_input_blocks[0]
+        entities = {
+            first_alex_id: EntityWrite(
+                entity_id=first_alex_id,
+                is_new=True,
+                canonical_name="Alex",
+                entity_type="Person",
+                topic="Work",
+                embedding=None,
+                aliases=("Alex",),
+            ),
+            second_alex_id: EntityWrite(
+                entity_id=second_alex_id,
+                is_new=True,
+                canonical_name="Alex",
+                entity_type="Person",
+                topic="Work",
+                embedding=None,
+                aliases=("Alex",),
+            ),
+            delta_id: EntityWrite(
+                entity_id=delta_id,
+                is_new=True,
+                canonical_name="Delta",
+                entity_type="Company",
+                topic="Work",
+                embedding=None,
+                aliases=("Delta",),
+            ),
+        }
+        result = ContextEntityResult(
+            entity_ids=(first_alex_id, second_alex_id, delta_id),
+            new_entity_ids=frozenset(entities),
+            alias_updated_ids=frozenset(),
+            alias_updates={},
+            pending_entity_writes=entities,
+            project_classifications={
+                first_alex_id: _classification(
+                    first_alex_id,
+                    "Person",
+                    membership="missing",
+                ),
+                second_alex_id: _classification(
+                    second_alex_id,
+                    "Person",
+                    membership="missing",
+                ),
+                delta_id: _classification(
+                    delta_id,
+                    "Company",
+                    membership="missing",
+                ),
+            },
+            block_entity_associations=tuple(
+                ContextBlockEntityAssociation(
+                    block_id=block.block_id,
+                    entity_id=entity_id,
+                    mention_text=mention_text,
+                )
+                for entity_id, mention_text in (
+                    (first_alex_id, "Alex"),
+                    (second_alex_id, "Alex"),
+                    (delta_id, "Delta"),
+                )
+            ),
+            message_entity_refs=(),
+        )
+        build.set_entity_result(result)
+        return result
 
 
 class _CorrectionContextModel:
@@ -706,7 +804,21 @@ async def test_project_semantic_job_commits_source_grounded_relationship_provena
         context_updater=ContextUpdater(llm=_SourceGroundedContextModel()),
         context_projection=projection,
         context_entity_builder=_RelationshipEntityBuilder(store),
-        context_relationship_extractor=_OwnershipRelationshipExtractor(),
+        context_relationship_extractor=ContextRelationshipExtractor(
+            user_name=user_name,
+            llm=_ContextRelationshipLLM(
+                [
+                    {
+                        "block_ids": ["b1"],
+                        "entity_a": "e2",
+                        "entity_b": "e3",
+                        "relationship": "owns",
+                        "context": "Sarah owns Delta.",
+                    }
+                ]
+            ),
+            entities=_PendingContextEntities(),
+        ),
     )
     context = JobContext(user_name=user_name, project_id=project_id)
 
@@ -816,6 +928,155 @@ async def test_project_semantic_job_commits_source_grounded_relationship_provena
     assert len(after_deletion.nodes) == 1
     assert after_deletion.nodes[0].status == "missing"
     assert after_deletion.edges == ()
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_context_vp02_persists_distinct_homonymous_handles_with_source_provenance(
+    real_server_scope,
+    tmp_path,
+):
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name = scope["user_name"]
+    project_id = scope["project_id"]
+    session_id = scope["session_id"]
+    source_ref_id = uuid4()
+    await postgres.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (%s, %s, 211, %s, 'user', 'Check the supplied ownership source.',
+                  1, 'sealed', 'closed', 'assistant_final', 2),
+                 (%s, %s, 212, %s, 'assistant', 'The source says Alex owns Delta.',
+                  2, 'sealed', 'open', NULL, NULL)
+        """,
+        (user_name, session_id, project_id, user_name, session_id, project_id),
+    )
+    await postgres.execute(
+        """
+        UPDATE public.messages
+        SET user_msg_id = 211
+        WHERE project_id = %s AND message_id = 212
+        """,
+        (project_id,),
+    )
+    await postgres.execute(
+        """
+        INSERT INTO public.message_source_refs (
+            source_ref_id, project_id, session_id, message_id, source_kind,
+            source_message_id, content_hash, locator, excerpt, metadata,
+            encounter_kind, agent_run_id, result_position, idempotency_key
+        ) VALUES (
+            %s, %s, %s, 212, 'user_pasted_text', 211, %s,
+            '{"kind":"character_span","start_char":0,"end_char":8}',
+            'Alex owns Delta.', '{}'::jsonb, 'user_pasted_text',
+            'homonym-run', 0, 'homonym-source-provenance'
+        )
+        """,
+        (source_ref_id, project_id, session_id, "0" * 64),
+    )
+
+    domain = _relationship_domain()
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(llm_ner=False),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+    projection = ContextProjection(
+        reader=ProjectContextReader(postgres),
+        writer=ProjectContextWriter(postgres),
+        filesystem=ProjectFilesystem(tmp_path / project_id),
+        capture_ingestion_policy=lambda: policy,
+    )
+
+    async def capture_domain():
+        return domain
+
+    entity_builder = _HomonymRelationshipEntityBuilder(store)
+    job = ProjectSemanticJob(
+        SemanticWindowAdmission(
+            store,
+            IngestionSettings(semantic_window_tokens=100),
+            token_counter=lambda text: max(1, len(text.split())),
+            now_ms=lambda: 1_000_000,
+        ),
+        store,
+        _ZeroEpisodeGenerator(),
+        settings=IngestionSettings(semantic_window_tokens=100),
+        capture_domain=capture_domain,
+        capture_ingestion_policy=lambda: policy,
+        context_updater=ContextUpdater(llm=_HomonymSourceGroundedContextModel()),
+        context_projection=projection,
+        context_entity_builder=entity_builder,
+        context_relationship_extractor=ContextRelationshipExtractor(
+            user_name=user_name,
+            llm=_ContextRelationshipLLM(
+                [
+                    {
+                        "block_ids": ["b1"],
+                        "entity_a": "e2",
+                        "entity_b": "e4",
+                        "relationship": "owns",
+                    },
+                    {
+                        "block_ids": ["b1"],
+                        "entity_a": "e3",
+                        "entity_b": "e4",
+                        "relationship": "owns",
+                    },
+                ]
+            ),
+            entities=_PendingContextEntities(),
+        ),
+    )
+
+    results = [
+        await job.execute(JobContext(user_name=user_name, project_id=project_id))
+        for _ in range(4)
+    ]
+    assert all(result.success for result in results)
+    assert entity_builder.first_alex_id is not None
+    assert entity_builder.second_alex_id is not None
+    assert entity_builder.delta_id is not None
+
+    observations = await postgres.fetch_all(
+        """
+        SELECT
+            observation.source_entity_id,
+            observation.target_entity_id,
+            support.message_id,
+            support.source_ref_id
+        FROM public.relationship_observations AS observation
+        JOIN public.relationship_observation_blocks AS observation_block
+          ON observation_block.observation_id = observation.observation_id
+         AND observation_block.project_id = observation.project_id
+        JOIN public.project_context_block_supports AS support
+          ON support.block_id = observation_block.block_id
+         AND support.project_id = observation.project_id
+        WHERE observation.project_id = %s AND observation.retired_at IS NULL
+        ORDER BY observation.source_entity_id
+        """,
+        (project_id,),
+    )
+    assert observations == [
+        {
+            "source_entity_id": entity_builder.first_alex_id,
+            "target_entity_id": entity_builder.delta_id,
+            "message_id": 212,
+            "source_ref_id": source_ref_id,
+        },
+        {
+            "source_entity_id": entity_builder.second_alex_id,
+            "target_entity_id": entity_builder.delta_id,
+            "message_id": 212,
+            "source_ref_id": source_ref_id,
+        },
+    ]
 
 
 @pytest.mark.integration

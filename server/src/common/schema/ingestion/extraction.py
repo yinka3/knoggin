@@ -104,7 +104,15 @@ class ContextRelationshipMention(StructuredLLMOutput):
             raise ValueError("block_ids must contain local bN Context references")
         return value
 
-    @field_validator("entity_a", "entity_b", "relationship")
+    @field_validator("entity_a", "entity_b")
+    @classmethod
+    def validate_entity_handle(cls, value: str, info) -> str:
+        value = normalize_required_text(value, field_name=info.field_name)
+        if not re.match(r"^e[1-9]\d*$", value):
+            raise ValueError(f"{info.field_name} must be a local eN entity handle")
+        return value
+
+    @field_validator("relationship")
     @classmethod
     def validate_required_text(cls, value: str, info) -> str:
         return normalize_required_text(value, field_name=info.field_name)
