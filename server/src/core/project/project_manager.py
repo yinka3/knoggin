@@ -339,44 +339,6 @@ class ProjectManager:
         meta.pop("domain_config", None)
         return meta
 
-    async def get_episode_window_size(self, project_id: str) -> int:
-        """Return the one project-owned episode window setting."""
-
-        row = await self.pg.fetch_one(
-            """
-            SELECT episode_window_size
-            FROM public.projects
-            WHERE user_name = %s AND project_id = %s
-            """,
-            (self.user_name, project_id),
-        )
-        if row is None:
-            raise ValueError("Episode settings require an existing project")
-        return int(row["episode_window_size"])
-
-    async def update_episode_window_size(
-        self, project_id: str, episode_window_size: int
-    ) -> int:
-        """Persist and immediately apply a project's episode window size."""
-
-        if not 8 <= episode_window_size <= 72:
-            raise ValueError("episode_window_size must be between 8 and 72")
-        row = await self.pg.fetch_one(
-            """
-            UPDATE public.projects
-            SET episode_window_size = %s, updated_at = now()
-            WHERE user_name = %s AND project_id = %s
-            RETURNING episode_window_size
-            """,
-            (episode_window_size, self.user_name, project_id),
-        )
-        if row is None:
-            raise ValueError("Episode settings require an existing project")
-        active = self.active_projects.get(project_id)
-        if active is not None and active.episode_job is not None:
-            active.episode_job.update_episode_window_size(episode_window_size)
-        return int(row["episode_window_size"])
-
     def validate_domain_config(self, candidate: DomainCandidate) -> DomainValidation:
         """Validate a complete candidate without touching project state."""
 

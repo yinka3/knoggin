@@ -162,7 +162,6 @@ class ProjectRuntime:
             return IngestionPolicy.capture(
                 text_processor=TextProcessorSettings(
                     gliner_threshold=self.text_processor.gliner_threshold,
-                    llm_ner=self.text_processor.llm_ner,
                 ),
                 entity_resolution=settings.entity_resolution,
                 compiled_domain=self.compiled_domain,

@@ -74,7 +74,7 @@ def _admission(rows, *, target=128_000, now_ms=1_000):
 
 def _policy(domain):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -111,7 +111,7 @@ async def test_target_crossing_keeps_the_complete_exchange_and_stops_after_it():
 async def test_admission_persists_the_exact_context_entity_policy():
     compiled_domain = make_domain_config().compile()
     frozen_policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42, llm_ner=False),
+        text_processor=TextProcessorSettings(gliner_threshold=0.42),
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=compiled_domain,
     )
@@ -125,9 +125,31 @@ async def test_admission_persists_the_exact_context_entity_policy():
     )
 
     assert selected is not None
-    assert IngestionPolicy.from_semantic_window_snapshot(
-        selected.window.policy_snapshot["ingestion_policy"]
-    ) == frozen_policy
+    ingestion_snapshot = selected.window.policy_snapshot["ingestion_policy"]
+    assert IngestionPolicy.from_semantic_window_snapshot(ingestion_snapshot) == frozen_policy
+    assert set(ingestion_snapshot) == {
+        "gliner_threshold",
+        "candidate_fuzzy_threshold",
+        "candidate_vector_threshold",
+        "resolution_threshold",
+        "common_word_frequency_threshold",
+        "sparse_context_verbs",
+        "compiled_domain",
+    }
+    assert set(selected.window.policy_snapshot["episode_generation_policy"]) == {
+        "version",
+        "enabled",
+        "max_episode_source_messages",
+        "max_episode_source_tokens",
+        "max_narrative_chars",
+        "prior_episode_candidate_count",
+    }
+    assert "episode_window_size" not in selected.window.policy_snapshot
+
+    with pytest.raises(ValueError, match="shape"):
+        IngestionPolicy.from_semantic_window_snapshot(
+            ingestion_snapshot | {"llm_ner": False}
+        )
 
 
 @pytest.mark.unit

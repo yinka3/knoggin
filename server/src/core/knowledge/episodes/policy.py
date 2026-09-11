@@ -15,7 +15,6 @@ class EpisodeGenerationPolicy:
 
     version: str
     enabled: bool
-    target_message_count: int
     max_episode_source_messages: int
     max_episode_source_tokens: int
     max_narrative_chars: int
@@ -26,14 +25,9 @@ class EpisodeGenerationPolicy:
         cls,
         *,
         settings: EpisodeSettings,
-        episode_window_size: int,
     ) -> "EpisodeGenerationPolicy":
-        if not 8 <= episode_window_size <= 72:
-            raise ValueError("episode_window_size must be between 8 and 72")
-
         values = {
             "enabled": settings.enabled,
-            "target_message_count": episode_window_size,
             "max_episode_source_messages": settings.max_episode_source_messages,
             "max_episode_source_tokens": settings.max_episode_source_tokens,
             "max_narrative_chars": settings.max_narrative_chars,
@@ -50,7 +44,6 @@ class EpisodeGenerationPolicy:
 
         return {
             "version": self.version,
-            "target_message_count": self.target_message_count,
             "max_episode_source_messages": self.max_episode_source_messages,
             "max_episode_source_tokens": self.max_episode_source_tokens,
             "max_narrative_chars": self.max_narrative_chars,
@@ -64,7 +57,6 @@ class EpisodeGenerationPolicy:
         return {
             "version": self.version,
             "enabled": self.enabled,
-            "target_message_count": self.target_message_count,
             "max_episode_source_messages": self.max_episode_source_messages,
             "max_episode_source_tokens": self.max_episode_source_tokens,
             "max_narrative_chars": self.max_narrative_chars,
@@ -82,7 +74,6 @@ class EpisodeGenerationPolicy:
         expected = {
             "version",
             "enabled",
-            "target_message_count",
             "max_episode_source_messages",
             "max_episode_source_tokens",
             "max_narrative_chars",
@@ -102,7 +93,6 @@ class EpisodeGenerationPolicy:
             raise ValueError("semantic window episode policy has invalid values")
         values = {
             "enabled": snapshot["enabled"],
-            "target_message_count": snapshot["target_message_count"],
             "max_episode_source_messages": snapshot["max_episode_source_messages"],
             "max_episode_source_tokens": snapshot["max_episode_source_tokens"],
             "max_narrative_chars": snapshot["max_narrative_chars"],
@@ -123,7 +113,6 @@ class EpisodeGenerationPolicy:
             raise ValueError("semantic window episode policy has invalid values") from exc
         if (
             not policy.version
-            or not 8 <= policy.target_message_count <= 72
             or policy.max_episode_source_messages <= 0
             or policy.max_episode_source_tokens <= 0
             or policy.max_narrative_chars <= 0

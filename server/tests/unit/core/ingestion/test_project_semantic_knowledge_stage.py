@@ -41,7 +41,7 @@ def _domain():
 
 def _policy():
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=_domain(),
     )

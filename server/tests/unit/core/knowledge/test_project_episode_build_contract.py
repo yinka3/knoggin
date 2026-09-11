@@ -17,9 +17,7 @@ def _build(*, prior=None, settings=None):
     settings = settings or EpisodeSettings()
     return ProjectEpisodeBuild(
         project_id="project-1",
-        policy=EpisodeGenerationPolicy.capture(
-            settings=settings, episode_window_size=8
-        ),
+        policy=EpisodeGenerationPolicy.capture(settings=settings),
         messages=[
             {"message_id": 10, "session_id": "session-a", "role": "user", "content": "Plan launch", "timestamp_ms": 1},
             {"message_id": 11, "session_id": "session-a", "role": "assistant", "content": "Drafted plan", "timestamp_ms": 2, "user_msg_id": 10},

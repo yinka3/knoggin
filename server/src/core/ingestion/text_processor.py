@@ -87,7 +87,6 @@ class TextProcessor:
     def update_settings(self, config: TextProcessorSettings):
         """Update settings dynamically while running."""
         self.gliner_threshold = config.gliner_threshold
-        self.llm_ner = config.llm_ner
 
     def set_vp01(self, vp01: VP01EntityExtractor) -> None:
         """Install the adapter selected by the next active domain snapshot."""

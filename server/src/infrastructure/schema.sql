@@ -608,14 +608,12 @@ CREATE TABLE public.projects (
     description text,
     status text DEFAULT 'active'::text NOT NULL,
     domain_config jsonb NOT NULL,
-    episode_window_size integer DEFAULT 24 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     archived_at timestamp with time zone,
     deleted_at timestamp with time zone,
     last_activity_at timestamp with time zone,
     CONSTRAINT projects_domain_config_check CHECK ((jsonb_typeof(domain_config) = 'object'::text)),
-    CONSTRAINT projects_episode_window_size_check CHECK (((episode_window_size >= 8) AND (episode_window_size <= 72))),
     CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text, 'deleted'::text])))
 );
 CREATE TABLE public.project_contexts (

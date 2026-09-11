@@ -1,7 +1,7 @@
 # Core Stage 3 — Semantic Participation and Admission Policy
 
-Status: In progress 2026-09-11. Chunks A–D are complete; Chunk E has not
-started.
+Status: In progress 2026-09-11. Chunks A–E are complete; combined validation
+and review closeout remain.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Recheck HEAD and the working tree before implementation. Preserve
@@ -289,8 +289,8 @@ without rewriting their original rationale.
 - [x] B: eligibility before FIFO and deleted-Session exclusion.
 - [x] C: atomic claim-time participation revalidation.
 - [x] D: coherent semantic policy/domain capture.
-- [ ] E: inert policy cleanup.
+- [x] E: inert policy cleanup.
 - [ ] Combined real-PostgreSQL scenario passes.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 3 Chunk E.
+Next implementation task: Stage 3 combined validation and review closeout.

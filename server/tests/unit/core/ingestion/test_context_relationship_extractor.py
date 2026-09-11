@@ -73,7 +73,7 @@ def _build(*blocks):
         ),
         impact_block_ids=frozenset(block.block_id for block in blocks),
         policy=IngestionPolicy.capture(
-            text_processor=TextProcessorSettings(llm_ner=False),
+            text_processor=TextProcessorSettings(),
             entity_resolution=EntityResolutionSettings(),
             compiled_domain=domain,
         ),

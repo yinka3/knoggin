@@ -749,7 +749,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
 
     domain = _domain()
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -941,7 +941,7 @@ async def test_project_semantic_job_recovers_resolver_publication_and_commits_so
 
     domain = _relationship_domain()
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -1201,7 +1201,7 @@ async def test_context_vp02_persists_distinct_homonymous_handles_with_source_pro
 
     domain = _relationship_domain()
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -1335,7 +1335,7 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
     domain = _relationship_domain()
     settings = IngestionSettings(semantic_window_tokens=1)
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -1556,7 +1556,7 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
     domain = _relationship_domain()
     settings = IngestionSettings(semantic_window_tokens=1)
     policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=domain,
     )
@@ -1648,7 +1648,7 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
             get_profile=resolver.get_profile,
             vp01=vp01,
             spacy=spacy.blank("en"),
-            settings=TextProcessorSettings(llm_ner=False),
+            settings=TextProcessorSettings(),
         )
         return ProjectSemanticJob(
             SemanticWindowAdmission(

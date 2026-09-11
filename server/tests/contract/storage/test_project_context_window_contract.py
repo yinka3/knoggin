@@ -69,7 +69,7 @@ def _materialization(*blocks: ContextBlockRecord, supports=()) -> ContextMateria
 
 def _ingestion_policy() -> IngestionPolicy:
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42, llm_ner=False),
+        text_processor=TextProcessorSettings(gliner_threshold=0.42),
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=_domain(),
     )

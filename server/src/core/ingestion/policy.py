@@ -17,7 +17,6 @@ class IngestionPolicy:
     """Runtime rules that remain stable for one in-memory ingestion batch."""
 
     gliner_threshold: float
-    llm_ner: bool
     candidate_fuzzy_threshold: int
     candidate_vector_threshold: float
     resolution_threshold: float
@@ -37,7 +36,6 @@ class IngestionPolicy:
             raise TypeError("IngestionPolicy requires an active CompiledDomain")
         return cls(
             gliner_threshold=text_processor.gliner_threshold,
-            llm_ner=text_processor.llm_ner,
             candidate_fuzzy_threshold=entity_resolution.candidate_fuzzy_threshold,
             candidate_vector_threshold=entity_resolution.candidate_vector_threshold,
             resolution_threshold=entity_resolution.resolution_threshold,
@@ -57,7 +55,6 @@ class IngestionPolicy:
 
         return {
             "gliner_threshold": self.gliner_threshold,
-            "llm_ner": self.llm_ner,
             "candidate_fuzzy_threshold": self.candidate_fuzzy_threshold,
             "candidate_vector_threshold": self.candidate_vector_threshold,
             "resolution_threshold": self.resolution_threshold,
@@ -72,9 +69,19 @@ class IngestionPolicy:
 
         if not isinstance(payload, Mapping):
             raise ValueError("Ingestion policy snapshot must be an object")
+        expected = {
+            "gliner_threshold",
+            "candidate_fuzzy_threshold",
+            "candidate_vector_threshold",
+            "resolution_threshold",
+            "common_word_frequency_threshold",
+            "sparse_context_verbs",
+            "compiled_domain",
+        }
+        if set(payload) != expected:
+            raise ValueError("Invalid ingestion policy snapshot shape")
         try:
             gliner_threshold = payload["gliner_threshold"]
-            llm_ner = payload["llm_ner"]
             candidate_fuzzy_threshold = payload["candidate_fuzzy_threshold"]
             candidate_vector_threshold = payload["candidate_vector_threshold"]
             resolution_threshold = payload["resolution_threshold"]
@@ -88,7 +95,6 @@ class IngestionPolicy:
         if (
             not isinstance(gliner_threshold, (int, float))
             or isinstance(gliner_threshold, bool)
-            or not isinstance(llm_ner, bool)
             or not isinstance(candidate_fuzzy_threshold, int)
             or isinstance(candidate_fuzzy_threshold, bool)
             or not isinstance(candidate_vector_threshold, (int, float))
@@ -102,7 +108,6 @@ class IngestionPolicy:
             raise ValueError("Invalid ingestion policy snapshot values")
         return cls(
             gliner_threshold=float(gliner_threshold),
-            llm_ner=llm_ner,
             candidate_fuzzy_threshold=candidate_fuzzy_threshold,
             candidate_vector_threshold=float(candidate_vector_threshold),
             resolution_threshold=float(resolution_threshold),

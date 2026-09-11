@@ -355,7 +355,7 @@ async def test_semantic_policy_capture_and_domain_activation_share_one_lock(monk
 
     runtime = make_project_state(
         domain_config=initial,
-        text_processor=SimpleNamespace(gliner_threshold=0.42, llm_ner=False),
+        text_processor=SimpleNamespace(gliner_threshold=0.42),
     )
     runtime.domain_config_store = Store()
     monkeypatch.setattr(

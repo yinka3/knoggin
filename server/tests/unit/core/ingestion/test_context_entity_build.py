@@ -182,7 +182,7 @@ def identity_domain():
 
 def policy(compiled_domain):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42, llm_ner=False),
+        text_processor=TextProcessorSettings(gliner_threshold=0.42),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=compiled_domain,
     )
@@ -232,7 +232,7 @@ def processor(vp01):
         get_profile=no_profile,
         vp01=vp01,
         spacy=EmptyNLP(),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
     result._build_phrase_matcher = lambda: (lambda _doc: [], {})
@@ -393,7 +393,7 @@ async def test_context_known_aliases_run_before_the_gliner25_pass():
         get_profile=get_profile,
         vp01=RecordingVP01(),
         spacy=AliasNLP(),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
     text_processor._build_phrase_matcher = lambda: (
@@ -431,7 +431,7 @@ async def test_context_foreign_alias_defers_type_authority_to_vp01():
             [VP01EntitySpan(text="Acme", label="company", start=0, end=4)]
         ),
         spacy=AliasNLP(),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
     text_processor._build_phrase_matcher = lambda: (
@@ -511,7 +511,7 @@ async def test_blank_spacy_preserves_casefolded_alias_matching():
         get_profile=get_profile,
         vp01=FakeVP01(),
         spacy=spacy.blank("en"),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
 
@@ -540,7 +540,7 @@ async def test_blank_spacy_keeps_common_word_false_positives_out_of_context_ment
         get_profile=lambda _entity_id: _async_value(None),
         vp01=vp01,
         spacy=spacy.blank("en"),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
 

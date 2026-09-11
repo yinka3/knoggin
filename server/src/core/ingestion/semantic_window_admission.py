@@ -65,7 +65,6 @@ class SemanticWindowAdmission:
     TOKEN_ESTIMATOR = "llm.count_tokens"
     TOKEN_ESTIMATOR_VERSION = "runtime-v1"
     POLICY_VERSION = 1
-    EPISODE_POLICY_REFERENCE_WINDOW_SIZE = 24
 
     def __init__(
         self,
@@ -169,7 +168,6 @@ class SemanticWindowAdmission:
             },
             "episode_generation_policy": EpisodeGenerationPolicy.capture(
                 settings=self._episode_settings,
-                episode_window_size=self.EPISODE_POLICY_REFERENCE_WINDOW_SIZE,
             ).semantic_window_snapshot(),
             "compiled_domain": domain.to_dict(),
         }
