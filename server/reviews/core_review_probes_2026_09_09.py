@@ -1,8 +1,8 @@
 """Historical review probes plus active reproductions for unresolved findings.
 
-F1 and F7 are skipped historical records after Stage 1: normal regression
-tests now assert the desired behavior. The remaining probes still document
-active findings rather than desired acceptance contracts.
+F1, F2, F3, and F7 are skipped historical records after Stages 1 and 2:
+normal regressions now assert the desired behavior. The remaining probes still
+document active findings rather than desired acceptance contracts.
 """
 
 from uuid import uuid4
@@ -220,6 +220,13 @@ async def test_two_windows_same_context_create_two_active_observations(
     assert len(refs[0]) == 2
 
 
+@pytest.mark.skip(
+    reason=(
+        "Historical F2 reproduction resolved by 4eac23e; desired behavior is "
+        "covered by test_semantic_commit_admits_a_currently_readable_foreign_identity "
+        "and the Stage 2 composition regression"
+    ),
+)
 async def test_linked_entity_without_local_classification_rejected(
     real_postgres_client,
 ):
@@ -242,6 +249,12 @@ async def test_linked_entity_without_local_classification_rejected(
     ) == {"n": 0}
 
 
+@pytest.mark.skip(
+    reason=(
+        "Historical F2 cache-only reproduction resolved by 4eac23e; desired "
+        "behavior is covered by the storage and Stage 2 composition regressions"
+    ),
+)
 async def test_resolver_accepts_entity_from_readable_project():
     from common.schema.ingestion.contracts import ContextBlockMention
     from core.knowledge.entity.resolver import EntityResolver
@@ -283,6 +296,13 @@ async def test_resolver_accepts_entity_from_readable_project():
     assert result["pending_entity_writes"] == {}
 
 
+@pytest.mark.skip(
+    reason=(
+        "Historical F3 reproduction resolved by a0b49af and beb68b6; desired "
+        "behavior is covered by test_cold_resolver_hydrates_a_durable_exact_alias "
+        "and the Stage 2 composition regression"
+    ),
+)
 async def test_cold_resolver_misses_durable_exact_alias_when_vector_does_not_match():
     from core.knowledge.entity.resolver import EntityResolver
     from tests.unit.core.knowledge.conftest import (

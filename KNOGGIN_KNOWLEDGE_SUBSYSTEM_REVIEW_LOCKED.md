@@ -1212,3 +1212,27 @@ validated; the later-stage work in this review remains open.
 - `e344e24` adds the real-PostgreSQL combined correction → no-op → restart
   regression in
   `tests/integration/ingestion/test_project_semantic_postgres_flow.py`.
+
+## Stage 2 implementation status — 2026-09-11
+
+The locked rationale remains intact. The following bounded identity work is
+implemented and validated:
+
+- §4: `4eac23e` makes target-project classification an explicit atomic payload
+  when a readable user-global identity is reused. It does not recreate or
+  mutate the identity's originating project classification.
+- Scoped durable exact canonical-name and alias candidates hydrate before
+  vector fallback (`a0b49af`). `beb68b6` keeps a unique direct exact candidate
+  usable when a different shared fuzzy alias is ambiguous.
+- §15: `52cbacb` embeds normalized canonical identity only; project-local
+  type/topic reclassification no longer changes the global identity vector or
+  triggers an identity embedding rebuild.
+- The real PostgreSQL/AGE composition regression
+  `test_project_semantic_job_composes_real_resolution_extraction_and_recovery`
+  verifies the cross-project classification, identity reuse, resolver recovery,
+  block provenance, and Stage 1 observation/history behavior together.
+
+The later maintenance, merge, concurrency, document, and Episode work listed
+above remains open. Stage 2 also retains ambiguity for semantically
+indistinguishable same-name, same-type identities rather than making an
+unsupported automatic choice.

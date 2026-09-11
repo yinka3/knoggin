@@ -71,6 +71,16 @@ Only source-grounded, user-asserted, and human-asserted Context blocks enter
 Knowledge. Agent-derived blocks still render in Project Context but are not
 entity or relationship input.
 
+After the atomic Knowledge commit, finalization reloads affected entity IDs
+from that committed Context revision and publishes authoritative scoped rows to
+the live resolver. A publication failure leaves the window at
+`knowledge_committed` with a `resolver_publication` failure; retry hydrates the
+resolver and finalizes without replaying the SQL/AGE mutation. Resolver lookup
+treats scoped durable exact names and aliases as direct evidence, while a
+shared fuzzy alias cannot invalidate a unique direct exact match. A reused
+visible identity receives an explicit target-project classification before its
+Context associations and relationships are committed.
+
 When a later conversation window checkpoints a Context revision already
 published by its owning window, it has empty effective Knowledge impact: it
 advances the normal Knowledge and finalization checkpoints without extraction,

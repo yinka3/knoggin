@@ -195,15 +195,41 @@ They import existing test helpers and require the same test PostgreSQL/AGE/pgvec
   regression in
   `tests/integration/ingestion/test_project_semantic_postgres_flow.py`.
 
-All other findings and recommended work remain unchanged and open.
+At the end of Stage 1, all other findings and recommended work remained open.
+
+## Stage 2 implementation status — 2026-09-11
+
+The following findings are resolved within the evidence boundary stated in this
+review. The original findings remain above as historical rationale.
+
+- **F2:** `4eac23e` stages a receiving project's explicit classification for a
+  readable foreign identity in the same atomic Knowledge commit, before its
+  Context associations and relationships. The normal storage contract is
+  `test_semantic_commit_admits_a_currently_readable_foreign_identity`.
+- **F3:** `a0b49af` hydrates scoped durable exact canonical-name and alias
+  candidates before vector fallback. `beb68b6` additionally prevents an
+  unrelated shared fuzzy alias from invalidating a unique direct exact match.
+  The normal regression is
+  `test_cold_resolver_hydrates_a_durable_exact_alias`.
+- **F5:** `4eac23e` evaluates pending identities as compatibility candidates,
+  and `343e3a5` gives VP-02 opaque local entity handles instead of canonical
+  names. This does not claim semantic selection between otherwise
+  indistinguishable same-name, same-type identities; that ambiguous case still
+  does not reuse an identity automatically.
+- **F6:** `84d3eb0` publishes only committed entity/alias state to the live
+  resolver and treats a publication failure as a recoverable finalization
+  checkpoint, without replaying the canonical Knowledge mutation.
+- **F10:** `52cbacb` derives global entity embeddings from normalized canonical
+  identity only, so project-local reclassification does not change or rebuild
+  the identity vector.
+- `beb68b6` adds the combined real PostgreSQL/AGE regression
+  `test_project_semantic_job_composes_real_resolution_extraction_and_recovery`,
+  covering F2/F3/F5/F6/F10 together with Stage 1 history/time behavior.
 
 ## Recommended implementation order
 
-1. F1: distinguish unchanged Context from a new impact set.
-2. F2, F3, F5, F6: finish identity reuse, local classification, handles, and cache consistency together, with separate tests for each invariant.
-3. F7 and F9: align current evidence and event time.
-4. F8 and F12: complete maintenance participation in Context-first state, then validate concurrency ordering.
-5. F4, F10, F11: make document and embedding version publication consistent; complete episode editing before exposing it.
-6. I1–I4: remove inert paths/settings and improve bounded diagnostics/model context.
+1. F8 and F12: complete maintenance participation in Context-first state, then validate concurrency ordering.
+2. F4 and F11: make document version publication consistent and complete Episode editing before exposing it.
+3. I1–I4: remove inert paths/settings and improve bounded diagnostics/model context.
 
 These are repairs and simplifications of the existing engine. No implementation changes were made during this review; only the report and standalone reproduction artifact were added.

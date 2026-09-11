@@ -1,6 +1,6 @@
 # Core Stage 2 — Entity Identity and Resolution
 
-Status: In progress; Chunks A-E completed 2026-09-11.
+Status: Complete 2026-09-11.
 
 Baseline inspected: `aadedewe/refactor`, `4e47481`, following completed
 [Stage 1](CORE_STAGE_1_IMPLEMENTATION_PLAN.md). Recheck HEAD and the working
@@ -446,11 +446,45 @@ while drafting this plan.
 - [x] C: entity handles and provenance-preserving endpoint validation.
 - [x] D: committed resolver publication and recovery.
 - [x] E: identity-only embeddings and classification-only maintenance cleanup.
-- [ ] Combined real-resolver/extractor PostgreSQL scenario passes.
-- [ ] Verify retained Stage 1 gates; record changed files, commands, limitations and local commit IDs.
-- [ ] Annotate completed F2/F3/F5/F6/F10 and relevant locked sections; preserve deferred findings.
-- [ ] Retire resolved historical core probes with normal regression references.
-- [ ] Add a narrow operations-document update while preserving existing user edits.
+- [x] Combined real-resolver/extractor PostgreSQL scenario passes.
+- [x] Verify retained Stage 1 gates; record changed files, commands, limitations and local commit IDs.
+- [x] Annotate completed F2/F3/F5/F6/F10 and relevant locked sections; preserve deferred findings.
+- [x] Retire resolved historical core probes with normal regression references.
+- [x] Add a narrow operations-document update while preserving existing user edits.
 
-Next implementation task: run the combined Stage 2 real-resolver/extractor
-PostgreSQL scenario, then close the retained Stage 1 gates and operations notes.
+### Completion record — 2026-09-11
+
+- Added `test_project_semantic_job_composes_real_resolution_extraction_and_recovery`:
+  a real PostgreSQL/AGE flow with the production resolver, Context entity
+  builder, and relationship extractor. It proves cold durable-exact identity
+  reuse across readable projects without a useful vector result, target-project
+  classification, opaque relationship handles, source/block provenance,
+  post-commit publication recovery after reconstruction, a changed follow-up,
+  and a no-op follow-up.
+- The composition flow exposed an additional source defect: an unrelated shared
+  fuzzy alias could add `ambiguous_alias` to a unique direct exact-name
+  candidate, causing the resolver to create a duplicate identity. `beb68b6`
+  keeps ambiguity conservative for fuzzy-only candidates while preserving
+  direct durable exact evidence.
+- Normal regressions now replace the resolved historical F2/F3 probes. The
+  deferred same-name, same-type semantic-adjudication boundary remains open;
+  Stage 2 does not claim to infer an identity where evidence is genuinely
+  ambiguous.
+- Validation passed:
+  - `uv run --project server --extra dev pytest -q tests/unit/core/knowledge/test_entity_manager_candidates_contract.py -k unique_exact_name_is_not_blocked_by_a_shared_fuzzy_alias` — `1 passed, 19 deselected`
+  - `uv run --project server --extra dev pytest -q tests/integration/ingestion/test_project_semantic_postgres_flow.py -k composes_real_resolution_extraction_and_recovery` — `1 passed, 4 deselected`
+  - `uv run --project server --extra dev pytest -q tests/unit/core/knowledge/test_entity_manager_candidates_contract.py tests/unit/core/ingestion/test_context_entity_build.py tests/unit/core/ingestion/test_context_relationship_extractor.py tests/unit/core/ingestion/test_project_semantic_knowledge_stage.py` — `52 passed`
+  - `uv run --project server --extra dev pytest -q tests/integration/ingestion/test_project_semantic_postgres_flow.py` — `5 passed`
+  - `uv run --project server --extra dev pytest -q tests/contract/storage -m requires_postgres` — `77 passed, 108 deselected`
+  - `uv run --project . --extra dev pytest -q reviews/core_review_probes_2026_09_09.py -c pyproject.toml` — `1 passed, 5 skipped`; the unresolved F4 document probe remains active.
+  - touched-path Ruff, compileall, and `git diff --check`.
+- The configured mypy baseline was inspected but cannot start because the
+  local `mypy.ini` names removed `src/core/ingestion/recovery`; this is a
+  stale baseline configuration, not a Stage 2 source finding. It was left
+  unchanged.
+- Local implementation commits: `a0b49af` (A), `4eac23e` (B), `343e3a5` (C),
+  `84d3eb0` (D), `52cbacb` (E), and `beb68b6` (composition regression and
+  direct-exact candidate repair).
+
+Next implementation task: select the next remaining core finding from the
+review records; Stage 2 identity and resolver-publication work is complete.

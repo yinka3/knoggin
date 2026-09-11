@@ -833,3 +833,25 @@ The remaining important problems are concentrated around entity identity and run
 - and semantic participation not yet being wired into the complete admission/claim boundary.
 
 Fixing those edges should preserve the current architecture while making the durable Knowledge identity model and the live ingestion runtime agree.
+
+## Stage 2 implementation status — 2026-09-11
+
+The locked rationale remains the historical review record. The following
+identity and publication items are now implemented and covered by normal
+regressions:
+
+- §§13–15: `a0b49af` treats pending entities as compatibility candidates and
+  `343e3a5` uses generated request-local `eN` handles for VP-02 endpoints,
+  preserving the chosen durable identity and source-block provenance.
+- §17: `84d3eb0` publishes only after the atomic Knowledge commit. A failure
+  leaves the window at `knowledge_committed`; restart recovery republishes
+  durable state and finalizes without replaying the canonical mutation.
+- `beb68b6` adds a real PostgreSQL/AGE composition flow that covers cold
+  durable-exact reuse from a readable project, local classification,
+  relationship handles, failed publication recovery, changed and no-op
+  follow-ups. It also preserves a unique direct exact-name candidate when an
+  unrelated shared short alias is ambiguous.
+
+The broader case of semantically indistinguishable same-name, same-type
+identities remains deliberately unresolved: the system retains ambiguity
+instead of claiming an unsupported automatic choice.
