@@ -1,0 +1,374 @@
+# Core Stage 5 — Maintenance Integrity and Concurrency
+
+Status: Planned 2026-09-11. No implementation has started.
+
+Baseline inspected: `aadedewe/refactor`, `bcb354e`, including the typed evidence
+maintenance framework committed before Core Stages 1 and 2. Recheck the current
+checkout before implementation: this plan finishes that framework and must not
+recreate it.
+
+Stage 5 depends on Stage 3's final semantic-participation names and eligibility
+rules. Its association and review chunks may be developed independently, but
+frontier/concurrency closeout waits for Stage 3.
+
+## Objective
+
+Make explicit maintenance operations agree with Context-first Knowledge under
+merge, cleanup, restart, and concurrent semantic work:
+
+1. Global merge/rollback and Project cleanup include
+   `context_block_entities`.
+2. Maintenance quiescence includes eligible conversation work and every active
+   semantic-window origin.
+3. Global identity merge and semantic Knowledge commit have a proven durable
+   ordering.
+4. Projection repair obligations survive interruption after canonical change.
+5. Conflict discovery/reviews use stable identity, exact evidence snapshots,
+   and durable structured resolution.
+6. User-selected maintenance automation reduces repeated review burden without
+   silently broadening mutation authority.
+
+## Finding map
+
+| Work | Review source | Stage 5 outcome |
+| --- | --- | --- |
+| Merge omits Context associations | Core F8; locked Knowledge §§10–11 | Include associations in preview/hash/mutation/rollback. |
+| Cleanup omits Context associations | Core F8; locked Knowledge §§10,12,28 | Remove only the target Project's associations and downstream links. |
+| Frontier ignores participation/human edits | Core F12; locked Knowledge §§20–21 | Use Stage 3 eligibility plus all active semantic windows. |
+| Merge/semantic serialization | Locked Knowledge §22; core remaining gate | Prove the interleaving first; add the smallest shared transaction lock only if required. |
+| Lost projection repair marker | Maintenance review MC5 | Mark repair pending inside canonical merge/rollback transaction. |
+| Conflict discovery/review gaps | Maintenance review MC1–MC4 | Make discovery useful and reviews stable/auditable. |
+| User review burden | Prior product discussion; maintenance scoped improvement | Add bounded action-class trust policy after identity/deduplication is correct. |
+
+## Scope boundaries
+
+Included:
+
+- Existing global entity merge journal, rollback, impact preview, Project entity
+  cleanup, maintenance frontier, typed review envelope, conflict discovery,
+  projection repair, health status, and ProjectManager cache invalidation.
+- Real PostgreSQL/AGE transaction and controlled-interleaving tests.
+- Server-side policy for manual/assisted/trusted maintenance behavior.
+
+Deferred:
+
+- Project Forget remains a separate irreversible workflow.
+- Context supersession remains deterministic ingestion, not a conflict review.
+- Historical Episode prose is not rewritten by merge or relationship
+  reinterpretation.
+- Multi-engine/distributed locking is out of scope; one local Knoggin engine
+  with concurrent jobs remains in scope.
+- UI/SDK presentation waits for those layers.
+
+## Required invariants
+
+- `context_block_entities` is first-class identity usage in preview, state hash,
+  merge, rollback, cleanup, and conflict residue.
+- Merge/cleanup never remove another Project's association.
+- A global identity survives while any Project classification remains.
+- Maintenance cannot capture or revalidate a stable frontier while an eligible
+  exchange or any non-completed semantic window exists.
+- Canonical merge/rollback commits with a durable projection-repair obligation;
+  successful projection rebuild clears it afterward.
+- Retry rebuilds derived projections from the committed audit and never replays
+  canonical mutations.
+- Equivalent conflict evidence maps to one review regardless of model
+  confidence/rationale drift. Dismissal remains effective until evidence state
+  actually changes.
+- Review resolution category, note, actor, and closure are durable and readable
+  without parsing prose.
+
+## Chunk A — Association-complete global merge and rollback
+
+Add `context_block_entities` to the current merge snapshot and mutation journal:
+
+- include survivor/retired associations in preview and expected-state hash;
+- migrate retired ID associations to survivor ID within the canonical merge;
+- deduplicate `(block_id, survivor_entity_id)` collisions;
+- journal inserted/deleted/deduplicated rows for inverse application;
+- include association changes in rollback conflict detection and residue review;
+- keep Context blocks/revisions immutable.
+
+Primary files:
+
+| File | Planned change |
+| --- | --- |
+| `src/core/knowledge/db/writers/global_entity_merge_writer.py` | Snapshot, hash, mutate, journal, and invert Context associations. |
+| `src/core/knowledge/entity/maintenance_service.py` | Surface accurate preview/rollback effects. |
+| `src/core/knowledge/maintenance_impact.py` | Report association counts/effects honestly. |
+| `tests/unit/knowledge/test_global_entity_maintenance_contract.py` | Cover deterministic plan/hash shape. |
+| `tests/unit/knowledge/test_maintenance_application_contract.py` | Cover journal and rollback behavior. |
+| `tests/contract/storage/test_maintenance_application_real_postgres.py` | Prove migration, dedupe, rollback, and stale-state detection. |
+
+Acceptance:
+
+- Merge moves every retired block association exactly once.
+- Survivor/retired collision leaves one survivor association.
+- Changing an association after preview invalidates the merge plan.
+- Safe rollback restores associations; concurrent changes become explicit
+  residue and are not overwritten.
+- Episode enrichment sees only the surviving identity after merge.
+
+Commit boundary: global merge/rollback association completeness.
+
+## Chunk B — Project-scoped entity cleanup completeness
+
+Extend cleanup preview and application to remove the selected entity's
+`context_block_entities` only for the target Project. Reconcile dependent
+Episode entity/relationship links and aggregate/projection state through the
+existing cleanup transaction.
+
+Primary files:
+
+| File | Planned change |
+| --- | --- |
+| `src/core/knowledge/db/readers/entity_reader.py` | Count Context associations in cleanup preview. |
+| `src/core/knowledge/db/writers/graph_writer.py` | Delete target-project associations in canonical cleanup. |
+| `src/core/project/entity_cleanup.py` | Preserve explicit preview/selection workflow. |
+| `src/core/project/maintenance_service.py` | Return accurate typed effects and invalidate affected cache state. |
+| `tests/unit/core/knowledge/test_entity_cleanup_persistence_contract.py` | Cover write ownership and dependent cleanup. |
+| `tests/unit/project/test_entity_cleanup_workflow.py` | Cover preview/apply semantics. |
+| Real PostgreSQL maintenance contracts | Prove cross-project survival and no stale Episode enrichment. |
+
+Acceptance:
+
+- Target Project associations disappear.
+- Another Project's associations/classification remain untouched.
+- The global entity is deleted only when no Project classification remains.
+- Later Episode enrichment cannot resurrect the cleaned entity through stale
+  block associations.
+
+Commit boundary: explicit Project cleanup completeness.
+
+## Chunk C — Participation-aware, all-origin semantic frontier
+
+Replace the message-only pending query with one coherent quiescence read per
+affected Project:
+
+- eligible unclaimed conversation exchanges use Stage 3 participation/status/
+  frontier rules;
+- any `project_semantic_windows.stage <> 'completed'` blocks maintenance,
+  including `human_edit` windows with no message membership;
+- completed/excluded/deleted Session work does not block;
+- the frontier token includes the durable semantic-window/completion boundary,
+  not only maximum message ID/timestamp.
+
+Capture and revalidate must run the same query/normalization. Avoid a second
+definition of semantic eligibility drifting from admission; use one SQL helper
+or focused reader owned by semantic-window storage.
+
+Primary files:
+
+| File | Planned change |
+| --- | --- |
+| `src/core/knowledge/entity/maintenance_service.py` | Consume one participation-aware frontier contract. |
+| `src/core/knowledge/db/readers/semantic_window_reader.py` | Expose reusable quiescence/frontier state if it prevents SQL duplication. |
+| `src/core/knowledge/store.py` | Add only the narrow facade operation required. |
+| `tests/unit/knowledge/test_maintenance_application_contract.py` | Cover token generation/revalidation shape. |
+| Real PostgreSQL maintenance contracts | Cover disabled/re-enabled/deleted Sessions and conversation/human-edit windows. |
+
+Acceptance:
+
+- Active human-edit and conversation windows block maintenance.
+- A completed human-edit window no longer blocks.
+- Intentionally excluded Session exchanges never block.
+- New eligible work after preview invalidates the plan.
+
+Commit boundary: semantic quiescence and frontier tokens.
+
+## Chunk D — Prove and enforce merge/semantic-commit ordering
+
+First add a controlled PostgreSQL interleaving test:
+
+1. Prepare a semantic build referencing entity X.
+2. Pause before its durable commit.
+3. Attempt a global merge retiring X.
+4. Exercise both transaction orderings.
+5. Assert no committed relationship/association references a stale retired
+   identity and no partial state is visible.
+
+If existing row/FK/advisory locks already establish the invariant, retain the
+regression and do not add another lock. If the test demonstrates the reviewed
+gap, use one short-lived user-global identity advisory transaction lock shared
+by `SemanticCommitWriter.commit()` and global merge/rollback. Acquire it only
+around canonical database mutation, after model work, with one documented lock
+order.
+
+Primary files:
+
+| File | Planned change |
+| --- | --- |
+| `src/core/knowledge/db/writers/semantic_commit_writer.py` | Acquire shared durable identity lock only if the interleaving proves it necessary. |
+| `src/core/knowledge/db/writers/global_entity_merge_writer.py` | Use the same key/order for merge and rollback. |
+| `src/core/knowledge/entity/maintenance_service.py` | Remove/rename its older merge-only lock if ownership moves to writers. |
+| `tests/contract/storage/test_maintenance_application_real_postgres.py` | Deterministic two-connection interleaving and timeout/deadlock guard. |
+| `tests/contract/storage/test_semantic_commit_contract.py` | Assert redirect validation/rollback behavior. |
+
+Acceptance:
+
+- Merge first causes stale semantic commit to reject/re-resolve atomically.
+- Semantic commit first is fully visible to merge migration/hash validation.
+- No deadlock under the documented lock order.
+- Unrelated model/extraction work is not serialized.
+
+Commit boundary: concurrency evidence plus only the proven source repair.
+
+## Chunk E — Durable projection-repair obligation
+
+Set `projection_repair_pending` in the same canonical transaction that marks a
+merge or rollback executed. After commit:
+
+- rebuild affected AGE projections;
+- clear the marker only when every affected projection succeeds;
+- retain it across exception, cancellation, or process death;
+- retry by reloading the committed audit and rebuilding projections only.
+
+Reuse the existing bounded `failure_reason='projection_repair_pending'` marker
+unless implementation evidence shows that a separate column materially
+simplifies the state model. No generic workflow engine is needed.
+
+Primary files:
+
+| File | Planned change |
+| --- | --- |
+| `src/core/knowledge/db/writers/global_entity_merge_writer.py` | Commit the repair obligation with merge/rollback audit state. |
+| `src/core/knowledge/entity/maintenance_service.py` | Clear after success and preserve on interruption. |
+| `src/core/health/service.py` | Continue exposing bounded pending state without payload leakage. |
+| Maintenance unit and real PostgreSQL contracts | Inject cancellation before/during/after rebuild and prove canonical mutation runs once. |
+
+Acceptance:
+
+- Cancellation immediately after commit leaves a visible pending marker.
+- Restart repair reloads audit state and never replays merge/rollback.
+- Partial multi-Project rebuild leaves the operation pending.
+- Successful retry clears health state and invalidates relevant live caches.
+
+Commit boundary: projection recovery durability.
+
+## Chunk F — Stable conflict discovery and review records
+
+Repair MC1–MC4 as one review contract in four internal steps:
+
+1. Discovery eligibility distinguishes active independent disagreement from
+   deterministic supersession. Context-backed current observations are not
+   excluded merely because they have block support.
+2. Every candidate snapshot is built from exactly its cited observation IDs,
+   using the same ordered evidence service as detail/preview. Agent/user reports
+   use this same snapshot path.
+3. Equivalent evidence state reuses the existing review regardless of
+   confidence, rationale, or origin changes. Dismissed equivalent evidence does
+   not silently reopen. Changed evidence deliberately stales/succeeds it.
+4. Persist a typed resolution record containing category, note, actor, and
+   closure time while retaining the immutable original proposal.
+
+Activate scheduled discovery only after these invariants pass. If the feature
+is intentionally disabled by product policy, expose that honestly instead of a
+job whose normal `should_run()` is permanently false.
+
+Primary files:
+
+| File | Planned change |
+| --- | --- |
+| `src/core/knowledge/conflict_discovery.py` | Select reviewable current disagreement without blanket Context exclusion. |
+| `src/core/knowledge/db/readers/conflict_discovery_reader.py` | Return the evidence/status needed for deterministic eligibility. |
+| `src/core/project/maintenance_service.py` | Build candidate-local snapshots for background and direct reports. |
+| `src/core/knowledge/db/writers/conflict_writer.py` | Reuse stable review identity and persist typed resolution. |
+| `src/core/knowledge/db/writers/maintenance_review_writer.py` | Support immutable proposal plus durable typed closure. |
+| `src/core/knowledge/db/readers/conflict_reader.py` | Return the stored resolution without parsing event text. |
+| `src/core/knowledge/jobs/conflict_discovery_job.py` | Make scheduling reflect configured behavior after correctness. |
+| `src/infrastructure/schema.sql` and `src/core/knowledge/maintenance_reviews.py` | Add the smallest typed resolution storage needed. |
+| Conflict discovery/writer/maintenance tests | Replace MC1–MC4 defect probes with desired contracts. |
+
+Acceptance:
+
+- Current Context-backed disagreement reaches discovery.
+- A fresh review reports `evidence_state='current'` immediately.
+- Confidence-only changes do not create or notify a second review.
+- Dismissal survives equivalent rediscovery.
+- Changed cited evidence creates an explicit successor/stale transition.
+- Resolution kind and note survive a fresh detail read.
+
+Commit boundary: conflict discovery/review correctness.
+
+## Chunk G — Configurable maintenance burden after correctness
+
+Add a small server-owned trust policy based on action class, not model
+confidence thresholds:
+
+- `manual`: discovery/checks run only when requested; every proposed change is
+  reviewed.
+- `assisted`: bounded scheduled discovery opens deduplicated reviews and
+  notifies; mutations still require explicit application.
+- `trusted`: the user may explicitly whitelist exact non-destructive
+  classifications or maintenance action kinds. Identity merges, Project
+  cleanup, Context changes, and other canonical destructive actions remain
+  previewable and explicit unless that exact action kind is separately enabled.
+
+Keep the review/audit record for automated dispositions. Do not let a generic
+"confidence" setting become mutation authority.
+
+Primary files:
+
+| File | Planned change |
+| --- | --- |
+| `src/common/schema/settings.py` | Add a compact maintenance review mode/action allowlist. |
+| `src/core/project/maintenance_service.py` | Enforce policy after stable dedupe/evidence checks. |
+| `src/core/knowledge/jobs/conflict_discovery_job.py` | Respect manual/assisted/trusted scheduling. |
+| Health/trace contracts | Report counts/mode without exposing evidence payloads. |
+| Maintenance unit/integration tests | Prove repeated evidence does not repeatedly burden the user and only whitelisted actions auto-close/apply. |
+
+Acceptance:
+
+- Manual mode performs no background model review.
+- Assisted mode produces one review per unchanged evidence state.
+- Trusted mode cannot broaden itself or bypass action-class authorization.
+- Every automated disposition remains reversible/auditable where the
+  underlying operation supports reversal.
+
+Commit boundary: operator policy after MC1–MC4 are resolved.
+
+## Combined Stage 5 scenario
+
+Use real PostgreSQL/AGE and deterministic review/model outputs:
+
+1. Create two Project-visible identities with Context block associations and a
+   current conflict.
+2. Verify discovery creates one current review from exactly cited evidence and
+   equivalent reruns do not duplicate it.
+3. Hold an active human-edit window and prove merge cannot capture a stable
+   frontier; complete it and retry.
+4. Interleave semantic commit with merge and verify the selected durable order.
+5. Merge identities, inject process-style interruption before projection
+   rebuild, restart repair, and prove one canonical merge plus recovered AGE.
+6. Roll back safely, then introduce concurrent association change and prove it
+   becomes residue rather than being overwritten.
+7. Clean the identity from one Project and prove another Project's identity and
+   associations survive while stale Episode enrichment cannot reintroduce it.
+8. Exercise manual/assisted/trusted review modes against unchanged evidence.
+
+## Validation and closeout
+
+Run focused tests per chunk, then all maintenance, merge, cleanup, conflict,
+semantic-commit, evidence, health, and Stage 3 participation contracts. Run real
+PostgreSQL/AGE service tests with cancellation/interleaving timeouts; do not use
+parallel workers against shared reset fixtures.
+
+Also run touched-path Ruff, compileall, architecture checks when imports move,
+the configured mypy scope after its stale path is repaired separately, and
+`git diff --check`. No live model or external network call is required.
+
+Record exact commands/results, changed files, limitations, and local commit IDs.
+Retire F8/F12/MC1–MC5 probes only after normal regressions exist. Append status
+to the locked Knowledge review and maintenance correction review.
+
+- [ ] A: merge/rollback includes Context entity associations.
+- [ ] B: Project cleanup includes Context entity associations.
+- [ ] C: participation-aware, all-origin maintenance frontier.
+- [ ] D: merge/semantic-commit ordering is proven and minimally enforced.
+- [ ] E: projection-repair obligation is durable before rebuild.
+- [ ] F: conflict discovery/review identity, evidence, and resolution are stable.
+- [ ] G: configurable maintenance review burden.
+- [ ] Combined real-PostgreSQL/AGE scenario passes.
+- [ ] Review/probe/operations closeout is recorded and committed locally.
+
+Next implementation task after Stage 4 closes: Stage 5 Chunk A.
