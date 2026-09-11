@@ -13,10 +13,7 @@ from common.schema.ingestion.contracts import (
     ValidationIssue,
 )
 from common.schema.settings import TextProcessorSettings
-from common.utils.core_utils import (
-    is_covered,
-    validate_entity,
-)
+from common.utils.core_utils import validate_entity
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.vp01 import VP01EntityExtractor, VP01EntitySpan
@@ -204,9 +201,24 @@ class TextProcessor:
         )
         build.trace.known_mentions = len(known_matches)
         mentions: list[ContextBlockMention] = []
-        covered_by_block: dict[UUID, set[str]] = {
-            block.block_id: set() for block in blocks
-        }
+        seen_occurrences: set[tuple[int, int, str, str]] = set()
+
+        def add_mention(mention: ContextBlockMention) -> bool:
+            """Keep distinct typed occurrences, not just distinct surfaces."""
+
+            if mention.source_start is None or mention.source_end is None:
+                raise ValueError("Extracted Context mentions require source offsets")
+            key = (
+                mention.source_start,
+                mention.source_end,
+                mention.name.casefold(),
+                mention.entity_type.casefold(),
+            )
+            if key in seen_occurrences:
+                return False
+            seen_occurrences.add(key)
+            mentions.append(mention)
+            return True
 
         for span_text, start, end, entity_id in known_matches:
             block_ids = assembled.block_ids_for_span(start, end)
@@ -224,6 +236,10 @@ class TextProcessor:
                     )
                 )
                 continue
+            if not profile.is_classified_in(build.project_id):
+                # A foreign alias can identify a candidate later, but it cannot
+                # supply this project's type or suppress VP-01 classification.
+                continue
             entity_type = build.policy.domain.canonical_entity_type(
                 profile.entity_type
             ) or build.policy.domain.resolve_entity_type(profile.entity_type)
@@ -231,15 +247,15 @@ class TextProcessor:
             if entity_type is None or topic is None:
                 continue
             normalized = " ".join(span_text.split())
-            for block_id in block_ids:
-                covered_by_block[block_id].add(normalized.casefold())
-            mentions.append(
+            add_mention(
                 ContextBlockMention(
                     block_ids=block_ids,
                     name=normalized,
                     entity_type=entity_type,
                     topic=topic,
                     origin="known_alias",
+                    source_start=start,
+                    source_end=end,
                 )
             )
 
@@ -263,10 +279,7 @@ class TextProcessor:
             if not block_ids:
                 continue
             normalized = " ".join(entity.text.split())
-            if not normalized or any(
-                is_covered(normalized, covered_by_block[block_id])
-                for block_id in block_ids
-            ):
+            if not normalized:
                 continue
             entity_type = build.policy.domain.resolve_entity_type(entity.label)
             topic = build.policy.domain.topic_for_entity_type(entity_type or "")
@@ -279,33 +292,22 @@ class TextProcessor:
                 label=entity.label,
             ):
                 continue
-            for block_id in block_ids:
-                covered_by_block[block_id].add(normalized.casefold())
-            mentions.append(
+            if add_mention(
                 ContextBlockMention(
                     block_ids=block_ids,
                     name=normalized,
                     entity_type=entity_type,
                     topic=topic,
                     origin="vp01",
+                    source_start=entity.start,
+                    source_end=entity.end,
                 )
-            )
-            accepted += 1
+            ):
+                accepted += 1
         build.trace.gliner_accepted_mentions = accepted
+        build.set_mentions(mentions)
+        return mentions
 
-        deduped: list[ContextBlockMention] = []
-        seen: set[tuple[tuple[UUID, ...], str, str]] = set()
-        for mention in mentions:
-            key = (
-                mention.block_ids,
-                mention.name.casefold(),
-                mention.entity_type.casefold(),
-            )
-            if key not in seen:
-                seen.add(key)
-                deduped.append(mention)
-        build.set_mentions(deduped)
-        return deduped
     @staticmethod
     def _validate_domain_mention(
         name: str,

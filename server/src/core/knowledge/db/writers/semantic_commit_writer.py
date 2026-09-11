@@ -13,6 +13,7 @@ from common.exceptions import StorageWriteError
 from common.schema.ingestion.contracts import (
     ContextEntityResult,
     ContextRelationshipWrite,
+    ProjectEntityClassification,
     relationship_identity,
 )
 from common.schema.semantic_window import SemanticWindowStage
@@ -107,10 +108,18 @@ class SemanticCommitWriter:
                         cur,
                         entity_result,
                         user_name=user_name,
+                    )
+                    await self._write_project_classifications(
+                        cur,
+                        entity_result,
+                        user_name=user_name,
                         project_id=project_id,
                     )
                     aliases_written = await self._write_aliases(
-                        cur, entity_result, project_id=project_id
+                        cur,
+                        entity_result,
+                        user_name=user_name,
+                        project_id=project_id,
                     )
                     associations_written = await self._write_block_entity_associations(
                         cur,
@@ -317,6 +326,7 @@ class SemanticCommitWriter:
             or result.alias_updated_ids
             or result.alias_updates
             or result.pending_entity_writes
+            or result.project_classifications
             or result.block_entity_associations
             or result.message_entity_refs
         ):
@@ -328,7 +338,6 @@ class SemanticCommitWriter:
         result: ContextEntityResult,
         *,
         user_name: str,
-        project_id: str,
     ) -> None:
         for entity in result.pending_entity_writes.values():
             if not entity.is_new:
@@ -363,54 +372,251 @@ class SemanticCommitWriter:
                 or stored["status"] != "active"
             ):
                 raise ValueError("Context entity ID conflicts with an immutable entity")
-            await cur.execute(
-                """
-                INSERT INTO public.project_entity_contexts (
-                    project_id, entity_id, user_name, entity_type, topic
-                ) VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (project_id, entity_id) DO UPDATE
-                SET entity_type = EXCLUDED.entity_type,
-                    topic = EXCLUDED.topic,
-                    updated_at_ms = floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
-                """,
-                (
-                    project_id,
-                    entity.entity_id,
-                    user_name,
-                    entity.entity_type,
-                    entity.topic,
-                ),
+
+    @staticmethod
+    async def _lock_current_readable_project_ids(
+        cur,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> set[str]:
+        """Lock the target's current durable read scope for membership admission."""
+
+        await cur.execute(
+            """
+            SELECT project_id
+            FROM public.projects
+            WHERE project_id = %s
+              AND user_name = %s
+              AND status IN ('active', 'archived')
+            FOR KEY SHARE
+            """,
+            (project_id, user_name),
+        )
+        if await cur.fetchone() is None:
+            raise ValueError("Context project is unavailable for entity membership")
+        await cur.execute(
+            """
+            SELECT scope.readable_project_id
+            FROM public.project_read_scopes AS scope
+            JOIN public.projects AS readable
+              ON readable.project_id = scope.readable_project_id
+            WHERE scope.user_name = %s
+              AND scope.project_id = %s
+              AND readable.user_name = %s
+              AND readable.status IN ('active', 'archived')
+            FOR KEY SHARE OF scope, readable
+            """,
+            (user_name, project_id, user_name),
+        )
+        return {
+            project_id,
+            *(str(row["readable_project_id"]) for row in await cur.fetchall()),
+        }
+
+    @staticmethod
+    async def _verify_reused_entity_ids(
+        cur,
+        *,
+        entity_ids: tuple[int, ...],
+        user_name: str,
+        readable_project_ids: set[str],
+    ) -> None:
+        """Require every reused identity to remain active and currently readable."""
+
+        if not entity_ids:
+            return
+        await cur.execute(
+            """
+            SELECT entity.entity_id
+            FROM public.entities AS entity
+            JOIN public.project_entity_contexts AS context
+              ON context.entity_id = entity.entity_id
+             AND context.user_name = entity.user_name
+            JOIN public.projects AS context_project
+              ON context_project.project_id = context.project_id
+            WHERE entity.entity_id = ANY(%s)
+              AND entity.user_name = %s
+              AND entity.status = 'active'
+              AND context.project_id = ANY(%s)
+              AND context_project.user_name = %s
+              AND context_project.status IN ('active', 'archived')
+            FOR KEY SHARE OF entity, context, context_project
+            """,
+            (list(entity_ids), user_name, sorted(readable_project_ids), user_name),
+        )
+        visible_ids = {int(row["entity_id"]) for row in await cur.fetchall()}
+        if visible_ids != set(entity_ids):
+            raise ValueError(
+                "Context project membership references an inactive or unreadable entity"
             )
-            for alias in entity.aliases:
-                await cur.execute(
-                    """
-                    INSERT INTO public.entity_aliases (entity_id, alias)
-                    VALUES (%s, %s)
-                    ON CONFLICT (entity_id, alias) DO NOTHING
-                    """,
-                    (entity.entity_id, alias),
+
+    @classmethod
+    async def _write_project_classifications(
+        cls,
+        cur,
+        result: ContextEntityResult,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> None:
+        """Create missing local contexts and verify existing ones without retyping."""
+
+        classifications = result.project_classifications
+        reused_ids = tuple(
+            sorted(
+                entity_id
+                for entity_id in classifications
+                if entity_id not in result.new_entity_ids
+            )
+        )
+        if reused_ids:
+            readable_project_ids = await cls._lock_current_readable_project_ids(
+                cur,
+                user_name=user_name,
+                project_id=project_id,
+            )
+            await cls._verify_reused_entity_ids(
+                cur,
+                entity_ids=reused_ids,
+                user_name=user_name,
+                readable_project_ids=readable_project_ids,
+            )
+
+        for entity_id in sorted(classifications):
+            classification = classifications[entity_id]
+            if classification.membership == "existing":
+                await cls._verify_existing_project_classification(
+                    cur,
+                    classification,
+                    user_name=user_name,
+                    project_id=project_id,
+                )
+            else:
+                await cls._insert_or_verify_missing_project_classification(
+                    cur,
+                    classification,
+                    user_name=user_name,
+                    project_id=project_id,
                 )
 
     @staticmethod
-    async def _write_aliases(cur, result: ContextEntityResult, *, project_id: str) -> int:
+    async def _verify_existing_project_classification(
+        cur,
+        classification: ProjectEntityClassification,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> None:
+        await cur.execute(
+            """
+            SELECT user_name, entity_type, topic
+            FROM public.project_entity_contexts
+            WHERE project_id = %s AND entity_id = %s
+            FOR UPDATE
+            """,
+            (project_id, classification.entity_id),
+        )
+        stored = await cur.fetchone()
+        if stored is None:
+            raise ValueError("Context existing project membership is unavailable")
+        SemanticCommitWriter._require_matching_project_classification(
+            stored,
+            classification,
+            user_name=user_name,
+        )
+
+    @staticmethod
+    async def _insert_or_verify_missing_project_classification(
+        cur,
+        classification: ProjectEntityClassification,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> None:
+        await cur.execute(
+            """
+            INSERT INTO public.project_entity_contexts (
+                project_id, entity_id, user_name, entity_type, topic
+            ) VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (project_id, entity_id) DO NOTHING
+            """,
+            (
+                project_id,
+                classification.entity_id,
+                user_name,
+                classification.entity_type,
+                classification.topic,
+            ),
+        )
+        await cur.execute(
+            """
+            SELECT user_name, entity_type, topic
+            FROM public.project_entity_contexts
+            WHERE project_id = %s AND entity_id = %s
+            FOR UPDATE
+            """,
+            (project_id, classification.entity_id),
+        )
+        stored = await cur.fetchone()
+        if stored is None:
+            raise RuntimeError("Context project membership was not persisted")
+        SemanticCommitWriter._require_matching_project_classification(
+            stored,
+            classification,
+            user_name=user_name,
+        )
+
+    @staticmethod
+    def _require_matching_project_classification(
+        stored,
+        classification: ProjectEntityClassification,
+        *,
+        user_name: str,
+    ) -> None:
+        if (
+            stored["user_name"] != user_name
+            or stored["entity_type"] != classification.entity_type
+            or stored["topic"] != classification.topic
+        ):
+            raise ValueError(
+                "Context project classification conflicts with existing local classification"
+            )
+
+    @staticmethod
+    async def _write_aliases(
+        cur,
+        result: ContextEntityResult,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> int:
         count = 0
+        aliases_by_entity_id: dict[int, list[str]] = {}
+        for entity in result.pending_entity_writes.values():
+            aliases_by_entity_id.setdefault(entity.entity_id, []).extend(entity.aliases)
         for entity_id, aliases in result.alias_updates.items():
+            aliases_by_entity_id.setdefault(entity_id, []).extend(aliases)
+        for entity_id in sorted(aliases_by_entity_id):
             await cur.execute(
                 """
                 SELECT 1
                 FROM public.entities AS entity
                 WHERE entity.entity_id = %s
+                  AND entity.user_name = %s
                   AND (entity.entity_id = %s OR EXISTS (
                       SELECT 1 FROM public.project_entity_contexts AS context
-                      WHERE context.project_id = %s AND context.entity_id = entity.entity_id
+                      WHERE context.project_id = %s
+                        AND context.entity_id = entity.entity_id
+                        AND context.user_name = %s
                   ))
                   AND entity.status = 'active'
                 """,
-                (entity_id, IDENTITY_ENTITY_ID, project_id),
+                (entity_id, user_name, IDENTITY_ENTITY_ID, project_id, user_name),
             )
             if await cur.fetchone() is None:
                 raise ValueError("Context alias update references an unavailable entity")
-            for alias in aliases:
+            for alias in dict.fromkeys(aliases_by_entity_id[entity_id]):
                 await cur.execute(
                     """
                     INSERT INTO public.entity_aliases (entity_id, alias)

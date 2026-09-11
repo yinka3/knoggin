@@ -21,6 +21,7 @@ from common.schema.ingestion.contracts import (
     ContextEntityResult,
     ContextRelationshipWrite,
     EntityWrite,
+    ProjectEntityClassification,
 )
 from common.schema.semantic_window import SemanticWindowStage
 from common.schema.settings import (
@@ -73,6 +74,15 @@ def _relationship_domain():
     ).compile()
 
 
+def _classification(entity_id, entity_type, *, membership):
+    return ProjectEntityClassification(
+        entity_id=entity_id,
+        entity_type=entity_type,
+        topic="Work",
+        membership=membership,
+    )
+
+
 class _ZeroEpisodeGenerator:
     async def generate(self, **_kwargs):
         return type("EpisodeBuild", (), {"final_episodes": []})()
@@ -108,6 +118,7 @@ class _EmptyEntityBuilder:
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes={},
+            project_classifications={},
             block_entity_associations=(),
             message_entity_refs=(),
         )
@@ -131,6 +142,7 @@ class _HumanEditEntityBuilder:
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes={},
+            project_classifications={},
             block_entity_associations=(),
             message_entity_refs=(),
         )
@@ -209,6 +221,18 @@ class _RelationshipEntityBuilder:
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes=entities,
+            project_classifications={
+                sarah_id: _classification(
+                    sarah_id,
+                    "Person",
+                    membership="missing",
+                ),
+                delta_id: _classification(
+                    delta_id,
+                    "Company",
+                    membership="missing",
+                ),
+            },
             block_entity_associations=(
                 ContextBlockEntityAssociation(
                     block_id=block.block_id,
@@ -350,6 +374,20 @@ class _CorrectionEntityBuilder:
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes=writes,
+            project_classifications={
+                source_id: _classification(
+                    source_id,
+                    "Person",
+                    membership="missing",
+                ),
+                self.delta_id: _classification(
+                    self.delta_id,
+                    "Company",
+                    membership=(
+                        "missing" if self.delta_id in writes else "existing"
+                    ),
+                ),
+            },
             block_entity_associations=(
                 ContextBlockEntityAssociation(
                     block_id=block.block_id,

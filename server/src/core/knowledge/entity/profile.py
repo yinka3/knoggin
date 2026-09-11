@@ -68,6 +68,11 @@ class EntityProfile:
     def canonical_lower(self) -> str:
         return self.canonical_name.lower()
 
+    def is_classified_in(self, project_id: str) -> bool:
+        """Return whether this profile carries that project's classification."""
+
+        return bool(project_id and self.project_id == project_id)
+
     def set_embedding(self, embedding: list[float]) -> None:
         self.embedding = embedding
 

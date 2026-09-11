@@ -61,6 +61,7 @@ class _Builder:
                 alias_updated_ids=frozenset(),
                 alias_updates={},
                 pending_entity_writes={},
+                project_classifications={},
                 block_entity_associations=(),
                 message_entity_refs=(),
             )

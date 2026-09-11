@@ -67,6 +67,7 @@ def assemble_context_entity_result(
         alias_updated_ids=resolution["alias_updated_ids"],
         alias_updates=resolution["alias_updates"],
         pending_entity_writes=resolution["pending_entity_writes"],
+        project_classifications=resolution["project_classifications"],
         block_entity_associations=resolution["block_entity_associations"],
         message_entity_refs=tuple(message_refs.values()),
     )

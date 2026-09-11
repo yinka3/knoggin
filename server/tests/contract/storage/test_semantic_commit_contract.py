@@ -17,6 +17,7 @@ from common.schema.ingestion.contracts import (
     ContextEntityResult,
     ContextRelationshipWrite,
     EntityWrite,
+    ProjectEntityClassification,
 )
 from common.schema.semantic_window import (
     SemanticWindowMessage,
@@ -168,6 +169,15 @@ def _entity(entity_id, name, entity_type):
     )
 
 
+def _classification(entity_id, entity_type, *, membership):
+    return ProjectEntityClassification(
+        entity_id=entity_id,
+        entity_type=entity_type,
+        topic="Work",
+        membership=membership,
+    )
+
+
 def _build(
     snapshot,
     *,
@@ -175,16 +185,50 @@ def _build(
     entity_ids,
     entities,
     associations,
+    existing_classifications=None,
+    missing_classifications=None,
     relationship=None,
     relationship_writes=None,
     support_message_id=101,
 ):
+    existing_classifications = existing_classifications or {}
+    missing_classifications = missing_classifications or {}
+    project_classifications = {
+        entity_id: _classification(
+            entity_id,
+            entity.entity_type,
+            membership="missing",
+        )
+        for entity_id, entity in entities.items()
+    }
+    for entity_id in entity_ids:
+        if entity_id in project_classifications:
+            continue
+        if entity_id in missing_classifications:
+            project_classifications[entity_id] = _classification(
+                entity_id,
+                missing_classifications[entity_id],
+                membership="missing",
+            )
+            continue
+        try:
+            entity_type = existing_classifications[entity_id]
+        except KeyError as exc:
+            raise ValueError(
+                "test build requires an existing local classification"
+            ) from exc
+        project_classifications[entity_id] = _classification(
+            entity_id,
+            entity_type,
+            membership="existing",
+        )
     result = ContextEntityResult(
         entity_ids=tuple(entity_ids),
         new_entity_ids=frozenset(entities),
         alias_updated_ids=frozenset(),
         alias_updates={},
         pending_entity_writes={item.entity_id: item for item in entities.values()},
+        project_classifications=project_classifications,
         block_entity_associations=tuple(associations),
         message_entity_refs=(),
     )
@@ -337,6 +381,7 @@ async def test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_suppor
         impact=(old_block.block_id, adjacent_block.block_id, replacement.block_id),
         entity_ids=(12, 11),
         entities={12: _entity(12, "John", "Person")},
+        existing_classifications={11: "Company"},
         associations=(
             ContextBlockEntityAssociation(block_id=replacement.block_id, entity_id=12, mention_text="John"),
             ContextBlockEntityAssociation(block_id=replacement.block_id, entity_id=11, mention_text="Delta"),
@@ -500,6 +545,9 @@ async def test_semantic_commit_reuses_published_context_without_replaying_its_im
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes={},
+            project_classifications={
+                10: _classification(10, "Person", membership="existing"),
+            },
             block_entity_associations=(),
             message_entity_refs=(),
         )
@@ -623,7 +671,7 @@ async def test_semantic_commit_accepts_an_owned_empty_context_revision(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_semantic_commit_rolls_back_every_write_when_endpoint_validation_fails(
+async def test_semantic_commit_rolls_back_every_write_when_late_relationship_validation_fails(
     real_postgres_client,
 ):
     await _seed_message(real_postgres_client)
@@ -644,9 +692,13 @@ async def test_semantic_commit_rolls_back_every_write_when_endpoint_validation_f
         _WindowContext(window.window_id, context),
         impact=(block.block_id,),
         entity_ids=(10, 11),
-        entities={10: _entity(10, "Sarah", "Person")},
+        entities={
+            10: _entity(10, "Sarah", "Person"),
+            11: _entity(11, "Delta", "Company"),
+        },
         associations=(
             ContextBlockEntityAssociation(block_id=block.block_id, entity_id=10, mention_text="Sarah"),
+            ContextBlockEntityAssociation(block_id=block.block_id, entity_id=11, mention_text="Delta"),
         ),
         relationship=ContextRelationshipWrite(
             support_block_ids=(block.block_id,),
@@ -654,13 +706,13 @@ async def test_semantic_commit_rolls_back_every_write_when_endpoint_validation_f
             entity_b_id=11,
             relationship_type="owns",
             canonical_type="OWNS",
-            source_type="Person",
+            source_type="Company",
             target_type="Company",
             domain_version=1,
         ),
     )
 
-    with pytest.raises(ValueError, match="endpoints"):
+    with pytest.raises(ValueError, match="does not match"):
         await SemanticCommitWriter(real_postgres_client).commit(build)
 
     assert await real_postgres_client.fetch_one(
@@ -826,6 +878,7 @@ async def test_semantic_commit_updates_existing_entity_recency_monotonically(
         impact=(older_block.block_id,),
         entity_ids=(10,),
         entities={},
+        existing_classifications={10: "Person"},
         associations=(
             ContextBlockEntityAssociation(
                 block_id=older_block.block_id, entity_id=10, mention_text="Sarah"
@@ -872,6 +925,7 @@ async def test_semantic_commit_updates_existing_entity_recency_monotonically(
         impact=(newer_block.block_id,),
         entity_ids=(10,),
         entities={},
+        existing_classifications={10: "Person"},
         associations=(
             ContextBlockEntityAssociation(
                 block_id=newer_block.block_id, entity_id=10, mention_text="Sarah"
@@ -897,6 +951,190 @@ async def test_semantic_commit_updates_existing_entity_recency_monotonically(
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.entities WHERE entity_id = 10"
     ) == {"count": 1}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_admits_a_currently_readable_foreign_identity(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.entities (entity_id, user_name, canonical_name)
+        VALUES (10, 'ada', 'Acme Labs');
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES ('project-2', 10, 'ada', 'Vendor', 'Archive');
+        INSERT INTO public.project_read_scopes (
+            user_name, project_id, readable_project_id
+        ) VALUES ('ada', 'project-1', 'project-2');
+        """
+    )
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Acme Labs sponsors the project.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+
+    summary = await SemanticCommitWriter(real_postgres_client).commit(
+        _build(
+            _WindowContext(window.window_id, context),
+            impact=(block.block_id,),
+            entity_ids=(10,),
+            entities={},
+            missing_classifications={10: "Company"},
+            associations=(
+                ContextBlockEntityAssociation(
+                    block_id=block.block_id,
+                    entity_id=10,
+                    mention_text="Acme Labs",
+                ),
+            ),
+        )
+    )
+
+    assert summary.entities_written == 0
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT project_id, entity_type, topic
+        FROM public.project_entity_contexts
+        WHERE entity_id = 10
+        ORDER BY project_id
+        """
+    ) == [
+        {"project_id": "project-1", "entity_type": "Company", "topic": "Work"},
+        {"project_id": "project-2", "entity_type": "Vendor", "topic": "Archive"},
+    ]
+    assert await real_postgres_client.fetch_one(
+        "SELECT canonical_name FROM public.entities WHERE entity_id = 10"
+    ) == {"canonical_name": "Acme Labs"}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_rejects_conflicting_existing_local_classification(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.entities (entity_id, user_name, canonical_name)
+        VALUES (10, 'ada', 'Acme Labs');
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES ('project-1', 10, 'ada', 'Person', 'Work');
+        """
+    )
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Acme Labs sponsors the project.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(10,),
+        entities={},
+        existing_classifications={10: "Company"},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=block.block_id,
+                entity_id=10,
+                mention_text="Acme Labs",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="classification conflicts"):
+        await SemanticCommitWriter(real_postgres_client).commit(build)
+
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT entity_type, topic
+        FROM public.project_entity_contexts
+        WHERE project_id = 'project-1' AND entity_id = 10
+        """
+    ) == {"entity_type": "Person", "topic": "Work"}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.context_block_entities"
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_rejects_a_foreign_identity_after_scope_revocation(
+    real_postgres_client,
+):
+    await _seed_message(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.entities (entity_id, user_name, canonical_name)
+        VALUES (10, 'ada', 'Acme Labs');
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES ('project-2', 10, 'ada', 'Vendor', 'Archive');
+        """
+    )
+    window = _window()
+    window_writer = SemanticWindowWriter(real_postgres_client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Acme Labs sponsors the project.")
+    context = await _commit_context(real_postgres_client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(10,),
+        entities={},
+        missing_classifications={10: "Company"},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=block.block_id,
+                entity_id=10,
+                mention_text="Acme Labs",
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="inactive or unreadable"):
+        await SemanticCommitWriter(real_postgres_client).commit(build)
+
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.project_entity_contexts
+        WHERE project_id = 'project-1' AND entity_id = 10
+        """
+    ) == {"count": 0}
 
 
 @pytest.mark.storage

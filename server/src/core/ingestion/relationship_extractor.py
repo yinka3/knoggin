@@ -78,6 +78,7 @@ class ContextRelationshipExtractor:
         names: Dict[str, tuple[int, str]] = {}
         for entity_id in build.entity_result.entity_ids:
             pending = build.entity_result.pending_entity_writes.get(entity_id)
+            classification = build.entity_result.project_classifications.get(entity_id)
             profile = None if pending is not None else await self.entities.get_profile(entity_id)
             if pending is None and profile is None:
                 self._record_issue(
@@ -88,7 +89,16 @@ class ContextRelationshipExtractor:
                 )
                 continue
             canonical_name = pending.canonical_name if pending is not None else profile.canonical_name
-            entity_type = pending.entity_type if pending is not None else profile.entity_type
+            if entity_id == IDENTITY_ENTITY_ID:
+                entity_type = (
+                    build.policy.domain.canonical_entity_type("Identity") or "Identity"
+                )
+            elif classification is None:
+                raise ValueError(
+                    "Context VP-02 candidate lacks a project classification"
+                )
+            else:
+                entity_type = classification.entity_type
             aliases = list(pending.aliases) if pending is not None else self.entities.get_mentions_for_id(entity_id)
             key = self._name_key(canonical_name)
             if key in names and names[key][0] != entity_id:

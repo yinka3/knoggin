@@ -16,11 +16,16 @@ from common.schema.ingestion.contracts import (
     ContextBlockEntityAssociation,
     ContextBlockMention,
     EntityWrite,
+    ProjectEntityClassification,
     ResolvedContextBlockMention,
     ValidationIssue,
 )
 from common.schema.settings import EntityResolutionSettings
-from common.scoping import require_scope_value, require_visible_project_ids
+from common.scoping import (
+    IDENTITY_ENTITY_ID,
+    require_scope_value,
+    require_visible_project_ids,
+)
 from common.utils.events import emit_sync
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.entity.embedding import (
@@ -179,6 +184,7 @@ class EntityResolver:
             pending_entity_writes: Dict[int, EntityWrite] = {}
             pending_ids_by_surface: Dict[str, List[int]] = {}
             pending_support_by_id: Dict[int, str] = {}
+            project_classifications: Dict[int, ProjectEntityClassification] = {}
             resolved_mentions: list[ResolvedContextBlockMention] = []
             associations: list[ContextBlockEntityAssociation] = []
 
@@ -194,6 +200,7 @@ class EntityResolver:
                     continue
                 surface_key = self._candidate_search_key(mention.name)
                 entity_id: int | None = None
+                selected_profile: EntityProfile | None = None
                 support_text = "\n".join(
                     block_text_by_id.get(block_id, "") for block_id in mention.block_ids
                 )
@@ -229,7 +236,18 @@ class EntityResolver:
                             compatibility=compatibility,
                             candidate=candidate,
                         ):
+                            classification = self._classification_for_resolution(
+                                candidate_id,
+                                mention,
+                                profile,
+                            )
+                            if self._classification_conflicts(
+                                project_classifications,
+                                classification,
+                            ):
+                                continue
                             entity_id = candidate_id
+                            selected_profile = profile
                             new_aliases = self._new_aliases_for_selected_entity(
                                 candidate_id,
                                 [mention.name.strip()],
@@ -270,6 +288,21 @@ class EntityResolver:
                         )
                         pending_support_by_id[entity_id] = support_text
 
+                classification = self._classification_for_resolution(
+                    entity_id,
+                    mention,
+                    selected_profile,
+                )
+                if self._classification_conflicts(
+                    project_classifications,
+                    classification,
+                ):
+                    raise ValueError(
+                        "Context entity resolution produced conflicting project classifications"
+                    )
+                if classification is not None:
+                    project_classifications[entity_id] = classification
+
                 if entity_id not in entity_ids:
                     entity_ids.append(entity_id)
                 resolved_mentions.append(
@@ -299,9 +332,44 @@ class EntityResolver:
                     for entity_id, aliases in alias_updates.items()
                 },
                 "pending_entity_writes": pending_entity_writes,
+                "project_classifications": project_classifications,
                 "resolved_mentions": tuple(resolved_mentions),
                 "block_entity_associations": unique_associations,
             }
+
+    def _classification_for_resolution(
+        self,
+        entity_id: int,
+        mention: ContextBlockMention,
+        profile: EntityProfile | None,
+    ) -> ProjectEntityClassification | None:
+        """Stage the type storage must use in this resolver's target project."""
+
+        if entity_id == IDENTITY_ENTITY_ID:
+            return None
+        if profile is not None and profile.is_classified_in(self.project_id):
+            return ProjectEntityClassification(
+                entity_id=entity_id,
+                entity_type=profile.entity_type,
+                topic=profile.topic,
+                membership="existing",
+            )
+        return ProjectEntityClassification(
+            entity_id=entity_id,
+            entity_type=mention.entity_type,
+            topic=mention.topic,
+            membership="missing",
+        )
+
+    @staticmethod
+    def _classification_conflicts(
+        staged: Dict[int, ProjectEntityClassification],
+        classification: ProjectEntityClassification | None,
+    ) -> bool:
+        if classification is None:
+            return False
+        previous = staged.get(classification.entity_id)
+        return previous is not None and previous != classification
 
     async def candidate_entries_for_context_block_mentions(
         self,
@@ -443,6 +511,10 @@ class EntityResolver:
         profile: EntityProfile,
         policy: IngestionPolicy,
     ) -> str:
+        if not profile.is_classified_in(self.project_id):
+            # A visible foreign project establishes that an identity exists, but
+            # its vocabulary cannot classify this project's occurrence.
+            return "neutral"
         mention_configured_type = policy.domain.canonical_entity_type(
             mention_type
         ) or policy.domain.resolve_entity_type(mention_type)

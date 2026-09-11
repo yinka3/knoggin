@@ -15,11 +15,13 @@ from common.schema.ingestion.contracts import (
     ContextBlockEntityAssociation,
     ContextEntityResult,
     EntityWrite,
+    ProjectEntityClassification,
 )
 from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
+from core.knowledge.entity.profile import EntityProfile
 
 
 def _domain():
@@ -104,6 +106,20 @@ def _build(*blocks):
             alias_updated_ids=frozenset(),
             alias_updates={},
             pending_entity_writes={10: alice, 11: delta},
+            project_classifications={
+                10: ProjectEntityClassification(
+                    entity_id=10,
+                    entity_type="Person",
+                    topic="Work",
+                    membership="missing",
+                ),
+                11: ProjectEntityClassification(
+                    entity_id=11,
+                    entity_type="Company",
+                    topic="Work",
+                    membership="missing",
+                ),
+            },
             block_entity_associations=(
                 ContextBlockEntityAssociation(
                     block_id=first.block_id, entity_id=10, mention_text="Alice"
@@ -181,3 +197,74 @@ async def test_context_vp02_uses_current_multi_block_evidence_and_rejects_unknow
     assert [issue.code for issue in build.issues] == [
         "invalid_context_connection_block"
     ]
+
+
+class _ForeignSourceEntities:
+    async def get_profile(self, entity_id):
+        assert entity_id == 10
+        return EntityProfile(
+            canonical_name="Alice",
+            entity_type="Company",
+            topic="Archive",
+            project_id="project-2",
+        )
+
+    def get_mentions_for_id(self, entity_id):
+        assert entity_id == 10
+        return ["Alice"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_vp02_uses_staged_local_type_for_a_reused_identity():
+    first = _block("Alice is the owner.")
+    second = _block("She owns Delta.")
+    build = _build(first, second)
+    delta = build.entity_result.pending_entity_writes[11]
+    build.set_entity_result(
+        ContextEntityResult(
+            entity_ids=(10, 11),
+            new_entity_ids=frozenset({11}),
+            alias_updated_ids=frozenset(),
+            alias_updates={},
+            pending_entity_writes={11: delta},
+            project_classifications={
+                10: ProjectEntityClassification(
+                    entity_id=10,
+                    entity_type="Person",
+                    topic="Work",
+                    membership="missing",
+                ),
+                11: ProjectEntityClassification(
+                    entity_id=11,
+                    entity_type="Company",
+                    topic="Work",
+                    membership="missing",
+                ),
+            },
+            block_entity_associations=(
+                ContextBlockEntityAssociation(
+                    block_id=first.block_id,
+                    entity_id=10,
+                    mention_text="Alice",
+                ),
+                ContextBlockEntityAssociation(
+                    block_id=second.block_id,
+                    entity_id=11,
+                    mention_text="Delta",
+                ),
+            ),
+            message_entity_refs=(),
+        )
+    )
+
+    writes = await ContextRelationshipExtractor(
+        user_name="ada",
+        llm=_LLM(),
+        entities=_ForeignSourceEntities(),
+    ).extract(build)
+
+    assert len(writes) == 1
+    assert writes[0].source_type == "Person"
+    assert writes[0].target_type == "Company"
+    assert writes[0].canonical_type == "OWNS"
