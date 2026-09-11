@@ -1,6 +1,6 @@
 # Core Stage 2 — Entity Identity and Resolution
 
-Status: In progress; Chunks A-D completed 2026-09-11.
+Status: In progress; Chunks A-E completed 2026-09-11.
 
 Baseline inspected: `aadedewe/refactor`, `4e47481`, following completed
 [Stage 1](CORE_STAGE_1_IMPLEMENTATION_PLAN.md). Recheck HEAD and the working
@@ -386,6 +386,26 @@ and across project classifications. Reclassification makes no identity/Episode
 embedding calls. Explicit rebuild still validates dimensions and commits
 replacement vectors atomically. Input parity is not a real-model quality benchmark.
 
+### Completion record
+
+- Entity embedding text now consists solely of the normalized canonical name.
+  Pending creation, explicit rebuild, and the reserved Identity all use that
+  same representation; project-local type/topic remain on their Context rows.
+- Historical entity reclassification now rebuilds the project graph only when
+  classifications changed. It neither re-embeds global identities nor Episodes
+  nor reports obsolete embedding-rebuild fields; explicit embedding rebuild
+  remains available for development data and model changes.
+- Added deterministic creation/rebuild parity coverage across distinct local
+  classifications, reserved-Identity input/vector coverage, and pre-write
+  validation coverage for malformed entity and Episode vectors. A real
+  PostgreSQL trigger now proves a late Episode write failure rolls back entity,
+  Identity, and Episode vector replacements together.
+- Validated with direct embedding, identity, reclassification, and maintenance
+  tests (`31 passed, 2 deselected`), affected Context/semantic tests (`32
+  passed, 11 deselected`), and PostgreSQL embedding contracts (`2 passed, 9
+  deselected`), plus touched-path Ruff, compileall, and `git diff --check`.
+- Local implementation commit: `52cbacb fix(knowledge): make entity embeddings identity-only`.
+
 ## Validation and closeout
 
 Use deterministic model/embedding outputs for contract tests, real PostgreSQL/AGE
@@ -425,12 +445,12 @@ while drafting this plan.
 - [x] B: local classification authority, occurrence preservation and atomic membership.
 - [x] C: entity handles and provenance-preserving endpoint validation.
 - [x] D: committed resolver publication and recovery.
-- [ ] E: identity-only embeddings and classification-only maintenance cleanup.
+- [x] E: identity-only embeddings and classification-only maintenance cleanup.
 - [ ] Combined real-resolver/extractor PostgreSQL scenario passes.
 - [ ] Verify retained Stage 1 gates; record changed files, commands, limitations and local commit IDs.
 - [ ] Annotate completed F2/F3/F5/F6/F10 and relevant locked sections; preserve deferred findings.
 - [ ] Retire resolved historical core probes with normal regression references.
 - [ ] Add a narrow operations-document update while preserving existing user edits.
 
-Next implementation task: Chunk E. Make entity embeddings identity-only and
-remove classification-triggered embedding rebuilds.
+Next implementation task: run the combined Stage 2 real-resolver/extractor
+PostgreSQL scenario, then close the retained Stage 1 gates and operations notes.
