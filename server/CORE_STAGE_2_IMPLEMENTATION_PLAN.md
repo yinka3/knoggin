@@ -1,6 +1,6 @@
 # Core Stage 2 — Entity Identity and Resolution
 
-Status: In progress; Chunks A-C completed 2026-09-11.
+Status: In progress; Chunks A-D completed 2026-09-11.
 
 Baseline inspected: `aadedewe/refactor`, `4e47481`, following completed
 [Stage 1](CORE_STAGE_1_IMPLEMENTATION_PLAN.md). Recheck HEAD and the working
@@ -333,6 +333,31 @@ handles restart after an already-completed window; full alias preload is not req
 - Publication/enrichment retries are idempotent; no-op windows do no extra work.
 - Scope remains project-owned; no cross-runtime cache broadcast is introduced.
 
+### Completion record
+
+- Finalization now reads only durable entity IDs from a knowledge-committed
+  window, publishes them through the project resolver, then enriches Episodes
+  and advances the completion checkpoint. Publication failure records
+  `resolver_publication` and retains `knowledge_committed` for bounded retry.
+- The affected-ID reader requires the Context revision to be owned by the same
+  window. A later no-op window therefore returns no IDs and cannot republish an
+  earlier window's impact.
+- `ContextEntityResult` now requires every resolved identity to have a durable
+  Context-block association. That makes revision impact plus associations a
+  complete recovery source without a publication journal.
+- Resolver publication hydrates authoritative scoped rows, reconciles removed
+  aliases and local classifications, preserves durable alias ambiguity, evicts
+  inaccessible rows, and changes the alias version only when ownership changes.
+- Added unit ordering/retry/no-op coverage, a factory-wiring contract, durable
+  PostgreSQL reader coverage, and a PostgreSQL crash-boundary composition test
+  that reconstructs a cold resolver without rerunning extraction or Knowledge
+  mutation.
+- Validated with affected ingestion/resolver units (93 passed), runtime wiring
+  tests (6 passed), PostgreSQL storage contracts (76 passed), and project
+  semantic integration tests (4 passed), plus touched-path Ruff, compileall,
+  and `git diff --check`.
+- Local implementation commit: `84d3eb0 fix(knowledge): recover committed resolver publication`.
+
 ## Chunk E — Identity-only entity embeddings
 
 Change `build_entity_embedding_text` to take only the canonical identity name.
@@ -399,7 +424,7 @@ while drafting this plan.
 - [x] A: durable exact candidates and safe pending reuse.
 - [x] B: local classification authority, occurrence preservation and atomic membership.
 - [x] C: entity handles and provenance-preserving endpoint validation.
-- [ ] D: committed resolver publication and recovery.
+- [x] D: committed resolver publication and recovery.
 - [ ] E: identity-only embeddings and classification-only maintenance cleanup.
 - [ ] Combined real-resolver/extractor PostgreSQL scenario passes.
 - [ ] Verify retained Stage 1 gates; record changed files, commands, limitations and local commit IDs.
@@ -407,5 +432,5 @@ while drafting this plan.
 - [ ] Retire resolved historical core probes with normal regression references.
 - [ ] Add a narrow operations-document update while preserving existing user edits.
 
-Next implementation task: Chunk D. Publish only committed entity state to the
-live resolver, then recover that publication safely after a restart.
+Next implementation task: Chunk E. Make entity embeddings identity-only and
+remove classification-triggered embedding rebuilds.
