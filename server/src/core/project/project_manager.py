@@ -493,13 +493,13 @@ class ProjectManager:
         )
         return [row["session_id"] for row in rows]
 
-    async def get_episode_sources(self, project_id: str) -> List[dict]:
-        """List the sessions currently allowed to feed future episode windows."""
+    async def list_session_semantic_participation(self, project_id: str) -> List[dict]:
+        """List each open session's boundary for future semantic work."""
 
         rows = await self.pg.fetch_all(
             """
-            SELECT session_id, episode_participation_enabled,
-                   episode_participation_after_message_id
+            SELECT session_id, semantic_participation_enabled,
+                   semantic_participation_after_message_id
             FROM public.sessions
             WHERE user_name = %(user_name)s
               AND project_id = %(project_id)s
@@ -511,16 +511,20 @@ class ProjectManager:
         return [
             {
                 "session_id": str(row["session_id"]),
-                "enabled": bool(row["episode_participation_enabled"]),
-                "after_message_id": int(row["episode_participation_after_message_id"]),
+                "semantic_participation_enabled": bool(
+                    row["semantic_participation_enabled"]
+                ),
+                "semantic_participation_after_message_id": int(
+                    row["semantic_participation_after_message_id"]
+                ),
             }
             for row in rows
         ]
 
-    async def set_episode_sources(
+    async def set_session_semantic_participation(
         self, project_id: str, session_ids: List[str]
     ) -> List[dict]:
-        """Select exactly which project sessions feed future episode windows.
+        """Select exactly which project sessions feed future semantic work.
 
         A state transition records the current message frontier.  Therefore a
         session enabled later contributes only messages made after that choice,
@@ -531,7 +535,7 @@ class ProjectManager:
         async with self.pg.transaction() as cur:
             await cur.execute(
                 """
-                SELECT session_id, episode_participation_enabled
+                SELECT session_id, semantic_participation_enabled
                 FROM public.sessions
                 WHERE user_name = %s
                   AND project_id = %s
@@ -545,19 +549,19 @@ class ProjectManager:
             unknown = selected.difference(available)
             if unknown:
                 raise ValueError(
-                    "Episode participation includes sessions outside this project: "
+                    "Semantic participation includes unavailable project sessions: "
                     + ", ".join(sorted(unknown))
                 )
             for row in rows:
                 session_id = str(row["session_id"])
                 enabled = session_id in selected
-                if enabled == bool(row["episode_participation_enabled"]):
+                if enabled == bool(row["semantic_participation_enabled"]):
                     continue
                 await cur.execute(
                     """
                     UPDATE public.sessions
-                    SET episode_participation_enabled = %s,
-                        episode_participation_after_message_id = COALESCE(
+                    SET semantic_participation_enabled = %s,
+                        semantic_participation_after_message_id = COALESCE(
                             (
                                 SELECT MAX(message_id)
                                 FROM public.messages
@@ -582,7 +586,7 @@ class ProjectManager:
                     ),
                 )
 
-        return await self.get_episode_sources(project_id)
+        return await self.list_session_semantic_participation(project_id)
 
     async def _validate_allowed_project_ids(
         self, project_id: str, allowed_projects: List[str]

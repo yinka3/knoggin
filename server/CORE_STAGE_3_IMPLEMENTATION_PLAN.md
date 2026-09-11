@@ -1,6 +1,7 @@
 # Core Stage 3 — Semantic Participation and Admission Policy
 
-Status: Planned 2026-09-11. No implementation has started.
+Status: In progress 2026-09-11. Chunk A is complete; Chunks B–E have not
+started.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Recheck HEAD and the working tree before implementation. Preserve
@@ -94,7 +95,7 @@ Primary files:
 | `src/infrastructure/schema.sql` | Rename columns and constraints directly. |
 | `src/core/project/project_manager.py` | Rename the API and SQL fields; retain one transactional bulk update. |
 | `src/core/knowledge/db/writers/session_deletion_writer.py` | Disable semantic participation as part of deletion. |
-| `tests/project/test_episode_session_participation_contract.py` | Rename and expand as the semantic-participation contract. |
+| `tests/project/test_session_semantic_participation_contract.py` | Renamed and expanded semantic-participation contract. |
 | `tests/contract/storage/test_session_deletion_writer_contract.py` | Assert deletion closes the future semantic boundary. |
 
 Acceptance:
@@ -267,8 +268,8 @@ Use real PostgreSQL with deterministic model boundaries:
 
 Run focused tests per chunk, then:
 
-- the renamed semantic-participation contract (currently
-  `tests/project/test_episode_session_participation_contract.py`)
+- `tests/project/test_session_semantic_participation_contract.py`
+- `tests/contract/storage/test_session_semantic_participation_storage_contract.py`
 - `tests/unit/core/ingestion/test_semantic_window_admission.py`
 - `tests/unit/runtime/test_project_config_fanout.py`
 - `tests/contract/storage/test_project_context_window_contract.py`
@@ -284,7 +285,7 @@ Retire only historical probes whose desired behavior has a normal regression.
 Append implementation status to the locked Session/Ingestion/Knowledge reviews
 without rewriting their original rationale.
 
-- [ ] A: canonical semantic-participation names and persistence.
+- [x] A: canonical semantic-participation names and persistence.
 - [ ] B: eligibility before FIFO and deleted-Session exclusion.
 - [ ] C: atomic claim-time participation revalidation.
 - [ ] D: coherent semantic policy/domain capture.
@@ -292,4 +293,4 @@ without rewriting their original rationale.
 - [ ] Combined real-PostgreSQL scenario passes.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task after all stage plans are reviewed: Stage 3 Chunk A.
+Next implementation task: Stage 3 Chunk B.

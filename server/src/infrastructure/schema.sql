@@ -825,12 +825,12 @@ CREATE TABLE public.sessions (
     enabled_tools jsonb,
     document_focus jsonb,
     status text DEFAULT 'open'::text NOT NULL,
-    episode_participation_enabled boolean DEFAULT true NOT NULL,
-    episode_participation_after_message_id bigint DEFAULT 0 NOT NULL,
+    semantic_participation_enabled boolean DEFAULT true NOT NULL,
+    semantic_participation_after_message_id bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     last_active_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
-    CONSTRAINT sessions_episode_participation_after_message_id_check CHECK ((episode_participation_after_message_id >= 0)),
+    CONSTRAINT sessions_semantic_participation_after_message_id_check CHECK ((semantic_participation_after_message_id >= 0)),
     CONSTRAINT sessions_status_check CHECK ((status = ANY (ARRAY['open'::text, 'deleted'::text])))
 );
 ALTER TABLE ONLY public.entity_global_merge_mutations ALTER COLUMN mutation_id SET DEFAULT nextval('public.entity_global_merge_mutations_mutation_id_seq'::regclass);
