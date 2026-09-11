@@ -123,6 +123,27 @@ def domain(*, language="en"):
     ).compile()
 
 
+def identity_domain():
+    return DomainConfig.from_mapping(
+        {
+            "version": 4,
+            "topics": {"Work": {"active": True}},
+            "entity_types": {
+                "Person": {
+                    "topic": "Work",
+                    "labels": ["person"],
+                    "description": "A person involved in this project.",
+                },
+                "Company": {
+                    "topic": "Work",
+                    "labels": ["company"],
+                    "description": "A company involved in this project.",
+                },
+            },
+        }
+    ).compile()
+
+
 def policy(compiled_domain):
     return IngestionPolicy.capture(
         text_processor=TextProcessorSettings(gliner_threshold=0.42, llm_ner=False),
@@ -524,6 +545,129 @@ async def test_context_alias_only_mode_is_valid_without_a_model_candidate():
 
     assert resolution["entity_ids"] == (701,)
     assert resolution["block_entity_associations"][0].block_id == current.block_id
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_pending_same_name_incompatible_types_do_not_collapse_by_topic():
+    compiled_domain = identity_domain()
+    first = block("Alex is the project sponsor.")
+    second = block("Alex is the project sponsor.")
+    mentions = [
+        ContextBlockMention(
+            block_ids=(first.block_id,),
+            name="Alex",
+            entity_type="Person",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(second.block_id,),
+            name="Alex",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+    next_ids = iter((701, 702))
+
+    async def allocate():
+        return next(next_ids)
+
+    resolution = await resolver().resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={
+            first.block_id: first.markdown,
+            second.block_id: second.markdown,
+        },
+        policy=policy(compiled_domain),
+        allocate_entity_id=allocate,
+    )
+
+    assert resolution["entity_ids"] == (701, 702)
+    assert {
+        entity_id: write.entity_type
+        for entity_id, write in resolution["pending_entity_writes"].items()
+    } == {701: "Person", 702: "Company"}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_pending_compatible_repetition_reuses_one_identity_with_same_context():
+    compiled_domain = identity_domain()
+    first = block("Acme Labs sponsors the project.")
+    second = block("Acme Labs sponsors the project.")
+    mentions = [
+        ContextBlockMention(
+            block_ids=(first.block_id,),
+            name="Acme Labs",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(second.block_id,),
+            name="Acme Labs",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+
+    resolution = await resolver().resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={
+            first.block_id: first.markdown,
+            second.block_id: second.markdown,
+        },
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(701),
+    )
+
+    assert resolution["entity_ids"] == (701,)
+    assert set(resolution["new_entity_ids"]) == {701}
+    assert [item.entity_id for item in resolution["resolved_mentions"]] == [701, 701]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_pending_same_type_homonyms_without_shared_context_stay_separate():
+    compiled_domain = identity_domain()
+    first = block("Alex manages the design review for the mobile application.")
+    second = block("Alex approves the payroll budget for the finance team.")
+    mentions = [
+        ContextBlockMention(
+            block_ids=(first.block_id,),
+            name="Alex",
+            entity_type="Person",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(second.block_id,),
+            name="Alex",
+            entity_type="Person",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+    next_ids = iter((701, 702))
+
+    async def allocate():
+        return next(next_ids)
+
+    resolution = await resolver().resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={
+            first.block_id: first.markdown,
+            second.block_id: second.markdown,
+        },
+        policy=policy(compiled_domain),
+        allocate_entity_id=allocate,
+    )
+
+    assert resolution["entity_ids"] == (701, 702)
+    assert set(resolution["new_entity_ids"]) == {701, 702}
 
 
 async def _async_value(value):

@@ -46,3 +46,36 @@ async def test_entity_name_lookup_matches_canonical_names_and_aliases_in_scope(
             "last_mentioned_ms": None,
         }
     ]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_entity_name_lookup_preserves_active_homonyms_and_normalizes_input(
+    real_postgres_client,
+):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO entities (entity_id, user_name, canonical_name, status) VALUES
+            (20, 'ada', 'München', 'active'),
+            (21, 'ada', 'Other place', 'active'),
+            (22, 'ada', 'Retired place', 'retired');
+        INSERT INTO project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 20, 'ada', 'concept', 'General'),
+            ('project-1', 21, 'ada', 'concept', 'General'),
+            ('project-1', 22, 'ada', 'concept', 'General');
+        INSERT INTO entity_aliases (entity_id, alias) VALUES
+            (21, 'München'),
+            (22, 'München')
+        """
+    )
+
+    matches = await EntityReader(real_postgres_client).get_entities_by_names(
+        ["  MÜNCHEN  "],
+        visible_project_ids=["project-1"],
+    )
+
+    assert [item["id"] for item in matches] == [20, 21]

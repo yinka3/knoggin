@@ -34,6 +34,7 @@ class FakeEntityKnowledgeStore:
         self.embedding_lookups = []
         self.vector_searches = []
         self.vector_results = {}
+        self.fail_name_lookup = False
 
     def add_entity(
         self,
@@ -45,6 +46,7 @@ class FakeEntityKnowledgeStore:
         topic="Identity",
         project_id="project-1",
         embedding=None,
+        status="active",
     ):
         entity = {
             "id": entity_id,
@@ -54,11 +56,14 @@ class FakeEntityKnowledgeStore:
             "topic": topic,
             "project_id": project_id,
             "embedding": embedding,
+            "status": status,
         }
         self.entities[entity_id] = entity
         return entity
 
     async def get_entities_by_names(self, names, visible_project_ids=None):
+        if self.fail_name_lookup:
+            raise RuntimeError("name lookup failed")
         self.name_lookups.append(
             {
                 "names": list(names),
@@ -101,7 +106,9 @@ class FakeEntityKnowledgeStore:
     async def get_entity_embedding(self, entity_id, *, visible_project_ids):
         self.embedding_lookups.append(entity_id)
         entity = self.entities.get(entity_id)
-        return list(entity.get("embedding") or []) if entity else []
+        if not entity or not self._is_visible(entity, visible_project_ids):
+            return []
+        return list(entity.get("embedding") or [])
 
     async def search_entities_by_embedding(
         self,
@@ -129,6 +136,8 @@ class FakeEntityKnowledgeStore:
         return visible_results[:limit]
 
     def _is_visible(self, entity, visible_project_ids):
+        if entity.get("status", "active") != "active":
+            return False
         if visible_project_ids is None:
             return True
         return entity.get("project_id") in visible_project_ids

@@ -12,17 +12,16 @@ async def seed_entity(
     project_id="project-1",
     embedding=None,
 ):
-    entities._populate_cache(
-        {
-            "id": entity_id,
-            "canonical_name": canonical_name,
-            "aliases": list(aliases or []),
-            "type": entity_type,
-            "topic": topic,
-            "project_id": project_id,
-            "embedding": embedding,
-        }
+    record = entities.knowledge_store.add_entity(
+        entity_id,
+        canonical_name,
+        aliases=aliases,
+        entity_type=entity_type,
+        topic=topic,
+        project_id=project_id,
+        embedding=embedding,
     )
+    entities._populate_cache(record)
 
 
 @pytest.mark.storage
@@ -58,6 +57,79 @@ async def test_ambiguous_exact_alias_returns_candidates_without_direct_evidence(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_cold_resolver_hydrates_a_durable_exact_alias(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    knowledge_store.add_entity(101, "Robert Chen", aliases=["Bob"])
+
+    candidates = await entities.get_candidate_ids("  BOB  ")
+
+    assert candidates == [(101, 1.0)]
+    assert candidates[0].signals == {"exact"}
+    assert entities.has_cached_entity(101)
+    assert knowledge_store.name_lookups == [
+        {"names": ["bob"], "visible_project_ids": ["project-1"]}
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_durable_exact_lookup_preserves_hidden_warm_alias_owner_ambiguity(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    first = knowledge_store.add_entity(101, "Robert Chen", aliases=["Bob"])
+    knowledge_store.add_entity(202, "Bob Smith", aliases=["Bob"])
+    entities._populate_cache(first)
+
+    candidates = await entities.get_candidate_ids("Bob")
+
+    assert [candidate.entity_id for candidate in candidates] == [101, 202]
+    for candidate in candidates:
+        assert candidate.signals == {"exact", "ambiguous_alias"}
+        assert candidate.has_direct_name_evidence is False
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_strict_durable_exact_lookup_failure_is_not_treated_as_absence(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    knowledge_store.fail_name_lookup = True
+
+    with pytest.raises(RuntimeError, match="name lookup failed"):
+        await entities.get_candidate_ids("Bob", strict=True)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_inactive_and_inaccessible_exact_owners_are_not_candidates(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    knowledge_store.add_entity(101, "Robert Chen", aliases=["Bob"])
+    knowledge_store.add_entity(
+        202,
+        "Retired Bob",
+        aliases=["Bob"],
+        status="retired",
+    )
+    knowledge_store.add_entity(
+        303,
+        "Other Project Bob",
+        aliases=["Bob"],
+        project_id="project-2",
+    )
+
+    candidates = await entities.get_candidate_ids("Bob")
+
+    assert candidates == [(101, 1.0)]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_fuzzy_match_above_threshold_is_returned(entity_manager_harness):
     entities, _, _ = entity_manager_harness
     await seed_entity(entities, 202, "Knoggin", entity_type="project", topic="General")
@@ -69,6 +141,20 @@ async def test_fuzzy_match_above_threshold_is_returned(entity_manager_harness):
     assert 0.85 <= candidates[0][1] < 1.0
     assert candidates[0].signals == {"fuzzy"}
     assert candidates[0].has_direct_name_evidence is False
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_warm_retired_fuzzy_candidate_is_revalidated_before_return(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    await seed_entity(entities, 202, "Knoggin", entity_type="project", topic="General")
+    knowledge_store.entities[202]["status"] = "retired"
+
+    candidates = await entities.get_candidate_ids("Knogin")
+
+    assert candidates == []
 
 
 @pytest.mark.storage
@@ -149,10 +235,10 @@ async def test_missing_vector_candidate_ids_are_dropped(entity_manager_harness):
 async def test_vector_candidate_is_hydrated_from_durable_store(entity_manager_harness):
     entities, knowledge_store, embedding = entity_manager_harness
     knowledge_store.add_entity(999, "Persisted Similar", entity_type="concept")
-    vector = embedding.vector_for("persisted similar")
+    vector = embedding.vector_for("unseen embedding match")
     knowledge_store.vector_results[tuple(vector)] = [(999, 0.95)]
 
-    candidates = await entities.get_candidate_ids("persisted similar")
+    candidates = await entities.get_candidate_ids("unseen embedding match")
 
     assert candidates == [(999, 0.95)]
     assert entities.has_cached_entity(999)

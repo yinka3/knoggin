@@ -113,6 +113,7 @@ class EntityReader:
         SELECT e.entity_id, e.embedding
         FROM entities e
         WHERE e.entity_id = ANY(%s)
+          AND e.status = 'active'
           AND (
               e.entity_id = %s
               OR EXISTS (
@@ -204,6 +205,7 @@ class EntityReader:
         SELECT e.embedding
         FROM entities e
         WHERE e.entity_id = %s
+          AND e.status = 'active'
           AND (e.entity_id = %s OR EXISTS (
               SELECT 1 FROM project_entity_contexts context
               WHERE context.entity_id = e.entity_id
@@ -346,6 +348,7 @@ class EntityReader:
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE e.entity_id = ANY(%s)
+          AND e.status = 'active'
           AND (e.entity_id = %s OR EXISTS (
               SELECT 1 FROM project_entity_contexts context
               WHERE context.entity_id = e.entity_id
@@ -453,7 +456,11 @@ class EntityReader:
         if not names:
             return []
 
-        lower_names = [n.lower() for n in names]
+        lower_names = list(
+            dict.fromkeys(name.strip().lower() for name in names if name.strip())
+        )
+        if not lower_names:
+            return []
         params = [lower_names, lower_names, IDENTITY_ENTITY_ID, visible_project_ids]
 
         query = """
@@ -461,14 +468,15 @@ class EntityReader:
             e.entity_id AS id
         FROM entities e
         WHERE (
-            lower(e.canonical_name) = ANY(%s)
+            lower(btrim(e.canonical_name)) = ANY(%s)
             OR EXISTS (
                 SELECT 1
                 FROM entity_aliases ea
                 WHERE ea.entity_id = e.entity_id
-                  AND lower(ea.alias) = ANY(%s)
+                  AND lower(btrim(ea.alias)) = ANY(%s)
             )
         )
+        AND e.status = 'active'
         AND (e.entity_id = %s OR EXISTS (
             SELECT 1 FROM project_entity_contexts context
             WHERE context.entity_id = e.entity_id
@@ -583,6 +591,7 @@ class EntityReader:
         SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
         FROM entities
         WHERE 1 - (embedding <=> %s::vector) >= %s
+          AND status = 'active'
           AND (entity_id = %s OR EXISTS (
               SELECT 1 FROM project_entity_contexts context
               WHERE context.entity_id = entities.entity_id
@@ -614,6 +623,7 @@ class EntityReader:
         SELECT entity_id AS id
         FROM entities
         WHERE entity_id = ANY(%s)
+          AND status = 'active'
           AND (entity_id = %s OR EXISTS (
               SELECT 1 FROM project_entity_contexts context
               WHERE context.entity_id = entities.entity_id
