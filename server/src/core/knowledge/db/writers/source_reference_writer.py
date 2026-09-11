@@ -39,9 +39,10 @@ class SourceReferenceWriter:
 
         The insert joins the canonical message and session so a caller cannot
         attach references to another user's scope or a non-assistant message.
-        It also checks session-document visibility before inserting a document
-        reference; that visibility rule cannot be expressed by the document's
-        project-level foreign key alone.
+        It also checks document ownership within the readable scope before
+        inserting a document reference.  The captured hash describes the
+        encounter, so a later catalog version or tombstone must not invalidate
+        that history at answer-finalization time.
         """
 
         if not candidates:
@@ -185,8 +186,6 @@ class SourceReferenceWriter:
                   FROM public.project_documents AS document
                   WHERE document.document_id = %s
                     AND document.project_id = %s
-                    AND document.content_hash = %s
-                    AND document.status <> 'deleted'
                     AND document.project_id = ANY(%s)
               )
           )
@@ -252,7 +251,6 @@ class SourceReferenceWriter:
             candidate.document_id,
             candidate.document_id,
             candidate.source_project_id,
-            candidate.content_hash,
             list(readable_project_ids),
         )
 

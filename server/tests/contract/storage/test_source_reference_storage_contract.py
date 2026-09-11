@@ -242,10 +242,12 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
     assert "INSERT INTO public.message_source_refs" in query
     assert "message.role = 'assistant'" in query
     assert "document.project_id = ANY(%s)" in query
+    assert "document.content_hash = %s" not in query
+    assert "document.status <> 'deleted'" not in query
     assert "ON CONFLICT (idempotency_key) DO UPDATE" in query
     assert params[1:4] == ("project-1", "session-1", 101)
     assert params[17] == SourceReferenceWriter.idempotency_key(candidate)
-    assert params[-9:] == (
+    assert params[-8:] == (
         101,
         "project-1",
         "session-1",
@@ -253,7 +255,6 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
         DOCUMENT_ID,
         DOCUMENT_ID,
         "project-1",
-        CONTENT_HASH,
         ["project-1"],
     )
 
@@ -362,7 +363,7 @@ async def test_reader_marks_a_deleted_document_source_unavailable():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_reader_marks_a_replaced_document_version_unavailable():
+async def test_reader_marks_a_replaced_document_version_historical():
     candidate = document_candidate()
     client = RecordingPostgresClient(
         fetch_all_results=[
@@ -384,7 +385,7 @@ async def test_reader_marks_a_replaced_document_version_unavailable():
         session_id="session-1",
     )
 
-    assert references[0].source_status == "unavailable"
+    assert references[0].source_status == "historical"
     assert references[0].excerpt == candidate.excerpt
     assert "document.content_hash AS document_content_hash" in client.calls[0][1]
 
@@ -650,6 +651,41 @@ async def test_real_postgres_document_tombstone_preserves_message_provenance(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_real_postgres_saves_captured_document_encounter_after_tombstone(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    candidate = document_candidate()
+    deleted = await DocumentWriter(real_postgres_client, "project-1").delete_document(
+        document_id=DOCUMENT_ID,
+    )
+
+    references = await SourceReferenceWriter(
+        real_postgres_client
+    ).write_for_assistant_message(
+        101,
+        [candidate],
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        readable_project_ids=["project-1"],
+    )
+    sources = await SourceReferenceReader(real_postgres_client).get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert deleted is not None
+    assert references[0].content_hash == candidate.content_hash
+    assert sources[0].source_status == "unavailable"
+    assert sources[0].excerpt == candidate.excerpt
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_real_postgres_provenance_uses_captured_cross_project_document_scope(
     real_postgres_client,
 ):
@@ -773,22 +809,22 @@ async def test_real_postgres_preserves_cross_project_provenance_after_source_del
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_real_postgres_marks_replaced_document_provenance_unavailable(
+async def test_real_postgres_marks_replaced_document_provenance_historical(
     real_postgres_client,
 ):
     await _seed_scope(real_postgres_client)
     document = document_candidate()
-    await SourceReferenceWriter(real_postgres_client).write_for_assistant_message(
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET content_hash = %s WHERE document_id = %s",
+        ("a" * 64, DOCUMENT_ID),
+    )
+    references = await SourceReferenceWriter(real_postgres_client).write_for_assistant_message(
         101,
         [document],
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
         readable_project_ids=["project-1"],
-    )
-    await real_postgres_client.execute(
-        "UPDATE public.project_documents SET content_hash = %s WHERE document_id = %s",
-        ("a" * 64, DOCUMENT_ID),
     )
 
     sources = await SourceReferenceReader(real_postgres_client).get_message_source_refs(
@@ -798,7 +834,8 @@ async def test_real_postgres_marks_replaced_document_provenance_unavailable(
         session_id="session-1",
     )
 
-    assert sources[0].source_status == "unavailable"
+    assert references[0].content_hash == document.content_hash
+    assert sources[0].source_status == "historical"
     assert sources[0].excerpt == document.excerpt
 
 

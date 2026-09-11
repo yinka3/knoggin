@@ -1,6 +1,6 @@
 # Core Stage 4 — Versioned Evidence and Editable Memory
 
-Status: Chunk A complete 2026-09-11. Chunks B–D remain planned.
+Status: Chunks A–B complete 2026-09-11. Chunks C–D remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 4 may begin after Stage 3, but its document and Episode work is
@@ -242,7 +242,7 @@ Retire F4/F11/PA3/PA4 probes only after normal desired-behavior regressions
 exist. Append status to the core, Knowledge, and provenance/Agent reviews.
 
 - [x] A: exact-byte document index publication.
-- [ ] B: historical encounter persistence across document changes.
+- [x] B: historical encounter persistence across document changes.
 - [ ] C: observation-aware graph evidence hydration.
 - [ ] D: atomic Episode narrative/vector edits.
 - [ ] Combined real-PostgreSQL scenarios pass.
@@ -259,3 +259,22 @@ No historical probe is retired yet: F4 remains represented by its normal
 regressions and the other Stage 4 review probes belong to later chunks.
 
 Next implementation task: Stage 4 Chunk B.
+
+Chunk B validation on 2026-09-11:
+
+- `uv run pytest -q tests/unit/common/test_source_reference_contracts.py tests/unit/runtime/test_context_add.py tests/contract/storage/test_source_reference_storage_contract.py tests/contract/storage/test_knowledge_store_source_reference_transaction.py tests/contract/storage/test_message_lifecycle_real_postgres.py -m 'not requires_postgres'` → 53 passed, 11 deselected; the environment emitted its existing Requests dependency warning.
+- `uv run pytest -q tests/contract/storage/test_source_reference_storage_contract.py tests/contract/storage/test_message_lifecycle_real_postgres.py -m requires_postgres` → 11 passed, 14 deselected; the same existing warning appeared.
+- `uv run pytest -q tests/integration/ingestion/test_document_format_runtime.py tests/unit/core/agent/test_sources_contract.py tests/unit/core/agent/test_document_search_contract.py` → 44 passed with the same existing warning.
+- Focused Ruff, compileall, and `git diff --check` passed. The first sandboxed compile invocation could not read the shared `uv` cache; the approved rerun passed.
+
+The writer now checks the assistant/session scope, the captured readable project
+scope, and document ownership without requiring the candidate hash or live
+catalog status to match. Source reads distinguish a currently available
+document from a changed `historical` version and a deleted/unavailable source.
+The regression coverage includes changed or tombstoned documents before source
+finalization, finalization idempotency, fabricated-document rollback, and an
+admitted run whose mutable runtime scope changes before its final response.
+No provenance probe is retired yet; PA4 is covered by normal desired-behavior
+regressions and the Stage 4 review/probe closeout remains pending.
+
+Next implementation task: Stage 4 Chunk C.
