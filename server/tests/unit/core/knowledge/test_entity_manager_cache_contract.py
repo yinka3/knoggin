@@ -98,6 +98,133 @@ def test_entity_index_populate_preserves_shared_alias_ambiguity():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+def test_entity_index_refresh_reconciles_removed_aliases_without_retry_churn():
+    index = EntityIndex()
+    index.populate(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Old Bob", "Bob"],
+            "type": "person",
+            "topic": "Identity",
+        }
+    )
+    index.populate(
+        {
+            "id": 202,
+            "canonical_name": "Bob Smith",
+            "aliases": ["Bob"],
+        }
+    )
+
+    profile, changed = index.refresh(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Robert", "Bob"],
+            "type": "person",
+            "topic": "Work",
+        }
+    )
+    _, repeated_changed = index.refresh(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Robert", "Bob"],
+            "type": "person",
+            "topic": "Work",
+        }
+    )
+
+    assert profile.topic == "Work"
+    assert changed is True
+    assert repeated_changed is False
+    assert index.get_entity_id_for_name("old bob") is None
+    assert index.get_entity_id_for_name("robert") == 101
+    assert index.get_entity_ids_for_name("bob") == {101, 202}
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_publish_committed_entity_ids_refreshes_local_context_and_alias_owners(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    entities._populate_cache(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Old Bob"],
+            "type": "person",
+            "topic": "Archive",
+            "project_id": "project-1",
+        }
+    )
+    initial_alias_version = entities.get_alias_version()
+    knowledge_store.entities[101] = {
+        "id": 101,
+        "canonical_name": "Robert Chen",
+        "aliases": ["Robert", "Bob"],
+        "project_id": "project-1",
+        "contexts": [
+            {
+                "project_id": "project-foreign",
+                "entity_type": "Contact",
+                "topic": "Elsewhere",
+            },
+            {
+                "project_id": "project-1",
+                "entity_type": "Person",
+                "topic": "Work",
+            },
+        ],
+    }
+    knowledge_store.add_entity(202, "Bob Smith", aliases=["Bob"])
+
+    await entities.publish_committed_entity_ids([101])
+
+    profile = entities.get_cached_profile(101)
+    assert profile is not None
+    assert profile.entity_type == "Person"
+    assert profile.topic == "Work"
+    assert profile.project_id == "project-1"
+    assert "old bob" not in entities.get_known_aliases()
+    assert entities.get_known_aliases()["robert"] == 101
+    assert entities.get_entity_ids_for_name("bob") == {101, 202}
+    assert entities.get_alias_version() == initial_alias_version + 1
+
+    await entities.publish_committed_entity_ids([101])
+
+    assert entities.get_alias_version() == initial_alias_version + 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_publish_committed_entity_ids_evicts_stale_missing_profiles(
+    entity_manager_harness,
+):
+    entities, _, _ = entity_manager_harness
+    entities._populate_cache(
+        {
+            "id": 303,
+            "canonical_name": "Retired Entity",
+            "aliases": ["Retired"],
+            "type": "person",
+            "topic": "Work",
+            "project_id": "project-1",
+        }
+    )
+    initial_alias_version = entities.get_alias_version()
+
+    await entities.publish_committed_entity_ids([303])
+
+    assert entities.get_cached_profile(303) is None
+    assert "retired" not in entities.get_known_aliases()
+    assert entities.get_alias_version() == initial_alias_version + 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 def test_entity_index_normalizes_aliases_and_ignores_blanks():
     index = EntityIndex()
 

@@ -14,7 +14,11 @@ from common.schema.context import (
     ContextRevisionOrigin,
     ContextSnapshot,
 )
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import (
+    ContextBlockMention,
+    ContextEntityResult,
+    ProjectEntityClassification,
+)
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
@@ -890,6 +894,29 @@ async def test_pending_same_type_homonyms_without_shared_context_stay_separate()
 
     assert resolution["entity_ids"] == (701, 702)
     assert set(resolution["new_entity_ids"]) == {701, 702}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_entity_result_requires_durable_block_coverage_for_each_entity():
+    with pytest.raises(ValueError, match="cover every resolved entity"):
+        ContextEntityResult(
+            entity_ids=(10,),
+            new_entity_ids=frozenset(),
+            alias_updated_ids=frozenset(),
+            alias_updates={},
+            pending_entity_writes={},
+            project_classifications={
+                10: ProjectEntityClassification(
+                    entity_id=10,
+                    entity_type="Person",
+                    topic="Work",
+                    membership="existing",
+                )
+            },
+            block_entity_associations=(),
+            message_entity_refs=(),
+        )
 
 
 async def _async_value(value):

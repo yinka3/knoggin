@@ -4,6 +4,7 @@ import asyncio
 import re
 import threading
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -701,8 +702,9 @@ class EntityResolver:
                 return True
         return False
 
-    def _populate_cache(self, entity: dict) -> EntityProfile:
-        """Hydrate internal indexes from a KnowledgeStore entity record."""
+    def _cache_record_for_project(self, entity: dict) -> dict:
+        """Select this resolver's local classification from a durable entity row."""
+
         contexts = entity.get("contexts")
         if contexts:
             context = next(
@@ -719,11 +721,83 @@ class EntityResolver:
                 "type": context.get("entity_type"),
                 "topic": context.get("topic"),
             }
+        return entity
+
+    def _populate_cache(self, entity: dict) -> EntityProfile:
+        """Hydrate internal indexes from a KnowledgeStore entity record."""
+
+        entity = self._cache_record_for_project(entity)
         with self._lock:
             profile, aliases_changed = self._index.populate(entity)
             if aliases_changed:
                 self._bump_alias_version()
         return profile
+
+    async def publish_committed_entity_ids(
+        self, affected_entity_ids: Iterable[int]
+    ) -> None:
+        """Refresh this resolver from the rows durably committed for one window.
+
+        The caller supplies only IDs read from the committed Context revision.
+        This deliberately never accepts a pending semantic build: the commit
+        writer may resume at its checkpoint without validating such a rebuild.
+        """
+
+        normalized_ids = set()
+        for entity_id in affected_entity_ids:
+            if (
+                not isinstance(entity_id, int)
+                or isinstance(entity_id, bool)
+                or entity_id <= 0
+            ):
+                raise ValueError(
+                    "Committed entity publication requires positive integer IDs"
+                )
+            normalized_ids.add(entity_id)
+        entity_ids = tuple(sorted(normalized_ids))
+        if not entity_ids:
+            return
+
+        durable_rows = await self.knowledge_store.get_entities_by_ids(
+            list(entity_ids),
+            visible_project_ids=self.readable_project_ids,
+        )
+        rows_by_id = {
+            int(entity["id"]): entity
+            for entity in durable_rows
+            if int(entity["id"]) in set(entity_ids)
+        }
+
+        names = {
+            str(name).strip()
+            for entity in rows_by_id.values()
+            for name in [entity.get("canonical_name"), *(entity.get("aliases") or [])]
+            if name and str(name).strip()
+        }
+        colliding_rows = (
+            await self.knowledge_store.get_entities_by_names(
+                sorted(names), visible_project_ids=self.readable_project_ids
+            )
+            if names
+            else []
+        )
+        for entity in colliding_rows:
+            rows_by_id[int(entity["id"])] = entity
+
+        requested_ids = set(entity_ids)
+        with self._lock:
+            aliases_changed = False
+            _, removed_aliases = self._index.remove(
+                sorted(requested_ids - set(rows_by_id))
+            )
+            aliases_changed = aliases_changed or removed_aliases
+            for entity_id in sorted(rows_by_id):
+                _, refreshed_aliases = self._index.refresh(
+                    self._cache_record_for_project(rows_by_id[entity_id])
+                )
+                aliases_changed = aliases_changed or refreshed_aliases
+            if aliases_changed:
+                self._bump_alias_version()
 
     async def get_id(self, name: str) -> Optional[int]:
         if not name:
@@ -1047,39 +1121,6 @@ class EntityResolver:
             embedding=tuple(embedding) if embedding is not None else None,
             aliases=tuple(alias for alias in aliases if alias and alias.strip()),
         )
-
-    def apply_committed_entity_writes(
-        self, entity_writes: List[EntityWrite] | tuple[EntityWrite, ...]
-    ) -> None:
-        """Expose newly durable entity rows to the local resolver cache.
-
-        Callers must invoke this only after the encompassing database transaction
-        succeeds. Pending entities deliberately remain invisible to other batches.
-        """
-
-        with self._lock:
-            aliases_changed = False
-            for write in entity_writes:
-                if not write.is_new:
-                    continue
-                profile = EntityProfile.registered(
-                    canonical_name=write.canonical_name,
-                    entity_type=write.entity_type,
-                    topic=write.topic,
-                    project_id=self.project_id,
-                    embedding=list(write.embedding) if write.embedding else None,
-                )
-                aliases_changed = (
-                    self._index.register(
-                        write.entity_id,
-                        profile,
-                        write.canonical_name,
-                        list(write.aliases),
-                    )
-                    or aliases_changed
-                )
-            if aliases_changed:
-                self._bump_alias_version()
 
     def remove_entities(self, entity_ids: List[int]) -> int:
         """Remove entities from entities indexes. Call after KnowledgeStore deletion."""

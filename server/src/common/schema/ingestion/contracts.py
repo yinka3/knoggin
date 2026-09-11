@@ -490,6 +490,13 @@ class ContextEntityResult:
             for association in self.block_entity_associations
         ):
             raise ValueError("Context block associations must reference resolved entities")
+        associated_entity_ids = {
+            association.entity_id for association in self.block_entity_associations
+        }
+        if associated_entity_ids != set(entity_ids):
+            raise ValueError(
+                "Context block associations must cover every resolved entity"
+            )
         if any(
             reference.entity_id not in set(entity_ids)
             for reference in self.message_entity_refs

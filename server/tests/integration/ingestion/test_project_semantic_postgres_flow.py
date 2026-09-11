@@ -41,6 +41,7 @@ from core.knowledge.db.readers.project_context_reader import ProjectContextReade
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystem
+from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.store import KnowledgeStore
 from infrastructure.job.base import JobContext
 
@@ -191,10 +192,18 @@ class _SourceGroundedContextModel:
 class _RelationshipEntityBuilder:
     def __init__(self, store):
         self.store = store
+        self.calls = 0
+        self.sarah_id: int | None = None
+        self.delta_id: int | None = None
 
     async def build(self, build):
+        self.calls += 1
+        if self.calls > 1:
+            raise AssertionError("Knowledge publication recovery must not rebuild entities")
         sarah_id = await self.store.allocate_entity_id()
         delta_id = await self.store.allocate_entity_id()
+        self.sarah_id = sarah_id
+        self.delta_id = delta_id
         block = build.knowledge_input_blocks[0]
         entities = {
             sarah_id: EntityWrite(
@@ -258,6 +267,15 @@ class _PendingContextEntities:
 
     def get_mentions_for_id(self, _entity_id):
         return []
+
+
+class _FailingCommittedEntityPublisher:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, ...]] = []
+
+    async def __call__(self, entity_ids: tuple[int, ...]) -> None:
+        self.calls.append(tuple(entity_ids))
+        raise OSError("injected resolver publication failure")
 
 
 class _ContextRelationshipLLM:
@@ -725,7 +743,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_project_semantic_job_commits_source_grounded_relationship_provenance(
+async def test_project_semantic_job_recovers_resolver_publication_and_commits_source_grounded_relationship_provenance(
     real_server_scope,
     tmp_path,
 ):
@@ -789,41 +807,95 @@ async def test_project_semantic_job_commits_source_grounded_relationship_provena
     async def capture_domain():
         return domain
 
-    job = ProjectSemanticJob(
-        SemanticWindowAdmission(
-            store,
-            IngestionSettings(semantic_window_tokens=100),
-            token_counter=lambda text: max(1, len(text.split())),
-            now_ms=lambda: 1_000_000,
+    entity_builder = _RelationshipEntityBuilder(store)
+    relationship_extractor = ContextRelationshipExtractor(
+        user_name=user_name,
+        llm=_ContextRelationshipLLM(
+            [
+                {
+                    "block_ids": ["b1"],
+                    "entity_a": "e2",
+                    "entity_b": "e3",
+                    "relationship": "owns",
+                    "context": "Sarah owns Delta.",
+                }
+            ]
         ),
-        store,
-        _ZeroEpisodeGenerator(),
-        settings=IngestionSettings(semantic_window_tokens=100),
-        capture_domain=capture_domain,
-        capture_ingestion_policy=lambda: policy,
-        context_updater=ContextUpdater(llm=_SourceGroundedContextModel()),
-        context_projection=projection,
-        context_entity_builder=_RelationshipEntityBuilder(store),
-        context_relationship_extractor=ContextRelationshipExtractor(
-            user_name=user_name,
-            llm=_ContextRelationshipLLM(
-                [
-                    {
-                        "block_ids": ["b1"],
-                        "entity_a": "e2",
-                        "entity_b": "e3",
-                        "relationship": "owns",
-                        "context": "Sarah owns Delta.",
-                    }
-                ]
-            ),
-            entities=_PendingContextEntities(),
-        ),
+        entities=_PendingContextEntities(),
     )
+    now = [1_000_000]
+
+    def new_job(publisher):
+        return ProjectSemanticJob(
+            SemanticWindowAdmission(
+                store,
+                IngestionSettings(semantic_window_tokens=100),
+                token_counter=lambda text: max(1, len(text.split())),
+                now_ms=lambda: now[0],
+            ),
+            store,
+            _ZeroEpisodeGenerator(),
+            settings=IngestionSettings(semantic_window_tokens=100),
+            capture_domain=capture_domain,
+            capture_ingestion_policy=lambda: policy,
+            context_updater=ContextUpdater(llm=_SourceGroundedContextModel()),
+            context_projection=projection,
+            context_entity_builder=entity_builder,
+            context_relationship_extractor=relationship_extractor,
+            publish_committed_entity_ids=publisher,
+            now_ms=lambda: now[0],
+        )
+
+    failed_publisher = _FailingCommittedEntityPublisher()
+    job = new_job(failed_publisher)
     context = JobContext(user_name=user_name, project_id=project_id)
 
-    results = [await job.execute(context) for _ in range(4)]
+    results = [await job.execute(context) for _ in range(3)]
     assert all(result.success for result in results)
+    committed_window = await store.get_active_project_semantic_window(
+        user_name=user_name,
+        project_id=project_id,
+    )
+    assert committed_window is not None
+    assert committed_window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
+    failed_finalization = await job.execute(context)
+
+    assert failed_finalization.success is False
+    assert entity_builder.sarah_id is not None
+    assert entity_builder.delta_id is not None
+    assert failed_publisher.calls == [
+        (entity_builder.sarah_id, entity_builder.delta_id)
+    ]
+    assert await postgres.fetch_one(
+        """
+        SELECT stage, last_failure_stage
+        FROM public.project_semantic_windows
+        WHERE project_id = %s
+        """,
+        (project_id,),
+    ) == {
+        "stage": "knowledge_committed",
+        "last_failure_stage": "resolver_publication",
+    }
+
+    now[0] = 1_030_001
+    recovered_resolver = EntityResolver(
+        store,
+        object(),
+        project_id,
+        [project_id],
+    )
+    recovered = await new_job(
+        recovered_resolver.publish_committed_entity_ids
+    ).execute(context)
+
+    assert recovered.success
+    assert entity_builder.calls == 1
+    assert await recovered_resolver.get_id("Sarah") == entity_builder.sarah_id
+    sarah = recovered_resolver.get_cached_profile(entity_builder.sarah_id)
+    assert sarah is not None
+    assert sarah.entity_type == "Person"
+    assert sarah.topic == "Work"
     provenance = await postgres.fetch_one(
         """
         SELECT

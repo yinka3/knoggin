@@ -134,10 +134,13 @@ class _Store:
         self.support_reads = 0
         self.evidence_message_reads = 0
         self.impact_block_ids = frozenset({self.block.block_id})
+        self.committed_entity_ids = (101, 202)
+        self.committed_entity_id_reads = 0
         self.enrich_calls = 0
         self.fail_commit = False
         self.fail_enrichment = False
         self.failures = []
+        self.events = []
 
     async def get_active_project_semantic_window(self, **_kwargs):
         return None if self.window.stage is SemanticWindowStage.COMPLETED else self.window
@@ -174,20 +177,30 @@ class _Store:
         if self.fail_commit:
             raise OSError("Knowledge commit unavailable")
         self.commit_calls.append(build)
+        self.events.append("commit")
         self.window = self.window.model_validate(
             self.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
         )
         return SimpleNamespace(resumed=False, relationships_written=0)
 
+    async def get_project_semantic_window_committed_entity_ids(self, _window_id, **_kwargs):
+        self.committed_entity_id_reads += 1
+        self.events.append("committed_entity_ids")
+        if self.snapshot.window_id != self.window.window_id:
+            return ()
+        return self.committed_entity_ids
+
     async def enrich_project_semantic_window_episodes(self, **_kwargs):
         if self.fail_enrichment:
             raise OSError("Episode enrichment unavailable")
         self.enrich_calls += 1
+        self.events.append("enrich")
         return {"entities": 0, "relationships": 0}
 
     async def advance_project_semantic_window_stage(self, **kwargs):
         assert kwargs["expected_stage"] is SemanticWindowStage.KNOWLEDGE_COMMITTED
         assert kwargs["next_stage"] is SemanticWindowStage.COMPLETED
+        self.events.append("complete")
         self.window = self.window.model_validate(
             self.window.model_dump() | {"stage": SemanticWindowStage.COMPLETED}
         )
@@ -219,10 +232,24 @@ class _FailingRelationships:
         raise OSError("Relationship extraction unavailable")
 
 
+class _Publisher:
+    def __init__(self, events, *, fail=False):
+        self.events = events
+        self.fail = fail
+        self.calls = []
+
+    async def __call__(self, entity_ids):
+        self.events.append("publish")
+        self.calls.append(tuple(entity_ids))
+        if self.fail:
+            raise OSError("Resolver publication unavailable")
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_knowledge_commit_precedes_episode_enrichment_and_completes_terminally():
     store = _Store()
+    publisher = _Publisher(store.events)
 
     async def capture_domain():
         return _domain()
@@ -235,6 +262,7 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_completes_termin
         capture_domain=capture_domain,
         context_entity_builder=_Builder(),
         context_relationship_extractor=_Relationships(),
+        publish_committed_entity_ids=publisher,
     )
     ctx = JobContext(user_name="ada", project_id="project-1")
 
@@ -244,7 +272,15 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_completes_termin
     assert knowledge.success
     assert completed.success
     assert len(store.commit_calls) == 1
+    assert publisher.calls == [(101, 202)]
     assert store.enrich_calls == 1
+    assert store.events == [
+        "commit",
+        "committed_entity_ids",
+        "publish",
+        "enrich",
+        "complete",
+    ]
     assert store.window.stage is SemanticWindowStage.COMPLETED
 
 
@@ -295,6 +331,7 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
         store.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
     )
     store.fail_enrichment = True
+    publisher = _Publisher(store.events)
 
     async def capture_domain():
         return _domain()
@@ -307,6 +344,7 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
         capture_domain=capture_domain,
         context_entity_builder=_Builder(),
         context_relationship_extractor=_Relationships(),
+        publish_committed_entity_ids=publisher,
         now_ms=lambda: 1_000,
     )
 
@@ -315,6 +353,66 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
     assert result.success is False
     assert store.window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
     assert store.failures[0]["failure_stage"] == "episode_enrichment"
+    assert publisher.calls == [(101, 202)]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_publication_failure_retries_only_durable_entity_ids_after_restart():
+    store = _Store()
+    store.window = store.window.model_validate(
+        store.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
+    )
+    now = [1_000]
+    failing_publisher = _Publisher(store.events, fail=True)
+
+    async def capture_domain():
+        return _domain()
+
+    failed_job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=failing_publisher,
+        now_ms=lambda: now[0],
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    failed = await failed_job.execute(context)
+
+    assert failed.success is False
+    assert store.window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
+    assert store.failures[-1]["failure_stage"] == "resolver_publication"
+    assert failing_publisher.calls == [(101, 202)]
+    assert store.enrich_calls == 0
+    assert store.commit_calls == []
+
+    now[0] = 31_001
+    recovered_publisher = _Publisher(store.events)
+    restarted = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_domain=capture_domain,
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=recovered_publisher,
+        now_ms=lambda: now[0],
+    )
+
+    recovered = await restarted.execute(context)
+
+    assert recovered.success
+    assert recovered_publisher.calls == [(101, 202)]
+    assert store.committed_entity_id_reads == 2
+    assert store.enrich_calls == 1
+    assert store.commit_calls == []
+    assert store.window.stage is SemanticWindowStage.COMPLETED
 
 
 @pytest.mark.unit
@@ -329,6 +427,7 @@ async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restar
     now = [1_000]
     builder = _UnexpectedBuilder()
     relationships = _UnexpectedRelationships()
+    publisher = _Publisher(store.events)
 
     async def capture_domain():
         return _domain()
@@ -341,6 +440,7 @@ async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restar
         capture_domain=capture_domain,
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
+        publish_committed_entity_ids=publisher,
         now_ms=lambda: now[0],
     )
     context = JobContext(user_name="ada", project_id="project-1")
@@ -367,6 +467,7 @@ async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restar
         capture_domain=capture_domain,
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
+        publish_committed_entity_ids=publisher,
         now_ms=lambda: now[0],
     )
     committed = await restarted.execute(context)
@@ -385,6 +486,8 @@ async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restar
     assert store.evidence_message_reads == 0
     assert builder.calls == 0
     assert relationships.calls == 0
+    assert publisher.calls == []
+    assert store.committed_entity_id_reads == 1
     assert store.window.stage is SemanticWindowStage.COMPLETED
 
 

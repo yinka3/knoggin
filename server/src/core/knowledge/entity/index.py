@@ -115,6 +115,34 @@ class EntityIndex:
 
         return profile, aliases_changed
 
+    def refresh(self, entity: dict) -> Tuple[EntityProfile, bool]:
+        """Replace one cached entity with its authoritative durable representation.
+
+        ``populate`` is intentionally additive for ordinary cache hydration.  A
+        committed publication must also remove aliases that are no longer owned
+        by this entity, while preserving any other owners of a shared alias.
+        """
+
+        entity_id = entity["id"]
+        profile = EntityProfile.from_entity_record(entity)
+        desired_aliases = {
+            self._normalize_name(name)
+            for name in [entity.get("canonical_name"), *(entity.get("aliases") or [])]
+            if self._normalize_name(name)
+        }
+        current_aliases = set(self._id_to_names.get(entity_id, set()))
+        aliases_changed = current_aliases != desired_aliases
+
+        if aliases_changed:
+            self._remove_all_aliases_for_entity(entity_id)
+            for alias in desired_aliases:
+                self._add_alias_owner(entity_id, alias)
+
+        if self._profiles.get(entity_id) != profile:
+            self._profiles[entity_id] = profile
+
+        return profile, aliases_changed
+
     def register(
         self,
         entity_id: int,

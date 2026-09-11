@@ -32,6 +32,7 @@ from core.knowledge.conflicts import ConflictDiscoveryCursor
 from core.knowledge.context.models import ContextBlockSupport, ContextMaterialization
 from core.knowledge.context.render import context_block_hash, context_document_hash
 from core.knowledge.db.readers.conflict_discovery_reader import ConflictDiscoveryReader
+from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.db.writers.semantic_commit_writer import SemanticCommitWriter
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
@@ -342,6 +343,13 @@ async def test_semantic_commit_is_atomic_idempotent_and_retracts_replaced_suppor
         "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
         (first_window.window_id,),
     ) == {"stage": "knowledge_committed"}
+    assert await ProjectContextReader(
+        real_postgres_client
+    ).get_committed_window_affected_entity_ids(
+        first_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+    ) == (10, 11)
     assert await window_writer.advance_stage(
         window_id=first_window.window_id,
         user_name="ada",
@@ -537,24 +545,6 @@ async def test_semantic_commit_reuses_published_context_without_replaying_its_im
     with pytest.raises(ValueError, match="impact closure"):
         await writer.commit(replayed_build)
 
-    malformed_empty_build = _empty_build(no_op_window.window_id, context)
-    malformed_empty_build.set_entity_result(
-        ContextEntityResult(
-            entity_ids=(10,),
-            new_entity_ids=frozenset(),
-            alias_updated_ids=frozenset(),
-            alias_updates={},
-            pending_entity_writes={},
-            project_classifications={
-                10: _classification(10, "Person", membership="existing"),
-            },
-            block_entity_associations=(),
-            message_entity_refs=(),
-        )
-    )
-    with pytest.raises(ValueError, match="empty Knowledge build"):
-        await writer.commit(malformed_empty_build)
-
     no_op_build = _empty_build(no_op_window.window_id, context)
     committed = await writer.commit(no_op_build)
     resumed = await writer.commit(no_op_build)
@@ -562,6 +552,13 @@ async def test_semantic_commit_reuses_published_context_without_replaying_its_im
     assert committed.resumed is False
     assert committed.relationships_written == 0
     assert resumed.resumed is True
+    assert await ProjectContextReader(
+        real_postgres_client
+    ).get_committed_window_affected_entity_ids(
+        no_op_window.window_id,
+        user_name="ada",
+        project_id="project-1",
+    ) == ()
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.relationship_observations"
     ) == {"count": 1}

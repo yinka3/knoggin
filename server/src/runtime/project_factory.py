@@ -265,6 +265,7 @@ class ProjectRuntimeFactory:
                 llm=resources.llm_service,
                 entities=runtime.entities,
             ),
+            publish_committed_entity_ids=runtime.entities.publish_committed_entity_ids,
         )
 
     def _register_background_jobs(

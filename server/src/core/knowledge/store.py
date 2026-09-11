@@ -247,6 +247,21 @@ class KnowledgeStore:
             project_id=project_id,
         )
 
+    async def get_project_semantic_window_committed_entity_ids(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> tuple[int, ...]:
+        """Return durable Context entity effects for a knowledge-committed window."""
+
+        return await self._project_context_reader.get_committed_window_affected_entity_ids(
+            window_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
     async def get_project_context_block_supports(
         self,
         block_ids: list[str],

@@ -31,7 +31,7 @@ from infrastructure.job.base import BaseJob, JobContext, JobResult
 
 
 class SemanticEpisodeStore(Protocol):
-    """Durable operations owned by the Episode and Context semantic stages."""
+    """Durable operations owned by project semantic stages."""
 
     async def get_active_project_semantic_window(
         self, *, user_name: str, project_id: str
@@ -105,6 +105,10 @@ class SemanticEpisodeStore(Protocol):
 
     async def commit_project_semantic_knowledge(self, build: SemanticWindowBuild): ...
 
+    async def get_project_semantic_window_committed_entity_ids(
+        self, window_id: str, *, user_name: str, project_id: str
+    ) -> tuple[int, ...]: ...
+
     async def enrich_project_semantic_window_episodes(
         self, *, window_id: str, user_name: str, project_id: str
     ) -> dict[str, int]: ...
@@ -148,12 +152,18 @@ class ProjectSemanticJob(BaseJob):
         context_projection: ContextProjection | None = None,
         context_entity_builder: ContextEntityBuildService | None = None,
         context_relationship_extractor: ContextRelationshipExtractor | None = None,
+        publish_committed_entity_ids: Callable[[tuple[int, ...]], Awaitable[None]]
+        | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not callable(capture_domain):
             raise TypeError("ProjectSemanticJob requires a domain snapshot callback")
         if capture_ingestion_policy is not None and not callable(capture_ingestion_policy):
             raise TypeError("capture_ingestion_policy must be callable")
+        if publish_committed_entity_ids is not None and not callable(
+            publish_committed_entity_ids
+        ):
+            raise TypeError("publish_committed_entity_ids must be callable")
         if not isinstance(settings, IngestionSettings):
             raise TypeError("ProjectSemanticJob requires IngestionSettings")
         self.admission = admission
@@ -163,6 +173,7 @@ class ProjectSemanticJob(BaseJob):
         self._context_projection = context_projection
         self._context_entity_builder = context_entity_builder
         self._context_relationship_extractor = context_relationship_extractor
+        self._publish_committed_entity_ids = publish_committed_entity_ids
         self._capture_domain = capture_domain
         self._capture_ingestion_policy = capture_ingestion_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
@@ -575,7 +586,31 @@ class ProjectSemanticJob(BaseJob):
     async def _execute_finalization_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
     ) -> JobResult:
-        """Enrich Episodes only after atomic Knowledge commit, then complete."""
+        """Publish committed resolver state, enrich Episodes, then complete."""
+
+        if self._publish_committed_entity_ids is not None:
+            try:
+                entity_ids = (
+                    await self.knowledge_store.get_project_semantic_window_committed_entity_ids(
+                        str(window.window_id),
+                        user_name=ctx.user_name,
+                        project_id=ctx.project_id,
+                    )
+                )
+                if entity_ids:
+                    await self._publish_committed_entity_ids(entity_ids)
+            except Exception as exc:
+                logger.exception("Semantic resolver publication stage failed: {}", exc)
+                await self._record_failure(
+                    window,
+                    ctx,
+                    exc,
+                    failure_stage="resolver_publication",
+                )
+                return JobResult(
+                    success=False,
+                    summary="Semantic resolver publication stage failed",
+                )
 
         try:
             enriched = await self.knowledge_store.enrich_project_semantic_window_episodes(
