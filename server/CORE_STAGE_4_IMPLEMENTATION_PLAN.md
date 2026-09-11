@@ -1,6 +1,6 @@
 # Core Stage 4 — Versioned Evidence and Editable Memory
 
-Status: Planned 2026-09-11. No implementation has started.
+Status: Chunk A complete 2026-09-11. Chunks B–D remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 4 may begin after Stage 3, but its document and Episode work is
@@ -241,11 +241,21 @@ Record exact commands/results, changed files, limitations, and local commit IDs.
 Retire F4/F11/PA3/PA4 probes only after normal desired-behavior regressions
 exist. Append status to the core, Knowledge, and provenance/Agent reviews.
 
-- [ ] A: exact-byte document index publication.
+- [x] A: exact-byte document index publication.
 - [ ] B: historical encounter persistence across document changes.
 - [ ] C: observation-aware graph evidence hydration.
 - [ ] D: atomic Episode narrative/vector edits.
 - [ ] Combined real-PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task after Stage 3 closes: Stage 4 Chunk A.
+Chunk A validation on 2026-09-11:
+
+- `uv run pytest -q tests/unit/core/knowledge/test_document_service.py tests/contract/storage/test_document_writer_transaction_contract.py tests/contract/storage/test_document_storage.py tests/contract/storage/test_document_format_indexing.py tests/contract/storage/test_document_reader_scope_contract.py tests/integration/ingestion/test_document_format_runtime.py tests/integration/test_workspace_health_flow.py` → 106 passed; the environment emitted its existing Requests dependency warning.
+- Focused Ruff and compileall passed. The initial sandboxed Ruff command could not open the shared `uv` cache; the approved rerun passed. `git diff --check` passed.
+
+The new normal regressions cover stale bytes before extraction, a catalog
+replacement during derivation, and the real-PostgreSQL publication boundary.
+No historical probe is retired yet: F4 remains represented by its normal
+regressions and the other Stage 4 review probes belong to later chunks.
+
+Next implementation task: Stage 4 Chunk B.

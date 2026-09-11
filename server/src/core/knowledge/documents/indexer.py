@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
@@ -134,6 +135,9 @@ class DocumentIndexer:
                 raw_bytes = await self._source_bytes(claimed)
                 if raw_bytes is None:
                     raise FileNotFoundError("Document content is missing")
+                read_content_hash = hashlib.sha256(raw_bytes).hexdigest()
+                if read_content_hash != claimed["content_hash"]:
+                    return await self._reconcile_stale_claim(claimed)
                 extraction = await self._run_blocking(
                     extract_and_split_document,
                     raw_bytes,
@@ -154,16 +158,10 @@ class DocumentIndexer:
                     embeddings=embeddings,
                     extracted_text=extraction.text,
                     indexed_at=get_now_iso(),
-                    expected_content_hash=claimed["content_hash"],
+                    read_content_hash=read_content_hash,
                 )
                 if row is None:
-                    refreshed = await self._reader.fetch_documents_by_reference(
-                        document_id=document_id,
-                        relative_path=None,
-                    )
-                    if not refreshed:
-                        raise FileNotFoundError("Document not found")
-                    return refreshed[0]
+                    return await self._reconcile_stale_claim(claimed)
                 return row
         except asyncio.CancelledError:
             raise
@@ -189,6 +187,31 @@ class DocumentIndexer:
                 document["relative_path"],
             )
         raise RuntimeError("Document source filesystem is not configured")
+
+    async def _reconcile_stale_claim(self, claimed: Dict) -> Dict:
+        """Reconcile a source/catalog race without marking it as an index failure."""
+
+        callback = self._reconciliation_callback
+        if callback is None:
+            raise RuntimeError("Document source changed but reconciliation is unavailable")
+        await callback()
+        await self._writer.requeue_index_claims(
+            document_ids=[claimed["document_id"]],
+            updated_at=get_now_iso(),
+        )
+        refreshed = await self._reader.fetch_documents_by_reference(
+            document_id=None,
+            relative_path=claimed["relative_path"],
+        )
+        if refreshed:
+            return refreshed[0]
+        return {
+            **claimed,
+            "status": "deleted",
+            "indexed_at": None,
+            "error_message": None,
+            "chunk_count": 0,
+        }
 
     @staticmethod
     def _validate_embeddings(

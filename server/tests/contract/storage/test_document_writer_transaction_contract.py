@@ -87,6 +87,7 @@ async def test_document_writer_rejects_mismatched_chunk_embedding_lists():
             embeddings=[],
             extracted_text="notes",
             indexed_at="2026-07-23T00:00:00+00:00",
+            read_content_hash="hash",
         )
 
     assert client.transaction_count == 0

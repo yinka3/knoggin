@@ -203,3 +203,70 @@ async def test_document_writer_tombstones_metadata_and_purges_extractions_and_ch
         "SELECT chunk_id FROM public.document_chunks WHERE document_id = %s",
         (document_id,),
     ) == []
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_document_publication_requires_the_hash_of_the_read_bytes(
+    real_postgres_client,
+):
+    document_id = str(uuid.uuid4())
+    read_content_hash = "a" * 64
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id,
+            original_name, relative_path, extension, size_bytes, content_hash,
+            status
+        )
+        VALUES (%s, 'project-1',
+                'notes.md', 'notes.md', '.md', 5, %s, 'indexing')
+        """,
+        (document_id, read_content_hash),
+    )
+    writer = DocumentWriter(real_postgres_client, "project-1")
+
+    rejected = await writer.persist_indexed_chunks(
+        document_id=document_id,
+        chunks=["alpha"],
+        embeddings=[[0.0] * 1024],
+        extracted_text="alpha",
+        indexed_at="2026-09-11T00:00:00+00:00",
+        read_content_hash="b" * 64,
+    )
+
+    assert rejected is None
+    assert await real_postgres_client.fetch_one(
+        "SELECT status FROM public.project_documents WHERE document_id = %s",
+        (document_id,),
+    ) == {"status": "indexing"}
+    assert await real_postgres_client.fetch_all(
+        "SELECT chunk_id FROM public.document_chunks WHERE document_id = %s",
+        (document_id,),
+    ) == []
+    assert await real_postgres_client.fetch_all(
+        "SELECT document_id FROM public.document_extractions WHERE document_id = %s",
+        (document_id,),
+    ) == []
+
+    published = await writer.persist_indexed_chunks(
+        document_id=document_id,
+        chunks=["alpha"],
+        embeddings=[[0.0] * 1024],
+        extracted_text="alpha",
+        indexed_at="2026-09-11T00:00:00+00:00",
+        read_content_hash=read_content_hash,
+    )
+
+    assert published is not None
+    assert published["status"] == "indexed"
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT extracted_content_hash
+        FROM public.document_extractions
+        WHERE document_id = %s
+        """,
+        (document_id,),
+    ) == {"extracted_content_hash": read_content_hash}
