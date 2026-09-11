@@ -241,12 +241,12 @@ class SemanticWindowReader:
         user_name: str,
         project_id: str,
     ) -> list[dict]:
-        """Return the complete exchange stream needed for FIFO admission.
+        """Return participation-eligible exchanges needed for FIFO admission.
 
-        The caller intentionally receives blocked exchanges as well as eligible
-        ones.  That is what prevents a later closed turn from overtaking an
-        earlier open or editable turn in the same session while leaving other
-        sessions independent.
+        Excluded sessions and pre-frontier exchanges must be absent before
+        per-session FIFO is evaluated. Within an eligible session, incomplete
+        exchanges remain in the stream so they still block later exchanges
+        from overtaking them.
         """
 
         user_name, project_id = self._scope(
@@ -267,7 +267,6 @@ class SemanticWindowReader:
                 assistant_message.content AS assistant_content,
                 assistant_message.timestamp_ms AS assistant_timestamp_ms,
                 assistant_message.lifecycle_state AS assistant_lifecycle_state,
-                session.status AS session_status,
                 EXISTS (
                     SELECT 1
                     FROM public.project_semantic_window_messages AS membership
@@ -292,6 +291,9 @@ class SemanticWindowReader:
               AND user_message.project_id = %s
               AND user_message.role = 'user'
               AND user_message.lifecycle_state <> 'superseded'
+              AND session.status = 'open'
+              AND session.semantic_participation_enabled
+              AND user_message.message_id > session.semantic_participation_after_message_id
             ORDER BY user_message.session_id,
                      user_message.timestamp_ms ASC NULLS LAST,
                      user_message.message_id

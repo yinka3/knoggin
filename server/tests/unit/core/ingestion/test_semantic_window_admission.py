@@ -40,7 +40,6 @@ def _row(
     assistant_id=None,
     user_state="closed",
     lifecycle="sealed",
-    status="open",
     claimed=False,
 ):
     if timestamp_ms is None:
@@ -60,7 +59,6 @@ def _row(
         "assistant_content": assistant_content,
         "assistant_timestamp_ms": timestamp_ms + 1,
         "assistant_lifecycle_state": "sealed" if assistant_id else None,
-        "session_status": status,
         "already_claimed": claimed,
     }
 

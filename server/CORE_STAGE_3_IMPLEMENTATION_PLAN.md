@@ -1,6 +1,6 @@
 # Core Stage 3 — Semantic Participation and Admission Policy
 
-Status: In progress 2026-09-11. Chunk A is complete; Chunks B–E have not
+Status: In progress 2026-09-11. Chunks A–B are complete; Chunks C–E have not
 started.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
@@ -127,8 +127,8 @@ Primary files:
 | `src/core/knowledge/db/readers/semantic_window_reader.py` | Apply participation/status/frontier eligibility in the canonical admission query. |
 | `src/core/ingestion/semantic_window_admission.py` | Remove deleted-Session flushing and preserve FIFO only across eligible rows. |
 | `src/core/knowledge/store.py` | Keep the facade narrow; update names/docs only as required. |
-| `tests/unit/core/ingestion/test_semantic_window_admission.py` | Cover disabled intervals, re-enable frontiers, and nonblocking FIFO. |
-| New storage contract under `tests/contract/storage/` | Prove the SQL reader excludes disabled, pre-frontier, and deleted Session exchanges. |
+| `tests/unit/core/ingestion/test_semantic_window_admission.py` | Preserve FIFO for eligible open/editable exchanges. |
+| `tests/contract/storage/test_semantic_window_participation_admission_contract.py` | Prove disabled intervals, re-enable frontiers, deleted Sessions, and eligible FIFO at the SQL boundary. |
 
 Acceptance:
 
@@ -286,11 +286,11 @@ Append implementation status to the locked Session/Ingestion/Knowledge reviews
 without rewriting their original rationale.
 
 - [x] A: canonical semantic-participation names and persistence.
-- [ ] B: eligibility before FIFO and deleted-Session exclusion.
+- [x] B: eligibility before FIFO and deleted-Session exclusion.
 - [ ] C: atomic claim-time participation revalidation.
 - [ ] D: coherent semantic policy/domain capture.
 - [ ] E: inert policy cleanup.
 - [ ] Combined real-PostgreSQL scenario passes.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 3 Chunk B.
+Next implementation task: Stage 3 Chunk C.

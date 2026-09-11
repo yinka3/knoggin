@@ -464,7 +464,7 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
     ) -> list[dict]:
-        """Load whole canonical exchanges for project-level semantic admission."""
+        """Load participation-eligible canonical exchanges for semantic admission."""
 
         return await self._semantic_window_reader.get_unclaimed_project_exchange_rows(
             user_name=user_name,

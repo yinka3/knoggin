@@ -50,7 +50,6 @@ class _Exchange:
     session_id: str
     source_timestamp_ms: int | None
     closed_at_ms: int
-    session_closed: bool
     messages: tuple[dict, ...]
 
 
@@ -138,8 +137,6 @@ class SemanticWindowAdmission:
             latest_close = max(exchange.closed_at_ms for exchange in selected)
             if force_flush:
                 close_reason = "explicit_flush"
-            elif any(exchange.session_closed for exchange in selected):
-                close_reason = "session_closed"
             elif self._now_ms() >= latest_close + (self.IDLE_FLUSH_SECONDS * 1000):
                 close_reason = "idle_flush"
             else:
@@ -302,7 +299,6 @@ class SemanticWindowAdmission:
                 else int(row["user_timestamp_ms"])
             ),
             closed_at_ms=int(row["exchange_closed_at_ms"]),
-            session_closed=row.get("session_status") != "open",
             messages=tuple(messages),
         )
 
