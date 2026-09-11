@@ -540,6 +540,7 @@ class ProjectManager:
                 WHERE user_name = %s
                   AND project_id = %s
                   AND status <> 'deleted'
+                ORDER BY session_id
                 FOR UPDATE
                 """,
                 (self.user_name, project_id),

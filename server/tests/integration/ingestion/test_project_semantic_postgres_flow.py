@@ -5,6 +5,7 @@ publication, stage checkpoints, Knowledge commit, finalization, and Context
 projection all use their production implementations.
 """
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -47,6 +48,7 @@ from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWri
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.store import KnowledgeStore
+from core.project.project_manager import ProjectManager
 from infrastructure.job.base import JobContext
 
 
@@ -637,6 +639,69 @@ class _CorrectionRelationshipExtractor:
         )
         build.set_relationship_writes(writes)
         return writes
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_selection_retries_after_participation_toggle(
+    real_server_scope,
+):
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name = scope["user_name"]
+    project_id = scope["project_id"]
+    session_id = scope["session_id"]
+    await postgres.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (%s, %s, 101, %s, 'user', 'Select this before the toggle.',
+                  1, 'sealed', 'closed', 'user_only', 1)
+        """,
+        (user_name, session_id, project_id),
+    )
+    domain = _domain()
+    store = KnowledgeStore(postgres, object())
+    admission = SemanticWindowAdmission(
+        store,
+        IngestionSettings(semantic_window_tokens=100),
+        token_counter=lambda text: max(1, len(text.split())),
+        now_ms=lambda: 1_000_000,
+    )
+    proposal = await admission.select(
+        user_name=user_name,
+        project_id=project_id,
+        domain=domain,
+        force_flush=True,
+    )
+    assert proposal is not None
+
+    await ProjectManager(
+        SimpleNamespace(postgres=postgres), user_name=user_name
+    ).set_session_semantic_participation(project_id, [])
+
+    with pytest.raises(ValueError, match="no longer eligible"):
+        await store.claim_project_semantic_window(
+            proposal.window, list(proposal.messages)
+        )
+
+    assert await postgres.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.project_semantic_windows
+        WHERE project_id = %s
+        """,
+        (project_id,),
+    ) == {"count": 0}
+    assert await admission.select(
+        user_name=user_name,
+        project_id=project_id,
+        domain=domain,
+        force_flush=True,
+    ) is None
 
 
 @pytest.mark.integration

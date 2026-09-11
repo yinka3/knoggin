@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -37,6 +38,7 @@ from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWri
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.store import KnowledgeStore
+from core.project.project_manager import ProjectManager
 
 _HASH = "a" * 64
 
@@ -71,6 +73,10 @@ def _ingestion_policy() -> IngestionPolicy:
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=_domain(),
     )
+
+
+def _project_manager(client) -> ProjectManager:
+    return ProjectManager(SimpleNamespace(postgres=client), user_name="ada")
 
 
 async def _seed_messages(client) -> None:
@@ -225,6 +231,86 @@ async def test_concurrent_semantic_window_claimers_return_one_project_owner(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_participation_toggle_before_claim_rejects_the_entire_stale_window(
+    real_postgres_client,
+):
+    await _seed_messages(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-3', 'ada', 'project-1');
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            lifecycle_state, exchange_state, exchange_outcome, exchange_closed_at_ms
+        ) VALUES (
+            'ada', 'session-3', 102, 'project-1', 'user', 'Second session message',
+            'sealed', 'closed', 'user_only', 102
+        )
+        """
+    )
+    members = _membership() + [
+        SemanticWindowMessage(
+            message_id=102,
+            session_id="session-3",
+            exchange_user_message_id=102,
+            role="user",
+            ordinal=1,
+        )
+    ]
+    await _project_manager(real_postgres_client).set_session_semantic_participation(
+        "project-1", ["session-3"]
+    )
+
+    with pytest.raises(ValueError, match="no longer eligible"):
+        await SemanticWindowWriter(real_postgres_client).claim_window(_window(), members)
+
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.project_semantic_windows
+        WHERE project_id = 'project-1'
+        """
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.project_semantic_window_messages
+        WHERE project_id = 'project-1'
+        """
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_claim_before_participation_toggle_preserves_frozen_membership(
+    real_postgres_client,
+):
+    await _seed_messages(real_postgres_client)
+    writer = SemanticWindowWriter(real_postgres_client)
+    window = _window()
+
+    claimed = await writer.claim_window(window, _membership())
+    await _project_manager(real_postgres_client).set_session_semantic_participation(
+        "project-1", []
+    )
+    resumed = await writer.claim_window(_window(), _membership())
+
+    assert claimed.claimed is True
+    assert resumed.claimed is False
+    assert resumed.window.window_id == window.window_id
+    assert await SemanticWindowReader(
+        real_postgres_client
+    ).get_window_messages(
+        window.window_id,
+        user_name="ada",
+        project_id="project-1",
+    ) == _membership()
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_context_source_catalog_reads_only_frozen_assistant_owned_refs(
     real_postgres_client,
 ):
@@ -254,6 +340,13 @@ async def test_context_source_catalog_reads_only_frozen_assistant_owned_refs(
         )
         """,
         (uuid4(), _HASH),
+    )
+    await real_postgres_client.execute(
+        """
+        UPDATE public.messages
+        SET exchange_outcome = 'assistant_final'
+        WHERE message_id = 101 AND project_id = 'project-1'
+        """
     )
     window = _window()
     members = _membership() + [

@@ -367,15 +367,34 @@ class SemanticWindowWriter:
         if window.origin is SemanticWindowOrigin.HUMAN_EDIT:
             return
         message_ids = [member.message_id for member in members]
+        exchange_members: dict[int, list[SemanticWindowMessage]] = {}
+        for member in members:
+            exchange_members.setdefault(member.exchange_user_message_id, []).append(
+                member
+            )
         await cur.execute(
             """
-            SELECT message_id, session_id, role, user_msg_id, lifecycle_state,
-                   exchange_state, exchange_outcome
-            FROM public.messages
-            WHERE project_id = %s
-              AND user_name = %s
-              AND message_id = ANY(%s)
-            FOR UPDATE
+            SELECT message.message_id,
+                   message.session_id,
+                   message.role,
+                   message.user_msg_id,
+                   message.lifecycle_state,
+                   message.exchange_state,
+                   message.exchange_outcome,
+                   message.exchange_closed_at_ms,
+                   session.status AS session_status,
+                   session.semantic_participation_enabled,
+                   session.semantic_participation_after_message_id
+            FROM public.messages AS message
+            JOIN public.sessions AS session
+              ON session.session_id = message.session_id
+             AND session.project_id = message.project_id
+             AND session.user_name = message.user_name
+            WHERE message.project_id = %s
+              AND message.user_name = %s
+              AND message.message_id = ANY(%s)
+            ORDER BY session.session_id, message.message_id
+            FOR UPDATE OF message, session
             """,
             (window.project_id, window.user_name, message_ids),
         )
@@ -395,10 +414,37 @@ class SemanticWindowWriter:
                     row["exchange_state"] != "closed"
                     or row["lifecycle_state"] != "sealed"
                     or row["exchange_outcome"] is None
+                    or row["exchange_closed_at_ms"] is None
                 ):
                     raise ValueError("Only sealed closed user exchanges are admissible")
-            elif int(row["user_msg_id"] or 0) != member.exchange_user_message_id:
-                raise ValueError("Assistant membership is linked to the wrong exchange")
+                if (
+                    row["session_status"] != "open"
+                    or not bool(row["semantic_participation_enabled"])
+                    or member.message_id
+                    <= int(row["semantic_participation_after_message_id"])
+                ):
+                    raise ValueError(
+                        "Conversation membership is no longer eligible for semantic work"
+                    )
+                assistant_members = [
+                    exchange_member
+                    for exchange_member in exchange_members[member.message_id]
+                    if exchange_member.role == "assistant"
+                ]
+                if row["exchange_outcome"] == "assistant_final":
+                    if len(assistant_members) != 1:
+                        raise ValueError(
+                            "Assistant-final exchanges require sealed assistant membership"
+                        )
+                elif assistant_members:
+                    raise ValueError(
+                        "Non-final exchanges cannot include assistant membership"
+                    )
+            elif (
+                row["lifecycle_state"] != "sealed"
+                or int(row["user_msg_id"] or 0) != member.exchange_user_message_id
+            ):
+                raise ValueError("Assistant membership is no longer sealed and linked")
 
     @staticmethod
     def _validate_transition(
