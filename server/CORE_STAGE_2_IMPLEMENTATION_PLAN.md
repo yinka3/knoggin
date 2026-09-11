@@ -1,6 +1,6 @@
 # Core Stage 2 — Entity Identity and Resolution
 
-Status: In progress; Chunks A-B completed 2026-09-11.
+Status: In progress; Chunks A-C completed 2026-09-11.
 
 Baseline inspected: `aadedewe/refactor`, `4e47481`, following completed
 [Stage 1](CORE_STAGE_1_IMPLEMENTATION_PLAN.md). Recheck HEAD and the working
@@ -262,6 +262,30 @@ Invalid outputs cannot persist, and valid multi-block support still reaches the
 original messages/sources. Handle support does not assert that the resolver can
 infer every same-type homonym from ambiguous prose.
 
+### Completion record
+
+- VP-02 now creates an opaque, ascending request-local `eN` table after all
+  eligible candidates are known. Reserved identity `1` is always `e1`; an
+  identity-name collision therefore retains two distinct candidate handles.
+  Durable IDs remain outside the prompt and are restored before relationship
+  normalization, block validation, deduplication, and `ContextRelationshipWrite`
+  construction.
+- The Context-only structured schema rejects canonical names, aliases, raw IDs,
+  and malformed handles. An unknown but well-formed handle remains a per-result
+  validation issue so other valid model connections can still persist.
+- The formatter and Context VP-02 prompt identify handle-only endpoint output,
+  preserve candidate metadata for model reasoning, and explicitly mark the
+  reserved user identity. There is no name-output fallback.
+- Added unit coverage for same-name/same-type candidates, identity collisions,
+  schema and runtime rejection, multi-block evidence, and effective local type.
+  The existing real PostgreSQL source-provenance flow now uses the actual
+  extractor; a new controlled homonym flow commits both selected IDs and their
+  original source reference.
+- Validated with the direct VP-02/schema tests (`9 passed`), the focused Stage 2
+  unit suite (`72 passed`), and real PostgreSQL storage/integration suite
+  (`15 passed`), plus touched-path Ruff, compileall, and `git diff --check`.
+- Local implementation commit: `343e3a5 fix(ingestion): use local VP-02 entity handles`.
+
 ## Chunk D — Durable commit before resolver publication, with restart recovery
 
 `ProjectSemanticJob` currently commits and returns without publishing entity
@@ -374,7 +398,7 @@ while drafting this plan.
 
 - [x] A: durable exact candidates and safe pending reuse.
 - [x] B: local classification authority, occurrence preservation and atomic membership.
-- [ ] C: entity handles and provenance-preserving endpoint validation.
+- [x] C: entity handles and provenance-preserving endpoint validation.
 - [ ] D: committed resolver publication and recovery.
 - [ ] E: identity-only embeddings and classification-only maintenance cleanup.
 - [ ] Combined real-resolver/extractor PostgreSQL scenario passes.
@@ -383,6 +407,5 @@ while drafting this plan.
 - [ ] Retire resolved historical core probes with normal regression references.
 - [ ] Add a narrow operations-document update while preserving existing user edits.
 
-Next implementation task: Chunk C. Replace name-keyed Context VP-02 endpoints
-with deterministic local entity handles while preserving B's classifications and
-Context-block provenance.
+Next implementation task: Chunk D. Publish only committed entity state to the
+live resolver, then recover that publication safely after a restart.
