@@ -57,6 +57,22 @@ async def test_ambiguous_exact_alias_returns_candidates_without_direct_evidence(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_unique_exact_name_is_not_blocked_by_a_shared_fuzzy_alias(
+    entity_manager_harness,
+):
+    entities, _, _ = entity_manager_harness
+    await seed_entity(entities, 101, "Avery Stone", aliases=["Avery"])
+    await seed_entity(entities, 202, "Avery Quinn", aliases=["Avery"])
+
+    candidates = await entities.get_candidate_ids("Avery Stone")
+    target = next(candidate for candidate in candidates if candidate.entity_id == 101)
+
+    assert target.has_direct_name_evidence is True
+    assert "ambiguous_alias" not in target.signals
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_cold_resolver_hydrates_a_durable_exact_alias(
     entity_manager_harness,
 ):

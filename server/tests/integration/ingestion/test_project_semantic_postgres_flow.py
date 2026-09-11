@@ -8,6 +8,7 @@ projection all use their production implementations.
 from uuid import uuid4
 
 import pytest
+import spacy
 
 from common.conf.domain_config import DomainConfig
 from common.schema.context import (
@@ -29,10 +30,13 @@ from common.schema.settings import (
     IngestionSettings,
     TextProcessorSettings,
 )
+from core.ingestion.context_entity_build import ContextEntityBuildService
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_job import ProjectSemanticJob
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
+from core.ingestion.text_processor import TextProcessor
+from core.ingestion.vp01 import VP01EntitySpan
 from core.knowledge.context.projection import ContextProjection
 from core.knowledge.context.render import apply_context_edits, render_context_markdown
 from core.knowledge.context.updater import ContextUpdater, ContextUpdateResult
@@ -283,9 +287,93 @@ class _ContextRelationshipLLM:
 
     def __init__(self, connections) -> None:
         self.connections = connections
+        self.calls = 0
 
     async def generate_structured(self, *, response_model, **_kwargs):
+        self.calls += 1
         return response_model.model_validate({"connections": self.connections})
+
+
+class _Stage2ContextModel:
+    """Create one Context block, replace it, then leave Context unchanged."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_structured(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMContextUpdate(
+                operations=[
+                    ContextAdd(
+                        section_key="current_state",
+                        markdown="Avery Stone owns Delta Corp.",
+                        assertion_kind=AssertionKind.USER_ASSERTED,
+                        evidence=[{"handle": "M1"}],
+                    )
+                ],
+                edit_summary="Recorded Avery ownership",
+            )
+        if self.calls == 2:
+            return LLMContextUpdate(
+                operations=[
+                    ContextReplace(
+                        section_key="current_state",
+                        target={"handle": "C1"},
+                        markdown="Avery Stone continues to own Delta Corp.",
+                        assertion_kind=AssertionKind.USER_ASSERTED,
+                        evidence=[{"handle": "M1"}],
+                    )
+                ],
+                edit_summary="Refreshed Avery ownership",
+            )
+        if self.calls == 3:
+            return LLMContextUpdate(
+                operations=[],
+                edit_summary="No Context changes",
+            )
+        raise AssertionError("unexpected Context update")
+
+
+class _Stage2Embedding:
+    """Keep the composition test deterministic without loading local models."""
+
+    def __init__(self) -> None:
+        self.batch_calls: list[tuple[str, ...]] = []
+        self.single_calls: list[str] = []
+
+    async def encode(self, values, **_kwargs):
+        materialized = tuple(values)
+        self.batch_calls.append(materialized)
+        return [[0.25] * 1024 for _ in materialized]
+
+    async def encode_single(self, value):
+        self.single_calls.append(value)
+        return [0.25] * 1024
+
+
+class _Stage2VP01:
+    """Return typed spans for the two names in the controlled Context edits."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def extract_entities(self, text, _domain, *, threshold):
+        del threshold
+        self.calls.append(text)
+        spans = []
+        for name, label in (("Avery Stone", "person"), ("Delta Corp", "company")):
+            start = text.find(name)
+            if start >= 0:
+                spans.append(
+                    VP01EntitySpan(
+                        text=name,
+                        label=label,
+                        start=start,
+                        end=start + len(name),
+                    )
+                )
+        return spans
 
 
 class _HomonymSourceGroundedContextModel:
@@ -1393,3 +1481,406 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
         """,
         (project_id,),
     ) == {"total": 3, "completed": 3, "episode_results": 3}
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_project_semantic_job_composes_real_resolution_extraction_and_recovery(
+    real_server_scope,
+    tmp_path,
+):
+    """Exercise foreign identity reuse through real Context extraction and recovery."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name = scope["user_name"]
+    project_id = scope["project_id"]
+    session_id = scope["session_id"]
+    shared_project_id = f"{project_id}-shared"
+    domain = _relationship_domain()
+    settings = IngestionSettings(semantic_window_tokens=1)
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(llm_ner=False),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    store = KnowledgeStore(postgres, object())
+    embedding = _Stage2Embedding()
+    vp01 = _Stage2VP01()
+    context_model = _Stage2ContextModel()
+    relationship_llm = _ContextRelationshipLLM(
+        [
+            {
+                "block_ids": ["b1"],
+                "entity_a": "e2",
+                "entity_b": "e3",
+                "relationship": "owns",
+                "context": "Avery Stone owns Delta Corp.",
+            }
+        ]
+    )
+    projection = ContextProjection(
+        reader=ProjectContextReader(postgres),
+        writer=ProjectContextWriter(postgres),
+        filesystem=ProjectFilesystem(tmp_path / project_id),
+        capture_ingestion_policy=lambda: policy,
+    )
+
+    await postgres.execute(
+        """
+        INSERT INTO public.projects (project_id, user_name, name, domain_config)
+        VALUES (%s, %s, 'Shared identity source', %s::jsonb)
+        """,
+        (shared_project_id, user_name, "{}"),
+    )
+    await postgres.execute(
+        """
+        INSERT INTO public.project_read_scopes (
+            user_name, project_id, readable_project_id
+        ) VALUES (%s, %s, %s)
+        """,
+        (user_name, project_id, shared_project_id),
+    )
+    target_id = await store.allocate_entity_id()
+    homonym_id = await store.allocate_entity_id()
+    await postgres.execute(
+        """
+        INSERT INTO public.entities (entity_id, user_name, canonical_name, embedding)
+        VALUES (%s, %s, 'Avery Stone', NULL),
+               (%s, %s, 'Avery Quinn', NULL)
+        """,
+        (target_id, user_name, homonym_id, user_name),
+    )
+    await postgres.execute(
+        """
+        INSERT INTO public.entity_aliases (entity_id, alias)
+        VALUES (%s, 'Avery'), (%s, 'Avery')
+        """,
+        (target_id, homonym_id),
+    )
+    await postgres.execute(
+        """
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES (%s, %s, %s, 'Person', 'Work'),
+                 (%s, %s, %s, 'Person', 'Work')
+        """,
+        (
+            shared_project_id,
+            target_id,
+            user_name,
+            shared_project_id,
+            homonym_id,
+            user_name,
+        ),
+    )
+    assert await store.search_entities_by_embedding(
+        [0.25] * 1024,
+        limit=5,
+        score_threshold=0.8,
+        visible_project_ids=[project_id, shared_project_id],
+    ) == []
+
+    async def capture_domain():
+        return domain
+
+    now = [1_000_000]
+
+    def new_job(resolver, publisher):
+        processor = TextProcessor(
+            get_known_aliases=resolver.get_known_aliases,
+            get_alias_version=resolver.get_alias_version,
+            get_profile=resolver.get_profile,
+            vp01=vp01,
+            spacy=spacy.blank("en"),
+            settings=TextProcessorSettings(llm_ner=False),
+        )
+        return ProjectSemanticJob(
+            SemanticWindowAdmission(
+                store,
+                settings,
+                token_counter=lambda text: max(1, len(text.split())),
+                now_ms=lambda: now[0],
+            ),
+            store,
+            _ZeroEpisodeGenerator(),
+            settings=settings,
+            capture_domain=capture_domain,
+            capture_ingestion_policy=lambda: policy,
+            context_updater=ContextUpdater(llm=context_model),
+            context_projection=projection,
+            context_entity_builder=ContextEntityBuildService(
+                processor=processor,
+                resolver=resolver,
+                allocate_entity_id=store.allocate_entity_id,
+            ),
+            context_relationship_extractor=ContextRelationshipExtractor(
+                user_name=user_name,
+                llm=relationship_llm,
+                entities=resolver,
+            ),
+            publish_committed_entity_ids=publisher,
+            now_ms=lambda: now[0],
+        )
+
+    async def insert_closed_exchange(
+        message_id: int,
+        content: str,
+        timestamp_ms: int,
+    ) -> None:
+        await postgres.execute(
+            """
+            INSERT INTO public.messages (
+                user_name, session_id, message_id, project_id, role, content,
+                timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+                exchange_closed_at_ms
+            ) VALUES (%s, %s, %s, %s, 'user', %s, %s, 'sealed', 'closed',
+                      'user_only', %s)
+            """,
+            (
+                user_name,
+                session_id,
+                message_id,
+                project_id,
+                content,
+                timestamp_ms,
+                timestamp_ms,
+            ),
+        )
+
+    async def complete_window(job, context):
+        results = [await job.execute(context) for _ in range(4)]
+        assert all(result.success for result in results)
+
+    context = JobContext(user_name=user_name, project_id=project_id)
+    cold_resolver = EntityResolver(
+        store,
+        embedding,
+        project_id,
+        [project_id, shared_project_id],
+    )
+    failed_publisher = _FailingCommittedEntityPublisher()
+    failed_job = new_job(cold_resolver, failed_publisher)
+
+    await insert_closed_exchange(401, "Avery Stone owns Delta Corp.", 1_000)
+    initial_results = [await failed_job.execute(context) for _ in range(3)]
+    assert all(result.success for result in initial_results)
+    committed_window = await store.get_active_project_semantic_window(
+        user_name=user_name,
+        project_id=project_id,
+    )
+    assert committed_window is not None
+    assert committed_window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
+    assert await postgres.fetch_one(
+        """
+        SELECT entity_id, entity_type, topic, last_mentioned_ms
+        FROM public.project_entity_contexts
+        WHERE project_id = %s AND entity_id = %s
+        """,
+        (project_id, target_id),
+    ) == {
+        "entity_id": target_id,
+        "entity_type": "Person",
+        "topic": "Work",
+        "last_mentioned_ms": 1_000,
+    }
+    delta = await postgres.fetch_one(
+        """
+        SELECT entity_id
+        FROM public.entities
+        WHERE user_name = %s AND canonical_name = 'Delta Corp'
+        """,
+        (user_name,),
+    )
+    assert delta is not None
+    delta_id = int(delta["entity_id"])
+    assert await postgres.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.entities
+        WHERE user_name = %s AND canonical_name = 'Avery Stone'
+        """,
+        (user_name,),
+    ) == {"count": 1}
+
+    initial_observation = await postgres.fetch_one(
+        """
+        SELECT observation_id, source_entity_id, target_entity_id, observed_at_ms
+        FROM public.relationship_observations
+        WHERE project_id = %s AND retired_at IS NULL
+        """,
+        (project_id,),
+    )
+    assert initial_observation is not None
+    initial_observation_id = int(initial_observation["observation_id"])
+    assert initial_observation == {
+        "observation_id": initial_observation_id,
+        "source_entity_id": target_id,
+        "target_entity_id": delta_id,
+        "observed_at_ms": 1_000,
+    }
+    assert await postgres.fetch_all(
+        """
+        SELECT association.entity_id, support.message_id, support.support_kind
+        FROM public.relationship_observation_blocks AS observation_block
+        JOIN public.context_block_entities AS association
+          ON association.block_id = observation_block.block_id
+         AND association.project_id = observation_block.project_id
+        JOIN public.project_context_block_supports AS support
+          ON support.block_id = observation_block.block_id
+         AND support.project_id = observation_block.project_id
+        WHERE observation_block.observation_id = %s
+          AND observation_block.project_id = %s
+        ORDER BY association.entity_id
+        """,
+        (initial_observation_id, project_id),
+    ) == [
+        {
+            "entity_id": target_id,
+            "message_id": 401,
+            "support_kind": "user_message",
+        },
+        {
+            "entity_id": delta_id,
+            "message_id": 401,
+            "support_kind": "user_message",
+        },
+    ]
+
+    failed_finalization = await failed_job.execute(context)
+    assert failed_finalization.success is False
+    assert failed_publisher.calls == [(target_id, delta_id)]
+    assert await postgres.fetch_one(
+        """
+        SELECT stage, last_failure_stage
+        FROM public.project_semantic_windows
+        WHERE window_id = %s
+        """,
+        (committed_window.window_id,),
+    ) == {
+        "stage": "knowledge_committed",
+        "last_failure_stage": "resolver_publication",
+    }
+    assert await postgres.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.relationship_observations
+        WHERE project_id = %s
+        """,
+        (project_id,),
+    ) == {"count": 1}
+
+    now[0] = 1_030_001
+    recovered_resolver = EntityResolver(
+        store,
+        embedding,
+        project_id,
+        [project_id, shared_project_id],
+    )
+    recovered_job = new_job(
+        recovered_resolver,
+        recovered_resolver.publish_committed_entity_ids,
+    )
+    recovered = await recovered_job.execute(context)
+    assert recovered.success
+    assert len(vp01.calls) == 1
+    assert relationship_llm.calls == 1
+    assert await recovered_resolver.get_id("Avery Stone") == target_id
+    target_profile = recovered_resolver.get_cached_profile(target_id)
+    assert target_profile is not None
+    assert (
+        target_profile.project_id,
+        target_profile.entity_type,
+        target_profile.topic,
+    ) == (project_id, "Person", "Work")
+
+    await insert_closed_exchange(
+        402,
+        "Avery Stone continues to own Delta Corp.",
+        2_000,
+    )
+    await complete_window(recovered_job, context)
+    observations = await postgres.fetch_all(
+        """
+        SELECT observation_id, source_entity_id, target_entity_id, observed_at_ms,
+               retired_at, retired_reason
+        FROM public.relationship_observations
+        WHERE project_id = %s
+        ORDER BY observation_id
+        """,
+        (project_id,),
+    )
+    assert len(observations) == 2
+    retired = next(
+        row
+        for row in observations
+        if int(row["observation_id"]) == initial_observation_id
+    )
+    active = next(
+        row
+        for row in observations
+        if int(row["observation_id"]) != initial_observation_id
+    )
+    assert retired["retired_at"] is not None
+    assert retired["retired_reason"] == "context_block_replaced_or_deleted"
+    assert active == {
+        "observation_id": active["observation_id"],
+        "source_entity_id": target_id,
+        "target_entity_id": delta_id,
+        "observed_at_ms": 2_000,
+        "retired_at": None,
+        "retired_reason": None,
+    }
+    assert len(vp01.calls) == 2
+    assert relationship_llm.calls == 2
+
+    await insert_closed_exchange(403, "No ownership change.", 3_000)
+    await complete_window(recovered_job, context)
+    assert context_model.calls == 3
+    assert len(vp01.calls) == 2
+    assert relationship_llm.calls == 2
+    assert await postgres.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.entities
+        WHERE user_name = %s AND canonical_name = 'Avery Stone'
+        """,
+        (user_name,),
+    ) == {"count": 1}
+    recency_rows = await postgres.fetch_all(
+        """
+        SELECT entity_id, last_mentioned_ms
+        FROM public.project_entity_contexts
+        WHERE project_id = %s AND entity_id = ANY(%s)
+        ORDER BY entity_id
+        """,
+        (project_id, [target_id, delta_id]),
+    )
+    assert recency_rows == [
+        {"entity_id": target_id, "last_mentioned_ms": 2_000},
+        {"entity_id": delta_id, "last_mentioned_ms": 2_000},
+    ]
+    assert await postgres.fetch_one(
+        """
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE stage = 'completed') AS completed
+        FROM public.project_semantic_windows
+        WHERE project_id = %s
+        """,
+        (project_id,),
+    ) == {"total": 3, "completed": 3}
+
+    homonym_audit = EntityResolver(
+        store,
+        embedding,
+        project_id,
+        [project_id, shared_project_id],
+    )
+    homonym_candidates = {
+        candidate.entity_id: candidate
+        for candidate in await homonym_audit.get_candidate_ids("Avery", strict=True)
+    }
+    assert {target_id, homonym_id}.issubset(homonym_candidates)
+    assert "ambiguous_alias" in homonym_candidates[target_id].signals
+    assert "ambiguous_alias" in homonym_candidates[homonym_id].signals

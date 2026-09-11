@@ -1032,7 +1032,11 @@ class EntityResolver:
                             EntityCandidate(entity_id),
                         )
                         candidate.add_signal("fuzzy", normalized)
-                        if alias_is_ambiguous:
+                        # A unique durable exact match stays direct evidence.
+                        # A different shared alias may be a fuzzy neighbor of
+                        # that name, but it cannot make the exact owner
+                        # ambiguous after the durable lookup proved otherwise.
+                        if alias_is_ambiguous and entity_id not in durable_exact_ids:
                             candidate.add_signal("ambiguous_alias", normalized)
 
         vector = precomputed_embedding
