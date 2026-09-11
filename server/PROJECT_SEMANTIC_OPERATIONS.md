@@ -71,6 +71,17 @@ Only source-grounded, user-asserted, and human-asserted Context blocks enter
 Knowledge. Agent-derived blocks still render in Project Context but are not
 entity or relationship input.
 
+When a later conversation window checkpoints a Context revision already
+published by its owning window, it has empty effective Knowledge impact: it
+advances the normal Knowledge and finalization checkpoints without extraction,
+observation writes, retirement, or projection rebuilds. Current Knowledge
+reads expose only active observations. Reconciliation retains observations
+retired because their Context support was replaced or deleted for explicit
+historical evidence traversal, while deriving entity activity and relationship
+observation times from persisted eligible/cited Context source time rather than
+processing time; entity recency only advances, and an untimed newly authored
+human block receives one accepted time when committed.
+
 ## Settings and trace evidence
 
 `developer_settings.ingestion.semantic_window_tokens` defaults to 128,000 and

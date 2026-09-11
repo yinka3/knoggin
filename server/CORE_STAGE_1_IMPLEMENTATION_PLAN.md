@@ -1,6 +1,7 @@
 # Core Stage 1 — Canonical Knowledge and Context
 
-Status: Chunks A, B, and C complete; the combined final Stage 1 scenario remains.
+Status: Complete. Chunks A, B, and C and the combined final Stage 1 scenario
+are validated.
 
 Baseline inspected: `aadedewe/refactor`, `acc0cac33b74759d07880a8b6fffeeee0cdee282`, 2026-09-09. Recheck HEAD and working-tree changes before implementation. Preserve unrelated changes, including the existing edit to `PROJECT_SEMANTIC_OPERATIONS.md`.
 
@@ -223,14 +224,33 @@ The old review probe files intentionally assert defects. Add desired-behavior re
 
 No timings or test results in the earlier reviews count as validation of the future implementation. Record exact commands, results, and any environment limitations when this stage runs.
 
+### Final Stage 1 validation — 2026-09-10
+
+- `tests/integration/ingestion/test_project_semantic_postgres_flow.py::test_project_semantic_job_preserves_correction_history_through_noop_restart`: 1 passed.
+  It publishes an older claim, replaces it with newer evidence, verifies
+  active-only current reads and retired historical evidence, stops at the
+  no-op Context checkpoint, then completes it through a freshly constructed
+  job.
+- The complete production-style ingestion PostgreSQL flow: 3 passed.
+- Touched-path Ruff, Python compilation, and `git diff --check` passed.
+- `RequestsDependencyWarning` remains a third-party environment warning; it
+  did not cause a source-test failure.
+
+### Stage 1 commit record
+
+- `98414ff` — window-specific Context impact and no-op/retry behavior.
+- `71112d0` — active-only current observation reads with retained history.
+- `06d04ec` — authoritative Context source time and accepted human-edit time.
+- `e344e24` — combined correction → no-op → restart PostgreSQL regression.
+
 ## Work and documentation checkpoints
 
 - [x] A: window-specific impact and no-op/retry regressions.
 - [x] B: active-only current reads plus historical evidence regression.
 - [x] C: authoritative event time and human accepted-time regression.
-- [ ] Combined correction → no-op → restart scenario passes.
-- [ ] Update this checklist with changed files, validation evidence, and commit IDs if commits are requested.
-- [ ] Annotate the corresponding locked Knowledge/Ingestion and core-review items with completion references; preserve their rationale and untouched later-stage work.
-- [ ] Add a narrow operations-document update covering no-op semantics, current versus historical evidence, and time semantics, preserving the user's existing edits.
+- [x] Combined correction → no-op → restart scenario passes.
+- [x] Update this checklist with changed files, validation evidence, and commit IDs.
+- [x] Annotate the corresponding locked Knowledge/Ingestion and core-review items with completion references; preserve their rationale and untouched later-stage work.
+- [x] Add a narrow operations-document update covering no-op semantics, current versus historical evidence, and time semantics, preserving the user's existing edits.
 
 Suggested implementation chunks/commits: A, then B, then C, with each chunk's tests included. Before implementing each chunk, verify the exact caller and fixture contracts; promote a conditional file to the change list only for a demonstrated need. No production changes or test executions were performed while drafting this plan.
