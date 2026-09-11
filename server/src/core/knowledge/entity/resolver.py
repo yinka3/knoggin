@@ -29,9 +29,7 @@ from common.scoping import (
 )
 from common.utils.events import emit_sync
 from core.ingestion.policy import IngestionPolicy
-from core.knowledge.entity.embedding import (
-    build_entity_embedding_text,
-)
+from core.knowledge.entity.embedding import build_entity_embedding_text
 from core.knowledge.entity.index import EntityIndex
 from core.knowledge.entity.profile import EntityProfile
 from core.knowledge.services.embedding_service import EmbeddingService
@@ -1110,7 +1108,7 @@ class EntityResolver:
         """Build a new entity write without exposing it through shared indexes."""
 
         embedding = await self.embedding_service.encode_single(
-            build_entity_embedding_text(canonical_name, entity_type)
+            build_entity_embedding_text(canonical_name)
         )
         return EntityWrite(
             entity_id=entity_id,

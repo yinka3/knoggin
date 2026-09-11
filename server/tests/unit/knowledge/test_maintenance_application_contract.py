@@ -12,6 +12,9 @@ from common.schema.evidence import (
     EvidencePointer,
     EvidenceSubject,
 )
+from core.knowledge.db.writers.entity_reclassification_writer import (
+    HistoricalReclassificationResult,
+)
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationResult,
     RelationshipInterpretationWriter,
@@ -123,6 +126,95 @@ def _project_service(review: MaintenanceReview):
     service._domain_store = _DomainStore()
     service._relationship_interpretation_writer = _InterpretationWriter(reviews)
     return service, reviews
+
+
+class _ReclassificationStore:
+    def __init__(self, result: HistoricalReclassificationResult):
+        self.result = result
+        self.reclassification_calls = []
+        self.projection_calls = []
+        self.embedding_calls = []
+
+    async def reclassify_historical_entities(self, **kwargs):
+        self.reclassification_calls.append(kwargs)
+        return self.result
+
+    async def rebuild_project_projection(self, project_id, user_name):
+        self.projection_calls.append((project_id, user_name))
+        return {"entities": self.result.updated}
+
+    async def rebuild_project_embeddings(self, project_id, user_name):
+        self.embedding_calls.append((project_id, user_name))
+        raise AssertionError("classification-only maintenance must not re-embed")
+
+
+@pytest.mark.no_network
+async def test_entity_reclassification_rebuilds_projection_without_embeddings():
+    service, _reviews = _project_service(_relationship_review())
+    store = _ReclassificationStore(
+        HistoricalReclassificationResult(
+            domain_version=1,
+            scanned=1,
+            updated=1,
+            unchanged=0,
+            unmapped=0,
+            conflicts=0,
+            batches=1,
+        )
+    )
+    service.resources.knowledge_store = store
+
+    summary = await service.reclassify_historical_entities(
+        "project-1",
+        expected_domain_version=1,
+    )
+
+    assert summary == {
+        "domain_version": 1,
+        "scanned": 1,
+        "updated": 1,
+        "unchanged": 0,
+        "unmapped": 0,
+        "conflicts": 0,
+        "batches": 1,
+        "truncated": False,
+        "projection_rebuilt": True,
+        "projection": {"entities": 1},
+    }
+    assert store.reclassification_calls[0]["user_name"] == "ada"
+    assert store.reclassification_calls[0]["project_id"] == "project-1"
+    assert store.projection_calls == [("project-1", "ada")]
+    assert store.embedding_calls == []
+
+
+@pytest.mark.no_network
+async def test_entity_reclassification_skips_derived_work_without_updates():
+    service, _reviews = _project_service(_relationship_review())
+    store = _ReclassificationStore(
+        HistoricalReclassificationResult(
+            domain_version=1,
+            scanned=1,
+            updated=0,
+            unchanged=1,
+            unmapped=0,
+            conflicts=0,
+            batches=1,
+        )
+    )
+    service.resources.knowledge_store = store
+
+    summary = await service.reclassify_historical_entities(
+        "project-1",
+        expected_domain_version=1,
+    )
+
+    assert summary["projection_rebuilt"] is False
+    assert "projection" not in summary
+    assert "embedding_rebuild_required" not in summary
+    assert "embeddings" not in summary
+    assert "embeddings_rebuilt" not in summary
+    assert store.projection_calls == []
+    assert store.embedding_calls == []
 
 
 @pytest.mark.no_network

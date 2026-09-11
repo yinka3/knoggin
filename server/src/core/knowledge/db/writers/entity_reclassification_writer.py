@@ -48,7 +48,6 @@ class HistoricalReclassificationResult:
             "conflicts": self.conflicts,
             "batches": self.batches,
             "truncated": self.truncated,
-            "embedding_rebuild_required": self.updated > 0,
         }
 
 

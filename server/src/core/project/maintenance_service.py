@@ -622,18 +622,12 @@ class ProjectMaintenanceService:
             )
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
-            summary["embeddings_rebuilt"] = False
             if result.updated:
                 summary["projection"] = await knowledge_store.rebuild_project_projection(
                     project_id,
                     self.user_name,
                 )
                 summary["projection_rebuilt"] = True
-                summary["embeddings"] = await knowledge_store.rebuild_project_embeddings(
-                    project_id,
-                    self.user_name,
-                )
-                summary["embeddings_rebuilt"] = True
             return summary
 
     async def preview_historical_relationship_normalization(

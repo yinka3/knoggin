@@ -83,10 +83,10 @@ class EmbeddingRebuilder:
         # classification belongs to project_entity_contexts and must not cause
         # the same identity to receive different vectors in different projects.
         entity_inputs = [
-            build_entity_embedding_text(entity["canonical_name"], None)
+            build_entity_embedding_text(entity["canonical_name"])
             for entity in entities
         ]
-        identity_input = build_entity_embedding_text(identity["canonical_name"], None)
+        identity_input = build_entity_embedding_text(identity["canonical_name"])
         entity_vectors = self._validate_embeddings(
             await self.embedding_service.encode(entity_inputs + [identity_input]),
             len(entity_inputs) + 1,
