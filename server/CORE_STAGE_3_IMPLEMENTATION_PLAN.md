@@ -291,7 +291,7 @@ without rewriting their original rationale.
 - [x] D: coherent semantic policy/domain capture.
 - [x] E: inert policy cleanup.
 - [x] Combined real-PostgreSQL scenario passes.
-- [ ] Review/probe/operations closeout is recorded and committed locally.
+- [x] Review/probe/operations closeout is recorded and committed locally.
 
 Combined validation on 2026-09-11: the listed Stage 3 suite passed with 122
 tests. The real-PostgreSQL scenario exercises the participation frontier,
@@ -300,5 +300,14 @@ coherent domain/policy capture across domain activation. Its fixture now stores
 domain configuration through `DomainConfig.to_dict()`, the same canonical
 representation used by project creation.
 
-Next implementation task: record the remaining review/probe/operations
-closeout, then begin Stage 4 only after its current callers are rechecked.
+Recorded validation:
+
+- `uv run pytest -q tests/unit/common/test_context_semantic_window_contracts.py tests/unit/common/test_conf_manager.py tests/project/test_session_semantic_participation_contract.py tests/contract/storage/test_session_semantic_participation_storage_contract.py tests/contract/storage/test_session_deletion_writer_contract.py tests/unit/core/ingestion/test_semantic_window_admission.py tests/unit/core/ingestion/test_context_entity_build.py tests/unit/core/ingestion/test_context_relationship_extractor.py tests/unit/core/ingestion/test_project_semantic_context_stage.py tests/unit/core/ingestion/test_project_semantic_knowledge_stage.py tests/unit/core/knowledge/test_project_episode_build_contract.py tests/unit/runtime/test_project_config_fanout.py tests/contract/storage/test_project_context_window_contract.py tests/contract/storage/test_semantic_commit_contract.py tests/integration/ingestion/test_project_semantic_postgres_flow.py` → 122 passed; the environment emitted its existing Requests dependency warning.
+- `uv run ruff check tests/integration/ingestion/conftest.py tests/integration/ingestion/test_project_semantic_postgres_flow.py`, focused `compileall`, and `git diff --check` → passed.
+
+The normal Stage 3 regression replaces no historical review probe: the existing
+maintenance and provenance probes exercise separate findings. Implementation
+status is appended to the locked Session, Ingestion, and Knowledge records;
+the operations description now states the durable admission and claim rules.
+
+Next implementation task: recheck current callers, then begin Stage 4 Chunk A.

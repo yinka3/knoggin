@@ -101,6 +101,16 @@ and a frozen admission policy. Overfill is acceptable only when it is the
 unavoidable remainder of one whole exchange; an exchange larger than the target
 forms a single `oversized_exchange` window rather than being split.
 
+Conversation admission first removes Sessions that are deleted, have disabled
+semantic participation, or have exchanges at or before their recorded
+participation frontier. Per-Session FIFO therefore applies only to eligible
+exchanges. Claim rechecks the same durable boundary: a participation change
+that commits first rejects the stale proposal without partial membership, while
+a later change cannot rewrite an already claimed window. The semantic job
+captures its compiled domain and ingestion settings as one lock-protected
+policy, then uses that same snapshot through selection, claim, and Context
+work.
+
 Each durable window records `window_id`, origin, stage, domain version, frozen
 policy, failure stage/code/summary, retry time, and attempt count. Context
 revisions record their parent, window, origin, impact closure, blocks, and
