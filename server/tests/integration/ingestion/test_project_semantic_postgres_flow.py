@@ -759,11 +759,10 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
         reader=ProjectContextReader(postgres),
         writer=ProjectContextWriter(postgres),
         filesystem=filesystem,
-        capture_ingestion_policy=lambda: policy,
     )
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return policy
 
     job = ProjectSemanticJob(
         SemanticWindowAdmission(
@@ -775,8 +774,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
         store,
         _ZeroEpisodeGenerator(),
         settings=IngestionSettings(semantic_window_tokens=100),
-        capture_domain=capture_domain,
-        capture_ingestion_policy=lambda: policy,
+        capture_semantic_policy=capture_semantic_policy,
         context_updater=_AgentDerivedUpdater(),
         context_projection=projection,
         context_entity_builder=_EmptyEntityBuilder(),
@@ -838,7 +836,6 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
         reader=ProjectContextReader(postgres),
         writer=ProjectContextWriter(postgres),
         filesystem=recovery_filesystem,
-        capture_ingestion_policy=lambda: policy,
     )
     human_edit_job = ProjectSemanticJob(
         SemanticWindowAdmission(
@@ -850,8 +847,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
         store,
         _ZeroEpisodeGenerator(),
         settings=IngestionSettings(semantic_window_tokens=100),
-        capture_domain=capture_domain,
-        capture_ingestion_policy=lambda: policy,
+        capture_semantic_policy=capture_semantic_policy,
         context_updater=_AgentDerivedUpdater(),
         context_projection=recovery_projection,
         context_entity_builder=_HumanEditEntityBuilder(),
@@ -954,11 +950,10 @@ async def test_project_semantic_job_recovers_resolver_publication_and_commits_so
         reader=ProjectContextReader(postgres),
         writer=ProjectContextWriter(postgres),
         filesystem=ProjectFilesystem(tmp_path / project_id),
-        capture_ingestion_policy=lambda: policy,
     )
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return policy
 
     entity_builder = _RelationshipEntityBuilder(store)
     relationship_extractor = ContextRelationshipExtractor(
@@ -989,8 +984,7 @@ async def test_project_semantic_job_recovers_resolver_publication_and_commits_so
             store,
             _ZeroEpisodeGenerator(),
             settings=IngestionSettings(semantic_window_tokens=100),
-            capture_domain=capture_domain,
-            capture_ingestion_policy=lambda: policy,
+            capture_semantic_policy=capture_semantic_policy,
             context_updater=ContextUpdater(llm=_SourceGroundedContextModel()),
             context_projection=projection,
             context_entity_builder=entity_builder,
@@ -1216,11 +1210,10 @@ async def test_context_vp02_persists_distinct_homonymous_handles_with_source_pro
         reader=ProjectContextReader(postgres),
         writer=ProjectContextWriter(postgres),
         filesystem=ProjectFilesystem(tmp_path / project_id),
-        capture_ingestion_policy=lambda: policy,
     )
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return policy
 
     entity_builder = _HomonymRelationshipEntityBuilder(store)
     job = ProjectSemanticJob(
@@ -1233,8 +1226,7 @@ async def test_context_vp02_persists_distinct_homonymous_handles_with_source_pro
         store,
         _ZeroEpisodeGenerator(),
         settings=IngestionSettings(semantic_window_tokens=100),
-        capture_domain=capture_domain,
-        capture_ingestion_policy=lambda: policy,
+        capture_semantic_policy=capture_semantic_policy,
         context_updater=ContextUpdater(llm=_HomonymSourceGroundedContextModel()),
         context_projection=projection,
         context_entity_builder=entity_builder,
@@ -1352,14 +1344,13 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
         reader=ProjectContextReader(postgres),
         writer=ProjectContextWriter(postgres),
         filesystem=ProjectFilesystem(tmp_path / project_id),
-        capture_ingestion_policy=lambda: policy,
     )
     model = _CorrectionContextModel()
     entity_builder = _CorrectionEntityBuilder(store)
     relationship_extractor = _CorrectionRelationshipExtractor()
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return policy
 
     def new_job():
         return ProjectSemanticJob(
@@ -1372,8 +1363,7 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
             store,
             _ZeroEpisodeGenerator(),
             settings=settings,
-            capture_domain=capture_domain,
-            capture_ingestion_policy=lambda: policy,
+            capture_semantic_policy=capture_semantic_policy,
             context_updater=ContextUpdater(llm=model),
             context_projection=projection,
             context_entity_builder=entity_builder,
@@ -1589,7 +1579,6 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
         reader=ProjectContextReader(postgres),
         writer=ProjectContextWriter(postgres),
         filesystem=ProjectFilesystem(tmp_path / project_id),
-        capture_ingestion_policy=lambda: policy,
     )
 
     await postgres.execute(
@@ -1647,8 +1636,8 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
         visible_project_ids=[project_id, shared_project_id],
     ) == []
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return policy
 
     now = [1_000_000]
 
@@ -1671,8 +1660,7 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
             store,
             _ZeroEpisodeGenerator(),
             settings=settings,
-            capture_domain=capture_domain,
-            capture_ingestion_policy=lambda: policy,
+            capture_semantic_policy=capture_semantic_policy,
             context_updater=ContextUpdater(llm=context_model),
             context_projection=projection,
             context_entity_builder=ContextEntityBuildService(

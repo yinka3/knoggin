@@ -244,15 +244,13 @@ class ProjectRuntimeFactory:
             reader=ProjectContextReader(resources.postgres),
             writer=ProjectContextWriter(resources.postgres),
             filesystem=context_filesystem,
-            capture_ingestion_policy=runtime.capture_ingestion_policy,
         )
         return ProjectSemanticJob(
             admission,
             resources.knowledge_store,
             episode_generator,
             settings=self.dev_settings.ingestion,
-            capture_domain=runtime.capture_domain,
-            capture_ingestion_policy=runtime.capture_ingestion_policy,
+            capture_semantic_policy=runtime.capture_semantic_policy,
             context_updater=ContextUpdater(llm=resources.llm_service),
             context_projection=context_projection,
             context_entity_builder=ContextEntityBuildService(

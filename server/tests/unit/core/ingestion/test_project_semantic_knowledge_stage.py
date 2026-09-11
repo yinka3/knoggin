@@ -47,6 +47,10 @@ def _policy():
     )
 
 
+async def _capture_semantic_policy():
+    return _policy()
+
+
 class _Admission:
     def update_settings(self, _settings):
         pass
@@ -251,15 +255,12 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_completes_termin
     store = _Store()
     publisher = _Publisher(store.events)
 
-    async def capture_domain():
-        return _domain()
-
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=_Builder(),
         context_relationship_extractor=_Relationships(),
         publish_committed_entity_ids=publisher,
@@ -300,15 +301,12 @@ async def test_knowledge_failures_keep_the_context_checkpoint_for_restart(
     store = _Store()
     store.fail_commit = fail_commit
 
-    async def capture_domain():
-        return _domain()
-
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
         now_ms=lambda: 1_000,
@@ -333,15 +331,12 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
     store.fail_enrichment = True
     publisher = _Publisher(store.events)
 
-    async def capture_domain():
-        return _domain()
-
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=_Builder(),
         context_relationship_extractor=_Relationships(),
         publish_committed_entity_ids=publisher,
@@ -366,15 +361,12 @@ async def test_publication_failure_retries_only_durable_entity_ids_after_restart
     now = [1_000]
     failing_publisher = _Publisher(store.events, fail=True)
 
-    async def capture_domain():
-        return _domain()
-
     failed_job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=_UnexpectedBuilder(),
         context_relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=failing_publisher,
@@ -398,7 +390,7 @@ async def test_publication_failure_retries_only_durable_entity_ids_after_restart
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=_UnexpectedBuilder(),
         context_relationship_extractor=_UnexpectedRelationships(),
         publish_committed_entity_ids=recovered_publisher,
@@ -429,15 +421,12 @@ async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restar
     relationships = _UnexpectedRelationships()
     publisher = _Publisher(store.events)
 
-    async def capture_domain():
-        return _domain()
-
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
         publish_committed_entity_ids=publisher,
@@ -464,7 +453,7 @@ async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restar
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
         publish_committed_entity_ids=publisher,
@@ -500,15 +489,12 @@ async def test_owned_empty_context_checkpoint_completes_without_extraction():
     builder = _UnexpectedBuilder()
     relationships = _UnexpectedRelationships()
 
-    async def capture_domain():
-        return _domain()
-
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
     )

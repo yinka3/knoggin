@@ -154,18 +154,19 @@ class ProjectRuntime:
             await self._select_vp01(self.compiled_domain)
         return config
 
-    def capture_ingestion_policy(self) -> IngestionPolicy:
-        """Freeze the live Context-entity policy for one semantic window."""
+    async def capture_semantic_policy(self) -> IngestionPolicy:
+        """Capture one coherent policy and domain snapshot for semantic work."""
 
-        settings = ConfigManager.get().config.developer_settings
-        return IngestionPolicy.capture(
-            text_processor=TextProcessorSettings(
-                gliner_threshold=self.text_processor.gliner_threshold,
-                llm_ner=self.text_processor.llm_ner,
-            ),
-            entity_resolution=settings.entity_resolution,
-            compiled_domain=self.compiled_domain,
-        )
+        async with self._domain_config_lock:
+            settings = ConfigManager.get().config.developer_settings
+            return IngestionPolicy.capture(
+                text_processor=TextProcessorSettings(
+                    gliner_threshold=self.text_processor.gliner_threshold,
+                    llm_ner=self.text_processor.llm_ner,
+                ),
+                entity_resolution=settings.entity_resolution,
+                compiled_domain=self.compiled_domain,
+            )
 
     async def _select_vp01(self, compiled_domain: CompiledDomain) -> None:
         """Align the live adapter with an explicitly switched domain language."""

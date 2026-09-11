@@ -1,10 +1,12 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from common.schema.settings import DeveloperSettings, DocumentSettings, RootConfig
+from core.project.domain_config_store import DomainActivation
 from runtime.project_factory import ProjectRuntimeFactory
-from tests.fixtures.factories import make_domain_config
+from tests.fixtures.factories import make_domain_config, make_project_state
 
 
 class RecordingConfigManager:
@@ -293,8 +295,7 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
     entities = SimpleNamespace(publish_committed_entity_ids=publisher)
     runtime = SimpleNamespace(
         project_id="project-1",
-        capture_domain=lambda: None,
-        capture_ingestion_policy=lambda: None,
+        capture_semantic_policy=lambda: None,
         text_processor=object(),
         entities=entities,
     )
@@ -330,6 +331,58 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
     job = factory._create_project_semantic_job(runtime, resources=resources)
 
     assert job.kwargs["publish_committed_entity_ids"] is publisher
+    assert job.kwargs["capture_semantic_policy"] is runtime.capture_semantic_policy
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_semantic_policy_capture_and_domain_activation_share_one_lock(monkeypatch):
+    config_manager = RecordingConfigManager()
+    initial = make_domain_config(version=2)
+    activated = make_domain_config(version=3)
+    activation_started = asyncio.Event()
+    finish_activation = asyncio.Event()
+
+    class Store:
+        async def activate(self, **_kwargs):
+            activation_started.set()
+            await finish_activation.wait()
+            return DomainActivation(
+                config=activated,
+                compiled=activated.compile(),
+                previous_version=initial.version,
+            )
+
+    runtime = make_project_state(
+        domain_config=initial,
+        text_processor=SimpleNamespace(gliner_threshold=0.42, llm_ner=False),
+    )
+    runtime.domain_config_store = Store()
+    monkeypatch.setattr(
+        "runtime.project_runtime.ConfigManager.get",
+        staticmethod(lambda: config_manager),
+    )
+
+    before_activation = await runtime.capture_semantic_policy()
+    activation = asyncio.create_task(
+        runtime.activate_domain_config(make_domain_config(), expected_version=2)
+    )
+    await activation_started.wait()
+    capture_after_activation = asyncio.create_task(runtime.capture_semantic_policy())
+    await asyncio.sleep(0)
+    assert not capture_after_activation.done()
+
+    finish_activation.set()
+    activation_result, after_activation = await asyncio.gather(
+        activation,
+        capture_after_activation,
+    )
+
+    assert activation_result.compiled.version == 3
+    assert before_activation.domain.version == 2
+    assert before_activation.domain is not runtime.compiled_domain
+    assert after_activation.domain.version == 3
+    assert after_activation.domain is runtime.compiled_domain
 
 
 @pytest.mark.runtime

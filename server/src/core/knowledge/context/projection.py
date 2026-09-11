@@ -80,14 +80,10 @@ class ContextProjection:
         reader: ProjectContextReader,
         writer: ProjectContextWriter,
         filesystem: ProjectFilesystem,
-        capture_ingestion_policy=None,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self._filesystem = filesystem
-        if capture_ingestion_policy is not None and not callable(capture_ingestion_policy):
-            raise TypeError("capture_ingestion_policy must be callable")
-        self._capture_ingestion_policy = capture_ingestion_policy
 
     async def reconcile(
         self,
@@ -154,7 +150,7 @@ class ContextProjection:
         *,
         user_name: str,
         project_id: str,
-        domain: CompiledDomain,
+        ingestion_policy: IngestionPolicy,
         allow_user_edit: bool,
     ) -> ContextProjectionResult:
         """Import one recognized local edit or repair the canonical projection.
@@ -164,6 +160,9 @@ class ContextProjection:
         current revision; all other non-generated files remain conflicts.
         """
 
+        if not isinstance(ingestion_policy, IngestionPolicy):
+            raise TypeError("Context synchronization requires an IngestionPolicy")
+        domain = ingestion_policy.domain
         state = None
         try:
             await self._writer.ensure_context(
@@ -180,7 +179,7 @@ class ContextProjection:
                 return await self.import_user_edit(
                     user_name=user_name,
                     project_id=project_id,
-                    domain=domain,
+                    ingestion_policy=ingestion_policy,
                 )
             snapshot = await self._reader.get_snapshot(
                 state.current_revision_id,
@@ -201,7 +200,7 @@ class ContextProjection:
                 return await self.import_user_edit(
                     user_name=user_name,
                     project_id=project_id,
-                    domain=domain,
+                    ingestion_policy=ingestion_policy,
                 )
             return await self.reconcile(
                 user_name=user_name,
@@ -234,7 +233,7 @@ class ContextProjection:
         *,
         user_name: str,
         project_id: str,
-        domain: CompiledDomain,
+        ingestion_policy: IngestionPolicy,
         edit_summary: str = "Imported user edits from CONTEXT.md",
     ) -> ContextProjectionResult:
         """Accept a structured local edit as a human-authored Context revision.
@@ -244,6 +243,9 @@ class ContextProjection:
         the durable downstream reconciliation trigger once that job is enabled.
         """
 
+        if not isinstance(ingestion_policy, IngestionPolicy):
+            raise TypeError("Context import requires an IngestionPolicy")
+        domain = ingestion_policy.domain
         await self._writer.ensure_context(user_name=user_name, project_id=project_id)
         state = await self._reader.get_projection_state(
             user_name=user_name,
@@ -294,15 +296,7 @@ class ContextProjection:
             "kind": "context_file_import",
             "compiled_domain": domain.to_dict(),
         }
-        if self._capture_ingestion_policy is not None:
-            ingestion_policy = self._capture_ingestion_policy()
-            if not isinstance(ingestion_policy, IngestionPolicy):
-                raise TypeError("Context projection policy callback returned an invalid policy")
-            if ingestion_policy.domain != domain:
-                raise ValueError("Context projection policy must use the supplied domain")
-            policy_snapshot["ingestion_policy"] = (
-                ingestion_policy.semantic_window_snapshot()
-            )
+        policy_snapshot["ingestion_policy"] = ingestion_policy.semantic_window_snapshot()
         window = SemanticWindowRecord(
             window_id=uuid4(),
             user_name=user_name,

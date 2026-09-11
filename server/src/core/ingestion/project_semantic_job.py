@@ -146,8 +146,7 @@ class ProjectSemanticJob(BaseJob):
         episode_generator: EpisodeGenerator,
         *,
         settings: IngestionSettings,
-        capture_domain: Callable[[], Awaitable[CompiledDomain]],
-        capture_ingestion_policy: Callable[[], IngestionPolicy] | None = None,
+        capture_semantic_policy: Callable[[], Awaitable[IngestionPolicy]],
         context_updater: ContextUpdater | None = None,
         context_projection: ContextProjection | None = None,
         context_entity_builder: ContextEntityBuildService | None = None,
@@ -156,10 +155,8 @@ class ProjectSemanticJob(BaseJob):
         | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
-        if not callable(capture_domain):
-            raise TypeError("ProjectSemanticJob requires a domain snapshot callback")
-        if capture_ingestion_policy is not None and not callable(capture_ingestion_policy):
-            raise TypeError("capture_ingestion_policy must be callable")
+        if not callable(capture_semantic_policy):
+            raise TypeError("ProjectSemanticJob requires a semantic policy callback")
         if publish_committed_entity_ids is not None and not callable(
             publish_committed_entity_ids
         ):
@@ -174,8 +171,7 @@ class ProjectSemanticJob(BaseJob):
         self._context_entity_builder = context_entity_builder
         self._context_relationship_extractor = context_relationship_extractor
         self._publish_committed_entity_ids = publish_committed_entity_ids
-        self._capture_domain = capture_domain
-        self._capture_ingestion_policy = capture_ingestion_policy
+        self._capture_semantic_policy = capture_semantic_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
         self.update_settings(settings)
 
@@ -204,12 +200,12 @@ class ProjectSemanticJob(BaseJob):
                 or self._knowledge_is_due(active)
                 or self._finalization_is_due(active)
             )
-        domain = await self._capture_domain()
+        policy = await self._capture_semantic_policy()
         return (
             await self.admission.select(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
-                domain=domain,
+                domain=policy.domain,
             )
             is not None
         )
@@ -228,17 +224,12 @@ class ProjectSemanticJob(BaseJob):
         elif window.stage is not SemanticWindowStage.CLAIMED:
             await self.synchronize_context_file(ctx, allow_user_edit=False)
         if window is None:
-            domain = await self._capture_domain()
-            ingestion_policy = (
-                None
-                if self._capture_ingestion_policy is None
-                else self._capture_ingestion_policy()
-            )
+            policy = await self._capture_semantic_policy()
             claimed = await self.admission.claim_next(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
-                domain=domain,
-                ingestion_policy=ingestion_policy,
+                domain=policy.domain,
+                ingestion_policy=policy,
             )
             if claimed is None:
                 return JobResult(success=True, summary="No semantic window is due")
@@ -264,10 +255,11 @@ class ProjectSemanticJob(BaseJob):
         if self._context_projection is None:
             return None
         try:
+            policy = await self._capture_semantic_policy()
             return await self._context_projection.synchronize(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
-                domain=await self._capture_domain(),
+                ingestion_policy=policy,
                 allow_user_edit=allow_user_edit,
             )
         except Exception as exc:

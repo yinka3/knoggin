@@ -1028,7 +1028,6 @@ async def test_context_revision_retry_and_projection_import_are_durable(
         reader=reader,
         writer=writer,
         filesystem=filesystem,
-        capture_ingestion_policy=_ingestion_policy,
     )
     projected = await projection.reconcile(
         user_name="ada", project_id="project-1", domain=_domain()
@@ -1045,7 +1044,7 @@ async def test_context_revision_retry_and_projection_import_are_durable(
         expected_content_hash=original_hash,
     )
     imported = await projection.import_user_edit(
-        user_name="ada", project_id="project-1", domain=_domain()
+        user_name="ada", project_id="project-1", ingestion_policy=_ingestion_policy()
     )
     assert imported.changed
     assert imported.snapshot is not None
@@ -1082,6 +1081,10 @@ async def test_context_revision_retry_and_projection_import_are_durable(
         (imported.reconciliation_window_id,),
     )
     assert policy_row["policy_snapshot"]["ingestion_policy"]["gliner_threshold"] == 0.42
+    assert (
+        policy_row["policy_snapshot"]["ingestion_policy"]["compiled_domain"]
+        == policy_row["policy_snapshot"]["compiled_domain"]
+    )
 
     stale_block = _context_block("Database moved ahead.")
     stale = await writer.commit_revision(
@@ -1110,7 +1113,9 @@ async def test_context_revision_retry_and_projection_import_are_durable(
     )
     with pytest.raises(ContextProjectionConflictError, match="stale"):
         await projection.import_user_edit(
-            user_name="ada", project_id="project-1", domain=_domain()
+            user_name="ada",
+            project_id="project-1",
+            ingestion_policy=_ingestion_policy(),
         )
     assert (
         await reader.get_current_revision(user_name="ada", project_id="project-1")
@@ -1336,7 +1341,7 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
         await failed_projection.synchronize(
             user_name="ada",
             project_id="project-1",
-            domain=_domain(),
+            ingestion_policy=_ingestion_policy(),
             allow_user_edit=True,
         )
     current = await reader.get_current_revision(user_name="ada", project_id="project-1")
@@ -1366,7 +1371,7 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
     ).synchronize(
         user_name="ada",
         project_id="project-1",
-        domain=_domain(),
+        ingestion_policy=_ingestion_policy(),
         allow_user_edit=False,
     )
     assert repaired.changed

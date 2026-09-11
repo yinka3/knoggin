@@ -72,6 +72,14 @@ def _admission(rows, *, target=128_000, now_ms=1_000):
     )
 
 
+def _policy(domain):
+    return IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(llm_ner=False),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_target_crossing_keeps_the_complete_exchange_and_stops_after_it():
@@ -293,8 +301,8 @@ async def test_project_semantic_job_records_zero_result_for_one_claimed_window()
     )
     domain = make_domain_config().compile()
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return _policy(domain)
 
     selected = await admission.select(
         user_name="ada",
@@ -309,7 +317,7 @@ async def test_project_semantic_job_records_zero_result_for_one_claimed_window()
         store,
         generator,
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
     )
     job.enabled = True
     context = JobContext(user_name="ada", project_id="project-1")
@@ -348,15 +356,15 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
     generator = _FailThenZeroEpisodeGenerator()
     now = [1_000]
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return _policy(domain)
 
     job = ProjectSemanticJob(
         admission,
         store,
         generator,
         settings=settings,
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
         now_ms=lambda: now[0],
     )
     job.enabled = True
@@ -409,15 +417,15 @@ async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
     store = _SemanticEpisodeStore(selected.window)
     generator = _FailThenZeroEpisodeGenerator()
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return _policy(domain)
 
     job = ProjectSemanticJob(
         admission,
         store,
         generator,
         settings=settings,
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
     )
     context = JobContext(user_name="ada", project_id="project-1")
 

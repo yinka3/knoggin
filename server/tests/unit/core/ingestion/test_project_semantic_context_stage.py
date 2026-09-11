@@ -17,7 +17,12 @@ from common.schema.semantic_window import (
     SemanticWindowRecord,
     SemanticWindowStage,
 )
-from common.schema.settings import IngestionSettings
+from common.schema.settings import (
+    EntityResolutionSettings,
+    IngestionSettings,
+    TextProcessorSettings,
+)
+from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_job import ProjectSemanticJob
 from core.knowledge.context.models import ContextRevisionConflictError
 from core.knowledge.context.projection import ContextProjectionResult
@@ -29,6 +34,14 @@ from infrastructure.job.scheduler import Scheduler
 
 def _domain():
     return DomainConfig(version=1, topics=(), entity_types=()).compile()
+
+
+def _policy():
+    return IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(llm_ner=False),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=_domain(),
+    )
 
 
 def _window():
@@ -238,23 +251,25 @@ class _RecordingProjection:
     def __init__(self):
         self.called = asyncio.Event()
         self.allow_user_edit = None
+        self.ingestion_policy = None
 
     async def synchronize(self, **kwargs):
         self.allow_user_edit = kwargs["allow_user_edit"]
+        self.ingestion_policy = kwargs["ingestion_policy"]
         self.called.set()
         return ContextProjectionResult(snapshot=None, changed=False)
 
 
 def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
-    async def capture_domain():
-        return _domain()
+    async def capture_semantic_policy():
+        return _policy()
 
     return ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
         context_updater=updater,
         context_projection=projection,
         now_ms=now_ms,
@@ -285,16 +300,17 @@ async def test_context_stage_commits_then_checkpoints_even_if_file_projection_ne
 @pytest.mark.no_network
 async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
     projection = _RecordingProjection()
+    policy = _policy()
 
-    async def capture_domain():
-        return _domain()
+    async def capture_semantic_policy():
+        return policy
 
     job = ProjectSemanticJob(
         _IdleAdmission(),
         _IdleStore(),
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
         context_projection=projection,
     )
     scheduler = Scheduler("ada", "project-1")
@@ -307,6 +323,43 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
         await scheduler.stop()
 
     assert projection.allow_user_edit is True
+    assert projection.ingestion_policy is policy
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_claim_uses_the_same_captured_policy_and_domain():
+    policy = _policy()
+
+    class ClaimingAdmission:
+        def update_settings(self, _settings):
+            pass
+
+        async def claim_next(self, **kwargs):
+            self.kwargs = kwargs
+            return None
+
+    class NoActiveWindowStore:
+        async def get_active_project_semantic_window(self, **_kwargs):
+            return None
+
+    async def capture_semantic_policy():
+        return policy
+
+    admission = ClaimingAdmission()
+    job = ProjectSemanticJob(
+        admission,
+        NoActiveWindowStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_semantic_policy,
+    )
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert admission.kwargs["ingestion_policy"] is policy
+    assert admission.kwargs["domain"] is policy.domain
 
 
 @pytest.mark.unit
