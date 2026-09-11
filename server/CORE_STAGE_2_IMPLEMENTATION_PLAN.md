@@ -1,6 +1,6 @@
 # Core Stage 2 — Entity Identity and Resolution
 
-Status: In progress; Chunk A completed 2026-09-10.
+Status: In progress; Chunks A-B completed 2026-09-11.
 
 Baseline inspected: `aadedewe/refactor`, `4e47481`, following completed
 [Stage 1](CORE_STAGE_1_IMPLEMENTATION_PLAN.md). Recheck HEAD and the working
@@ -214,6 +214,23 @@ resulting mention into a local context would preserve the wrong authority.
   General same-name/same-type disambiguation is not claimed: if occurrence context
   cannot establish identity, retain ambiguity and avoid unconditional reuse.
 
+### Completion record
+
+- Added `ProjectEntityClassification` as the explicit target-project payload.
+  It covers every non-identity resolved ID, distinguishes existing from missing
+  membership, and keeps identity `1` outside project contexts.
+- Foreign profiles can establish an identity candidate but cannot classify the
+  receiving project. Local alias shortcuts retain local authority; foreign
+  aliases go through VP-01, and typed source spans prevent same-surface
+  incompatible occurrences from being dropped before resolution.
+- The commit writer now locks current readable scope for reused IDs, verifies
+  ownership/status/visibility, inserts or verifies target contexts without
+  reclassification, then writes aliases and the remaining semantic payload in
+  the existing transaction. VP-02 consumes the staged local type.
+- Validated with the focused extraction/resolver/commit/integration suite
+  (`79 passed`), touched-path Ruff, compileall, and `git diff --check`.
+- Local implementation commit: `4eac23e fix(knowledge): stage local entity classifications`.
+
 ## Chunk C — Local entity handles for Context VP-02
 
 Replace name-keyed transport with one deterministic `eN` handle per durable ID.
@@ -356,7 +373,7 @@ to hide source defects or unrelated missing dependencies. No tests were executed
 while drafting this plan.
 
 - [x] A: durable exact candidates and safe pending reuse.
-- [ ] B: local classification authority, occurrence preservation and atomic membership.
+- [x] B: local classification authority, occurrence preservation and atomic membership.
 - [ ] C: entity handles and provenance-preserving endpoint validation.
 - [ ] D: committed resolver publication and recovery.
 - [ ] E: identity-only embeddings and classification-only maintenance cleanup.
@@ -366,5 +383,6 @@ while drafting this plan.
 - [ ] Retire resolved historical core probes with normal regression references.
 - [ ] Add a narrow operations-document update while preserving existing user edits.
 
-Next implementation task: Chunk B. Establish local classification authority and
-occurrence preservation before adding relationship handles or publication work.
+Next implementation task: Chunk C. Replace name-keyed Context VP-02 endpoints
+with deterministic local entity handles while preserving B's classifications and
+Context-block provenance.
