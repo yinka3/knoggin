@@ -1236,3 +1236,21 @@ The later maintenance, merge, concurrency, document, and Episode work listed
 above remains open. Stage 2 also retains ambiguity for semantically
 indistinguishable same-name, same-type identities rather than making an
 unsupported automatic choice.
+
+## Stage 3 implementation status — 2026-09-11
+
+The locked rationale remains intact. Stage 3 now makes a Session's
+participation frontier authoritative for new conversation semantic windows:
+
+- `73af90b`, `822a16f`, and `ec387a6` apply participation before FIFO and
+  revalidate it in the transaction that freezes a window. A participation
+  change that wins before claim rejects the selection without partial durable
+  membership; a later change cannot alter an already claimed window.
+- `a6ebc7d` keeps the domain and ingestion policy persisted with a semantic
+  window coherent across runtime configuration activation.
+- `5d32823` supplies the combined real-PostgreSQL regression, including the
+  re-enable frontier and frozen-membership cases.
+
+This completes the semantic-window admission boundary only. The later
+maintenance-frontier and cross-origin semantic-window work described above
+remains open.

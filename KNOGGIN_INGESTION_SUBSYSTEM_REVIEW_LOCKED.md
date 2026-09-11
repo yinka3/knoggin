@@ -855,3 +855,24 @@ regressions:
 The broader case of semantically indistinguishable same-name, same-type
 identities remains deliberately unresolved: the system retains ambiguity
 instead of claiming an unsupported automatic choice.
+
+## Stage 3 implementation status — 2026-09-11
+
+The locked rationale remains the historical review record. The participation
+and frozen-policy priorities are now implemented and covered by normal
+regressions:
+
+- §§1–2 and §9: `73af90b`, `822a16f`, and `ec387a6` rename the durable
+  participation contract, filter eligibility before per-Session FIFO, and
+  revalidate participation in the atomic claim transaction.
+- §6: `a6ebc7d` captures the compiled domain and ingestion settings as one
+  lock-protected semantic policy for selection, claim, and Context work.
+- §§7–8: `2b47dea` removes the inactive LLM-NER and Episode
+  target-message/window-size policy surface.
+- `5d32823` adds a real-PostgreSQL scenario for the participation frontier,
+  stale selection rejection, claim-first frozen membership, and domain-policy
+  coherence through activation.
+
+The remaining name-only identity collapse, VP-02 endpoint handles, and live
+resolver-publication items from this review were completed in Stage 2. They
+remain separate from the later maintenance and document work.
