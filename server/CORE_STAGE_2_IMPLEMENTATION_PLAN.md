@@ -1,6 +1,6 @@
 # Core Stage 2 — Entity Identity and Resolution
 
-Status: Planned; implementation has not started.
+Status: In progress; Chunk A completed 2026-09-10.
 
 Baseline inspected: `aadedewe/refactor`, `4e47481`, following completed
 [Stage 1](CORE_STAGE_1_IMPLEMENTATION_PLAN.md). Recheck HEAD and the working
@@ -68,7 +68,7 @@ ontology, new cache service, event bus, publication table, or full catalog load.
   current observations, retained history, authoritative event time, and atomic
   SQL/AGE publication.
 
-## Chunk A — Durable exact candidates and safe pending identity reuse
+## Chunk A — Durable exact candidates and safe pending identity reuse (completed)
 
 ### Verified behavior
 
@@ -123,6 +123,26 @@ up again by name and can lose a valid homonym selection.
 - Same-name incompatible types in one topic do not collapse; compatible
   repetitions do not allocate on every mention.
 - Selecting one same-name durable ID never stages aliases on another ID.
+
+### Completion record
+
+- `get_candidate_ids()` now treats the scoped durable exact lookup as the
+  authoritative exact-owner set, hydrates every returned owner, retains
+  ambiguity, and orders equal-score candidates by ID. Cached fuzzy/vector
+  candidates are revalidated through the active scoped durable reader before
+  they can be returned.
+- Candidate-search reuse is keyed only by normalized surface text. Pending
+  identity reuse is separate: it requires frozen-domain compatibility and the
+  same normalized Context support. Distinct support stays separate when the
+  system cannot establish a same-type homonym identity.
+- Reader name/ID/vector resolution now excludes inactive entities and normalizes
+  surrounding whitespace for exact names and aliases. Alias staging takes the
+  candidate ID already selected by resolution.
+- Removed the unused transcript resolver, `validate_existing`, `register_entity`,
+  and `compute_embedding` paths. Retained committed-write publication support
+  for Chunk D.
+- Validated with focused resolver and Context tests (55 passed), reader snapshot
+  contracts (9 passed), and the real PostgreSQL name-lookup contract (2 passed).
 
 ## Chunk B — Explicit project classification through extraction and commit
 
@@ -335,7 +355,7 @@ limitation to recheck only if broader collection is needed; do not modify tests
 to hide source defects or unrelated missing dependencies. No tests were executed
 while drafting this plan.
 
-- [ ] A: durable exact candidates and safe pending reuse.
+- [x] A: durable exact candidates and safe pending reuse.
 - [ ] B: local classification authority, occurrence preservation and atomic membership.
 - [ ] C: entity handles and provenance-preserving endpoint validation.
 - [ ] D: committed resolver publication and recovery.
@@ -346,5 +366,5 @@ while drafting this plan.
 - [ ] Retire resolved historical core probes with normal regression references.
 - [ ] Add a narrow operations-document update while preserving existing user edits.
 
-Next implementation task: Chunk A. Establish candidate and pending-identity
-contracts first; do not start all five chunks as one undifferentiated refactor.
+Next implementation task: Chunk B. Establish local classification authority and
+occurrence preservation before adding relationship handles or publication work.
