@@ -3,7 +3,6 @@
 import json
 import os
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 
 import psycopg
@@ -59,7 +58,7 @@ async def real_server_scope():
             project_id,
             user_name,
             "Server acceptance integration",
-            json.dumps(asdict(make_domain_config())),
+            json.dumps(make_domain_config().to_dict()),
         ),
     )
     await postgres.execute(

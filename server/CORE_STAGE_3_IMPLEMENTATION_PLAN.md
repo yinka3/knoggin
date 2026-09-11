@@ -290,7 +290,15 @@ without rewriting their original rationale.
 - [x] C: atomic claim-time participation revalidation.
 - [x] D: coherent semantic policy/domain capture.
 - [x] E: inert policy cleanup.
-- [ ] Combined real-PostgreSQL scenario passes.
+- [x] Combined real-PostgreSQL scenario passes.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 3 combined validation and review closeout.
+Combined validation on 2026-09-11: the listed Stage 3 suite passed with 122
+tests. The real-PostgreSQL scenario exercises the participation frontier,
+pre-FIFO filtering, claim-time revalidation, frozen claimed membership, and a
+coherent domain/policy capture across domain activation. Its fixture now stores
+domain configuration through `DomainConfig.to_dict()`, the same canonical
+representation used by project creation.
+
+Next implementation task: record the remaining review/probe/operations
+closeout, then begin Stage 4 only after its current callers are rechecked.

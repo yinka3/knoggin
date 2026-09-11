@@ -27,8 +27,10 @@ from common.schema.ingestion.contracts import (
 )
 from common.schema.semantic_window import SemanticWindowStage
 from common.schema.settings import (
+    DeveloperSettings,
     EntityResolutionSettings,
     IngestionSettings,
+    RootConfig,
     TextProcessorSettings,
 )
 from core.ingestion.context_entity_build import ContextEntityBuildService
@@ -48,8 +50,10 @@ from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWri
 from core.knowledge.documents.filesystem import ProjectFilesystem
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.store import KnowledgeStore
+from core.project.domain_config_store import DomainConfigStore
 from core.project.project_manager import ProjectManager
 from infrastructure.job.base import JobContext
+from runtime.project_runtime import ProjectRuntime
 
 
 def _domain():
@@ -702,6 +706,181 @@ async def test_semantic_selection_retries_after_participation_toggle(
         domain=domain,
         force_flush=True,
     ) is None
+
+
+@pytest.mark.integration
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_participation_claim_and_runtime_policy_are_coherent(
+    real_server_scope,
+    monkeypatch,
+):
+    """Exercise Stage 3 eligibility, claim ordering, and policy capture together."""
+
+    scope = real_server_scope
+    postgres = scope["postgres"]
+    user_name = scope["user_name"]
+    project_id = scope["project_id"]
+    disabled_session_id = scope["session_id"]
+    enabled_session_id = f"{disabled_session_id}-enabled"
+    domain_store = DomainConfigStore(postgres)
+    initial_domain = await domain_store.load(user_name, project_id)
+    runtime = ProjectRuntime(
+        project_id=project_id,
+        entities=object(),
+        knowledge_retrieval=object(),
+        text_processor=SimpleNamespace(gliner_threshold=0.42),
+        scheduler=None,
+        user_name=user_name,
+        readable_project_ids=[project_id],
+        domain_config=initial_domain,
+        document_service=SimpleNamespace(),
+        domain_config_store=domain_store,
+    )
+    monkeypatch.setattr(
+        "runtime.project_runtime.ConfigManager.get",
+        staticmethod(
+            lambda: SimpleNamespace(
+                config=RootConfig(developer_settings=DeveloperSettings())
+            )
+        ),
+    )
+    before_activation = await runtime.capture_semantic_policy()
+    activation = await runtime.activate_domain_config(
+        initial_domain.with_version(0),
+        expected_version=initial_domain.version,
+    )
+    captured_policy = await runtime.capture_semantic_policy()
+
+    assert before_activation.domain.version == initial_domain.version
+    assert captured_policy.domain is activation.compiled
+    assert captured_policy.domain.version == activation.config.version
+
+    await postgres.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES (%s, %s, %s)
+        """,
+        (enabled_session_id, user_name, project_id),
+    )
+    manager = ProjectManager(SimpleNamespace(postgres=postgres), user_name=user_name)
+    await manager.set_session_semantic_participation(project_id, [enabled_session_id])
+    await postgres.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES
+            (%s, %s, 101, %s, 'user', 'Excluded before re-enable.',
+             1, 'sealed', 'closed', 'user_only', 1),
+            (%s, %s, 201, %s, 'user', 'Always eligible.',
+             2, 'sealed', 'closed', 'user_only', 2)
+        """,
+        (
+            user_name,
+            disabled_session_id,
+            project_id,
+            user_name,
+            enabled_session_id,
+            project_id,
+        ),
+    )
+    await manager.set_session_semantic_participation(
+        project_id,
+        [disabled_session_id, enabled_session_id],
+    )
+    await postgres.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (%s, %s, 102, %s, 'user', 'Eligible after re-enable.',
+                 3, 'sealed', 'closed', 'user_only', 3)
+        """,
+        (user_name, disabled_session_id, project_id),
+    )
+
+    store = KnowledgeStore(postgres, object())
+    admission = SemanticWindowAdmission(
+        store,
+        IngestionSettings(semantic_window_tokens=100),
+        token_counter=lambda text: max(1, len(text.split())),
+        now_ms=lambda: 1_000_000,
+    )
+    stale_proposal = await admission.select(
+        user_name=user_name,
+        project_id=project_id,
+        domain=captured_policy.domain,
+        ingestion_policy=captured_policy,
+        force_flush=True,
+    )
+
+    assert stale_proposal is not None
+    assert [member.message_id for member in stale_proposal.messages] == [201, 102]
+    assert (
+        stale_proposal.window.policy_snapshot["compiled_domain"]
+        == captured_policy.domain.to_dict()
+    )
+    assert (
+        stale_proposal.window.policy_snapshot["ingestion_policy"]["compiled_domain"]
+        == captured_policy.domain.to_dict()
+    )
+
+    await manager.set_session_semantic_participation(project_id, [enabled_session_id])
+    with pytest.raises(ValueError, match="no longer eligible"):
+        await store.claim_project_semantic_window(
+            stale_proposal.window,
+            list(stale_proposal.messages),
+        )
+    assert await postgres.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.project_semantic_windows
+        WHERE project_id = %s
+        """,
+        (project_id,),
+    ) == {"count": 0}
+
+    await manager.set_session_semantic_participation(
+        project_id,
+        [disabled_session_id, enabled_session_id],
+    )
+    await postgres.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (%s, %s, 103, %s, 'user', 'Frozen when claimed.',
+                 4, 'sealed', 'closed', 'user_only', 4)
+        """,
+        (user_name, disabled_session_id, project_id),
+    )
+    proposal = await admission.select(
+        user_name=user_name,
+        project_id=project_id,
+        domain=captured_policy.domain,
+        ingestion_policy=captured_policy,
+        force_flush=True,
+    )
+
+    assert proposal is not None
+    assert [member.message_id for member in proposal.messages] == [201, 103]
+    claimed = await store.claim_project_semantic_window(
+        proposal.window,
+        list(proposal.messages),
+    )
+    await manager.set_session_semantic_participation(project_id, [])
+    replayed = await store.claim_project_semantic_window(
+        proposal.window,
+        list(proposal.messages),
+    )
+
+    assert claimed.claimed is True
+    assert replayed.claimed is False
+    assert replayed.window.window_id == claimed.window.window_id
 
 
 @pytest.mark.integration
