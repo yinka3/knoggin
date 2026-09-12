@@ -229,7 +229,25 @@ review. The original findings remain above as historical rationale.
 ## Recommended implementation order
 
 1. F8 and F12: complete maintenance participation in Context-first state, then validate concurrency ordering.
-2. F4 and F11: make document version publication consistent and complete Episode editing before exposing it.
-3. I1–I4: remove inert paths/settings and improve bounded diagnostics/model context.
+2. I1–I4: remove inert paths/settings and improve bounded diagnostics/model context.
 
 These are repairs and simplifications of the existing engine. No implementation changes were made during this review; only the report and standalone reproduction artifact were added.
+
+## Stage 4 implementation status — 2026-09-12
+
+The original F4 and F11 rationale remains historical. Both are resolved:
+
+- **F4:** `db8a6ca` hashes the exact filesystem bytes before extraction and
+  requires that verified version at the writer publication boundary. A changed
+  file is reconciled and requeued without publishing its new text under the old
+  hash.
+- **F11:** `f7ab785` generates and validates the edited Episode vector before
+  opening the writer transaction, then CAS-updates narrative, vector,
+  `user_modified`, and timestamp together. Embedding failure, stale edits, and
+  injected SQL failure leave the preceding narrative/vector pair intact.
+- The Stage 4 focused document, source, graph, Episode, and retained semantic
+  gate passed **307 tests** with the existing Requests dependency warning.
+
+The F4 standalone reproduction is retained as a skipped historical probe. No
+F11 standalone probe existed; the normal Episode writer contracts are the
+acceptance evidence. F8, F12, and I1–I4 remain open.

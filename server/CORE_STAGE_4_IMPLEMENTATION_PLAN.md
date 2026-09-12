@@ -1,6 +1,6 @@
 # Core Stage 4 — Versioned Evidence and Editable Memory
 
-Status: Chunks A–D complete 2026-09-11. Combined scenarios and closeout remain.
+Status: Complete 2026-09-12. Chunks A–D and combined closeout passed.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 4 may begin after Stage 3, but its document and Episode work is
@@ -245,8 +245,8 @@ exist. Append status to the core, Knowledge, and provenance/Agent reviews.
 - [x] B: historical encounter persistence across document changes.
 - [x] C: observation-aware graph evidence hydration.
 - [x] D: atomic Episode narrative/vector edits.
-- [ ] Combined real-PostgreSQL scenarios pass.
-- [ ] Review/probe/operations closeout is recorded and committed locally.
+- [x] Combined real-PostgreSQL scenarios pass.
+- [x] Review/probe/operations closeout is recorded and committed locally.
 
 Chunk A validation on 2026-09-11:
 
@@ -314,5 +314,33 @@ or stale Episode. Existing Episode reads already return `updated_at`, so no
 reader contract changed. The automatic-generation guard for `user_modified`
 Episodes remains covered by its existing regression.
 
-Next implementation task: run the combined Stage 4 scenarios and record the
-review/probe/operations closeout.
+## Stage 4 closeout — 2026-09-12
+
+The combined focused gate passed with deterministic extraction/embeddings and
+the existing real PostgreSQL fixture:
+
+- `uv run pytest -q` over the document index/publication, source-reference and
+  answer-finalization, graph-evidence, Episode edit/vector, and retained
+  Stage 1/2 semantic files → **307 passed**. The environment emitted its
+  existing Requests dependency warning.
+- The gate includes the real PostgreSQL cases for changed/deleted document
+  encounters, graph-reader references, Episode stale writes and injected SQL
+  failure, semantic commits, and the semantic project flow. Together with the
+  per-chunk checks recorded above, it exercises all four combined scenarios.
+- Focused Ruff and compileall passed for each source chunk; `git diff --check`
+  passed. MyPy remains deferred because its configured path baseline is still
+  stale, as recorded separately in `MYPY_BASELINE.md`.
+
+F4 and PA4's original reproductions now fail at their former defective
+assertions: stale filesystem bytes return the reconciled queued version, and a
+captured authorized document version persists. PA3's historical fixture omits
+the now-required typed observation-reference kind, so it is retained as a
+skipped obsolete-shape record; the normal graph contracts assert the live typed
+reference and bounded hydration. F11 had no standalone historical probe; the
+normal Episode writer contracts cover successful vector replacement, embedding
+failure before a transaction, stale-edit rejection, and SQL rollback.
+
+The review/probe closeout is recorded in the core, Knowledge, and
+provenance/Agent reports. No live model or external-network validation was run.
+The next core work remains the maintenance/concurrency and simplification work
+outside this stage.

@@ -1254,3 +1254,27 @@ participation frontier authoritative for new conversation semantic windows:
 This completes the semantic-window admission boundary only. The later
 maintenance-frontier and cross-origin semantic-window work described above
 remains open.
+
+## Stage 4 implementation status — 2026-09-12
+
+The locked rationale remains intact. Stage 4 completes the pending versioned
+document/source and Episode edit work without changing the immutable Context
+or user-global identity model:
+
+- Document extraction now publishes only for the hash of the bytes actually
+  read; a changed file is reconciled and requeued instead of being indexed
+  under its old version.
+- An authorized captured document version remains answer provenance after the
+  document is replaced or deleted, and is presented as historical or
+  unavailable rather than current.
+- Manual Episode edits generate the canonical replacement embedding before the
+  write and CAS-update narrative, vector, `user_modified`, and timestamp in a
+  single transaction. §25's stale-vector concern is therefore resolved.
+- Relationship paths retain typed observation support and hydrate it through
+  the existing bounded evidence traversal. Prompt rendering of that structured
+  support remains later Agent work.
+
+The combined document, provenance, graph, Episode, and retained semantic gate
+passed **307 tests** with the existing Requests dependency warning. The later
+maintenance-frontier, merge, concurrency, and Agent prompt-projection work
+remains open.

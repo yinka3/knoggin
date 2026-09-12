@@ -1,8 +1,8 @@
 """Historical review probes plus active reproductions for unresolved findings.
 
-F1, F2, F3, and F7 are skipped historical records after Stages 1 and 2:
-normal regressions now assert the desired behavior. The remaining probes still
-document active findings rather than desired acceptance contracts.
+F1, F2, F3, F4, and F7 are skipped historical records after Stages 1, 2, and
+4: normal regressions now assert the desired behavior. The remaining probes
+still document active findings rather than desired acceptance contracts.
 """
 
 from uuid import uuid4
@@ -325,6 +325,12 @@ async def test_cold_resolver_misses_durable_exact_alias_when_vector_does_not_mat
     assert store.name_lookups == []
 
 
+@pytest.mark.skip(
+    reason=(
+        "Historical F4 reproduction resolved by db8a6ca; desired behavior is "
+        "covered by the Stage 4 document index publication regressions"
+    ),
+)
 async def test_document_index_accepts_changed_bytes_under_old_hash(
     real_postgres_client, tmp_path
 ):
