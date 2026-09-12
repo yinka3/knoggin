@@ -53,6 +53,93 @@ async def test_uncompleted_semantic_work_blocks_stable_frontier():
         await EntityMaintenanceService(client, "ada").capture_frontier(["project-1"])
 
 
+@pytest.mark.no_network
+async def test_merge_preview_includes_context_block_associations_in_scope_and_hash():
+    class Writer:
+        async def snapshot(self, *_args, **_kwargs):
+            return {
+                "entities": [
+                    {"entity_id": 2, "status": "active"},
+                    {"entity_id": 3, "status": "active"},
+                ],
+                "aliases": [],
+                "contexts": [],
+                "context_block_entities": [
+                    {
+                        "block_id": "block-1",
+                        "project_id": "project-1",
+                        "entity_id": 3,
+                        "mention_text": "Augusta",
+                    },
+                    {
+                        "block_id": "block-2",
+                        "project_id": "project-2",
+                        "entity_id": 3,
+                        "mention_text": "Ada",
+                    },
+                    {
+                        "block_id": "block-2",
+                        "project_id": "project-2",
+                        "entity_id": 2,
+                        "mention_text": "Ada Lovelace",
+                    },
+                ],
+                "message_refs": [],
+                "episode_entities": [],
+                "relationships": [],
+                "relationship_observations": [],
+                "episode_relationships": [],
+            }
+
+    service = EntityMaintenanceService(RecordingPostgresClient(), "ada")
+    service.writer = Writer()
+
+    async def frontiers(projects, **_kwargs):
+        return {project_id: {"token": f"frontier:{project_id}"} for project_id in projects}
+
+    async def versions(_actor, projects, **_kwargs):
+        return {project_id: 1 for project_id in projects}
+
+    service.capture_frontier = frontiers
+    service._definition_versions = versions
+
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+
+    assert preview["affected_project_ids"] == ["project-1", "project-2"]
+    assert preview["plan"].context_block_association_counts == {
+        "project-1": 1,
+        "project-2": 1,
+    }
+    changed_snapshot = {
+        **preview["snapshot"],
+        "context_block_entities": [
+            {
+                **preview["snapshot"]["context_block_entities"][0],
+                "mention_text": "Changed mention",
+            },
+            *preview["snapshot"]["context_block_entities"][1:],
+        ],
+    }
+    assert EntityMaintenanceService.state_hash(changed_snapshot) != preview["state_hash"]
+    changed_survivor_snapshot = {
+        **preview["snapshot"],
+        "context_block_entities": [
+            *preview["snapshot"]["context_block_entities"][:2],
+            {
+                **preview["snapshot"]["context_block_entities"][2],
+                "mention_text": "Changed survivor mention",
+            },
+        ],
+    }
+    assert (
+        EntityMaintenanceService.state_hash(changed_survivor_snapshot)
+        != preview["state_hash"]
+    )
+
+
 @pytest.mark.storage
 @pytest.mark.no_network
 def test_global_merge_and_rollback_plans_are_typed():

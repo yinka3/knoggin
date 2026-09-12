@@ -59,6 +59,22 @@ class MaintenanceImpactPlanner:
                     cls._item("episode_entity_link", "direct_mutation", projects),
                 ]
             )
+            association_counts = {
+                project_id: count
+                for project_id, count in plan.context_block_association_counts.items()
+                if count > 0
+            }
+            if association_counts:
+                association_projects = sorted(association_counts)
+                impacts.append(
+                    MaintenanceImpactItem(
+                        kind="context_block_entity",
+                        mode="direct_mutation",
+                        identifiers=tuple(association_projects[:128]),
+                        total_count=sum(association_counts.values()),
+                        truncated=len(association_projects) > 128,
+                    )
+                )
             impacts.extend(cls._project_rebuilds(projects, include_cache=True))
         elif isinstance(plan, EntityMergeRollbackPlan):
             mutation_ids = [

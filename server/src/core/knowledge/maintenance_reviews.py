@@ -100,6 +100,7 @@ class EntityMergePlan(BaseModel):
     context_choices: list["EntityContextMergeChoice"] = Field(default_factory=list)
     frontier_tokens: dict[str, str] = Field(default_factory=dict)
     definition_versions: dict[str, int] = Field(default_factory=dict)
+    context_block_association_counts: dict[str, int] = Field(default_factory=dict)
     expected_state_hash: str | None = Field(default=None, min_length=1)
 
     @field_validator("retired_entity_id")

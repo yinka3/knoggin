@@ -166,6 +166,14 @@ class EntityMaintenanceService:
             by_project.setdefault(context["project_id"], {})[
                 int(context["entity_id"])
             ] = context
+        association_counts: dict[str, int] = {}
+        for association in snapshot["context_block_entities"]:
+            project_id = str(association["project_id"])
+            by_project.setdefault(project_id, {})
+            if int(association["entity_id"]) == retired_entity_id:
+                association_counts[project_id] = (
+                    association_counts.get(project_id, 0) + 1
+                )
         conflicts = []
         for project_id, contexts in by_project.items():
             primary = contexts.get(survivor_entity_id)
@@ -207,6 +215,7 @@ class EntityMaintenanceService:
                 for project_id, frontier in sorted(frontiers.items())
             },
             definition_versions=definition_versions,
+            context_block_association_counts=dict(sorted(association_counts.items())),
             expected_state_hash=self.state_hash(snapshot),
         )
         return {

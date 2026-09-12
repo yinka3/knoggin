@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -33,6 +34,30 @@ async def _seed_entities(client):
     )
 
 
+async def _seed_context_block(client, associations):
+    block_id = uuid4()
+    await client.execute(
+        """
+        INSERT INTO public.project_context_blocks (
+            block_id, project_id, section_key, markdown, content_hash,
+            assertion_kind
+        ) VALUES (%s, 'project-1', 'current_state', 'Ada identity evidence.',
+                  %s, 'source_grounded')
+        """,
+        (block_id, "a" * 64),
+    )
+    for entity_id, mention_text in associations:
+        await client.execute(
+            """
+            INSERT INTO public.context_block_entities (
+                block_id, project_id, entity_id, mention_text
+            ) VALUES (%s, 'project-1', %s, %s)
+            """,
+            (block_id, entity_id, mention_text),
+        )
+    return block_id
+
+
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
@@ -40,6 +65,10 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
     real_postgres_client,
 ):
     await _seed_entities(real_postgres_client)
+    block_id = await _seed_context_block(
+        real_postgres_client,
+        [(3, "Augusta Ada King")],
+    )
     service = EntityMaintenanceService(
         postgres=real_postgres_client,
         user_name="ada",
@@ -87,6 +116,14 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
         ORDER BY entity_id
         """
     ) == [{"entity_id": 2}]
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id, mention_text
+        FROM public.context_block_entities
+        WHERE block_id = %s
+        """,
+        (block_id,),
+    ) == [{"entity_id": 2, "mention_text": "Augusta Ada King"}]
 
     rolled_back = await service.rollback(merged["merge_id"])
 
@@ -107,6 +144,155 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
         ORDER BY entity_id
         """
     ) == [{"entity_id": 2}, {"entity_id": 3}]
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id, mention_text
+        FROM public.context_block_entities
+        WHERE block_id = %s
+        """,
+        (block_id,),
+    ) == [{"entity_id": 3, "mention_text": "Augusta Ada King"}]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_global_merge_deduplicates_context_associations_and_preserves_changed_residue(
+    real_postgres_client,
+):
+    await _seed_entities(real_postgres_client)
+    moved_block_id = await _seed_context_block(
+        real_postgres_client,
+        [(3, "Augusta")],
+    )
+    collision_block_id = await _seed_context_block(
+        real_postgres_client,
+        [(2, "Ada Lovelace"), (3, "Ada")],
+    )
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+
+    assert preview["plan"].context_block_association_counts == {"project-1": 2}
+    merged = await service.merge(preview["plan"])
+
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id, mention_text
+        FROM public.context_block_entities
+        WHERE block_id = %s
+        ORDER BY entity_id
+        """,
+        (moved_block_id,),
+    ) == [{"entity_id": 2, "mention_text": "Augusta"}]
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id, mention_text
+        FROM public.context_block_entities
+        WHERE block_id = %s
+        ORDER BY entity_id
+        """,
+        (collision_block_id,),
+    ) == [{"entity_id": 2, "mention_text": "Ada Lovelace"}]
+    mutations = await real_postgres_client.fetch_all(
+        """
+        SELECT object_kind, object_key
+        FROM public.entity_global_merge_mutations
+        WHERE merge_id = %s AND object_kind = 'context_block_entity'
+        ORDER BY object_key
+        """,
+        (merged["merge_id"],),
+    )
+    assert {item["object_key"] for item in mutations} == {
+        str(moved_block_id),
+        str(collision_block_id),
+    }
+
+    await real_postgres_client.execute(
+        """
+        UPDATE public.context_block_entities
+        SET mention_text = 'Changed after merge'
+        WHERE block_id = %s AND entity_id = 2
+        """,
+        (moved_block_id,),
+    )
+    rollback_plan = await service.plan_rollback(merged["merge_id"])
+    association_conflicts = [
+        item
+        for item in rollback_plan["conflicting_mutations"]
+        if item["object_kind"] == "context_block_entity"
+    ]
+    assert [item["object_key"] for item in association_conflicts] == [
+        str(moved_block_id)
+    ]
+
+    rolled_back = await service.rollback(merged["merge_id"])
+
+    assert rolled_back["rolled_back"] is False
+    assert any(
+        item["object_kind"] == "context_block_entity"
+        and item["object_key"] == str(moved_block_id)
+        for item in rolled_back["conflicts"]
+    )
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id, mention_text
+        FROM public.context_block_entities
+        WHERE block_id = %s
+        ORDER BY entity_id
+        """,
+        (moved_block_id,),
+    ) == [{"entity_id": 2, "mention_text": "Changed after merge"}]
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id, mention_text
+        FROM public.context_block_entities
+        WHERE block_id = %s
+        ORDER BY entity_id
+        """,
+        (collision_block_id,),
+    ) == [
+        {"entity_id": 2, "mention_text": "Ada Lovelace"},
+        {"entity_id": 3, "mention_text": "Ada"},
+    ]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_global_merge_rejects_a_preview_when_context_association_changes(
+    real_postgres_client,
+):
+    await _seed_entities(real_postgres_client)
+    block_id = await _seed_context_block(real_postgres_client, [(3, "Augusta")])
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+    await real_postgres_client.execute(
+        """
+        UPDATE public.context_block_entities
+        SET mention_text = 'Updated before merge'
+        WHERE block_id = %s AND entity_id = 3
+        """,
+        (block_id,),
+    )
+
+    with pytest.raises(ValueError, match="entity evidence changed"):
+        await service.merge(preview["plan"])
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT status FROM public.entities WHERE entity_id = 3"
+    ) == {"status": "active"}
 
 
 @pytest.mark.storage

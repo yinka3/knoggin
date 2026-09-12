@@ -1,6 +1,6 @@
 # Core Stage 5 — Maintenance Integrity and Concurrency
 
-Status: Planned 2026-09-11. No implementation has started.
+Status: Chunk A complete 2026-09-12. Chunks B–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, including the typed evidence
 maintenance framework committed before Core Stages 1 and 2. Recheck the current
@@ -361,7 +361,7 @@ Record exact commands/results, changed files, limitations, and local commit IDs.
 Retire F8/F12/MC1–MC5 probes only after normal regressions exist. Append status
 to the locked Knowledge review and maintenance correction review.
 
-- [ ] A: merge/rollback includes Context entity associations.
+- [x] A: merge/rollback includes Context entity associations.
 - [ ] B: Project cleanup includes Context entity associations.
 - [ ] C: participation-aware, all-origin maintenance frontier.
 - [ ] D: merge/semantic-commit ordering is proven and minimally enforced.
@@ -371,4 +371,17 @@ to the locked Knowledge review and maintenance correction review.
 - [ ] Combined real-PostgreSQL/AGE scenario passes.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task after Stage 4 closes: Stage 5 Chunk A.
+Chunk A validation on 2026-09-12:
+
+- `uv run pytest -q tests/unit/core/knowledge/test_maintenance_impact.py tests/unit/knowledge/test_global_entity_maintenance_contract.py tests/unit/knowledge/test_maintenance_application_contract.py tests/contract/storage/test_maintenance_application_real_postgres.py tests/unit/core/knowledge/test_project_episode_build_contract.py tests/contract/storage/test_semantic_commit_contract.py tests/unit/runtime/test_api_port.py tests/contract/api/test_app.py tests/unit/core/agent/test_conflict_reporting_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py` → 77 passed; the environment emitted its existing Requests dependency warning.
+- The real PostgreSQL regressions prove association migration, survivor/retired deduplication, safe rollback, changed-association residue, and stale-preview rejection.
+- Focused Ruff, compileall, and `git diff --check` passed. MyPy remains deferred because its configured path baseline is still stale, as recorded separately in `MYPY_BASELINE.md`.
+
+`context_block_entities` is now included in the merge snapshot and state hash,
+the typed impact preview, the canonical association mutation journal, rollback
+safety classification, and inverse application. A collision preserves the
+existing survivor association; a later change remains explicit residue instead
+of being overwritten. F8's Project-cleanup portion and its final review/probe
+closeout remain in Chunk B and Stage 5 closeout respectively.
+
+Next implementation task: Stage 5 Chunk B.

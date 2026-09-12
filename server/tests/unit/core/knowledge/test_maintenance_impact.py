@@ -58,6 +58,7 @@ def test_merge_preview_lists_context_scopes_projection_and_cache_impacts():
                 survivor_entity_id=2,
                 retired_entity_id=3,
                 frontier_tokens={"project-2": "token-2", "project-1": "token-1"},
+                context_block_association_counts={"project-1": 2, "project-2": 1},
             ),
             project_id=None,
         )
@@ -70,6 +71,11 @@ def test_merge_preview_lists_context_scopes_projection_and_cache_impacts():
     )
     assert by_kind["age_projection"].mode == "derived_rebuild"
     assert by_kind["live_entity_cache"].mode == "cache_invalidation"
+    assert by_kind["context_block_entity"].identifiers == (
+        "project-1",
+        "project-2",
+    )
+    assert by_kind["context_block_entity"].total_count == 3
 
 
 @pytest.mark.unit
