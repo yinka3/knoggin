@@ -3,6 +3,9 @@ from uuid import uuid4
 
 import pytest
 
+from core.knowledge.db.readers.entity_reader import EntityReader
+from core.knowledge.db.writers.episode_writer import EpisodeWriter
+from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.maintenance_reviews import (
     RelationshipInterpretationChange,
@@ -34,26 +37,26 @@ async def _seed_entities(client):
     )
 
 
-async def _seed_context_block(client, associations):
+async def _seed_context_block(client, associations, *, project_id="project-1"):
     block_id = uuid4()
     await client.execute(
         """
         INSERT INTO public.project_context_blocks (
             block_id, project_id, section_key, markdown, content_hash,
             assertion_kind
-        ) VALUES (%s, 'project-1', 'current_state', 'Ada identity evidence.',
+        ) VALUES (%s, %s, 'current_state', 'Ada identity evidence.',
                   %s, 'source_grounded')
         """,
-        (block_id, "a" * 64),
+        (block_id, project_id, "a" * 64),
     )
     for entity_id, mention_text in associations:
         await client.execute(
             """
             INSERT INTO public.context_block_entities (
                 block_id, project_id, entity_id, mention_text
-            ) VALUES (%s, 'project-1', %s, %s)
+            ) VALUES (%s, %s, %s, %s)
             """,
-            (block_id, entity_id, mention_text),
+            (block_id, project_id, entity_id, mention_text),
         )
     return block_id
 
@@ -293,6 +296,183 @@ async def test_global_merge_rejects_a_preview_when_context_association_changes(
     assert await real_postgres_client.fetch_one(
         "SELECT status FROM public.entities WHERE entity_id = 3"
     ) == {"status": "active"}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_project_cleanup_removes_context_associations_without_reintroducing_episode_links(
+    real_postgres_client,
+):
+    await _seed_entities(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES ('project-2', 2, 'ada', 'Concept', 'General')
+        """
+    )
+    block_id = await _seed_context_block(real_postgres_client, [(2, "Ada")])
+    other_project_block_id = await _seed_context_block(
+        real_postgres_client,
+        [(2, "Ada")],
+        project_id="project-2",
+    )
+    preview = await EntityReader(
+        real_postgres_client
+    ).preview_project_entity_cleanup(
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert next(
+        item["context_block_association_count"]
+        for item in preview
+        if item["entity_id"] == 2
+    ) == 1
+
+    revision_id = uuid4()
+    window_id = uuid4()
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('cleanup-session', 'ada', 'project-1')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms
+        ) VALUES (
+            'ada', 'cleanup-session', 901, 'project-1', 'user',
+            'Ada is part of the current project.', 1000
+        )
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.episodes (episode_id, project_id, summary)
+        VALUES ('cleanup-episode', 'project-1', 'Ada is current project context.')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.episode_messages (
+            episode_id, project_id, session_id, message_id, message_position
+        ) VALUES ('cleanup-episode', 'project-1', 'cleanup-session', 901, 0)
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_context_revisions (
+            revision_id, project_id, revision_number, origin, domain_version,
+            content_hash
+        ) VALUES (%s, 'project-1', 1, 'conversation', 1, %s)
+        """,
+        (revision_id, "a" * 64),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_context_revision_blocks (
+            revision_id, project_id, block_id, ordinal
+        ) VALUES (%s, 'project-1', %s, 0)
+        """,
+        (revision_id, block_id),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_windows (
+            window_id, user_name, project_id, origin, stage, domain_version,
+            policy_snapshot, source_token_count, token_estimator,
+            token_estimator_version, context_revision_id
+        ) VALUES (
+            %s, 'ada', 'project-1', 'conversation', 'knowledge_committed', 1,
+            '{}'::jsonb, 0, 'test', 'v1', %s
+        )
+        """,
+        (window_id, revision_id),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_window_episodes (
+            window_id, project_id, episode_id, ordinal
+        ) VALUES (%s, 'project-1', 'cleanup-episode', 0)
+        """,
+        (window_id,),
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_context_block_supports (
+            block_id, project_id, message_id, session_id, support_kind
+        ) VALUES (%s, 'project-1', 901, 'cleanup-session', 'user_message')
+        """,
+        (block_id,),
+    )
+
+    episode_writer = EpisodeWriter(real_postgres_client)
+    assert await episode_writer.enrich_project_semantic_window_episodes(
+        window_id=str(window_id),
+        user_name="ada",
+        project_id="project-1",
+    ) == {"entities": 1, "relationships": 0}
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id
+        FROM public.episode_entities
+        WHERE project_id = 'project-1' AND episode_id = 'cleanup-episode'
+        """
+    ) == [{"entity_id": 2}]
+
+    assert await GraphWriter(real_postgres_client).delete_selected_project_entities(
+        [2],
+        user_name="ada",
+        project_id="project-1",
+    ) == [2]
+
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT block_id::text AS block_id, project_id, entity_id
+        FROM public.context_block_entities
+        WHERE entity_id = 2
+        ORDER BY project_id, block_id
+        """
+    ) == [
+        {
+            "block_id": str(other_project_block_id),
+            "project_id": "project-2",
+            "entity_id": 2,
+        }
+    ]
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT project_id, entity_id
+        FROM public.project_entity_contexts
+        WHERE entity_id = 2
+        ORDER BY project_id
+        """
+    ) == [{"project_id": "project-2", "entity_id": 2}]
+    assert await real_postgres_client.fetch_one(
+        "SELECT entity_id FROM public.entities WHERE entity_id = 2"
+    ) == {"entity_id": 2}
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id
+        FROM public.episode_entities
+        WHERE project_id = 'project-1' AND episode_id = 'cleanup-episode'
+        """
+    ) == []
+    assert await episode_writer.enrich_project_semantic_window_episodes(
+        window_id=str(window_id),
+        user_name="ada",
+        project_id="project-1",
+    ) == {"entities": 0, "relationships": 0}
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id
+        FROM public.episode_entities
+        WHERE project_id = 'project-1' AND episode_id = 'cleanup-episode'
+        """
+    ) == []
 
 
 @pytest.mark.storage

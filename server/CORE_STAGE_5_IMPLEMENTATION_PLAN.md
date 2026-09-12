@@ -1,6 +1,6 @@
 # Core Stage 5 — Maintenance Integrity and Concurrency
 
-Status: Chunk A complete 2026-09-12. Chunks B–G remain planned.
+Status: Chunks A–B complete 2026-09-12. Chunks C–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, including the typed evidence
 maintenance framework committed before Core Stages 1 and 2. Recheck the current
@@ -362,7 +362,7 @@ Retire F8/F12/MC1–MC5 probes only after normal regressions exist. Append statu
 to the locked Knowledge review and maintenance correction review.
 
 - [x] A: merge/rollback includes Context entity associations.
-- [ ] B: Project cleanup includes Context entity associations.
+- [x] B: Project cleanup includes Context entity associations.
 - [ ] C: participation-aware, all-origin maintenance frontier.
 - [ ] D: merge/semantic-commit ordering is proven and minimally enforced.
 - [ ] E: projection-repair obligation is durable before rebuild.
@@ -385,3 +385,23 @@ of being overwritten. F8's Project-cleanup portion and its final review/probe
 closeout remain in Chunk B and Stage 5 closeout respectively.
 
 Next implementation task: Stage 5 Chunk B.
+
+Chunk B validation on 2026-09-12:
+
+- `uv run pytest -q tests/unit/core/knowledge/test_maintenance_impact.py tests/unit/knowledge/test_global_entity_maintenance_contract.py tests/unit/knowledge/test_maintenance_application_contract.py tests/unit/core/knowledge/test_entity_cleanup_persistence_contract.py tests/unit/project/test_entity_cleanup_workflow.py tests/contract/storage/test_maintenance_application_real_postgres.py tests/unit/core/knowledge/test_project_episode_build_contract.py tests/contract/storage/test_semantic_commit_contract.py tests/contract/storage/test_project_context_window_contract.py tests/unit/runtime/test_api_port.py tests/contract/api/test_app.py tests/unit/core/agent/test_conflict_reporting_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py` → 105 passed; the environment emitted its existing Requests dependency warning.
+- The focused cleanup gate passed 15 tests, including real PostgreSQL cleanup of an identity shared by two Projects and a post-cleanup Episode-enrichment retry.
+- Focused Ruff, compileall, and `git diff --check` passed. MyPy remains deferred because its configured path baseline is still stale, as recorded separately in `MYPY_BASELINE.md`.
+
+Cleanup preview now reports `context_block_association_count`. Its canonical
+transaction deletes selected associations only in the target Project, clears
+that Project's AGE relationship projection, removes dependent Episode links,
+and then removes the Project classification. A shared global entity and the
+other Project's classification/association remain intact; an enrichment retry
+has no target-Project association from which to recreate the removed Episode
+link. The existing Project maintenance service already invalidates the target
+runtime cache with the selected IDs.
+
+F8 now has normal merge and cleanup regressions. Its historical probe and
+review closeout remain pending the Stage 5 closeout.
+
+Next implementation task: Stage 5 Chunk C.

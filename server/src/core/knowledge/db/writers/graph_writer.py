@@ -309,6 +309,12 @@ class GraphWriter:
             """,
             (project_id, entity_ids, entity_ids),
         )
+        await self.projection.replace_relationships_for_entities(
+            cur,
+            project_id,
+            entity_ids,
+            [],
+        )
         await cur.execute(
             """
             DELETE FROM message_entity_refs ref
@@ -322,6 +328,13 @@ class GraphWriter:
         await cur.execute(
             """
             DELETE FROM episode_entities
+            WHERE project_id = %s AND entity_id = ANY(%s)
+            """,
+            (project_id, entity_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM context_block_entities
             WHERE project_id = %s AND entity_id = ANY(%s)
             """,
             (project_id, entity_ids),

@@ -667,7 +667,8 @@ class EntityReader:
             context.last_mentioned_ms,
             COUNT(DISTINCT mer.message_id) AS message_reference_count,
             COUNT(DISTINCT relationship.relationship_id) AS relationship_count,
-            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count
+            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count,
+            COUNT(DISTINCT block_entity.block_id) AS context_block_association_count
         FROM public.entities e
         JOIN public.project_entity_contexts context
             ON context.entity_id = e.entity_id
@@ -684,6 +685,9 @@ class EntityReader:
         LEFT JOIN public.episode_entities episode_entity
             ON episode_entity.project_id = context.project_id
            AND episode_entity.entity_id = e.entity_id
+        LEFT JOIN public.context_block_entities block_entity
+            ON block_entity.project_id = context.project_id
+           AND block_entity.entity_id = e.entity_id
         WHERE e.user_name = %s
           AND context.project_id = %s
           AND e.entity_id <> %s
