@@ -2,7 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.agent.formatters import format_graph_results
+from common.schema.evidence import EvidenceBundle
+from core.agent.formatters import format_graph_results, format_path_results
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 
@@ -122,6 +123,9 @@ async def test_connections_keep_stored_direction_when_selected_from_target():
 @pytest.mark.no_network
 async def test_path_returns_canonical_direction_and_project_attribution():
     class Store:
+        def __init__(self):
+            self.evidence_calls = []
+
         async def find_path(self, entity_a_id, entity_b_id, **kwargs):
             assert (entity_a_id, entity_b_id) == (3, 2)
             assert kwargs == {"max_depth": 4, "visible_project_ids": ["project-1"]}
@@ -139,16 +143,151 @@ async def test_path_returns_canonical_direction_and_project_attribution():
                     "relationship_type": "works_at",
                     "symmetric": False,
                     "relationship_semantics": "observed_evidence",
-                    "evidence_refs": [],
+                    "evidence_refs": [
+                        {
+                            "kind": "relationship_observation",
+                            "project_id": "project-1",
+                            "user_name": "ada",
+                            "observation_id": 17,
+                        },
+                        {
+                            "kind": "relationship_observation",
+                            "project_id": "project-1",
+                            "user_name": "ada",
+                            "observation_id": 18,
+                        },
+                    ],
                 }
             ]
 
-    result = await _retrieval(Store()).find_path(3, 2, session_id="session-1")
+        async def get_relationship_observations_evidence(self, observation_ids, **kwargs):
+            self.evidence_calls.append((observation_ids, kwargs))
+            return (_observation_bundle(17), _missing_observation_bundle(18))
+
+    store = Store()
+    result = await _retrieval(store).find_path(3, 2, session_id="session-1")
 
     assert result[0]["source"] == "Ade"
     assert result[0]["target"] == "Acme"
     assert result[0]["project_id"] == "project-1"
-    assert result[0]["evidence"] == []
+    assert store.evidence_calls == [
+        ([17, 18], {"user_name": "ada", "project_id": "project-1"})
+    ]
+    evidence = result[0]["evidence"]
+    assert [item["subject"]["identifier"] for item in evidence] == ["17", "18"]
+    evidence = evidence[0]
+    assert evidence["subject"] == {
+        "kind": "relationship_observation",
+        "identifier": "17",
+    }
+    assert [node["pointer"]["kind"] for node in evidence["nodes"]] == [
+        "relationship_observation",
+        "context_block",
+        "message",
+        "source_reference",
+    ]
+    assert evidence["nodes"][0]["status"] == "active"
+    evidence = result[0]["evidence"][1]
+    assert evidence["subject"] == {
+        "kind": "relationship_observation",
+        "identifier": "18",
+    }
+    assert evidence["nodes"][0]["status"] == "missing"
+
+
+def _observation_bundle(observation_id: int) -> EvidenceBundle:
+    block_id = "00000000-0000-0000-0000-000000000017"
+    source_ref_id = "00000000-0000-0000-0000-000000000018"
+    return EvidenceBundle.model_validate(
+        {
+            "subject": {
+                "kind": "relationship_observation",
+                "identifier": str(observation_id),
+            },
+            "nodes": [
+                {
+                    "pointer": {
+                        "kind": "relationship_observation",
+                        "identifier": str(observation_id),
+                    },
+                    "label": "works at",
+                    "status": "active",
+                },
+                {
+                    "pointer": {"kind": "context_block", "identifier": block_id},
+                    "excerpt": "Ade joined Acme.",
+                },
+                {
+                    "pointer": {"kind": "message", "identifier": "7"},
+                    "role": "user",
+                },
+                {
+                    "pointer": {
+                        "kind": "source_reference",
+                        "identifier": source_ref_id,
+                    },
+                    "source_kind": "text_document",
+                    "content_hash": "a" * 64,
+                    "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+                    "excerpt": "Ade joined Acme.",
+                },
+            ],
+            "edges": [
+                {
+                    "source": {"kind": "context_block", "identifier": block_id},
+                    "target": {
+                        "kind": "relationship_observation",
+                        "identifier": str(observation_id),
+                    },
+                    "relation": "supports_relationship_observation",
+                },
+                {
+                    "source": {"kind": "message", "identifier": "7"},
+                    "target": {"kind": "context_block", "identifier": block_id},
+                    "relation": "supports_context_block",
+                },
+                {
+                    "source": {
+                        "kind": "source_reference",
+                        "identifier": source_ref_id,
+                    },
+                    "target": {"kind": "message", "identifier": "7"},
+                    "relation": "source_owned_by_message",
+                },
+            ],
+            "total_nodes": 4,
+            "total_edges": 3,
+            "nodes_truncated": False,
+            "edges_truncated": False,
+            "state_token": "a" * 64,
+        }
+    )
+
+
+def _missing_observation_bundle(observation_id: int) -> EvidenceBundle:
+    return EvidenceBundle.model_validate(
+        {
+            "subject": {
+                "kind": "relationship_observation",
+                "identifier": str(observation_id),
+            },
+            "nodes": [
+                {
+                    "pointer": {
+                        "kind": "relationship_observation",
+                        "identifier": str(observation_id),
+                    },
+                    "status": "missing",
+                }
+            ],
+            "edges": [],
+            "total_nodes": 1,
+            "total_edges": 0,
+            "nodes_truncated": False,
+            "edges_truncated": False,
+            "state_token": "b" * 64,
+        }
+    )
 
 
 @pytest.mark.no_network
@@ -170,3 +309,19 @@ def test_graph_result_format_states_that_relationships_are_observed_evidence():
     assert "Observed: Ade --works at--> Acme" in result
     assert "not a current-state claim" in result
     assert "2 messages, 3 observations" in result
+
+
+@pytest.mark.no_network
+def test_path_formatter_does_not_render_structured_observation_support_as_message_text():
+    rendered = format_path_results(
+        [
+            {
+                "step": 0,
+                "entity_a": "Ade",
+                "entity_b": "Acme",
+                "evidence": [_observation_bundle(17).model_dump(mode="json")],
+            }
+        ]
+    )
+
+    assert '"" [unknown]' not in rendered

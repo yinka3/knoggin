@@ -505,19 +505,108 @@ class KnowledgeRetrieval:
         *,
         session_id: str,
     ) -> List[Dict]:
-        """Replace stored evidence references with scoped durable messages."""
+        """Hydrate message and observation support without changing its meaning."""
 
+        message_refs_by_result: list[list] = []
+        observation_refs_by_result: list[list[dict]] = []
         for result in results:
             refs = result.pop("evidence_refs", None)
             if refs is None:
                 refs = result.pop("evidence_ids", [])
             else:
                 result.pop("evidence_ids", None)
-            result["evidence"] = await self._hydrate_evidence(
-                refs,
+            message_refs, observation_refs = self._split_evidence_refs(refs)
+            message_refs_by_result.append(message_refs)
+            observation_refs_by_result.append(observation_refs)
+
+        observation_bundles = await self._hydrate_observation_evidence(
+            observation_refs_by_result
+        )
+        for result, message_refs, bundles in zip(
+            results,
+            message_refs_by_result,
+            observation_bundles,
+        ):
+            messages = await self._hydrate_evidence(
+                message_refs,
                 session_id=session_id,
             )
+            result["evidence"] = [*messages, *bundles]
         return results
+
+    def _split_evidence_refs(self, refs: Any) -> tuple[list, list[dict]]:
+        if not isinstance(refs, list):
+            return [], []
+        message_refs: list = []
+        observation_refs: list[dict] = []
+        for ref in refs:
+            if isinstance(ref, dict) and ref.get("kind") == "relationship_observation":
+                observation_refs.append(self._normalize_observation_ref(ref))
+            else:
+                message_refs.append(ref)
+        return message_refs, observation_refs
+
+    def _normalize_observation_ref(self, ref: Dict) -> dict:
+        observation_id = ref.get("observation_id")
+        project_id = ref.get("project_id")
+        user_name = ref.get("user_name")
+        if (
+            not isinstance(observation_id, int)
+            or isinstance(observation_id, bool)
+            or observation_id <= 0
+            or not isinstance(project_id, str)
+            or project_id not in self.readable_project_ids
+            or user_name != self.user_name
+        ):
+            raise ValueError("relationship observation evidence is outside read scope")
+        return {"observation_id": observation_id, "project_id": project_id}
+
+    async def _hydrate_observation_evidence(
+        self,
+        refs_by_result: list[list[dict]],
+    ) -> list[list[dict]]:
+        requested_by_project: dict[str, set[int]] = {}
+        for refs in refs_by_result:
+            for ref in refs:
+                requested_by_project.setdefault(ref["project_id"], set()).add(
+                    ref["observation_id"]
+                )
+
+        bundles_by_observation: dict[tuple[str, int], dict] = {}
+        for project_id, observation_ids in requested_by_project.items():
+            bundles = await self.knowledge_store.get_relationship_observations_evidence(
+                sorted(observation_ids),
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+            for bundle in bundles:
+                serialized = (
+                    bundle.model_dump(mode="json")
+                    if hasattr(bundle, "model_dump")
+                    else dict(bundle)
+                )
+                subject = serialized.get("subject", {})
+                if subject.get("kind") != "relationship_observation":
+                    raise ValueError("observation evidence returned an invalid subject")
+                try:
+                    observation_id = int(subject["identifier"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "observation evidence returned an invalid identifier"
+                    ) from exc
+                bundles_by_observation[(project_id, observation_id)] = serialized
+
+        hydrated: list[list[dict]] = []
+        for refs in refs_by_result:
+            result_bundles = []
+            for ref in refs:
+                key = (ref["project_id"], ref["observation_id"])
+                bundle = bundles_by_observation.get(key)
+                if bundle is None:
+                    raise ValueError("relationship observation evidence is unavailable")
+                result_bundles.append(bundle)
+            hydrated.append(result_bundles)
+        return hydrated
 
     async def _get_visible_session_ids(self) -> List[str]:
         rows = await self.postgres.fetch_all(

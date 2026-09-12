@@ -1,6 +1,6 @@
 # Core Stage 4 — Versioned Evidence and Editable Memory
 
-Status: Chunks A–B complete 2026-09-11. Chunks C–D remain planned.
+Status: Chunks A–C complete 2026-09-11. Chunk D remains planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 4 may begin after Stage 3, but its document and Episode work is
@@ -243,7 +243,7 @@ exist. Append status to the core, Knowledge, and provenance/Agent reviews.
 
 - [x] A: exact-byte document index publication.
 - [x] B: historical encounter persistence across document changes.
-- [ ] C: observation-aware graph evidence hydration.
+- [x] C: observation-aware graph evidence hydration.
 - [ ] D: atomic Episode narrative/vector edits.
 - [ ] Combined real-PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
@@ -278,3 +278,23 @@ No provenance probe is retired yet; PA4 is covered by normal desired-behavior
 regressions and the Stage 4 review/probe closeout remains pending.
 
 Next implementation task: Stage 4 Chunk C.
+
+Chunk C validation on 2026-09-11:
+
+- `uv run pytest -q tests/unit/core/agent/test_graph_retrieval_contract.py tests/unit/core/knowledge/test_evidence_service.py tests/contract/storage/test_tool_queries_cypher_contract.py tests/contract/storage/test_graph_reader_contract.py tests/contract/storage/test_current_observation_reader_contract.py` → 30 passed; the environment emitted its existing Requests dependency warning.
+- `uv run pytest -q tests/unit/core/agent/test_agent_runtime_context_contract.py tests/unit/core/agent/test_executor_loop_contract.py tests/unit/core/agent/test_graph_retrieval_contract.py tests/unit/core/knowledge/test_evidence_service.py tests/contract/storage/test_tool_queries_cypher_contract.py tests/contract/storage/test_graph_reader_contract.py tests/contract/storage/test_current_observation_reader_contract.py` → 74 passed with the same existing warning.
+- Focused Ruff, compileall, and `git diff --check` passed. The first sandboxed compile invocation could not read the shared `uv` cache; the approved rerun passed.
+
+Graph paths now emit explicit, project- and user-scoped relationship-observation
+references. Retrieval dispatches those references to the existing bounded
+evidence facade, preserving the typed observation subject, its active or
+missing status, Context blocks, messages, and source references. The reader
+limits each path edge to 32 observations, so a maximum four-hop path cannot
+exceed the evidence service's 128-observation request limit. No store or
+evidence-service change was necessary: the existing facade already provides
+the bounded, project-scoped traversal and makes absent observations explicit
+as `missing`. Current text formatters skip structured bundles until the Stage
+6 notebook/prompt rendering work, preventing them from appearing as empty
+message quotations.
+
+Next implementation task: Stage 4 Chunk D.

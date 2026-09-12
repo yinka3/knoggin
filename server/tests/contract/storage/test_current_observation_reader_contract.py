@@ -160,7 +160,14 @@ async def test_current_readers_exclude_retired_observations_and_history_retains_
         [_PROJECT_ONE_RELATIONSHIP, _PROJECT_TWO_RELATIONSHIP],
         ["project-1"],
     )
-    assert [ref["observation_id"] for ref in path_refs[0]] == [1]
+    assert path_refs[0] == [
+        {
+            "kind": "relationship_observation",
+            "project_id": "project-1",
+            "user_name": "ada",
+            "observation_id": 1,
+        }
+    ]
     assert path_refs[1] == []
 
     activity = await KnowledgeQueryReader(real_postgres_client).get_recent_activity(

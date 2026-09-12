@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 
 from common.exceptions import StorageReadError
+from common.schema.evidence import EvidenceTraversalLimits
 from common.scoping import (
     IDENTITY_ENTITY_ID,
     require_scope_value,
@@ -12,6 +13,9 @@ from common.scoping import (
 from infrastructure.postgres_client import PostgresClient
 
 _MAX_PATH_DEPTH = 4
+_MAX_OBSERVATION_REFS_PER_PATH_STEP = (
+    EvidenceTraversalLimits().max_observations // _MAX_PATH_DEPTH
+)
 
 
 class GraphReader:
@@ -113,6 +117,23 @@ class GraphReader:
             return []
         rows = await self.client.fetch_all(
             """
+            WITH ranked_observations AS (
+                SELECT
+                    relationship_id,
+                    project_id,
+                    user_name,
+                    semantic_window_id,
+                    observation_id,
+                    observed_at_ms,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY relationship_id
+                        ORDER BY observed_at_ms, observation_id
+                    ) AS evidence_rank
+                FROM relationship_observations AS observation
+                WHERE observation.relationship_id = ANY(%s)
+                  AND observation.project_id = ANY(%s)
+                  AND observation.retired_at IS NULL
+            )
             SELECT
                 relationship_id,
                 json_agg(
@@ -124,22 +145,53 @@ class GraphReader:
                     )
                     ORDER BY observed_at_ms, observation_id
                 ) AS evidence_refs
-            FROM relationship_observations AS observation
-            WHERE observation.relationship_id = ANY(%s)
-              AND observation.project_id = ANY(%s)
-              AND observation.retired_at IS NULL
-            GROUP BY observation.relationship_id
+            FROM ranked_observations
+            WHERE evidence_rank <= %s
+            GROUP BY relationship_id
             """,
-            (relationship_ids, visible_project_ids),
+            (
+                relationship_ids,
+                visible_project_ids,
+                _MAX_OBSERVATION_REFS_PER_PATH_STEP,
+            ),
         )
         by_relationship = {
-            row["relationship_id"]: row.get("evidence_refs") or []
+            str(row["relationship_id"]): [
+                self._observation_evidence_ref(reference)
+                for reference in row.get("evidence_refs") or []
+            ]
             for row in rows
         }
         return [
             by_relationship.get(relationship_id, [])
             for relationship_id in relationship_ids
         ]
+
+    @staticmethod
+    def _observation_evidence_ref(reference: Dict) -> Dict:
+        """Expose graph-path support as an explicit observation reference."""
+
+        if not isinstance(reference, dict):
+            raise ValueError("relationship observation evidence must be an object")
+        observation_id = reference.get("observation_id")
+        project_id = reference.get("project_id")
+        user_name = reference.get("user_name")
+        if (
+            not isinstance(observation_id, int)
+            or isinstance(observation_id, bool)
+            or observation_id <= 0
+            or not isinstance(project_id, str)
+            or not project_id.strip()
+            or not isinstance(user_name, str)
+            or not user_name.strip()
+        ):
+            raise ValueError("relationship observation evidence has invalid scope")
+        return {
+            "kind": "relationship_observation",
+            "project_id": project_id,
+            "user_name": user_name,
+            "observation_id": observation_id,
+        }
 
     async def _relationship_details(
         self,

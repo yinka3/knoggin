@@ -184,11 +184,12 @@ async def test_evidence_service_batches_observations_and_builds_typed_snapshot()
     service = EvidenceService(EvidenceTraversalReader(client))
 
     bundles = await service.for_relationship_observations(
-        [9, 7, 9], user_name="ada", project_id="project-1"
+        [9, 7, 8, 9], user_name="ada", project_id="project-1"
     )
     snapshot = service.snapshot(bundles)
 
-    assert [bundle.subject.identifier for bundle in bundles] == ["7", "9"]
+    assert [bundle.subject.identifier for bundle in bundles] == ["7", "8", "9"]
+    assert bundles[1].nodes[0].status == "missing"
     assert len(client.calls) == 1
     assert snapshot.total_edges == 4
     assert {pointer.kind for pointer in snapshot.pointers} == {

@@ -185,7 +185,9 @@ def format_graph_results(results: List[Dict]) -> str:
             continue
 
         for ev in r.get("evidence", []):
-            msg = ev.get("message", "")
+            msg = ev.get("message")
+            if not isinstance(msg, str) or not msg:
+                continue
             ts = _format_timestamp(ev.get("timestamp"))
             block += f'  [{ts}] "{msg}"\n'
 
@@ -215,7 +217,9 @@ def format_path_results(path: List[Dict]) -> str:
         step_block = f"  [{step_num}] {ent_a} -> {ent_b}\n"
 
         for ev in step.get("evidence", []):
-            msg = ev.get("message", "")
+            msg = ev.get("message")
+            if not isinstance(msg, str) or not msg:
+                continue
             ts = _format_timestamp(ev.get("timestamp"))
             step_block += f'      "{msg}" [{ts}]\n'
 

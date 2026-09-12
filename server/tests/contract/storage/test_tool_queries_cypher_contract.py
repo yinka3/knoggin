@@ -76,7 +76,14 @@ async def test_path_preserves_traversal_and_stored_relationship_direction():
             [
                 {
                     "relationship_id": relationship_id,
-                    "evidence_refs": [{"project_id": "project-1", "message_id": 101}],
+                    "evidence_refs": [
+                        {
+                            "project_id": "project-1",
+                            "user_name": "ada",
+                            "semantic_window_id": "window-1",
+                            "observation_id": 101,
+                        }
+                    ],
                 }
             ],
             [
@@ -116,10 +123,23 @@ async def test_path_preserves_traversal_and_stored_relationship_direction():
             "relationship_type": "works_at",
             "symmetric": False,
             "relationship_semantics": "observed_evidence",
-            "evidence_refs": [{"project_id": "project-1", "message_id": 101}],
+            "evidence_refs": [
+                {
+                    "kind": "relationship_observation",
+                    "project_id": "project-1",
+                    "user_name": "ada",
+                    "observation_id": 101,
+                }
+            ],
         }
     ]
     assert "observation.retired_at IS NULL" in client.calls[1][1]
+    assert "ROW_NUMBER() OVER" in client.calls[1][1]
+    assert client.calls[1][2] == (
+        [relationship_id],
+        ["project-1"],
+        32,
+    )
 
 
 @pytest.mark.storage
