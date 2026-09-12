@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
@@ -10,7 +11,7 @@ from common.schema.context import (
     ContextRevisionRecord,
     ContextSnapshot,
 )
-from common.schema.episode.models import Episode, EpisodeCard
+from common.schema.episode.models import Episode, EpisodeCard, EpisodeNarrative
 from common.schema.evidence import EvidenceBundle, EvidenceTraversalLimits
 from common.schema.semantic_window import (
     SemanticWindowClaimResult,
@@ -65,6 +66,7 @@ from core.knowledge.db.writers.semantic_commit_writer import (
 )
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.knowledge.episodes.embedding import build_episode_embedding_text_from_fields
 from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
@@ -123,6 +125,7 @@ class KnowledgeStore:
             self._postgres_client,
             embedding_service,
         )
+        self._embedding_service = embedding_service
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
 
     async def get_relationship_observation_evidence(
@@ -854,16 +857,82 @@ class KnowledgeStore:
         new_developments: List[str],
         updates: List[str],
         unresolved: List[str],
-    ) -> None:
-        await self._episode_writer.edit_episode(
+        expected_updated_at: datetime,
+    ) -> datetime:
+        """Generate a replacement vector, then atomically persist one edit."""
+
+        narrative = self._normalize_episode_edit_narrative(
+            summary,
+            new_developments,
+            updates,
+            unresolved,
+        )
+        if not isinstance(expected_updated_at, datetime):
+            raise TypeError("expected_updated_at must be a datetime")
+        if (
+            expected_updated_at.tzinfo is None
+            or expected_updated_at.utcoffset() is None
+        ):
+            raise ValueError("expected_updated_at must be timezone-aware")
+        embedding = await self._encode_episode_edit_narrative(narrative)
+        return await self._episode_writer.edit_episode(
             episode_id=episode_id,
             user_name=user_name,
             project_id=project_id,
-            summary=summary,
-            new_developments=new_developments,
-            updates=updates,
-            unresolved=unresolved,
+            summary=narrative.summary or "",
+            new_developments=narrative.new_developments,
+            updates=narrative.updates,
+            unresolved=narrative.unresolved,
+            embedding=embedding,
+            expected_updated_at=expected_updated_at,
         )
+
+    @staticmethod
+    def _normalize_episode_edit_narrative(
+        summary: str,
+        new_developments: List[str],
+        updates: List[str],
+        unresolved: List[str],
+    ) -> EpisodeNarrative:
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("Episode summary must not be blank")
+
+        def normalize(values: List[str], field: str) -> List[str]:
+            if not isinstance(values, list) or not all(
+                isinstance(value, str) for value in values
+            ):
+                raise TypeError(f"{field} must be a list of strings")
+            return [value.strip() for value in values if value.strip()]
+
+        return EpisodeNarrative(
+            summary=summary.strip(),
+            new_developments=normalize(new_developments, "new_developments"),
+            updates=normalize(updates, "updates"),
+            unresolved=normalize(unresolved, "unresolved"),
+        )
+
+    async def _encode_episode_edit_narrative(
+        self, narrative: EpisodeNarrative
+    ) -> List[float]:
+        embedding_text = build_episode_embedding_text_from_fields(
+            narrative.summary or "",
+            narrative.new_developments,
+            narrative.updates,
+            narrative.unresolved,
+        )
+        embeddings = await self._embedding_service.encode([embedding_text])
+        if not isinstance(embeddings, list) or len(embeddings) != 1:
+            raise RuntimeError("Episode edit embedding result must contain one vector")
+        try:
+            embedding = list(embeddings[0])
+            validated = Episode.validate_embedding(embedding)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Episode edit embedding must be a finite 1024-dimensional vector"
+            ) from exc
+        if validated is None:
+            raise RuntimeError("Episode edit embedding result is missing")
+        return validated
 
     async def get_project_episode(
         self,

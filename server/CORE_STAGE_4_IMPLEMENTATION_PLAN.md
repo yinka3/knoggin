@@ -1,6 +1,6 @@
 # Core Stage 4 — Versioned Evidence and Editable Memory
 
-Status: Chunks A–C complete 2026-09-11. Chunk D remains planned.
+Status: Chunks A–D complete 2026-09-11. Combined scenarios and closeout remain.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 4 may begin after Stage 3, but its document and Episode work is
@@ -244,7 +244,7 @@ exist. Append status to the core, Knowledge, and provenance/Agent reviews.
 - [x] A: exact-byte document index publication.
 - [x] B: historical encounter persistence across document changes.
 - [x] C: observation-aware graph evidence hydration.
-- [ ] D: atomic Episode narrative/vector edits.
+- [x] D: atomic Episode narrative/vector edits.
 - [ ] Combined real-PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
@@ -298,3 +298,21 @@ as `missing`. Current text formatters skip structured bundles until the Stage
 message quotations.
 
 Next implementation task: Stage 4 Chunk D.
+
+Chunk D validation on 2026-09-11:
+
+- `uv run pytest -q tests/unit/core/knowledge/episodes/test_episode_embedding.py tests/unit/core/knowledge/test_project_episode_build_contract.py tests/contract/storage/test_episode_writer_contract.py tests/contract/storage/test_episode_reader_contract.py tests/contract/storage/test_embedding_rebuilder_contract.py` → 39 passed; the environment emitted its existing Requests dependency warning.
+- The real PostgreSQL writer regression creates a successful edit, rejects a stale edit token, injects a SQL write failure, and verifies that the preceding narrative/vector pair remains intact.
+- Focused Ruff, compileall, and `git diff --check` passed. The initial sandboxed commands could not read the shared `uv` cache; approved reruns passed.
+
+The Knowledge facade now generates and validates a replacement vector from the
+same canonical narrative builder used by creation and rebuild before it opens a
+writer transaction. The writer receives a required timezone-aware
+`expected_updated_at` token and atomically updates narrative fields, vector,
+`user_modified`, and `updated_at`; a missing CAS match reports an unavailable
+or stale Episode. Existing Episode reads already return `updated_at`, so no
+reader contract changed. The automatic-generation guard for `user_modified`
+Episodes remains covered by its existing regression.
+
+Next implementation task: run the combined Stage 4 scenarios and record the
+review/probe/operations closeout.

@@ -1,7 +1,10 @@
 import pytest
 
 from common.schema.episode.models import Episode, MessageEpisode
-from core.knowledge.episodes.embedding import build_episode_embedding_text
+from core.knowledge.episodes.embedding import (
+    build_episode_embedding_text,
+    build_episode_embedding_text_from_fields,
+)
 
 
 def make_episode(**overrides) -> Episode:
@@ -28,6 +31,25 @@ def test_episode_embedding_text_uses_only_current_narrative_fields():
         "Updates:\n- Question retrieval will use semantic similarity.\n\n"
         "Unresolved:\n- Choose a hybrid ranking policy."
     )
+
+
+@pytest.mark.no_network
+def test_episode_embedding_text_from_fields_matches_an_edited_episode():
+    edited = make_episode().validated_copy(
+        update={
+            "summary": "The team adopted editable episodic memory.",
+            "new_developments": ["Episode edits replace the retrieval vector."],
+            "updates": ["The writer uses an optimistic edit token."],
+            "unresolved": [],
+        }
+    )
+
+    assert build_episode_embedding_text_from_fields(
+        edited.summary,
+        edited.new_developments,
+        edited.updates,
+        edited.unresolved,
+    ) == build_episode_embedding_text(edited)
 
 
 @pytest.mark.no_network
