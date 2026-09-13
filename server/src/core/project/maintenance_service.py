@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 
 from common.schema.maintenance import MaintenanceImpactPreview
+from common.schema.settings import ConflictDiscoverySettings
 from core.knowledge.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflict_service import (
     ConflictService,
@@ -15,6 +16,7 @@ from core.knowledge.conflict_service import (
 from core.knowledge.conflicts import (
     ConflictDiscoveryPackage,
     ConflictOrigin,
+    ConflictResolutionKind,
     ConflictWriteResult,
     LLMConflictCandidate,
 )
@@ -35,6 +37,10 @@ from core.knowledge.db.writers.relationship_interpretation_writer import (
 )
 from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.maintenance_impact import MaintenanceImpactPlanner
+from core.knowledge.maintenance_policy import (
+    AUTOMATED_MAINTENANCE_ACTOR,
+    MaintenanceTrustPolicy,
+)
 from core.knowledge.maintenance_reviews import (
     MaintenanceReviewDetail,
     RelationshipInterpretationPlan,
@@ -71,6 +77,7 @@ class ProjectMaintenanceService:
         project_lookup: ProjectLookup,
         active_projects: Mapping[str, ProjectRuntime],
         project_leases: Mapping[str, set[str]],
+        conflict_discovery_settings: ConflictDiscoverySettings | None = None,
     ) -> None:
         self.resources = resources
         self.user_name = user_name
@@ -79,6 +86,9 @@ class ProjectMaintenanceService:
         self._active_projects = active_projects
         self._project_leases = project_leases
         self._lock = asyncio.Lock()
+        self._maintenance_policy = MaintenanceTrustPolicy.capture(
+            conflict_discovery_settings or ConflictDiscoverySettings(mode="manual")
+        )
         self._domain_store = DomainConfigStore(self.pg)
         # Semantic review workflows live above KnowledgeStore. The persistence
         # facade remains focused on durable reads/writes and graph projections.
@@ -105,6 +115,14 @@ class ProjectMaintenanceService:
         """Lock shared with project lifecycle transitions."""
 
         return self._lock
+
+    def update_conflict_discovery_settings(
+        self,
+        settings: ConflictDiscoverySettings,
+    ) -> None:
+        """Install the only policy snapshot allowed to authorize automation."""
+
+        self._maintenance_policy = MaintenanceTrustPolicy.capture(settings)
 
     async def _require_domain_project(
         self,
@@ -142,10 +160,12 @@ class ProjectMaintenanceService:
 
         async with self._lock:
             await self._require_domain_project(project_id, allow_archived=False)
-            window = await self._require_knowledge_store().retry_project_semantic_window(
-                window_id=window_id,
-                user_name=self.user_name,
-                project_id=project_id,
+            window = (
+                await self._require_knowledge_store().retry_project_semantic_window(
+                    window_id=window_id,
+                    user_name=self.user_name,
+                    project_id=project_id,
+                )
             )
             if window is None:
                 raise ValueError("Failed active semantic window is unavailable")
@@ -248,8 +268,7 @@ class ProjectMaintenanceService:
             )
         current_snapshot = EvidenceService.snapshot(tuple(bundles))
         has_missing = unsupported or any(
-            any(node.status == "missing" for node in bundle.nodes)
-            for bundle in bundles
+            any(node.status == "missing" for node in bundle.nodes) for bundle in bundles
         )
         if has_missing:
             state = "partially_unavailable"
@@ -510,7 +529,7 @@ class ProjectMaintenanceService:
         project_id: str,
         conflict_id: str,
         *,
-        resolution_kind: str,
+        resolution_kind: ConflictResolutionKind,
         resolution_note: str | None = None,
         resolved_by: str | None = None,
     ):
@@ -525,6 +544,38 @@ class ProjectMaintenanceService:
             resolved_by=resolved_by or self.user_name,
             resolution_note=resolution_note,
         )
+
+    async def automatically_resolve_conflict_group(
+        self,
+        project_id: str,
+        conflict_id: str,
+        *,
+        resolution_kind: ConflictResolutionKind,
+    ):
+        """Close a current conflict only through an exact trusted policy action.
+
+        Conflict discovery candidates remain proposals. This narrow entry point
+        exists for a future deterministic classifier; it has no model-confidence
+        input and cannot apply a canonical mutation.
+        """
+
+        async with self._lock:
+            policy = self._maintenance_policy
+            policy.require_automated_conflict_resolution(resolution_kind)
+            detail = await self.get_maintenance_review_detail(project_id, conflict_id)
+            if detail.review.status != "open":
+                raise ValueError("Only an open conflict review can be auto-resolved")
+            if detail.evidence_state != "current":
+                raise ValueError("Conflict review is stale; evidence changed")
+            action = policy.action_for_conflict_resolution(resolution_kind)
+            return await self._conflict_service.resolve(
+                conflict_id=conflict_id,
+                user_name=self.user_name,
+                project_id=project_id,
+                resolution_kind=resolution_kind,
+                resolved_by=AUTOMATED_MAINTENANCE_ACTOR,
+                resolution_note=f"Automated trusted maintenance classification: {action}",
+            )
 
     async def apply_relationship_advisory_action(
         self,
@@ -649,7 +700,9 @@ class ProjectMaintenanceService:
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
             if result.updated:
-                summary["projection"] = await knowledge_store.rebuild_project_projection(
+                summary[
+                    "projection"
+                ] = await knowledge_store.rebuild_project_projection(
                     project_id,
                     self.user_name,
                 )
@@ -706,7 +759,9 @@ class ProjectMaintenanceService:
             summary = result.to_dict()
             summary["projection_rebuilt"] = False
             if result.updated:
-                summary["projection"] = await knowledge_store.rebuild_project_projection(
+                summary[
+                    "projection"
+                ] = await knowledge_store.rebuild_project_projection(
                     project_id,
                     self.user_name,
                 )

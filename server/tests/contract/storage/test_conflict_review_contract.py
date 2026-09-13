@@ -1,10 +1,22 @@
 """Durable conflict-review lifecycle contracts against fresh PostgreSQL schema."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
-from common.schema.evidence import EvidencePointer, EvidenceSnapshot
+from common.schema.evidence import (
+    EvidenceBundle,
+    EvidenceNode,
+    EvidencePointer,
+    EvidenceSnapshot,
+    EvidenceSubject,
+)
+from common.schema.settings import ConflictDiscoverySettings
 from core.knowledge.db.readers.conflict_reader import ConflictReader
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
+from core.knowledge.maintenance_policy import AUTOMATED_MAINTENANCE_ACTOR
+from core.project.maintenance_service import ProjectMaintenanceService
 
 
 async def _seed_conflict_observations(client) -> tuple[int, int]:
@@ -45,6 +57,21 @@ async def _seed_conflict_observations(client) -> tuple[int, int]:
     return tuple(int(row["observation_id"]) for row in rows)
 
 
+def _evidence_bundle(observation_id: int) -> EvidenceBundle:
+    pointer = EvidencePointer.for_observation(observation_id)
+    return EvidenceBundle(
+        subject=EvidenceSubject(
+            kind="relationship_observation",
+            identifier=str(observation_id),
+        ),
+        nodes=(EvidenceNode(pointer=pointer, status="active"),),
+        edges=(),
+        total_nodes=1,
+        total_edges=0,
+        state_token=f"{observation_id:064x}",
+    )
+
+
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
@@ -53,7 +80,9 @@ async def test_conflict_resolution_is_durable_and_keeps_original_proposal_immuta
 ):
     observation_ids = await _seed_conflict_observations(real_postgres_client)
     snapshot = EvidenceSnapshot(
-        pointers=tuple(EvidencePointer.for_observation(value) for value in observation_ids),
+        pointers=tuple(
+            EvidencePointer.for_observation(value) for value in observation_ids
+        ),
         total_nodes=2,
         state_token="a" * 64,
     )
@@ -124,11 +153,87 @@ async def test_conflict_resolution_is_durable_and_keeps_original_proposal_immuta
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_trusted_conflict_disposition_records_the_policy_actor_and_audit_event(
+    real_postgres_client,
+):
+    observation_ids = await _seed_conflict_observations(real_postgres_client)
+    bundles = {
+        observation_id: _evidence_bundle(observation_id)
+        for observation_id in observation_ids
+    }
+
+    class EvidenceStore:
+        async def get_relationship_observations_evidence(
+            self, observation_ids, **_kwargs
+        ):
+            return tuple(bundles[observation_id] for observation_id in observation_ids)
+
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(
+            postgres=real_postgres_client,
+            knowledge_store=EvidenceStore(),
+        ),
+        user_name="ada",
+        project_lookup=project_lookup,
+        active_projects={},
+        project_leases={},
+        conflict_discovery_settings=ConflictDiscoverySettings(
+            mode="trusted",
+            trusted_actions=["resolve_conflict:not_a_conflict"],
+        ),
+    )
+    service._conflict_service.notify_detection = AsyncMock()
+    created = await service.record_conflict_detection(
+        "project-1",
+        origin="background_discovery",
+        kind="possible_contradiction",
+        rationale="The observations require a classification.",
+        confidence=0.99,
+        evidence_ids=list(observation_ids),
+    )
+
+    await service.automatically_resolve_conflict_group(
+        "project-1",
+        created.group.conflict_id,
+        resolution_kind="not_a_conflict",
+    )
+
+    detail = await ConflictReader(real_postgres_client).get_detail(
+        conflict_id=created.group.conflict_id,
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert detail is not None
+    assert detail["resolution"]["resolved_by"] == AUTOMATED_MAINTENANCE_ACTOR
+    assert detail["resolution"]["resolution_note"] == (
+        "Automated trusted maintenance classification: resolve_conflict:not_a_conflict"
+    )
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT actor, reason
+        FROM public.maintenance_review_events
+        WHERE review_id = %s AND status = 'applied'
+        """,
+        (created.group.conflict_id,),
+    ) == {
+        "actor": AUTOMATED_MAINTENANCE_ACTOR,
+        "reason": "Automated trusted maintenance classification: resolve_conflict:not_a_conflict",
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_conflict_review_reuses_equivalent_evidence_and_stales_only_changed_state(
     real_postgres_client,
 ):
     observation_ids = await _seed_conflict_observations(real_postgres_client)
-    pointers = tuple(EvidencePointer.for_observation(value) for value in observation_ids)
+    pointers = tuple(
+        EvidencePointer.for_observation(value) for value in observation_ids
+    )
     first_snapshot = EvidenceSnapshot(
         pointers=pointers,
         total_nodes=2,

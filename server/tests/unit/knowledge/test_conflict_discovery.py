@@ -1,7 +1,9 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+from common.schema.settings import ConflictDiscoverySettings
 from core.knowledge.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflicts import (
     ConflictDiscoveryCursor,
@@ -10,6 +12,8 @@ from core.knowledge.conflicts import (
     LLMConflictDiscoveryResult,
 )
 from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
+from infrastructure.job.base import JobContext
+from infrastructure.job.scheduler import Scheduler
 
 
 def _observation(
@@ -36,9 +40,7 @@ def _observation(
 
 
 class PacketReader:
-    def __init__(
-        self, seeds: list[dict], neighborhoods: dict[int, list[dict]]
-    ) -> None:
+    def __init__(self, seeds: list[dict], neighborhoods: dict[int, list[dict]]) -> None:
         self.seeds = seeds
         self.neighborhoods = neighborhoods
         self.calls = []
@@ -134,8 +136,10 @@ class JobStore:
     def __init__(self, package: ConflictDiscoveryPackage) -> None:
         self.package = package
         self.completed = []
+        self.build_calls = 0
 
     async def build_conflict_discovery_package(self, project_id=None, **kwargs):
+        self.build_calls += 1
         self.project_id = project_id
         self.build_args = kwargs
         return self.package
@@ -187,38 +191,99 @@ async def test_job_persists_grounded_candidates_and_advances_cursor_together():
     llm = JobLLM()
     job = ConflictDiscoveryJob(
         store,
-        SimpleNamespace(
-            enabled=True,
-            interval_hours=48,
-            max_seed_span_days=60,
-            max_package_tokens=50_000,
-        ),
+        ConflictDiscoverySettings(),
         llm=llm,
     )
 
-    result = await job.execute(
-        SimpleNamespace(user_name="ada", project_id="project-1")
-    )
+    result = await job.execute(SimpleNamespace(user_name="ada", project_id="project-1"))
 
     assert result.success
     assert len(store.completed) == 1
     completed_package, candidates = store.completed[0]
     assert completed_package is package
     assert [candidate.evidence_ids for candidate in candidates] == [[101, 104]]
+    assert job.snapshot_for_health() == {
+        "mode": "assisted",
+        "scheduler_enabled": True,
+        "trusted_action_count": 0,
+        "interval_hours": 48,
+        "llm_available": True,
+        "last_run": {
+            "reviewed_observation_count": 2,
+            "opened_review_count": 1,
+            "ignored_candidate_count": 1,
+        },
+    }
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_job_uses_normal_cadence_without_a_continuation_trigger():
+async def test_job_defers_assisted_mode_to_the_scheduler_cadence():
     job = ConflictDiscoveryJob(
         SimpleNamespace(),
-        SimpleNamespace(
-            enabled=True,
-            interval_hours=48,
-            max_seed_span_days=60,
-            max_package_tokens=50_000,
-        ),
+        ConflictDiscoverySettings(),
         llm=object(),
     )
 
-    assert await job.should_run(SimpleNamespace(user_name="ada", project_id="project-1"))
+    assert job.enabled is True
+    assert not await job.should_run(
+        SimpleNamespace(user_name="ada", project_id="project-1")
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_manual_mode_skips_background_model_work_but_allows_requested_run():
+    store = JobStore(None)
+    job = ConflictDiscoveryJob(
+        store,
+        ConflictDiscoverySettings(mode="manual"),
+        llm=JobLLM(),
+    )
+
+    assert job.enabled is False
+    assert not await job.should_run(
+        SimpleNamespace(user_name="ada", project_id="project-1")
+    )
+
+    result = await job.execute(SimpleNamespace(user_name="ada", project_id="project-1"))
+
+    assert result.success is True
+    assert store.project_id == "project-1"
+    assert result.summary.startswith("[manual]")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_scheduler_admits_assisted_mode_by_cadence_but_never_manual_mode(
+    monkeypatch,
+):
+    context = JobContext(user_name="ada", project_id="project-1")
+    manual_store = JobStore(None)
+    manual_job = ConflictDiscoveryJob(
+        manual_store,
+        ConflictDiscoverySettings(mode="manual"),
+        llm=JobLLM(),
+    )
+    manual_scheduler = Scheduler("ada", "project-1")
+    manual_scheduler.register(manual_job)
+    await manual_scheduler._schedule_if_due(manual_job.name, manual_job, context)
+    assert manual_store.build_calls == 0
+
+    assisted_store = JobStore(None)
+    assisted_job = ConflictDiscoveryJob(
+        assisted_store,
+        ConflictDiscoverySettings(mode="assisted"),
+        llm=JobLLM(),
+    )
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.register(assisted_job)
+    monkeypatch.setattr("infrastructure.job.scheduler.get_now_unix", lambda: 1000)
+
+    await scheduler._schedule_if_due(assisted_job.name, assisted_job, context)
+    await scheduler._running_tasks[assisted_job.name]
+    await asyncio.sleep(0)
+    await scheduler._schedule_if_due(assisted_job.name, assisted_job, context)
+
+    assert assisted_store.build_calls == 1
+    assert scheduler._last_successful_runs == {"conflict_discovery": 1000}

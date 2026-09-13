@@ -1,6 +1,6 @@
 # Core Stage 5 — Maintenance Integrity and Concurrency
 
-Status: Chunks A–F complete 2026-09-12. Chunk G remains planned.
+Status: Chunks A–G complete 2026-09-12. Stage closeout remains planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, including the typed evidence
 maintenance framework committed before Core Stages 1 and 2. Recheck the current
@@ -366,8 +366,8 @@ to the locked Knowledge review and maintenance correction review.
 - [x] C: participation-aware, all-origin maintenance frontier.
 - [x] D: merge/semantic-commit ordering is proven by existing row locks.
 - [x] E: projection-repair obligation is durable before rebuild.
-- [ ] F: conflict discovery/review identity, evidence, and resolution are stable.
-- [ ] G: configurable maintenance review burden.
+- [x] F: conflict discovery/review identity, evidence, and resolution are stable.
+- [x] G: configurable maintenance review burden.
 - [ ] Combined real-PostgreSQL/AGE scenario passes.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
@@ -487,4 +487,27 @@ dedicated resolution table stores the validated category, note, actor, and
 closure time, while the original proposal remains unchanged. Scheduled
 discovery now follows the configured enabled/LLM state.
 
-Next implementation task: Stage 5 Chunk G.
+Chunk G validation on 2026-09-12:
+
+- `uv run pytest -q tests/unit/knowledge/test_conflict_discovery.py tests/unit/knowledge/test_conflict_writer.py tests/unit/knowledge/test_maintenance_policy.py tests/unit/core/knowledge/test_conflict_discovery_persistence_contract.py tests/unit/core/agent/test_conflict_reporting_contract.py tests/unit/knowledge/test_maintenance_application_contract.py tests/unit/knowledge/test_maintenance_reviews.py tests/unit/runtime/test_project_config_fanout.py tests/unit/health/test_runtime_health_service.py tests/contract/storage/test_current_observation_reader_contract.py tests/contract/storage/test_conflict_review_contract.py tests/contract/storage/test_maintenance_application_real_postgres.py tests/contract/storage/test_semantic_commit_contract.py tests/contract/postgres/test_schema_bootstrap_contract.py` → 98 passed; the environment emitted its existing Requests dependency warning.
+- `uv run ruff check` and `uv run ruff format --check` on the touched source/test paths, `uv run python -m compileall -q src`, and `git diff --check` passed. MyPy remains deferred because its configured path baseline is still stale, as recorded separately in `MYPY_BASELINE.md`.
+
+`ConflictDiscoverySettings` now has an explicit `manual`, `assisted`, or
+`trusted` mode. Its trusted allowlist accepts only four exact conflict
+classification actions; entity merge, Project cleanup, Context changes, and
+generic plan kinds are not representable in the setting. The shared Project
+maintenance service owns the active policy and updates from the configuration
+manager, so a caller cannot supply a stronger policy at disposition time.
+
+The conflict-discovery job is registered with active Project runtimes and now
+defers to scheduler cadence rather than returning a continuation trigger on
+every scheduler check. Manual mode disables scheduling while retaining an
+explicit execution path; assisted and trusted modes schedule bounded proposal
+creation and retain stable deduplication from Chunk F. Model candidates remain
+proposals in every mode. A separate trusted entry point can only close a
+current review using an exact allowlisted classification, records the fixed
+`maintenance-trust-policy` actor and reason, and performs no canonical
+mutation. Background health now exposes only the mode, policy/action count,
+interval, LLM availability, and bounded last-run counts.
+
+Next implementation task: Stage 5 combined scenario and review/probe closeout.

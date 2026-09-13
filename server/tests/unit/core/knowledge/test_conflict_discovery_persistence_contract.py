@@ -10,12 +10,14 @@ from common.schema.evidence import (
     EvidencePointer,
     EvidenceSubject,
 )
+from common.schema.settings import ConflictDiscoverySettings
 from core.knowledge.conflicts import (
     ConflictDiscoveryCursor,
     ConflictDiscoveryPackage,
     LLMConflictCandidate,
 )
 from core.knowledge.evidence_service import EvidenceService
+from core.knowledge.maintenance_policy import AUTOMATED_MAINTENANCE_ACTOR
 from core.project.maintenance_service import ProjectMaintenanceService
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -92,7 +94,9 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
     )
     store = EvidenceStore({10: bundles[0], 11: bundles[1], 12: bundles[2]})
     service = ProjectMaintenanceService(
-        resources=type("Resources", (), {"postgres": client, "knowledge_store": store})(),
+        resources=type(
+            "Resources", (), {"postgres": client, "knowledge_store": store}
+        )(),
         user_name="ada",
         project_lookup=lambda _project_id: None,
         active_projects={},
@@ -118,9 +122,13 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
 
     assert written == 1
     assert client.transaction_enters == 1
-    assert any("INSERT INTO public.maintenance_reviews" in call[1] for call in client.calls)
+    assert any(
+        "INSERT INTO public.maintenance_reviews" in call[1] for call in client.calls
+    )
     review_insert = next(
-        call for call in client.calls if "INSERT INTO public.maintenance_reviews" in call[1]
+        call
+        for call in client.calls
+        if "INSERT INTO public.maintenance_reviews" in call[1]
     )
     assert json.loads(review_insert[2][7]) == expected_snapshot.model_dump(mode="json")
     assert store.calls == [(10, 11)]
@@ -169,3 +177,75 @@ async def test_direct_conflict_report_captures_only_its_cited_evidence():
 
     assert recorded[0]["evidence_snapshot"] == EvidenceService.snapshot(bundles[:2])
     assert store.calls == [(10, 11)]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_trusted_conflict_disposition_requires_exact_authorization_and_audits_actor():
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(postgres=object(), knowledge_store=object()),
+        user_name="ada",
+        project_lookup=project_lookup,
+        active_projects={},
+        project_leases={},
+        conflict_discovery_settings=ConflictDiscoverySettings(
+            mode="trusted",
+            trusted_actions=["resolve_conflict:not_a_conflict"],
+        ),
+    )
+    service.get_maintenance_review_detail = AsyncMock(
+        return_value=SimpleNamespace(
+            review=SimpleNamespace(status="open"),
+            evidence_state="current",
+        )
+    )
+    resolved = []
+
+    class ConflictService:
+        async def resolve(self, **kwargs):
+            resolved.append(kwargs)
+            return SimpleNamespace(conflict_id=kwargs["conflict_id"])
+
+    service._conflict_service = ConflictService()
+    result = await service.automatically_resolve_conflict_group(
+        "project-1",
+        "review-1",
+        resolution_kind="not_a_conflict",
+    )
+
+    assert result.conflict_id == "review-1"
+    assert resolved == [
+        {
+            "conflict_id": "review-1",
+            "user_name": "ada",
+            "project_id": "project-1",
+            "resolution_kind": "not_a_conflict",
+            "resolved_by": AUTOMATED_MAINTENANCE_ACTOR,
+            "resolution_note": (
+                "Automated trusted maintenance classification: "
+                "resolve_conflict:not_a_conflict"
+            ),
+        }
+    ]
+    with pytest.raises(PermissionError, match="does not authorize"):
+        await service.automatically_resolve_conflict_group(
+            "project-1",
+            "review-1",
+            resolution_kind="confirmed_conflict",
+        )
+    service.get_maintenance_review_detail = AsyncMock(
+        return_value=SimpleNamespace(
+            review=SimpleNamespace(status="open"),
+            evidence_state="changed",
+        )
+    )
+    with pytest.raises(ValueError, match="evidence changed"):
+        await service.automatically_resolve_conflict_group(
+            "project-1",
+            "review-1",
+            resolution_kind="not_a_conflict",
+        )
+    assert len(resolved) == 1

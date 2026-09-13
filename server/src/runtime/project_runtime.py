@@ -64,6 +64,7 @@ class ProjectRuntime:
         self.document_service = document_service
 
         self.project_semantic_job: Optional[Any] = None
+        self.conflict_discovery_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._closed = False
 

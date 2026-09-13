@@ -145,6 +145,26 @@ class FakeDocumentService:
         return self.pending
 
 
+class FakeConflictDiscoveryJob:
+    def __init__(self):
+        self.calls = 0
+
+    def snapshot_for_health(self):
+        self.calls += 1
+        return {
+            "mode": "trusted",
+            "scheduler_enabled": True,
+            "trusted_action_count": 1,
+            "interval_hours": 48,
+            "llm_available": True,
+            "last_run": {
+                "reviewed_observation_count": 2,
+                "opened_review_count": 1,
+                "ignored_candidate_count": 0,
+            },
+        }
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_engine_health_is_healthy_and_does_not_mutate_dependencies():
@@ -473,10 +493,12 @@ async def test_background_health_combines_scheduler_queue_and_document_indexing(
         }
     )
     document_service = FakeDocumentService(pending=3)
+    conflict_discovery = FakeConflictDiscoveryJob()
     project = SimpleNamespace(
         project_id="project-a",
         scheduler=scheduler,
         document_service=document_service,
+        conflict_discovery_job=conflict_discovery,
     )
     resource_set = resources()
     resource_set.background_work = FakeCoordinator(
@@ -505,8 +527,21 @@ async def test_background_health_combines_scheduler_queue_and_document_indexing(
     assert payload["details"]["scheduler"]["running_jobs"] == 1
     assert payload["details"]["document_indexing"]["pending_document_count"] == 3
     assert payload["details"]["background_work"]["queued_for_project"] == 1
+    assert payload["details"]["conflict_discovery"] == {
+        "mode": "trusted",
+        "scheduler_enabled": True,
+        "trusted_action_count": 1,
+        "interval_hours": 48,
+        "llm_available": True,
+        "last_run": {
+            "reviewed_observation_count": 2,
+            "opened_review_count": 1,
+            "ignored_candidate_count": 0,
+        },
+    }
     assert scheduler.calls == 1
     assert document_service.calls == 1
+    assert conflict_discovery.calls == 1
     serialized = json.dumps(payload)
     assert "project-a" not in serialized
 
