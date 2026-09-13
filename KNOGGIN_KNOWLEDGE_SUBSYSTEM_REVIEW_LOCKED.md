@@ -1278,3 +1278,31 @@ The combined document, provenance, graph, Episode, and retained semantic gate
 passed **307 tests** with the existing Requests dependency warning. The later
 maintenance-frontier, merge, concurrency, and Agent prompt-projection work
 remains open.
+
+## Stage 5 implementation status — 2026-09-13
+
+The locked maintenance direction is now implemented without changing the
+Context-first or explicit-maintenance model:
+
+- §§10–12: Context entity associations participate in user-global merge,
+  safe rollback, and selected Project cleanup. Association collisions preserve
+  the survivor; later edits become explicit rollback residue.
+- §§20–22: maintenance uses semantic-participation eligibility and every
+  active semantic-window origin. Global merge and semantic commit share the
+  durable identity lock order, with both interleavings covered by real
+  PostgreSQL contracts.
+- Conflict discovery now admits current Context-backed observations while
+  excluding deterministically retired evidence. Reviews store snapshots of
+  exactly cited evidence, reuse unchanged evidence regardless of confidence,
+  persist typed resolution records, and retain a durable projection-repair
+  obligation before derived rebuild work begins.
+- Maintenance burden is configurable as manual, assisted, or trusted. Trusted
+  authority is closed to four audited conflict classifications; it does not
+  make model confidence or a model candidate an authority for canonical
+  mutation.
+
+The serial Stage 5 real PostgreSQL/AGE gate passed **160 tests** with the
+existing Requests dependency warning. Historical MC1–MC5 reproductions are
+now skipped records because their former defect assertions fail; normal
+contracts are the acceptance evidence. This does not measure live-model
+conflict quality or an operating-system crash/restart.

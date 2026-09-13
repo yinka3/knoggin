@@ -1,6 +1,7 @@
 # Core Stage 5 — Maintenance Integrity and Concurrency
 
-Status: Chunks A–G complete 2026-09-12. Stage closeout remains planned.
+Status: Complete 2026-09-13. Chunks A–G and the composed Stage 5 closeout are
+validated.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, including the typed evidence
 maintenance framework committed before Core Stages 1 and 2. Recheck the current
@@ -368,8 +369,8 @@ to the locked Knowledge review and maintenance correction review.
 - [x] E: projection-repair obligation is durable before rebuild.
 - [x] F: conflict discovery/review identity, evidence, and resolution are stable.
 - [x] G: configurable maintenance review burden.
-- [ ] Combined real-PostgreSQL/AGE scenario passes.
-- [ ] Review/probe/operations closeout is recorded and committed locally.
+- [x] Combined real-PostgreSQL/AGE scenario passes.
+- [x] Review/probe/operations closeout is recorded and committed locally.
 
 Chunk A validation on 2026-09-12:
 
@@ -511,3 +512,39 @@ mutation. Background health now exposes only the mode, policy/action count,
 interval, LLM availability, and bounded last-run counts.
 
 Next implementation task: Stage 5 combined scenario and review/probe closeout.
+
+## Stage 5 closeout — 2026-09-13
+
+The serial composed gate passed against the fresh PostgreSQL/AGE fixture:
+
+- `uv run pytest -q tests/unit/core/knowledge/test_maintenance_impact.py tests/unit/knowledge/test_global_entity_maintenance_contract.py tests/unit/knowledge/test_maintenance_application_contract.py tests/unit/core/knowledge/test_entity_cleanup_persistence_contract.py tests/unit/project/test_entity_cleanup_workflow.py tests/unit/core/ingestion/test_semantic_window_admission.py tests/unit/knowledge/test_conflict_discovery.py tests/unit/knowledge/test_conflict_writer.py tests/unit/knowledge/test_maintenance_policy.py tests/unit/knowledge/test_maintenance_reviews.py tests/unit/core/knowledge/test_conflict_discovery_persistence_contract.py tests/unit/core/agent/test_conflict_reporting_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py tests/unit/runtime/test_project_config_fanout.py tests/unit/health/test_runtime_health_service.py tests/contract/storage/test_maintenance_application_real_postgres.py tests/contract/storage/test_semantic_commit_contract.py tests/contract/storage/test_semantic_window_participation_admission_contract.py tests/contract/storage/test_project_context_window_contract.py tests/contract/storage/test_current_observation_reader_contract.py tests/contract/storage/test_conflict_review_contract.py tests/contract/storage/test_project_deletion_writer_contract.py tests/contract/postgres/test_schema_bootstrap_contract.py` → **160 passed**; the environment emitted its existing Requests dependency warning.
+- The gate keeps cancellation and lock-order cases in isolated database resets:
+  Context association merge/rollback and changed residue, target-Project
+  cleanup with a surviving Project and Episode-enrichment retry, active
+  human-edit frontier rejection, both semantic-commit/merge durable orders,
+  projection-repair restart, exact conflict evidence/deduplication/resolution,
+  and manual/assisted/trusted policy behavior all run against their real
+  persistence boundaries.
+
+The historical maintenance probe command intentionally failed all seven old
+defect assertions: Context-backed evidence is now discovered, fresh reviews
+are current against only their cited evidence, confidence changes no longer
+duplicate a review, structured resolution survives, and interrupted projection
+repair remains pending. The probe is retained as a skipped historical record;
+normal desired-behavior contracts are the acceptance evidence. F8 and F12 had
+no separate standalone historical probes; their real PostgreSQL maintenance
+and semantic-commit contracts provide that coverage.
+
+Chunk G review passed its acceptance boundary. Manual mode has no scheduled
+model work, assisted mode is cadence-driven and deduplicated, and trusted mode
+can authorize only an exact classification action retained in the audit trail.
+Trusted mode deliberately does not treat a model candidate or its confidence
+as authority: it is an authorization boundary for a future deterministic
+classifier and never performs a canonical mutation.
+
+Implementation commits: `85c5027` (A), `6dfcaae` (B), `f617bf1` (C),
+`7964911` (D), `57e9886` (E), `b23dbfd` (F), and `c7f6d5f` (G). No live-model
+quality test or operating-system crash/restart test ran; the recovery coverage
+uses deterministic cancellation and a newly constructed service over the same
+durable database state. MyPy remains deferred because the configured baseline
+still names stale paths, as recorded in `MYPY_BASELINE.md`.

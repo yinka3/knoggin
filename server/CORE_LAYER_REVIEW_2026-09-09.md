@@ -251,3 +251,26 @@ The original F4 and F11 rationale remains historical. Both are resolved:
 The F4 standalone reproduction is retained as a skipped historical probe. No
 F11 standalone probe existed; the normal Episode writer contracts are the
 acceptance evidence. F8, F12, and I1–I4 remain open.
+
+## Stage 5 implementation status — 2026-09-13
+
+The original F8 and F12 rationale remains historical. Both are resolved by
+the maintenance/concurrency work:
+
+- **F8:** `85c5027` includes `context_block_entities` in merge preview,
+  mutation journaling, rollback safety, and inverse application.
+  `6dfcaae` removes only the selected Project's associations and downstream
+  Episode links while preserving a surviving Project's association and global
+  identity. The real PostgreSQL contracts cover association collision,
+  changed-residue rollback, and stale Episode-enrichment retry.
+- **F12:** `f617bf1` makes maintenance frontiers participation-aware and
+  rejects active semantic windows from every origin. `7964911` proves both
+  durable semantic-commit/merge orders under row locking, rather than relying
+  on an in-process ordering assumption.
+
+`57e9886`, `b23dbfd`, and `c7f6d5f` complete the related durable projection
+repair, conflict-review, and bounded policy work. The Stage 5 serial real
+PostgreSQL/AGE gate passed **160 tests** with the existing Requests dependency
+warning. F8 and F12 had no separate historical standalone probe; the normal
+maintenance and semantic-commit contracts are the acceptance evidence. I1–I4
+remain outside Stage 5.
