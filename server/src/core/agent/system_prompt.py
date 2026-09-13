@@ -18,21 +18,28 @@ def get_agent_prompt(
     project_brief: str = "",
     project_context: str = "",
     research_profile: ResearchProfile | None = None,
+    gap_review: bool = False,
 ) -> str:
     date_context = f"Current time: {current_time}." if current_time else ""
     participants_list = ", ".join(participants) if participants else "None"
-    cognitive_persona = (
-        persona or "Warm, direct, and attentive to useful patterns."
-    )
+    cognitive_persona = persona or "Warm, direct, and attentive to useful patterns."
     profile = research_profile or resolve_research_profile("normal")
     research_mode_context = f"""<research_mode>
 Selected mode: {profile.mode}
-Artifact policy: {profile.artifact_policy}
-Default artifact type: {profile.default_artifact_kind or 'none'}
+Default artifact type: {profile.default_artifact_kind or "none"}
 
 Mode-specific execution guidance:
 {_research_mode_guidance(profile)}
 </research_mode>
+"""
+    deep_research_gap_review_context = ""
+    if gap_review and profile.mode == "deep_research":
+        deep_research_gap_review_context = """<deep_research_gap_review>
+This is the executor-required gap-review pass. Reassess the admitted evidence,
+identify any material unanswered question, and either retrieve targeted evidence
+for a real gap or submit an answer when the evidence is sufficient. Do not
+invent a required source count.
+</deep_research_gap_review>
 """
 
     project_brief_block = ""
@@ -212,6 +219,7 @@ Respond directly WITHOUT tools when:
 </skip_tools>
 {identity_context}{runtime_context}{community_context}
 {research_mode_context}
+{deep_research_gap_review_context}
 <thinking>
 Identify intent and select the best tool.
 Before acting, briefly identify the intent (detail, relationship, or temporal), \
@@ -247,13 +255,16 @@ def _research_mode_guidance(profile: ResearchProfile) -> str:
             "Treat this as an explicit investigation. Break the question into "
             "material subquestions, search for candidate sources, read promising "
             "pages, and corroborate important findings. Fill gaps with additional "
-            "searches. Finish with a concise research brief artifact."
+            "searches. The executor requires grounded investigation evidence "
+            "before a final answer. Finish with a concise research brief artifact."
         )
     return (
         "Treat this as a deep investigation. Decompose the question into "
         "subquestions, gather broad primary and authoritative evidence, read the "
         "underlying sources, seek disagreement or corroboration, and revisit gaps "
-        "before synthesis. Finish with a structured research report artifact."
+        "before synthesis. The executor requires grounded investigation evidence "
+        "and one gap-review pass before final synthesis. Finish with a structured "
+        "research report artifact."
     )
 
 

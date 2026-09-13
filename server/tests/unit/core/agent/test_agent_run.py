@@ -12,6 +12,7 @@ from core.agent.run import (
     AgentRun,
     AgentRunLimits,
 )
+from core.agent.sources.pasted_text import build_pasted_text_candidates
 
 
 def make_agent_config() -> AgentConfig:
@@ -138,6 +139,57 @@ def test_agent_run_enforces_attempt_and_tool_call_invariants():
     assert not run.can_call_tool("search_messages", {"query": "Ada"})
     with pytest.raises(ValueError, match="not permitted"):
         run.record_tool_call("search_messages", {"query": "Ada"})
+
+
+@pytest.mark.no_network
+def test_agent_run_distinguishes_grounded_evidence_from_actions_and_validates_input():
+    run = make_run()
+
+    run.notebook.apply("edit_brain", {"data": {"success": True}})
+
+    assert run.has_any() is True
+    assert run.has_grounded_investigation_evidence() is False
+
+    run.notebook.apply(
+        "search_messages",
+        {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
+    )
+
+    assert run.has_grounded_investigation_evidence() is True
+
+    pasted_candidates = build_pasted_text_candidates(
+        project_id="project-1",
+        session_id="session-1",
+        source_message_id=1,
+        message_content="Use this:\n```text\nSource-backed detail.\n```",
+        agent_run_id="run-2",
+    )
+    sourced_run = make_run(
+        run_id="run-2",
+        initial_source_candidates=pasted_candidates,
+    )
+
+    assert sourced_run.has_grounded_investigation_evidence() is True
+    with pytest.raises(TypeError, match="validated source references"):
+        make_run(initial_source_candidates=[object()])
+
+
+@pytest.mark.no_network
+def test_deep_research_gap_review_is_due_once_after_grounded_evidence():
+    run = make_run(research_profile=resolve_research_profile("deep_research"))
+
+    assert run.needs_deep_research_gap_review() is False
+    run.notebook.apply(
+        "search_messages",
+        {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
+    )
+
+    assert run.needs_deep_research_gap_review() is True
+    assert run.begin_deep_research_gap_review() is True
+    assert run.has_completed_deep_research_gap_review() is True
+    assert run.deep_research_gap_review_count == 1
+    assert run.needs_deep_research_gap_review() is False
+    assert run.begin_deep_research_gap_review() is False
 
 
 @pytest.mark.no_network
@@ -297,6 +349,13 @@ async def test_research_profile_supplies_default_report_artifact_at_synthesis():
     run = make_run(
         limits=AgentRunLimits(max_calls=6, max_attempts=6),
         research_profile=profile,
+        initial_source_candidates=build_pasted_text_candidates(
+            project_id="project-1",
+            session_id="session-1",
+            source_message_id=1,
+            message_content="Use this:\n```text\nGrounded evidence.\n```",
+            agent_run_id="run-1",
+        ),
     )
     executor = AgentExecutor(
         run,
@@ -310,6 +369,7 @@ async def test_research_profile_supplies_default_report_artifact_at_synthesis():
     assert response["data"]["research_mode"] == "deep_research"
     assert response["data"]["artifact"]["kind"] == "research_report"
     assert response["data"]["artifact"]["title"] == "Research report"
+    assert run.deep_research_gap_review_count == 1
 
 
 @pytest.mark.no_network

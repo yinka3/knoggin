@@ -63,11 +63,30 @@ def test_artifact_contract_rejects_executable_markup_and_empty_blocks():
         ArtifactDraft(title="Empty", blocks=())
 
 
-def test_research_profiles_make_mode_artifact_policy_explicit():
-    assert DEFAULT_RESEARCH_PROFILES["normal"].artifact_policy == "none"
-    assert DEFAULT_RESEARCH_PROFILES["research"].default_artifact_kind == "research_brief"
-    assert DEFAULT_RESEARCH_PROFILES["research"].artifact_policy == "default"
-    assert DEFAULT_RESEARCH_PROFILES["deep_research"].artifact_policy == "required"
+def test_research_profiles_keep_only_executor_owned_mode_defaults_and_budgets():
+    assert DEFAULT_RESEARCH_PROFILES["normal"].default_artifact_kind is None
+    assert (
+        DEFAULT_RESEARCH_PROFILES["research"].default_artifact_kind == "research_brief"
+    )
+    assert (
+        DEFAULT_RESEARCH_PROFILES["deep_research"].default_artifact_kind
+        == "research_report"
+    )
+    profile_fields = DEFAULT_RESEARCH_PROFILES["deep_research"].model_dump()
+    assert set(profile_fields) == {
+        "mode",
+        "default_artifact_kind",
+        "tool_call_budget_multiplier",
+        "attempt_budget_multiplier",
+        "source_budget_multiplier",
+    }
+    with pytest.raises(ValidationError, match="artifact_policy"):
+        DEFAULT_RESEARCH_PROFILES["research"].model_validate(
+            {
+                **DEFAULT_RESEARCH_PROFILES["research"].model_dump(),
+                "artifact_policy": "default",
+            }
+        )
 
 
 def test_submit_answer_schema_accepts_optional_artifact():

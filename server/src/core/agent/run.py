@@ -176,6 +176,7 @@ class AgentRun:
     call_count: int = 0
     attempt_count: int = 0
     synthesis_attempt_count: int = 0
+    deep_research_gap_review_count: int = 0
     consecutive_errors: int = 0
     consecutive_empty_results: int = 0
     tools_used: List[str] = field(default_factory=list)
@@ -237,6 +238,14 @@ class AgentRun:
             if last_turn_at is not None
             else getattr(agent.config, "last_turn_at", None)
         )
+        effective_initial_source_candidates = list(initial_source_candidates or [])
+        if not all(
+            isinstance(candidate, SourceReferenceCandidate)
+            for candidate in effective_initial_source_candidates
+        ):
+            raise TypeError(
+                "initial_source_candidates must contain validated source references"
+            )
         tool_runtime = build_tool_runtime(
             enabled_tools=effective_enabled_tools,
             additional_schemas=effective_additional_schemas,
@@ -271,7 +280,7 @@ class AgentRun:
             is_community=is_community,
             current_participants=list(current_participants or []),
             last_turn_at=effective_last_turn_at,
-            initial_source_candidates=list(initial_source_candidates or []),
+            initial_source_candidates=effective_initial_source_candidates,
         )
 
     @classmethod
@@ -352,6 +361,37 @@ class AgentRun:
         if self.synthesis_attempt_count:
             return False
         self.synthesis_attempt_count += 1
+        self.attempt_count += 1
+        return True
+
+    def has_grounded_investigation_evidence(self) -> bool:
+        """Whether this run has evidence sufficient to finalize research work."""
+
+        return bool(
+            self.initial_source_candidates or self.notebook.has_admitted_evidence()
+        )
+
+    def needs_deep_research_gap_review(self) -> bool:
+        """Whether the deep-research second-look checkpoint remains due."""
+
+        return (
+            self.research_profile.mode == "deep_research"
+            and self.has_grounded_investigation_evidence()
+            and not self.has_completed_deep_research_gap_review()
+        )
+
+    def has_completed_deep_research_gap_review(self) -> bool:
+        """Whether this run has completed its one required second-look pass."""
+
+        return self.deep_research_gap_review_count >= 1
+
+    def begin_deep_research_gap_review(self) -> bool:
+        """Reserve the one executor-owned deep-research review pass."""
+
+        self._require_active()
+        if not self.needs_deep_research_gap_review():
+            return False
+        self.deep_research_gap_review_count += 1
         self.attempt_count += 1
         return True
 

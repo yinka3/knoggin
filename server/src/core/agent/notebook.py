@@ -1245,6 +1245,18 @@ class RunNotebook:
             or self.summary.text
         )
 
+    def has_admitted_evidence(self) -> bool:
+        """Whether retained notebook evidence can ground an investigation.
+
+        Action records and summary prose alone are model-visible context, but do
+        not establish that an investigation produced evidence.
+        """
+
+        return bool(
+            any(self._orders[section] for section in _ALL_SECTIONS)
+            or self.summary.references
+        )
+
     def fingerprint(self) -> str:
         return json.dumps(
             self.as_dict(), sort_keys=True, default=str, separators=(",", ":")

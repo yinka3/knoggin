@@ -212,16 +212,19 @@ class AgentExecutor:
         # The executor, not the model, owns phase transitions.
         needs_replan = False
         needs_final_synthesis = False
+        needs_deep_research_gap_review = self.ctx.needs_deep_research_gap_review()
 
         while (
             self.ctx.attempt_count < self.ctx.limits.max_attempts
             or needs_final_synthesis
+            or needs_deep_research_gap_review
         ):
             if self.ctx.consecutive_errors >= self.ctx.limits.max_consecutive_errors:
                 yield self._terminal_error()
                 return
 
             is_final_synthesis = needs_final_synthesis
+            is_deep_research_gap_review = False
             if is_final_synthesis:
                 if not self.ctx.begin_final_synthesis_attempt():
                     break
@@ -229,6 +232,14 @@ class AgentExecutor:
                 current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "high"
                 logger.info("AgentExecutor: synthesizing the final response.")
+            elif needs_deep_research_gap_review:
+                if not self.ctx.begin_deep_research_gap_review():
+                    break
+                phase = _AgentPhase.PLAN
+                current_model = self.ctx.model or self.llm.agent_model
+                current_reasoning = "high"
+                is_deep_research_gap_review = True
+                logger.info("AgentExecutor: reviewing deep-research evidence gaps.")
             elif not self.ctx.begin_attempt():
                 break
             elif self.ctx.attempt_count == 1 or needs_replan:
@@ -245,6 +256,7 @@ class AgentExecutor:
             # Reset flags so a successful retrieval defaults back to execution.
             needs_replan = False
             needs_final_synthesis = False
+            needs_deep_research_gap_review = False
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
@@ -264,6 +276,7 @@ class AgentExecutor:
                 last_result,
                 project_brief=project_brief,
                 project_context=project_context,
+                gap_review=is_deep_research_gap_review,
             ):
                 event_type = event["event"]
                 data = event["data"]
@@ -326,6 +339,17 @@ class AgentExecutor:
                             )
                             step_failed = True
                             break
+                        if (
+                            self.ctx.research_profile.mode != "normal"
+                            and not self.ctx.has_grounded_investigation_evidence()
+                        ):
+                            self._record_step_error(
+                                "Research mode requires grounded investigation "
+                                "evidence before submit_answer.",
+                                "research",
+                            )
+                            step_failed = True
+                            break
                         artifact = None
                         raw_artifact = submit.args.get("artifact")
                         if raw_artifact is not None:
@@ -339,9 +363,9 @@ class AgentExecutor:
                                 step_failed = True
                                 break
 
-                        if (
-                            phase is not _AgentPhase.SYNTHESIZE
-                            and self.ctx.new_evidence_gathered
+                        if phase is not _AgentPhase.SYNTHESIZE and (
+                            self.ctx.new_evidence_gathered
+                            or self.ctx.has_completed_deep_research_gap_review()
                         ):
                             logger.info(
                                 "AgentExecutor: evidence is ready; scheduling synthesis."
@@ -394,6 +418,9 @@ class AgentExecutor:
 
                     last_result = current_results
                     await self._manage_context_size()
+
+                    if self.ctx.needs_deep_research_gap_review():
+                        needs_deep_research_gap_review = True
 
                     all_empty = (
                         all(
@@ -501,6 +528,7 @@ class AgentExecutor:
         last_result: Optional[List[Dict]],
         project_brief: str = "",
         project_context: str = "",
+        gap_review: bool = False,
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
         tool_schemas = self._tool_schemas_for_phase(phase)
@@ -524,6 +552,7 @@ class AgentExecutor:
             participants=self.ctx.current_participants,
             phase=phase,
             research_profile=self.ctx.research_profile,
+            gap_review=gap_review,
         )
 
         user_message = build_user_message(self.ctx, last_result)

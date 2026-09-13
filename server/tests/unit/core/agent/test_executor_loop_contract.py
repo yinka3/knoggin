@@ -5,13 +5,16 @@ import pytest
 
 from common.exceptions import LLMProviderError
 from common.schema.agent.identity import AgentConfig
+from common.schema.agent.research import resolve_research_profile
 from core.agent.executor import AgentExecutor
 from core.agent.executor import _ToolCall as ToolCall
 from core.agent.prompt_context import build_evidence_context
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
+from core.agent.sources.document_selection import build_document_selection_candidate
+from core.agent.sources.pasted_text import build_pasted_text_candidates
 
 
-def make_run(*, limits=None):
+def make_run(*, limits=None, research_profile=None, initial_source_candidates=None):
     return AgentRun.open(
         user_name="ada",
         project_id="project-1",
@@ -34,6 +37,8 @@ def make_run(*, limits=None):
             persona="Careful and evidence-led",
         ),
         limits=limits or AgentRunLimits(max_attempts=3, max_calls=4),
+        research_profile=research_profile,
+        initial_source_candidates=initial_source_candidates,
     )
 
 
@@ -398,6 +403,205 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
     assert events[-1]["data"]["content"] == "Still looking."
     assert [call["model"] for call in llm.calls] == ["architect", "architect"]
     assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("mode", ["research", "deep_research"])
+async def test_research_modes_reject_ungrounded_terminal_answers(mode):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Ungrounded answer."}',
+                    "submit-ungrounded",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "request_clarification",
+                    '{"question": "Which evidence should I investigate?"}',
+                    "clarify-after-rejection",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=2, max_calls=1),
+        research_profile=resolve_research_profile(mode),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events == [
+        {
+            "event": "clarification",
+            "data": {
+                "question": "Which evidence should I investigate?",
+                "usage": run.usage,
+            },
+        }
+    ]
+    assert run.call_count == 0
+    assert len(llm.calls) == 2
+    assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
+    assert (
+        "Research mode requires grounded investigation evidence before submit_answer."
+        in llm.calls[1]["user"]
+    )
+
+
+def _validated_initial_source_candidates(kind):
+    if kind == "pasted_text":
+        return build_pasted_text_candidates(
+            project_id="project-1",
+            session_id="session-1",
+            source_message_id=1,
+            message_content="Evidence supplied by the user:\n```text\nRelevant fact.\n```",
+            agent_run_id="run-1",
+        )
+    return [
+        build_document_selection_candidate(
+            project_id="project-1",
+            session_id="session-1",
+            agent_run_id="run-1",
+            selection_context={
+                "document_id": "document-1",
+                "project_id": "project-1",
+                "document_name": "brief.md",
+                "relative_path": "notes/brief.md",
+                "extension": ".md",
+                "content_hash": "a" * 64,
+                "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
+                "excerpt": "Relevant selected document fact.",
+            },
+        )
+    ]
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("source_kind", ["pasted_text", "document_selection"])
+async def test_research_accepts_validated_supplied_evidence_without_dispatch(
+    source_kind,
+):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Answer from supplied evidence."}',
+                    "submit-supplied",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+        initial_source_candidates=_validated_initial_source_candidates(source_kind),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["artifact"]["kind"] == "research_brief"
+    assert run.call_count == 0
+    assert len(llm.calls) == 1
+    assert [
+        event["data"]["tool"] for event in events if event["event"] == "tool_start"
+    ] == []
+    assert events[-1]["data"]["sources_consulted"][0][
+        "encounter_kind"
+    ] == source_kind.replace("pasted_text", "user_pasted_text")
+
+
+@pytest.mark.no_network
+async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "read_web_page",
+                    '{"url": "https://primary.example.test/release"}',
+                    "read-primary",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Evidence is sufficient after review."}',
+                    "submit-gap-review",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final deep-research answer."}',
+                    "submit-synthesis",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=2, max_calls=1),
+        research_profile=resolve_research_profile("deep_research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    dispatched = []
+
+    async def primary_source(_tools, name, args):
+        dispatched.append((name, args))
+        return {
+            "data": [
+                {
+                    "title": "Official primary release note",
+                    "url": "https://primary.example.test/release",
+                    "content": "The primary source directly answers the question.",
+                    "source_context": {
+                        "source_kind": "web_page",
+                        "canonical_url": "https://primary.example.test/release",
+                        "content_hash": "b" * 64,
+                        "locator": {
+                            "kind": "text_lines",
+                            "start_line": 1,
+                            "end_line": 1,
+                        },
+                        "excerpt": "The primary source directly answers the question.",
+                        "metadata": {"title": "Official primary release note"},
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", primary_source)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["artifact"]["kind"] == "research_report"
+    assert dispatched == [
+        ("read_web_page", {"url": "https://primary.example.test/release"})
+    ]
+    assert run.deep_research_gap_review_count == 1
+    assert len(llm.calls) == 3
+    assert [call["model"] for call in llm.calls] == [
+        "architect",
+        "architect",
+        "architect",
+    ]
+    assert [call["reasoning"] for call in llm.calls] == ["high", "high", "high"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[0]["system"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+    assert "<deep_research_gap_review>" in llm.calls[1]["system"]
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
 
 
 @pytest.mark.no_network

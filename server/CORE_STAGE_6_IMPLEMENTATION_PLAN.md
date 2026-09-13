@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Chunks A–C complete 2026-09-13. Chunks D–G remain planned.
+Status: Chunks A–D complete 2026-09-13. Chunks E–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -332,6 +332,31 @@ Acceptance:
 
 Commit boundary: research profile cleanup plus enforced state machine.
 
+### Chunk D completion — 2026-09-13
+
+`ResearchProfile` now retains only the selected mode, default artifact kind,
+and immutable budget multipliers. The executor owns research semantics: normal
+runs may submit directly, while research and deep-research runs reject an
+ungrounded `submit_answer` before any artifact is accepted.
+
+`AgentRun` distinguishes admitted notebook evidence and validated initial
+source candidates from actions, empty results, summaries without retained
+references, Project Brief, and Context. Deep research schedules exactly one
+executor-owned high-reasoning PLAN review after evidence exists; that review can
+retrieve a real remaining gap or submit directly into final synthesis when one
+authoritative source is sufficient.
+
+The focused contracts cover ungrounded research/deep-research rejection,
+validated pasted text and selected-document input without an extra retrieval,
+action-only non-evidence, one deep gap-review cycle, and unchanged default
+research artifact kinds.
+
+Validation passed:
+
+- `uv run pytest -q tests/unit/core/agent/test_agent_run.py tests/unit/core/agent/test_executor_loop_contract.py tests/unit/core/agent/test_agent_prompt_contract.py tests/unit/core/agent/test_orchestrator.py tests/unit/common/test_artifact_contracts.py tests/unit/common/test_local_references.py tests/unit/core/agent/test_agent_executor_step_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py tests/unit/core/agent/test_workspace_tools_contract.py` → **107 passed** with the existing Requests dependency warning.
+- `uv run pytest -q tests/unit/core/agent tests/unit/common/test_artifact_contracts.py tests/unit/common/test_local_references.py` → **252 passed** with the same warning.
+- Touched-path Ruff format/check, `python -m compileall -q src/core/agent src/common/schema/agent`, architecture imports, and `git diff --check` passed.
+
 ## Chunk E — Agent default lifecycle and Brain CAS
 
 Add one `AgentManager` lifecycle lock around structural default/delete/ensure
@@ -489,11 +514,11 @@ provenance/Agent reviews.
 - [x] A: one canonical model-facing notebook projection.
 - [x] B: typed notebook admission and source encounter ordering.
 - [x] C: phase authorization and protocol exclusivity.
-- [ ] D: enforced research/deep-research semantics and profile cleanup.
+- [x] D: enforced research/deep-research semantics and profile cleanup.
 - [ ] E: default-Agent lifecycle and Brain CAS.
 - [ ] F: model-facing provenance and qualified Context briefing.
 - [ ] G: configurable adaptive Project briefing.
 - [ ] Combined scripted-provider and PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 6 Chunk D.
+Next implementation task: Stage 6 Chunk E.
