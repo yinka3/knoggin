@@ -33,6 +33,7 @@ from core.agent.formatters import (
     format_document_focus_context,
     format_documents_context,
 )
+from core.agent.notebook import NotebookApplyResult
 from core.agent.prompt_context import (
     build_evidence_context,
     build_user_message,
@@ -56,13 +57,53 @@ from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
 MAX_PROJECT_CONTEXT_CHARS = 24_000
-PUBLIC_AGENT_FAILURE_MESSAGE = "The agent couldn't complete this request. Please try again."
+PUBLIC_AGENT_FAILURE_MESSAGE = (
+    "The agent couldn't complete this request. Please try again."
+)
 
 
 class _AgentPhase(StrEnum):
     PLAN = "PLAN"
     EXECUTE = "EXECUTE"
     SYNTHESIZE = "SYNTHESIZE"
+
+
+def _notebook_rejection_feedback(
+    admission: NotebookApplyResult,
+) -> tuple[str, Dict]:
+    """Build the bounded model result for evidence the notebook rejected."""
+
+    reason = admission.reason or "not_admitted"
+    if reason == "capacity":
+        message = (
+            "Result was not added to the run notebook because it exceeds the "
+            "evidence capacity. Try a narrower query or read a smaller document "
+            "or web range."
+        )
+    else:
+        message = (
+            "Result was not added to the run notebook. Narrow the request before "
+            "trying again."
+        )
+    return message, {
+        "data": [],
+        "notebook_admission": {
+            "accepted": False,
+            "changed": admission.changed,
+            "reason": reason,
+            "message": message,
+        },
+    }
+
+
+def _result_has_notebook_rejection(result: Dict) -> bool:
+    """Whether an executor result requires an immediate evidence replan."""
+
+    model_result = result.get("result")
+    if not isinstance(model_result, dict):
+        return False
+    admission = model_result.get("notebook_admission")
+    return isinstance(admission, dict) and admission.get("accepted") is False
 
 
 @dataclass
@@ -280,9 +321,7 @@ class AgentExecutor:
                         raw_artifact = submit.args.get("artifact")
                         if raw_artifact is not None:
                             try:
-                                artifact = ArtifactDraft.model_validate(
-                                    raw_artifact
-                                )
+                                artifact = ArtifactDraft.model_validate(raw_artifact)
                             except Exception as exc:
                                 self._record_step_error(
                                     f"Invalid submit_answer artifact: {exc}",
@@ -357,7 +396,17 @@ class AgentExecutor:
                         else True
                     )
 
-                    if all_empty:
+                    if any(
+                        _result_has_notebook_rejection(result)
+                        for result in current_results
+                    ):
+                        logger.info(
+                            "AgentExecutor: replanning after notebook admission "
+                            "rejected evidence."
+                        )
+                        needs_replan = True
+                        self.ctx.clear_empty_results()
+                    elif all_empty:
                         if self.ctx.record_empty_result():
                             logger.info(
                                 f"AgentExecutor: "
@@ -402,9 +451,8 @@ class AgentExecutor:
         return [
             schema
             for schema in self.ctx.tool_runtime.schemas
-            if (
-                definition := get_tool_definition(schema["function"]["name"])
-            ) is not None
+            if (definition := get_tool_definition(schema["function"]["name"]))
+            is not None
             and definition.executor_protocol
         ]
 
@@ -684,14 +732,28 @@ class AgentExecutor:
                         call.args,
                     )
 
-                self.ctx.record_sources(
-                    capture_tool_source_candidates(self.ctx, call, result)
-                )
-
                 # Keep the untouched backend result in the canonical notebook.
                 # Localization is a model-facing projection and must happen only
                 # after accumulation so compact handles cannot erase references.
-                self.ctx.accumulate_tool_result(call.name, result)
+                admission = self.ctx.accumulate_tool_result(call.name, result)
+                if not admission.accepted:
+                    feedback, model_result = _notebook_rejection_feedback(admission)
+                    self.ctx.note_nonfatal_error(feedback)
+                    results_out.append({"tool": call.name, "result": model_result})
+                    yield {
+                        "event": "tool_end",
+                        "data": {
+                            "tool": call.name,
+                            "result": feedback,
+                            "call_id": call.call_id,
+                        },
+                    }
+                    continue
+
+                if admission.changed:
+                    self.ctx.record_sources(
+                        capture_tool_source_candidates(self.ctx, call, result)
+                    )
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
                 self.ctx.record_tool_success()
@@ -903,9 +965,7 @@ class AgentExecutor:
 
             # Recalculate against the actual bounded state retained by the run.
             post_compaction = build_evidence_context(self.ctx)
-            self.ctx.set_evidence_token_count(
-                self.llm.count_tokens(post_compaction)
-            )
+            self.ctx.set_evidence_token_count(self.llm.count_tokens(post_compaction))
 
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""

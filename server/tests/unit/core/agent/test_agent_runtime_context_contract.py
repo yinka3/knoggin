@@ -128,7 +128,7 @@ def test_topic_context_tool_accumulates_messages_as_evidence():
         }
     }
 
-    assert ctx.accumulate_tool_result("load_topic_context", result) is True
+    assert ctx.accumulate_tool_result("load_topic_context", result).changed is True
     assert ctx.new_evidence_gathered is True
     assert summarize_result("load_topic_context", result) == (
         "Loaded context for 2 topic(s) with 1 supporting message(s)",
@@ -165,14 +165,34 @@ def test_topic_context_tool_accumulates_messages_as_evidence():
 def test_topic_context_without_messages_does_not_count_as_new_evidence():
     ctx = make_ctx()
 
-    assert (
-        ctx.accumulate_tool_result(
-            "load_topic_context",
-            {"data": {"Work": {"entities": [{"name": "Acme"}], "messages": []}}},
-        )
-        is False
+    admission = ctx.accumulate_tool_result(
+        "load_topic_context",
+        {"data": {"Work": {"entities": [{"name": "Acme"}], "messages": []}}},
     )
+
+    assert admission.accepted is True
+    assert admission.changed is False
+    assert admission.reason is None
     assert ctx.new_evidence_gathered is False
+
+
+@pytest.mark.no_network
+def test_duplicate_evidence_is_accepted_without_a_new_notebook_contribution():
+    ctx = make_ctx()
+    result = {"data": [{"id": "msg-7", "message": "Already retained."}]}
+
+    first = ctx.accumulate_tool_result("search_messages", result)
+    duplicate = ctx.accumulate_tool_result("search_messages", result)
+
+    assert first.accepted is True
+    assert first.changed is True
+    assert duplicate.accepted is True
+    assert duplicate.changed is False
+    assert duplicate.reason is None
+    assert duplicate.references == first.references
+    assert ctx.notebook.section_items("messages") == (
+        {"id": "msg-7", "message": "Already retained."},
+    )
 
 
 @pytest.mark.no_network
@@ -208,7 +228,7 @@ def test_build_user_message_renders_an_episode_with_its_usable_local_handle():
         }
     }
 
-    assert ctx.accumulate_tool_result("episode_check", result) is True
+    assert ctx.accumulate_tool_result("episode_check", result).changed is True
     model_result = localize_agent_tool_result(ctx, "episode_check", result)
 
     message = build_user_message(
@@ -339,7 +359,7 @@ def test_rollover_evidence_preserves_sources_and_summary_references():
         }
         for index in range(6)
     ]
-    assert ctx.accumulate_tool_result("web_search", {"data": sources}) is True
+    assert ctx.accumulate_tool_result("web_search", {"data": sources}).changed is True
 
     rollover = ctx.rollover_notebook("Condensed source evidence")
 
@@ -669,7 +689,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
 @pytest.mark.no_network
 def test_notebook_rejects_oversized_buckets_atomically():
     ctx = make_ctx(limits=AgentRunLimits(max_accumulated_profiles=2))
-    ctx.accumulate_tool_result(
+    admission = ctx.accumulate_tool_result(
         "search_entity",
         {
             "data": [
@@ -681,8 +701,10 @@ def test_notebook_rejects_oversized_buckets_atomically():
     )
 
     assert ctx.notebook.section_items("entities") == ()
-    assert ctx.notebook.last_apply_result.accepted is False
-    assert ctx.notebook.last_apply_result.reason == "capacity"
+    assert admission.accepted is False
+    assert admission.changed is False
+    assert admission.reason == "capacity"
+    assert ctx.notebook.last_apply_result == admission
 
 
 @pytest.mark.no_network

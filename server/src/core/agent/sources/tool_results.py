@@ -27,12 +27,13 @@ def capture_tool_source_candidates(
     call: _ToolCall,
     result: Mapping,
 ) -> list[SourceReferenceCandidate]:
-    """Validate source contexts from one successful tool call for this run.
+    """Build candidates from a tool result already admitted to the notebook.
 
     The raw backend result is intentionally consumed here, before model-facing
     result localization removes ``source_context``. Invalid or incomplete tool
     items are not sources and must not turn an otherwise successful tool call
-    into an agent failure.
+    into an agent failure. This function has no recording side effect: the
+    executor calls it only after the matching notebook admission succeeds.
     """
 
     encounter_kind = _TOOL_SOURCE_ENCOUNTERS.get(call.name)

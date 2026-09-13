@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Chunk A complete 2026-09-13. Chunks B–G remain planned.
+Status: Chunks A–B complete 2026-09-13. Chunks C–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -196,6 +196,32 @@ Acceptance:
 - Accepted evidence retains existing encounter idempotency.
 
 Commit boundary: notebook/source admission truth.
+
+### Chunk B completion — 2026-09-13
+
+`AgentRun.accumulate_tool_result()` now returns the full
+`NotebookApplyResult`. The executor applies a raw backend result before either
+localizing it or producing source candidates. Only an accepted, changed result
+can add source candidates; duplicate/empty results remain successful but do
+not create a new encounter.
+
+An atomic capacity rejection now produces an empty, structured model result
+with bounded guidance to narrow a query or read a smaller range. It exposes no
+rejected title, passage, count, compact handle, or source candidate. The tool
+event reports that the result was not added, and the executor immediately
+returns to PLAN so the next call can retry with different arguments. The
+existing duplicate-call guard therefore does not block a narrower retry.
+
+The focused gate passed:
+
+- `uv run pytest -q tests/unit/core/agent/test_agent_runtime_context_contract.py tests/unit/core/agent/test_executor_loop_contract.py tests/unit/core/agent/test_run_notebook_core.py tests/unit/core/agent/test_sources_contract.py` → **68 passed** with the existing Requests dependency warning.
+- `uv run pytest -q tests/unit/core/agent tests/unit/common/test_local_references.py` → **229 passed** with the same warning.
+- Touched-path Ruff check/format, `compileall`, architecture imports, and `git diff --check` passed.
+
+The regressions prove accepted, duplicate, empty, and capacity-rejected
+admission outcomes. The rejection scenario verifies that unadmitted wide web
+results reach neither the next model prompt nor final source list, while an
+accepted narrow retry retains its own call ID and result position.
 
 ## Chunk C — Executor phase authorization and protocol exclusivity
 
@@ -433,7 +459,7 @@ normal desired-behavior regressions exist. Append status to the locked Agent and
 provenance/Agent reviews.
 
 - [x] A: one canonical model-facing notebook projection.
-- [ ] B: typed notebook admission and source encounter ordering.
+- [x] B: typed notebook admission and source encounter ordering.
 - [ ] C: phase authorization and protocol exclusivity.
 - [ ] D: enforced research/deep-research semantics and profile cleanup.
 - [ ] E: default-Agent lifecycle and Brain CAS.
@@ -442,4 +468,4 @@ provenance/Agent reviews.
 - [ ] Combined scripted-provider and PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task after Stage 5 closes: Stage 6 Chunk A.
+Next implementation task: Stage 6 Chunk C.

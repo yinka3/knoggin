@@ -51,10 +51,22 @@ def build_user_message(
         results = last_result if isinstance(last_result, list) else [last_result]
         for result in results:
             tool = result.get("tool", "unknown")
-            data = result.get("result", {}).get("data")
+            model_result = result.get("result", {})
+            if not isinstance(model_result, dict):
+                model_result = {}
+            admission = model_result.get("notebook_admission")
+            data = model_result.get("data")
 
             if "error" in result:
                 msg += f"- `{tool}`: Error - {result['error']}\n"
+            elif isinstance(admission, dict) and admission.get("accepted") is False:
+                message = admission.get("message")
+                if not isinstance(message, str) or not message.strip():
+                    message = (
+                        "Result was not added to the run notebook. Narrow the "
+                        "request before trying again."
+                    )
+                msg += f"- `{tool}`: {message}\n"
             elif tool in ("episode_check", "read_recent_episodes"):
                 result_groups = (
                     data.get("results", []) if isinstance(data, dict) else []

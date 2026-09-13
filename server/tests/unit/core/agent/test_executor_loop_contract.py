@@ -198,6 +198,159 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
 
 
 @pytest.mark.no_network
+async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
+    monkeypatch,
+):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "web_search",
+                    '{"query": "wide release history"}',
+                    "wide-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "web_search",
+                    '{"query": "narrow release history"}',
+                    "narrow-2",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft from the narrow result."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final from the narrow result."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(
+            max_attempts=4,
+            max_calls=3,
+            max_accumulated_web_discoveries=1,
+        )
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    calls = []
+
+    def web_result(title, url, excerpt, *, query, rank, content_hash):
+        return {
+            "title": title,
+            "url": url,
+            "snippet": excerpt,
+            "provider": "brave",
+            "query": query,
+            "rank": rank,
+            "source_kind": "web_search_result",
+            "source_context": {
+                "source_kind": "web_search_result",
+                "canonical_url": url,
+                "content_hash": content_hash,
+                "locator": {
+                    "kind": "search_result",
+                    "provider": "brave",
+                    "query": query,
+                    "rank": rank,
+                },
+                "excerpt": excerpt,
+                "metadata": {"title": title, "discovery_snippet": True},
+            },
+        }
+
+    async def fake_execute(_tools, name, args):
+        calls.append((name, args))
+        if args["query"] == "wide release history":
+            return {
+                "data": [
+                    web_result(
+                        "Wide result one",
+                        "https://example.test/wide-one",
+                        "WIDE_RESULT_ONE",
+                        query=args["query"],
+                        rank=1,
+                        content_hash="a" * 64,
+                    ),
+                    web_result(
+                        "Wide result two",
+                        "https://example.test/wide-two",
+                        "WIDE_RESULT_TWO",
+                        query=args["query"],
+                        rank=2,
+                        content_hash="b" * 64,
+                    ),
+                ]
+            }
+        return {
+            "data": [
+                web_result(
+                    "Narrow result",
+                    "https://example.test/narrow",
+                    "NARROW_RESULT",
+                    query=args["query"],
+                    rank=1,
+                    content_hash="c" * 64,
+                )
+            ]
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
+
+    events = [event async for event in executor._execute_run()]
+
+    rejection = next(
+        event
+        for event in events
+        if event["event"] == "tool_end" and event["data"].get("call_id") == "wide-1"
+    )
+    assert rejection == {
+        "event": "tool_end",
+        "data": {
+            "tool": "web_search",
+            "result": (
+                "Result was not added to the run notebook because it exceeds the "
+                "evidence capacity. Try a narrower query or read a smaller document "
+                "or web range."
+            ),
+            "call_id": "wide-1",
+        },
+    }
+    assert "Result was not added to the run notebook" in llm.calls[1]["user"]
+    assert "Wide result one" not in llm.calls[1]["user"]
+    assert "WIDE_RESULT_ONE" not in llm.calls[1]["user"]
+    assert "Found 2 items" not in llm.calls[1]["user"]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
+    assert calls == [
+        ("web_search", {"query": "wide release history"}),
+        ("web_search", {"query": "narrow release history"}),
+    ]
+    assert [candidate.tool_call_id for candidate in run.source_candidates] == [
+        "narrow-2"
+    ]
+    assert [candidate.result_position for candidate in run.source_candidates] == [0]
+    assert [item["url"] for item in run.notebook.section_items("web_discoveries")] == [
+        "https://example.test/narrow"
+    ]
+    assert events[-1]["event"] == "response"
+    assert [
+        source["tool_call_id"] for source in events[-1]["data"]["sources_consulted"]
+    ] == ["narrow-2"]
+
+
+@pytest.mark.no_network
 async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
     llm = ScriptedLLM(
         [

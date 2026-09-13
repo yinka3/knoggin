@@ -21,7 +21,11 @@ from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
-from core.agent.notebook import NotebookRolloverResult, RunNotebook
+from core.agent.notebook import (
+    NotebookApplyResult,
+    NotebookRolloverResult,
+    RunNotebook,
+)
 from core.agent.tools.registry import (
     ToolRuntime,
     build_tool_runtime,
@@ -114,8 +118,7 @@ class AgentRunLimits:
             max_calls=self.max_calls * profile.tool_call_budget_multiplier,
             max_attempts=self.max_attempts * profile.attempt_budget_multiplier,
             max_accumulated_web_discoveries=(
-                self.max_accumulated_web_discoveries
-                * profile.source_budget_multiplier
+                self.max_accumulated_web_discoveries * profile.source_budget_multiplier
             ),
             max_accumulated_web_reads=(
                 self.max_accumulated_web_reads * profile.source_budget_multiplier
@@ -415,14 +418,15 @@ class AgentRun:
         self._require_active()
         self.source_candidates.extend(candidates)
 
-    def accumulate_tool_result(self, tool_name: str, result: Dict) -> bool:
-        """Apply one tool result to the aggregate's owned evidence buffers."""
+    def accumulate_tool_result(
+        self, tool_name: str, result: Dict
+    ) -> NotebookApplyResult:
+        """Apply one tool result and retain its explicit notebook decision."""
 
         self._require_active()
         apply_result = self.notebook.apply(tool_name, result)
-        gathered = apply_result.changed
-        self.new_evidence_gathered = self.new_evidence_gathered or gathered
-        return gathered
+        self.new_evidence_gathered = self.new_evidence_gathered or apply_result.changed
+        return apply_result
 
     def record_empty_result(self) -> bool:
         """Record an empty tool turn and report whether replanning is due."""
@@ -430,8 +434,7 @@ class AgentRun:
         self._require_active()
         self.consecutive_empty_results += 1
         return (
-            self.consecutive_empty_results
-            >= self.limits.empty_result_replan_threshold
+            self.consecutive_empty_results >= self.limits.empty_result_replan_threshold
         )
 
     def clear_empty_results(self) -> None:
@@ -459,7 +462,9 @@ class AgentRun:
             raise ValueError("evidence token count must be a non-negative integer")
         self.evidence_token_count = token_count
 
-    def rollover_notebook(self, summary: Optional[str] = None) -> NotebookRolloverResult:
+    def rollover_notebook(
+        self, summary: Optional[str] = None
+    ) -> NotebookRolloverResult:
         """Start a bounded notebook generation while preserving references."""
 
         self._require_active()
