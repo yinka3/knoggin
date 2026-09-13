@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -190,6 +191,281 @@ async def test_confirmed_global_merge_and_rollback_repair_durable_state(
         """,
         (block_id,),
     ) == [{"entity_id": 3, "mention_text": "Augusta Ada King"}]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_cancelled_merge_projection_repair_is_durable_and_retries_from_audit(
+    real_postgres_client,
+    monkeypatch,
+):
+    """A post-commit interruption must not lose the projection-repair obligation."""
+
+    await _seed_entities(real_postgres_client)
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+
+    async def cancel_before_rebuild(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        service.projection_rebuilder,
+        "rebuild_project_projection",
+        cancel_before_rebuild,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.merge(preview["plan"])
+
+    audit = await real_postgres_client.fetch_one(
+        """
+        SELECT merge_id, status, failure_reason
+        FROM public.entity_global_merge_audits
+        WHERE user_name = 'ada' AND survivor_entity_id = 2 AND retired_entity_id = 3
+        """
+    )
+    assert audit is not None
+    assert audit["status"] == "executed"
+    assert audit["failure_reason"] == "projection_repair_pending"
+    assert await service.projection_repair_health() == {
+        "pending_count": 1,
+        "truncated": False,
+    }
+    mutation_count = await real_postgres_client.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.entity_global_merge_mutations
+        WHERE merge_id = %s
+        """,
+        (audit["merge_id"],),
+    )
+    assert mutation_count is not None
+
+    restarted_service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    repaired = await restarted_service.repair_merge_projections(audit["merge_id"])
+
+    assert repaired["canonical_status"] == "executed"
+    assert repaired["projection_repaired"] is True
+    assert await restarted_service.projection_repair_health() == {
+        "pending_count": 0,
+        "truncated": False,
+    }
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT status, redirect_entity_id
+        FROM public.entities
+        WHERE entity_id = 3
+        """
+    ) == {"status": "redirected", "redirect_entity_id": 2}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.entity_global_merge_mutations
+        WHERE merge_id = %s
+        """,
+        (audit["merge_id"],),
+    ) == mutation_count
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_cancellation_after_merge_projection_rebuild_keeps_durable_marker(
+    real_postgres_client,
+    monkeypatch,
+):
+    """Cancellation between successful rebuild and marker clearing is recoverable."""
+
+    await _seed_entities(real_postgres_client)
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+    rebuilt = False
+    rebuild = service.projection_rebuilder.rebuild_project_projection
+
+    async def rebuild_then_continue(*args, **kwargs):
+        nonlocal rebuilt
+        result = await rebuild(*args, **kwargs)
+        rebuilt = True
+        return result
+
+    async def cancel_before_clearing_marker(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        service.projection_rebuilder,
+        "rebuild_project_projection",
+        rebuild_then_continue,
+    )
+    monkeypatch.setattr(
+        service,
+        "_record_projection_repair_state",
+        cancel_before_clearing_marker,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.merge(preview["plan"])
+
+    assert rebuilt is True
+    audit = await real_postgres_client.fetch_one(
+        """
+        SELECT merge_id, failure_reason
+        FROM public.entity_global_merge_audits
+        WHERE user_name = 'ada' AND survivor_entity_id = 2 AND retired_entity_id = 3
+        """
+    )
+    assert audit is not None
+    assert audit["failure_reason"] == "projection_repair_pending"
+
+    repaired = await EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    ).repair_merge_projections(audit["merge_id"])
+
+    assert repaired["projection_repaired"] is True
+    assert await real_postgres_client.fetch_one(
+        "SELECT failure_reason FROM public.entity_global_merge_audits WHERE merge_id = %s",
+        (audit["merge_id"],),
+    ) == {"failure_reason": None}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_cancelled_rollback_projection_repair_is_durable_and_retries_from_audit(
+    real_postgres_client,
+    monkeypatch,
+):
+    """Rollback records the same durable repair obligation before rebuilding."""
+
+    await _seed_entities(real_postgres_client)
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+    merged = await service.merge(preview["plan"])
+
+    async def cancel_before_rebuild(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        service.projection_rebuilder,
+        "rebuild_project_projection",
+        cancel_before_rebuild,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.rollback(merged["merge_id"])
+
+    audit = await real_postgres_client.fetch_one(
+        """
+        SELECT status, failure_reason
+        FROM public.entity_global_merge_audits
+        WHERE merge_id = %s
+        """,
+        (merged["merge_id"],),
+    )
+    assert audit == {
+        "status": "rolled_back",
+        "failure_reason": "projection_repair_pending",
+    }
+    assert await real_postgres_client.fetch_one(
+        "SELECT status, redirect_entity_id FROM public.entities WHERE entity_id = 3"
+    ) == {"status": "active", "redirect_entity_id": None}
+
+    restarted_service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    repaired = await restarted_service.repair_merge_projections(merged["merge_id"])
+
+    assert repaired["canonical_status"] == "rolled_back"
+    assert repaired["projection_repaired"] is True
+    assert await restarted_service.projection_repair_health() == {
+        "pending_count": 0,
+        "truncated": False,
+    }
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_partial_multi_project_projection_repair_stays_pending_until_retry(
+    real_postgres_client,
+    monkeypatch,
+):
+    await _seed_entities(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-2', 2, 'ada', 'Concept', 'General'),
+            ('project-2', 3, 'ada', 'Concept', 'General')
+        """
+    )
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+    rebuild = service.projection_rebuilder.rebuild_project_projection
+
+    async def fail_project_two(project_id, user_name):
+        if project_id == "project-2":
+            raise RuntimeError("project-2 projection unavailable")
+        return await rebuild(project_id, user_name)
+
+    monkeypatch.setattr(
+        service.projection_rebuilder,
+        "rebuild_project_projection",
+        fail_project_two,
+    )
+
+    merged = await service.merge(preview["plan"])
+
+    assert merged["projection_errors"] == [
+        {"project_id": "project-2", "error": "project-2 projection unavailable"}
+    ]
+    assert await service.projection_repair_health() == {
+        "pending_count": 1,
+        "truncated": False,
+    }
+
+    restarted_service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    repaired = await restarted_service.repair_merge_projections(merged["merge_id"])
+
+    assert repaired["affected_project_ids"] == ["project-1", "project-2"]
+    assert repaired["projection_repaired"] is True
+    assert await restarted_service.projection_repair_health() == {
+        "pending_count": 0,
+        "truncated": False,
+    }
 
 
 @pytest.mark.storage

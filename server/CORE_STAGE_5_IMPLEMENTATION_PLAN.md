@@ -365,7 +365,7 @@ to the locked Knowledge review and maintenance correction review.
 - [x] B: Project cleanup includes Context entity associations.
 - [x] C: participation-aware, all-origin maintenance frontier.
 - [x] D: merge/semantic-commit ordering is proven by existing row locks.
-- [ ] E: projection-repair obligation is durable before rebuild.
+- [x] E: projection-repair obligation is durable before rebuild.
 - [ ] F: conflict discovery/review identity, evidence, and resolution are stable.
 - [ ] G: configurable maintenance review burden.
 - [ ] Combined real-PostgreSQL/AGE scenario passes.
@@ -448,4 +448,23 @@ and model/extraction work is complete before `SemanticCommitWriter.commit()`
 opens its transaction. The regression releases the waiting task in each order
 and completes it under its deadlock guard.
 
-Next implementation task: Stage 5 Chunk E.
+Chunk E validation on 2026-09-12:
+
+- `uv run pytest -q tests/unit/knowledge/test_maintenance_application_contract.py` → 21 passed; the environment emitted its existing Requests dependency warning.
+- `uv run pytest -q tests/contract/storage/test_maintenance_application_real_postgres.py` → 11 passed; the same existing warning appeared.
+- `uv run pytest -q tests/unit/core/knowledge/test_maintenance_impact.py tests/unit/knowledge/test_global_entity_maintenance_contract.py tests/unit/knowledge/test_maintenance_application_contract.py tests/unit/health/test_runtime_health_service.py tests/contract/storage/test_maintenance_application_real_postgres.py tests/contract/storage/test_semantic_commit_contract.py` → 66 passed; the same existing warning appeared.
+- Focused Ruff, `uv run python -m compileall`, and `git diff --check` passed. MyPy remains deferred because its configured path baseline is still stale, as recorded separately in `MYPY_BASELINE.md`.
+
+The canonical merge audit now becomes `executed` with
+`failure_reason='projection_repair_pending'` in the same transaction. A
+rollback that applies any inverse mutation sets the same marker in its
+canonical transaction, including a partial rollback; a no-op rollback leaves
+an existing marker untouched. The post-commit rebuild clears the marker only
+after all affected Projects succeed. Cancellation before rebuild, during a
+multi-Project rebuild, or after rebuild before clearing leaves the committed
+obligation intact. Restart repair reloads the audit and rebuilds only derived
+AGE state; it does not replay merge or rollback. Existing health reporting
+remains bounded, and ProjectManager's existing repair path invalidates affected
+live entity caches after retry.
+
+Next implementation task: Stage 5 Chunk F.

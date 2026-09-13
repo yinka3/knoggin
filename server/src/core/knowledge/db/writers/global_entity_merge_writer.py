@@ -10,6 +10,8 @@ from common.schema.ingestion.contracts import relationship_identity
 from common.scoping import IDENTITY_ENTITY_ID
 from infrastructure.postgres_client import PostgresClient
 
+_PROJECTION_REPAIR_PENDING = "projection_repair_pending"
+
 
 class EntityMergeConflict(ValueError):
     """A merge needs an explicit user decision before it can be applied."""
@@ -866,10 +868,12 @@ class GlobalEntityMergeWriter:
             await active_cur.execute(
                 """
                 UPDATE public.entity_global_merge_audits
-                SET status = 'executed', completed_at = now()
+                SET status = 'executed',
+                    completed_at = now(),
+                    failure_reason = %s
                 WHERE merge_id = %s
                 """,
-                (merge_id,),
+                (_PROJECTION_REPAIR_PENDING, merge_id),
             )
             await active_cur.execute(
                 "SELECT count(*) AS count FROM public.entity_global_merge_mutations WHERE merge_id = %s",
@@ -907,7 +911,7 @@ class GlobalEntityMergeWriter:
             SET failure_reason = %s
             WHERE merge_id = %s
             """,
-            ("projection_repair_pending" if repair_pending else None, merge_id),
+            (_PROJECTION_REPAIR_PENDING if repair_pending else None, merge_id),
         )
 
     async def _mutation_rows(self, cur, merge_id: str) -> list[dict[str, Any]]:
@@ -1203,9 +1207,30 @@ class GlobalEntityMergeWriter:
             if pending_mutation_count == 0 or (
                 selected and len(selected) == pending_mutation_count
             ):
+                if selected:
+                    await active_cur.execute(
+                        """
+                        UPDATE public.entity_global_merge_audits
+                        SET status = 'rolled_back',
+                            completed_at = now(),
+                            failure_reason = %s
+                        WHERE merge_id = %s
+                        """,
+                        (_PROJECTION_REPAIR_PENDING, merge_id),
+                    )
+                else:
+                    await active_cur.execute(
+                        "UPDATE public.entity_global_merge_audits SET status = 'rolled_back', completed_at = now() WHERE merge_id = %s",
+                        (merge_id,),
+                    )
+            elif selected:
                 await active_cur.execute(
-                    "UPDATE public.entity_global_merge_audits SET status = 'rolled_back', completed_at = now() WHERE merge_id = %s",
-                    (merge_id,),
+                    """
+                    UPDATE public.entity_global_merge_audits
+                    SET failure_reason = %s
+                    WHERE merge_id = %s
+                    """,
+                    (_PROJECTION_REPAIR_PENDING, merge_id),
                 )
             return {
                 "merge_id": merge_id,

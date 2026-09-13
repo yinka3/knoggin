@@ -489,12 +489,12 @@ class EntityMaintenanceService:
                 result["affected_project_ids"],
                 actor,
             )
+            await self._record_projection_repair_state(
+                merge_id,
+                result["projection_errors"],
+            )
         else:
             result["projection_errors"] = []
-        await self._record_projection_repair_state(
-            merge_id,
-            result["projection_errors"],
-        )
         conflicts = [
             item
             for item in plan["conflicting_mutations"]
