@@ -7,11 +7,13 @@ storage; callers never persist model-generated SQL or arbitrary JSON patches.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
+from core.knowledge.conflicts import ConflictResolutionKind
 
 ReviewScope = Literal["project", "user-global"]
 ReviewStatus = Literal["open", "applied", "dismissed", "stale"]
@@ -145,8 +147,23 @@ class ConflictResolutionPlan(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     discovery_packet_tokens: int | None = Field(default=None, ge=0)
     packet_compacted: bool = False
-    resolution: str | None = Field(default=None, max_length=80)
-    note: str | None = Field(default=None, max_length=2_000)
+    supersedes_review_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ConflictResolutionInput(BaseModel):
+    """The typed user classification accepted when closing a conflict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution_kind: ConflictResolutionKind
+    resolution_note: str | None = Field(default=None, max_length=2_000)
+    resolved_by: str = Field(min_length=1, max_length=200)
+
+
+class ConflictResolutionRecord(ConflictResolutionInput):
+    """A durable user classification kept separate from the original proposal."""
+
+    resolved_at: datetime
 
 
 class RelationshipAdvisoryPlan(BaseModel):

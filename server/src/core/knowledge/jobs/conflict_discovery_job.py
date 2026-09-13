@@ -49,7 +49,7 @@ class ConflictDiscoveryJob(BaseJob):
     async def should_run(self, ctx: JobContext) -> bool:
         # The scheduler's normal cadence drives this bounded maintenance pass.
         # Failures leave the durable cursor unchanged for the next scheduled run.
-        return False
+        return self.enabled and self.llm is not None
 
     async def execute(self, ctx: JobContext) -> JobResult:
         if self.llm is None:
@@ -73,7 +73,7 @@ class ConflictDiscoveryJob(BaseJob):
             )
             return JobResult(
                 success=True,
-                summary="Advanced past Context-owned relationship evidence",
+                summary="Advanced conflict discovery cursor without evidence",
             )
 
         result = await self.llm.generate_structured(

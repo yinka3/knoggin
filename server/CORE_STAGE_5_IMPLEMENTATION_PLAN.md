@@ -1,6 +1,6 @@
 # Core Stage 5 — Maintenance Integrity and Concurrency
 
-Status: Chunks A–C complete 2026-09-12. Chunks D–G remain planned.
+Status: Chunks A–F complete 2026-09-12. Chunk G remains planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, including the typed evidence
 maintenance framework committed before Core Stages 1 and 2. Recheck the current
@@ -270,7 +270,7 @@ Primary files:
 | File | Planned change |
 | --- | --- |
 | `src/core/knowledge/conflict_discovery.py` | Select reviewable current disagreement without blanket Context exclusion. |
-| `src/core/knowledge/db/readers/conflict_discovery_reader.py` | Return the evidence/status needed for deterministic eligibility. |
+| `src/core/knowledge/db/readers/conflict_discovery_reader.py` | Keep `retired_at IS NULL` as deterministic supersession eligibility; evidence origin remains explanatory metadata. |
 | `src/core/project/maintenance_service.py` | Build candidate-local snapshots for background and direct reports. |
 | `src/core/knowledge/db/writers/conflict_writer.py` | Reuse stable review identity and persist typed resolution. |
 | `src/core/knowledge/db/writers/maintenance_review_writer.py` | Support immutable proposal plus durable typed closure. |
@@ -468,3 +468,23 @@ remains bounded, and ProjectManager's existing repair path invalidates affected
 live entity caches after retry.
 
 Next implementation task: Stage 5 Chunk F.
+
+Chunk F validation on 2026-09-12:
+
+- `uv run pytest -q tests/unit/knowledge/test_conflict_discovery.py tests/unit/knowledge/test_conflict_writer.py tests/unit/core/knowledge/test_conflict_discovery_persistence_contract.py tests/unit/core/agent/test_conflict_reporting_contract.py tests/unit/knowledge/test_maintenance_application_contract.py tests/unit/knowledge/test_maintenance_reviews.py tests/contract/storage/test_current_observation_reader_contract.py tests/contract/storage/test_conflict_review_contract.py tests/contract/storage/test_maintenance_application_real_postgres.py tests/contract/storage/test_semantic_commit_contract.py tests/contract/postgres/test_schema_bootstrap_contract.py` → 72 passed; the environment emitted its existing Requests dependency warning.
+- Focused Ruff, `uv run python -m compileall -q src`, and `git diff --check` passed. MyPy remains deferred because its configured path baseline is still stale, as recorded separately in `MYPY_BASELINE.md`.
+
+Current Context-backed observations now reach the bounded discovery packet;
+deterministically superseded observations remain excluded by `retired_at`. Every
+background, direct, and agent report captures the ordered evidence snapshot for
+only its cited observations, so a new review reads as current immediately.
+The writer rejects empty or packet-wide observation snapshots before it can
+persist an incorrect review.
+The conflict subject lock and stable subject key reuse equivalent evidence
+regardless of model confidence, rationale, or origin; changed state stales an
+open predecessor and records an immutable `supersedes_review_id` link. A
+dedicated resolution table stores the validated category, note, actor, and
+closure time, while the original proposal remains unchanged. Scheduled
+discovery now follows the configured enabled/LLM state.
+
+Next implementation task: Stage 5 Chunk G.

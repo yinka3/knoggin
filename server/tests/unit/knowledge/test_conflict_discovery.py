@@ -112,7 +112,7 @@ async def test_packet_stops_at_token_ceiling_and_advances_only_reviewed_seed():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_packet_advances_past_context_owned_seeds_without_model_evidence():
+async def test_packet_includes_current_context_backed_seeds_for_model_review():
     seeds = [
         {**_observation(101, 1, 2, observed_at_ms=100), "evidence_origin": "context"},
         {**_observation(102, 2, 3, observed_at_ms=110), "evidence_origin": "context"},
@@ -124,9 +124,10 @@ async def test_packet_advances_past_context_owned_seeds_without_model_evidence()
     )
 
     assert package is not None
-    assert package.observations == ()
+    assert [row["observation_id"] for row in package.observations] == [101, 102]
     assert package.next_observation_id == 102
-    assert package.estimated_tokens == 0
+    assert package.estimated_tokens > 0
+    assert '"evidence_origin":"context"' in package.prompt
 
 
 class JobStore:
@@ -220,4 +221,4 @@ async def test_job_uses_normal_cadence_without_a_continuation_trigger():
         llm=object(),
     )
 
-    assert not await job.should_run(SimpleNamespace(user_name="ada", project_id="project-1"))
+    assert await job.should_run(SimpleNamespace(user_name="ada", project_id="project-1"))

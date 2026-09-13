@@ -1,7 +1,15 @@
 """Current-read and historical-evidence boundaries for observations."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
+from core.knowledge.conflict_discovery import ConflictPacketBuilder
+from core.knowledge.conflicts import ConflictDiscoveryCursor
+from core.knowledge.db.readers.conflict_discovery_reader import (
+    ConflictDiscoveryReader,
+)
 from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.readers.evidence_traversal_reader import (
     EvidenceTraversalReader,
@@ -9,6 +17,7 @@ from core.knowledge.db.readers.evidence_traversal_reader import (
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.evidence_service import EvidenceService
+from core.project.maintenance_service import ProjectMaintenanceService
 
 _PROJECT_ONE_RELATIONSHIP = "project-1:2:3:works_at"
 _PROJECT_TWO_RELATIONSHIP = "project-2:2:4:works_at"
@@ -109,6 +118,79 @@ async def _seed_observation_matrix(client) -> None:
             (2, 'project-1', '55555555-5555-4555-8555-555555555555');
         """
     )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_current_context_backed_observations_reach_conflict_discovery(
+    real_postgres_client,
+):
+    await _seed_observation_matrix(real_postgres_client)
+
+    package = await ConflictPacketBuilder(
+        ConflictDiscoveryReader(real_postgres_client)
+    ).build(
+        ConflictDiscoveryCursor("ada", "project-1", 0),
+        max_span_days=60,
+        max_tokens=50_000,
+    )
+
+    assert package is not None
+    assert [row["observation_id"] for row in package.observations] == [1]
+    assert package.observations[0]["evidence_origin"] == "context"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_new_direct_conflict_review_is_current_against_its_cited_evidence(
+    real_postgres_client,
+):
+    await _seed_observation_matrix(real_postgres_client)
+
+    class EvidenceStore:
+        def __init__(self, client) -> None:
+            self.evidence = EvidenceService(EvidenceTraversalReader(client))
+
+        async def get_relationship_observations_evidence(self, observation_ids, **kwargs):
+            return await self.evidence.for_relationship_observations(
+                observation_ids,
+                **kwargs,
+            )
+
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(
+            postgres=real_postgres_client,
+            knowledge_store=EvidenceStore(real_postgres_client),
+        ),
+        user_name="ada",
+        project_lookup=project_lookup,
+        active_projects={},
+        project_leases={},
+    )
+    service._conflict_service.notify_detection = AsyncMock()
+
+    result = await service.record_conflict_detection(
+        "project-1",
+        origin="user_created",
+        kind="possible_contradiction",
+        rationale="The two cited relationship observations need review.",
+        confidence=0.7,
+        evidence_ids=[2, 1],
+    )
+    detail = await service.get_maintenance_review_detail(
+        "project-1", result.group.conflict_id
+    )
+
+    assert detail.evidence_state == "current"
+    assert detail.stored_snapshot == detail.review.evidence_snapshot
+    assert detail.stored_snapshot.state_token == EvidenceService.snapshot(
+        detail.current_evidence
+    ).state_token
 
 
 @pytest.mark.storage

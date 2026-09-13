@@ -7,7 +7,11 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 
 from common.schema.maintenance import MaintenanceImpactPreview
 from core.knowledge.conflict_discovery import ConflictPacketBuilder
-from core.knowledge.conflict_service import ConflictService
+from core.knowledge.conflict_service import (
+    ConflictService,
+    load_conflict_evidence,
+    snapshot_conflict_evidence,
+)
 from core.knowledge.conflicts import (
     ConflictDiscoveryPackage,
     ConflictOrigin,
@@ -227,8 +231,9 @@ class ProjectMaintenanceService:
         )
         store = self._require_knowledge_store()
         bundles = list(
-            await store.get_relationship_observations_evidence(
-                observation_ids,
+            await load_conflict_evidence(
+                store,
+                observation_ids=observation_ids,
                 user_name=self.user_name,
                 project_id=project_id,
             )
@@ -395,9 +400,11 @@ class ProjectMaintenanceService:
             user_name=self.user_name,
             project_id=project_id,
         )
+
         async def load_evidence(observation_ids: list[int]):
-            return await self._require_knowledge_store().get_relationship_observations_evidence(
-                observation_ids,
+            return await load_conflict_evidence(
+                self._require_knowledge_store(),
+                observation_ids=observation_ids,
                 user_name=self.user_name,
                 project_id=project_id,
             )
@@ -419,10 +426,22 @@ class ProjectMaintenanceService:
         candidates: Iterable[LLMConflictCandidate],
     ) -> int:
         """Persist grounded conflict reviews and advance the cursor atomically."""
+
+        candidate_items = tuple(candidates)
+        snapshots = {}
+        for candidate in candidate_items:
+            evidence_ids = tuple(sorted(set(candidate.evidence_ids)))
+            if evidence_ids not in snapshots:
+                snapshots[evidence_ids] = await snapshot_conflict_evidence(
+                    self._require_knowledge_store(),
+                    observation_ids=evidence_ids,
+                    user_name=package.cursor.user_name,
+                    project_id=package.cursor.project_id,
+                )
         results = []
-        snapshot = EvidenceService.snapshot(package.evidence_bundles)
         async with self.pg.transaction() as cur:
-            for candidate in candidates:
+            for candidate in candidate_items:
+                evidence_ids = tuple(sorted(set(candidate.evidence_ids)))
                 result = await self._conflict_writer.record_detection(
                     user_name=package.cursor.user_name,
                     project_id=package.cursor.project_id,
@@ -435,7 +454,7 @@ class ProjectMaintenanceService:
                         "discovery_packet_tokens": package.estimated_tokens,
                         "packet_compacted": package.compacted,
                     },
-                    evidence_snapshot=snapshot,
+                    evidence_snapshot=snapshots[evidence_ids],
                     cur=cur,
                 )
                 results.append(result)
@@ -467,6 +486,12 @@ class ProjectMaintenanceService:
     ) -> ConflictWriteResult:
         """Record an agent/user conflict report at the maintenance boundary."""
         await self._require_domain_project(project_id, allow_archived=True)
+        snapshot = await snapshot_conflict_evidence(
+            self._require_knowledge_store(),
+            observation_ids=evidence_ids,
+            user_name=self.user_name,
+            project_id=project_id,
+        )
         return await self._conflict_service.record_detection(
             user_name=self.user_name,
             project_id=project_id,
@@ -476,6 +501,7 @@ class ProjectMaintenanceService:
             confidence=confidence,
             evidence_ids=evidence_ids,
             metadata=metadata,
+            evidence_snapshot=snapshot,
             existing_conflict_id=existing_conflict_id,
         )
 

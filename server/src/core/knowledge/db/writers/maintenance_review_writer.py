@@ -11,6 +11,8 @@ from typing import Any, Iterable
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from common.scoping import require_scope_value
 from core.knowledge.maintenance_reviews import (
+    ConflictResolutionInput,
+    ConflictResolutionRecord,
     MaintenancePlan,
     MaintenanceReview,
     ReviewScope,
@@ -393,6 +395,105 @@ class MaintenanceReviewWriter:
             if result is None:
                 raise ValueError("Unknown or already-resolved maintenance review")
             return result
+
+    async def get_conflict_resolution(
+        self,
+        review_id: str,
+        *,
+        cur=None,
+    ) -> ConflictResolutionRecord | None:
+        """Read the immutable user classification for a conflict review."""
+
+        row = await self._fetchone(
+            cur,
+            """
+            SELECT resolution_kind, resolution_note, resolved_by, resolved_at
+            FROM public.maintenance_review_resolutions
+            WHERE review_id = %s
+            """,
+            (require_scope_value(review_id, "review_id", "get_conflict_resolution"),),
+        )
+        return ConflictResolutionRecord.model_validate(dict(row)) if row else None
+
+    async def resolve_conflict_review(
+        self,
+        review_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+        resolution_kind: str,
+        resolution_note: str | None,
+        resolved_by: str,
+        cur=None,
+    ) -> tuple[MaintenanceReview, ConflictResolutionRecord]:
+        """Close one conflict and store its typed classification atomically."""
+
+        review_id = require_scope_value(
+            review_id, "review_id", "resolve_conflict_review"
+        )
+        user_name = require_scope_value(
+            user_name, "user_name", "resolve_conflict_review"
+        )
+        project_id = require_scope_value(
+            project_id, "project_id", "resolve_conflict_review"
+        )
+        validated = ConflictResolutionInput.model_validate(
+            {
+                "resolution_kind": resolution_kind,
+                "resolution_note": resolution_note,
+                "resolved_by": require_scope_value(
+                    resolved_by, "resolved_by", "resolve_conflict_review"
+                ),
+            }
+        )
+        async with self._cursor_context(cur) as active_cur:
+            review = await self.get(
+                review_id,
+                user_name=user_name,
+                project_id=project_id,
+                cur=active_cur,
+            )
+            if review is None or review.kind != "relationship_conflict":
+                raise ValueError("Unknown conflict review in this project")
+            existing = await self.get_conflict_resolution(review_id, cur=active_cur)
+            if review.status != "open":
+                if existing is None:
+                    raise ValueError("Resolved conflict is missing its resolution record")
+                return review, existing
+
+            review = await self.transition(
+                review_id,
+                user_name=user_name,
+                project_id=project_id,
+                status="applied",
+                actor=validated.resolved_by,
+                reason=validated.resolution_note or validated.resolution_kind,
+                cur=active_cur,
+            )
+            row = await self._fetchone(
+                active_cur,
+                """
+                INSERT INTO public.maintenance_review_resolutions (
+                    review_id, resolution_kind, resolution_note, resolved_by, resolved_at
+                )
+                SELECT review_id, %s, %s, %s, resolved_at
+                FROM public.maintenance_reviews
+                WHERE review_id = %s AND user_name = %s AND project_id = %s
+                  AND status = 'applied'
+                RETURNING resolution_kind, resolution_note, resolved_by, resolved_at
+                """,
+                (
+                    validated.resolution_kind,
+                    validated.resolution_note,
+                    validated.resolved_by,
+                    review_id,
+                    user_name,
+                    project_id,
+                ),
+            )
+            if row is None:
+                raise RuntimeError("Conflict resolution was not stored")
+            return review, ConflictResolutionRecord.model_validate(dict(row))
 
     async def mark_stale_for_observations(
         self,

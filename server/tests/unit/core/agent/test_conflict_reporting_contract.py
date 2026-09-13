@@ -8,19 +8,39 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS_BY_NAME,
     get_schema_capability,
 )
+from common.schema.evidence import (
+    EvidenceBundle,
+    EvidenceNode,
+    EvidencePointer,
+    EvidenceSubject,
+)
 from core.agent.tools.maintenance import MaintenanceTools
+from core.knowledge.evidence_service import EvidenceService
 
 
 class RecordingKnowledgeStore:
     def __init__(self) -> None:
         self.calls = []
 
-    async def record_conflict_detection(self, **kwargs):
-        self.calls.append(kwargs)
-        return SimpleNamespace(
-            group=SimpleNamespace(conflict_id="conflict-1", status="open"),
-            created=True,
-            evidence_added=2,
+    async def get_relationship_observations_evidence(self, observation_ids, **kwargs):
+        self.calls.append((tuple(observation_ids), kwargs))
+        return tuple(
+            EvidenceBundle(
+                subject=EvidenceSubject(
+                    kind="relationship_observation", identifier=str(observation_id)
+                ),
+                nodes=(
+                    EvidenceNode(
+                        pointer=EvidencePointer.for_observation(observation_id),
+                        status="active",
+                    ),
+                ),
+                edges=(),
+                total_nodes=1,
+                total_edges=0,
+                state_token=("a" if observation_id == 101 else "b") * 64,
+            )
+            for observation_id in observation_ids
         )
 
 
@@ -112,6 +132,11 @@ async def test_agent_conflict_report_keeps_evidence_immutable_and_opens_review_w
 
     assert result["review_id"] == "conflict-1"
     assert result["created"] is True
+    expected_snapshot = EvidenceService.snapshot(
+        await tools.knowledge_store.get_relationship_observations_evidence(
+            [101, 104], user_name="ada", project_id="project-1"
+        )
+    )
     assert service.calls == [
         {
             "user_name": "ada",
@@ -122,8 +147,13 @@ async def test_agent_conflict_report_keeps_evidence_immutable_and_opens_review_w
             "confidence": 0.8,
             "evidence_ids": [101, 104],
             "metadata": {"reported_by": "agent"},
+            "evidence_snapshot": expected_snapshot,
         }
     ]
+    assert tools.knowledge_store.calls[0] == (
+        (101, 104),
+        {"user_name": "ada", "project_id": "project-1"},
+    )
 
 
 def test_agent_conflict_report_is_a_reversible_write_with_grounded_evidence_contract():

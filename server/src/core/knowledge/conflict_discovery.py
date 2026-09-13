@@ -47,24 +47,12 @@ class ConflictPacketBuilder:
         if not seeds:
             return None
 
-        reviewable_seeds = [
-            row for row in seeds if row.get("evidence_origin", "independent") == "independent"
-        ]
-        if not reviewable_seeds:
-            return ConflictDiscoveryPackage(
-                cursor=cursor,
-                observations=(),
-                next_observation_id=max(int(row["observation_id"]) for row in seeds),
-                prompt="",
-                estimated_tokens=0,
-            )
-
         known_by_entity: dict[int, list[dict[str, Any]]] = {}
         accepted: list[dict[str, Any]] = []
         records: dict[int, dict[str, Any]] = {}
         compacted = False
 
-        for seed in reviewable_seeds:
+        for seed in seeds:
             endpoint_ids = [
                 int(seed["source_entity_id"]),
                 int(seed["target_entity_id"]),

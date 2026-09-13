@@ -426,6 +426,15 @@ CREATE TABLE public.maintenance_review_evidence (
     observation_id bigint,
     snapshot jsonb DEFAULT '{}'::jsonb NOT NULL
 );
+CREATE TABLE public.maintenance_review_resolutions (
+    review_id text NOT NULL,
+    resolution_kind text NOT NULL,
+    resolution_note text,
+    resolved_by text NOT NULL,
+    resolved_at timestamp with time zone NOT NULL,
+    CONSTRAINT maintenance_review_resolutions_kind_check CHECK ((resolution_kind = ANY (ARRAY['confirmed_conflict'::text, 'normal_temporal_change'::text, 'not_a_conflict'::text, 'insufficient_evidence'::text, 'custom'::text]))),
+    CONSTRAINT maintenance_review_resolutions_resolved_by_nonblank_check CHECK ((btrim(resolved_by) <> ''::text))
+);
 CREATE TABLE public.maintenance_reviews (
     review_id text NOT NULL,
     user_name text NOT NULL,
@@ -896,6 +905,8 @@ ALTER TABLE ONLY public.maintenance_review_events
     ADD CONSTRAINT maintenance_review_events_pkey PRIMARY KEY (event_id);
 ALTER TABLE ONLY public.maintenance_review_evidence
     ADD CONSTRAINT maintenance_review_evidence_pkey PRIMARY KEY (review_id, evidence_kind, evidence_id);
+ALTER TABLE ONLY public.maintenance_review_resolutions
+    ADD CONSTRAINT maintenance_review_resolutions_pkey PRIMARY KEY (review_id);
 ALTER TABLE ONLY public.maintenance_reviews
     ADD CONSTRAINT maintenance_reviews_pkey PRIMARY KEY (review_id);
 ALTER TABLE ONLY public.maintenance_reviews
@@ -1144,6 +1155,8 @@ ALTER TABLE ONLY public.maintenance_review_evidence
     ADD CONSTRAINT maintenance_review_evidence_observation_id_fkey FOREIGN KEY (observation_id) REFERENCES public.relationship_observations(observation_id) ON DELETE SET NULL;
 ALTER TABLE ONLY public.maintenance_review_evidence
     ADD CONSTRAINT maintenance_review_evidence_review_id_fkey FOREIGN KEY (review_id) REFERENCES public.maintenance_reviews(review_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_review_resolutions
+    ADD CONSTRAINT maintenance_review_resolutions_review_id_fkey FOREIGN KEY (review_id) REFERENCES public.maintenance_reviews(review_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.maintenance_reviews
     ADD CONSTRAINT maintenance_reviews_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.message_entity_refs

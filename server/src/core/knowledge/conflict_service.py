@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from common.schema.evidence import EvidenceBundle, EvidenceSnapshot
 from common.utils.events import emit
 from core.knowledge.conflicts import (
     ConflictGroup,
@@ -12,6 +13,46 @@ from core.knowledge.conflicts import (
     ConflictWriteResult,
 )
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
+
+
+async def load_conflict_evidence(
+    knowledge_store: Any,
+    *,
+    observation_ids: Iterable[int],
+    user_name: str,
+    project_id: str,
+) -> tuple[EvidenceBundle, ...]:
+    """Load one conflict's cited observations in the review-detail order."""
+
+    ids = sorted({int(observation_id) for observation_id in observation_ids})
+    return tuple(
+        await knowledge_store.get_relationship_observations_evidence(
+            ids,
+            user_name=user_name,
+            project_id=project_id,
+        )
+    )
+
+
+async def snapshot_conflict_evidence(
+    knowledge_store: Any,
+    *,
+    observation_ids: Iterable[int],
+    user_name: str,
+    project_id: str,
+) -> EvidenceSnapshot:
+    """Capture the bounded evidence state for exactly one conflict subject."""
+
+    from core.knowledge.evidence_service import EvidenceService
+
+    return EvidenceService.snapshot(
+        await load_conflict_evidence(
+            knowledge_store,
+            observation_ids=observation_ids,
+            user_name=user_name,
+            project_id=project_id,
+        )
+    )
 
 
 class ConflictService:
@@ -30,6 +71,7 @@ class ConflictService:
         rationale: str,
         confidence: float | None,
         evidence_ids: Iterable[int],
+        evidence_snapshot: EvidenceSnapshot,
         metadata: dict[str, Any] | None = None,
         existing_conflict_id: str | None = None,
     ) -> ConflictWriteResult:
@@ -42,6 +84,7 @@ class ConflictService:
             confidence=confidence,
             evidence_ids=evidence_ids,
             metadata=metadata,
+            evidence_snapshot=evidence_snapshot,
             existing_conflict_id=existing_conflict_id,
         )
         await self.notify_detection(
@@ -101,7 +144,7 @@ class ConflictService:
                 "user_name": user_name,
                 "project_id": project_id,
                 "conflict_id": group.conflict_id,
-                "resolution_kind": resolution_kind,
+                "resolution_kind": group.resolution_kind,
             },
         )
         return group
