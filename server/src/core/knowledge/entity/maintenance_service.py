@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from core.knowledge.db.projection_rebuilder import GraphBuilder
+from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.writers.global_entity_merge_writer import (
     EntityMergeConflict,
     GlobalEntityMergeWriter,
@@ -45,6 +46,7 @@ class EntityMaintenanceService:
         self.writer = GlobalEntityMergeWriter(postgres)
         self.review_writer = MaintenanceReviewWriter(postgres)
         self.projection_rebuilder = GraphBuilder(postgres)
+        self.semantic_window_reader = SemanticWindowReader(postgres)
 
     @asynccontextmanager
     async def _cursor(self, cur=None):
@@ -659,7 +661,7 @@ class EntityMaintenanceService:
         user_name: str | None = None,
         cur=None,
     ) -> dict[str, dict[str, Any]]:
-        """Capture completed semantic-window boundaries for affected projects."""
+        """Capture a quiescent semantic boundary for every affected Project."""
 
         actor = user_name or self.user_name
         if not actor:
@@ -668,43 +670,25 @@ class EntityMaintenanceService:
         result: dict[str, dict[str, Any]] = {}
         async with self._cursor(cur) as active_cur:
             for project_id in normalized_projects:
-                await active_cur.execute(
-                    """
-                    SELECT
-                        count(*) FILTER (
-                            WHERE message.exchange_state = 'closed'
-                              AND NOT EXISTS (
-                                  SELECT 1
-                                  FROM public.project_semantic_window_messages membership
-                                  JOIN public.project_semantic_windows semantic_window
-                                    ON semantic_window.window_id = membership.window_id
-                                   AND semantic_window.project_id = membership.project_id
-                                  WHERE membership.exchange_user_message_id = message.message_id
-                                    AND membership.project_id = message.project_id
-                                    AND semantic_window.stage = 'completed'
-                              )
-                        ) AS pending_count,
-                        COALESCE(max(message.message_id) FILTER (
-                            WHERE message.exchange_state = 'closed'
-                        ), 0) AS frontier_message_id,
-                        max(message.timestamp_ms) FILTER (
-                            WHERE message.exchange_state = 'closed'
-                        ) AS frontier_timestamp_ms
-                    FROM public.messages AS message
-                    WHERE message.user_name = %s AND message.project_id = %s
-                      AND message.role = 'user' AND message.lifecycle_state <> 'superseded'
-                    """,
-                    (actor, project_id),
-                )
-                row = await active_cur.fetchone()
-                pending = int(row["pending_count"] or 0)
-                if pending:
-                    raise RuntimeError(
-                        f"project {project_id} has {pending} exchanges pending semantic completion"
+                frontier = self._normalize_frontier(
+                    await self.semantic_window_reader.get_maintenance_quiescence(
+                        user_name=actor,
+                        project_id=project_id,
+                        cur=active_cur,
                     )
-                message_id = int(row["frontier_message_id"] or 0)
-                timestamp_ms = row["frontier_timestamp_ms"]
-                token = self._frontier_token(message_id, timestamp_ms)
+                )
+                if frontier["pending_exchange_count"]:
+                    raise RuntimeError(
+                        "project "
+                        f"{project_id} has {frontier['pending_exchange_count']} eligible "
+                        "exchanges pending semantic completion"
+                    )
+                if frontier["active_window_count"]:
+                    raise RuntimeError(
+                        "project "
+                        f"{project_id} has {frontier['active_window_count']} "
+                        "active semantic windows"
+                    )
                 await active_cur.execute(
                     """
                     INSERT INTO public.maintenance_frontiers
@@ -717,13 +701,20 @@ class EntityMaintenanceService:
                         frontier_token = EXCLUDED.frontier_token,
                         updated_at = now()
                     """,
-                    (actor, project_id, message_id, timestamp_ms, token),
+                    (
+                        actor,
+                        project_id,
+                        frontier["message_id"],
+                        frontier["timestamp_ms"],
+                        frontier["token"],
+                    ),
                 )
                 result[project_id] = {
                     "project_id": project_id,
-                    "message_id": message_id,
-                    "timestamp_ms": timestamp_ms,
-                    "token": token,
+                    "message_id": frontier["message_id"],
+                    "timestamp_ms": frontier["timestamp_ms"],
+                    "completed_window_boundary": frontier["completed_window_boundary"],
+                    "token": frontier["token"],
                 }
         return result
 
@@ -740,42 +731,16 @@ class EntityMaintenanceService:
         if not actor:
             raise ValueError("user_name is required for global maintenance")
         for project_id, frontier in frontiers.items():
-            query = """
-                SELECT
-                    count(*) FILTER (
-                        WHERE message.exchange_state = 'closed'
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM public.project_semantic_window_messages membership
-                              JOIN public.project_semantic_windows semantic_window
-                                ON semantic_window.window_id = membership.window_id
-                               AND semantic_window.project_id = membership.project_id
-                              WHERE membership.exchange_user_message_id = message.message_id
-                                AND membership.project_id = message.project_id
-                                AND semantic_window.stage = 'completed'
-                          )
-                    ) AS pending_count,
-                    COALESCE(max(message.message_id) FILTER (
-                        WHERE message.exchange_state = 'closed'
-                    ), 0) AS frontier_message_id,
-                    max(message.timestamp_ms) FILTER (
-                        WHERE message.exchange_state = 'closed'
-                    ) AS frontier_timestamp_ms
-                FROM public.messages AS message
-                WHERE message.user_name = %s AND message.project_id = %s
-                  AND message.role = 'user' AND message.lifecycle_state <> 'superseded'
-                """
-            if cur is None:
-                row = await self.postgres.fetch_one(query, (actor, project_id))
-            else:
-                await cur.execute(query, (actor, project_id))
-                row = await cur.fetchone()
-            if int(row["pending_count"] or 0):
-                return False
-            token = self._frontier_token(
-                int(row["frontier_message_id"] or 0), row["frontier_timestamp_ms"]
+            current = self._normalize_frontier(
+                await self.semantic_window_reader.get_maintenance_quiescence(
+                    user_name=actor,
+                    project_id=project_id,
+                    cur=cur,
+                )
             )
-            if token != frontier.get("token"):
+            if current["pending_exchange_count"] or current["active_window_count"]:
+                return False
+            if current["token"] != frontier.get("token"):
                 return False
         return True
 
@@ -793,10 +758,41 @@ class EntityMaintenanceService:
         }
 
     @staticmethod
-    def _frontier_token(message_id: int, timestamp_ms: int | None) -> str:
-        return hashlib.sha256(
-            f"{int(message_id)}:{timestamp_ms if timestamp_ms is not None else ''}".encode()
-        ).hexdigest()
+    def _frontier_token(
+        message_id: int,
+        timestamp_ms: int | None,
+        completed_window_boundary: str,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "completed_window_boundary": completed_window_boundary,
+                "message_id": int(message_id),
+                "timestamp_ms": timestamp_ms,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _normalize_frontier(cls, state: dict[str, Any]) -> dict[str, Any]:
+        message_id = int(state.get("frontier_message_id") or 0)
+        timestamp_ms = state.get("frontier_timestamp_ms")
+        if timestamp_ms is not None:
+            timestamp_ms = int(timestamp_ms)
+        completed_window_boundary = str(state.get("completed_window_boundary") or "")
+        return {
+            "pending_exchange_count": int(state.get("pending_exchange_count") or 0),
+            "active_window_count": int(state.get("active_window_count") or 0),
+            "message_id": message_id,
+            "timestamp_ms": timestamp_ms,
+            "completed_window_boundary": completed_window_boundary,
+            "token": cls._frontier_token(
+                message_id,
+                timestamp_ms,
+                completed_window_boundary,
+            ),
+        }
 
     async def _definition_versions(
         self,

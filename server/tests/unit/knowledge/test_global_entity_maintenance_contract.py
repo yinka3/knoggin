@@ -10,18 +10,27 @@ from core.knowledge.maintenance_reviews import (
 from tests.fixtures.fakes import RecordingPostgresClient
 
 
+def _quiescence_row(
+    *,
+    pending_exchange_count=0,
+    active_window_count=0,
+    frontier_message_id=42,
+    frontier_timestamp_ms=1234,
+    completed_window_boundary="window-1:conversation:",
+):
+    return {
+        "pending_exchange_count": pending_exchange_count,
+        "active_window_count": active_window_count,
+        "frontier_message_id": frontier_message_id,
+        "frontier_timestamp_ms": frontier_timestamp_ms,
+        "completed_window_boundary": completed_window_boundary,
+    }
+
+
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_completed_semantic_windows_define_the_stable_frontier():
-    client = RecordingPostgresClient(
-        fetch_one_results=[
-            {
-                "pending_count": 0,
-                "frontier_message_id": 42,
-                "frontier_timestamp_ms": 1234,
-            }
-        ]
-    )
+    client = RecordingPostgresClient(fetch_one_results=[_quiescence_row()])
 
     frontier = await EntityMaintenanceService(client, "ada").capture_frontier(
         ["project-1"]
@@ -31,26 +40,64 @@ async def test_completed_semantic_windows_define_the_stable_frontier():
         "project_id": "project-1",
         "message_id": 42,
         "timestamp_ms": 1234,
-        "token": EntityMaintenanceService._frontier_token(42, 1234),
+        "completed_window_boundary": "window-1:conversation:",
+        "token": EntityMaintenanceService._frontier_token(
+            42,
+            1234,
+            "window-1:conversation:",
+        ),
     }
-    assert "project_semantic_windows" in client.calls[0][1]
+    query = client.calls[0][1]
+    assert "eligible_conversation_exchanges" in query
+    assert "session.semantic_participation_enabled" in query
+    assert "session.semantic_participation_after_message_id" in query
+    assert "semantic_window.stage <> 'completed'" in query
+    assert "completed_window_boundary" in query
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_uncompleted_semantic_work_blocks_stable_frontier():
     client = RecordingPostgresClient(
-        fetch_one_results=[
-            {
-                "pending_count": 1,
-                "frontier_message_id": 42,
-                "frontier_timestamp_ms": 1234,
-            }
-        ]
+        fetch_one_results=[_quiescence_row(pending_exchange_count=1)]
     )
 
     with pytest.raises(RuntimeError, match="pending semantic completion"):
         await EntityMaintenanceService(client, "ada").capture_frontier(["project-1"])
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_active_semantic_window_blocks_stable_frontier():
+    client = RecordingPostgresClient(
+        fetch_one_results=[_quiescence_row(active_window_count=1)]
+    )
+
+    with pytest.raises(RuntimeError, match="active semantic windows"):
+        await EntityMaintenanceService(client, "ada").capture_frontier(["project-1"])
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_revalidation_rejects_a_changed_completed_window_boundary():
+    original = _quiescence_row(completed_window_boundary="window-1:human_edit:")
+    changed = _quiescence_row(
+        completed_window_boundary="window-1:human_edit:|window-2:conversation:"
+    )
+    client = RecordingPostgresClient(fetch_one_results=[changed])
+    service = EntityMaintenanceService(client, "ada")
+
+    assert not await service.revalidate_frontier(
+        {
+            "project-1": {
+                "token": EntityMaintenanceService._frontier_token(
+                    original["frontier_message_id"],
+                    original["frontier_timestamp_ms"],
+                    original["completed_window_boundary"],
+                )
+            }
+        }
+    )
 
 
 @pytest.mark.no_network

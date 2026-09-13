@@ -1,6 +1,6 @@
 # Core Stage 5 — Maintenance Integrity and Concurrency
 
-Status: Chunks A–B complete 2026-09-12. Chunks C–G remain planned.
+Status: Chunks A–C complete 2026-09-12. Chunks D–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, including the typed evidence
 maintenance framework committed before Core Stages 1 and 2. Recheck the current
@@ -363,7 +363,7 @@ to the locked Knowledge review and maintenance correction review.
 
 - [x] A: merge/rollback includes Context entity associations.
 - [x] B: Project cleanup includes Context entity associations.
-- [ ] C: participation-aware, all-origin maintenance frontier.
+- [x] C: participation-aware, all-origin maintenance frontier.
 - [ ] D: merge/semantic-commit ordering is proven and minimally enforced.
 - [ ] E: projection-repair obligation is durable before rebuild.
 - [ ] F: conflict discovery/review identity, evidence, and resolution are stable.
@@ -404,4 +404,20 @@ runtime cache with the selected IDs.
 F8 now has normal merge and cleanup regressions. Its historical probe and
 review closeout remain pending the Stage 5 closeout.
 
-Next implementation task: Stage 5 Chunk C.
+Chunk C validation on 2026-09-12:
+
+- `uv run pytest -q tests/unit/knowledge/test_global_entity_maintenance_contract.py tests/contract/storage/test_maintenance_application_real_postgres.py` → 13 passed; the environment emitted its existing Requests dependency warning.
+- `uv run pytest -q tests/unit/core/ingestion/test_semantic_window_admission.py tests/contract/storage/test_semantic_window_participation_admission_contract.py tests/contract/storage/test_project_context_window_contract.py tests/contract/storage/test_semantic_commit_contract.py` → 37 passed; the same existing warning appeared.
+- `uv run pytest -q tests/unit/core/knowledge/test_maintenance_impact.py tests/unit/knowledge/test_global_entity_maintenance_contract.py tests/unit/knowledge/test_maintenance_application_contract.py tests/unit/core/knowledge/test_entity_cleanup_persistence_contract.py tests/unit/project/test_entity_cleanup_workflow.py tests/contract/storage/test_maintenance_application_real_postgres.py tests/unit/core/knowledge/test_project_episode_build_contract.py tests/contract/storage/test_semantic_commit_contract.py tests/contract/storage/test_project_context_window_contract.py tests/unit/runtime/test_api_port.py tests/contract/api/test_app.py tests/unit/core/agent/test_conflict_reporting_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py` → 109 passed; the same existing warning appeared.
+- Focused Ruff, `uv run python -m compileall`, and `git diff --check` passed. MyPy remains deferred because its configured path baseline is still stale, as recorded separately in `MYPY_BASELINE.md`.
+
+`SemanticWindowReader` now owns one shared participation-eligible exchange CTE
+for admission and maintenance. Its one-read quiescence state blocks eligible
+unclaimed closed exchanges and every non-completed semantic window, while its
+completed-window boundary changes the frontier token even for human edits with
+no message membership. Capture and revalidation use the same query and
+normalization. Disabled, deleted, and pre-frontier exchanges stay outside the
+pending set; a newly eligible post-frontier exchange invalidates the merge
+plan.
+
+Next implementation task: Stage 5 Chunk D.

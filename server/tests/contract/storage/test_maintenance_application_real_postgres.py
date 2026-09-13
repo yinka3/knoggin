@@ -61,6 +61,41 @@ async def _seed_context_block(client, associations, *, project_id="project-1"):
     return block_id
 
 
+async def _seed_semantic_window(
+    client,
+    *,
+    origin,
+    stage,
+    project_id="project-1",
+):
+    window_id = uuid4()
+    await client.execute(
+        """
+        INSERT INTO public.project_semantic_windows (
+            window_id, user_name, project_id, origin, stage, domain_version,
+            policy_snapshot, source_token_count, token_estimator,
+            token_estimator_version, completed_at
+        ) VALUES (
+            %s, 'ada', %s, %s, %s, 1, '{}'::jsonb, 0, 'test', 'v1',
+            CASE WHEN %s = 'completed' THEN NOW() ELSE NULL END
+        )
+        """,
+        (window_id, project_id, origin, stage, stage),
+    )
+    return window_id
+
+
+async def _complete_semantic_window(client, window_id):
+    await client.execute(
+        """
+        UPDATE public.project_semantic_windows
+        SET stage = 'completed', completed_at = NOW(), updated_at = NOW()
+        WHERE window_id = %s
+        """,
+        (window_id,),
+    )
+
+
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
@@ -296,6 +331,141 @@ async def test_global_merge_rejects_a_preview_when_context_association_changes(
     assert await real_postgres_client.fetch_one(
         "SELECT status FROM public.entities WHERE entity_id = 3"
     ) == {"status": "active"}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_global_merge_frontier_excludes_disabled_deleted_and_prefrontier_exchanges(
+    real_postgres_client,
+):
+    await _seed_entities(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (
+            session_id, user_name, project_id, status,
+            semantic_participation_enabled,
+            semantic_participation_after_message_id
+        ) VALUES
+            ('maintenance-disabled', 'ada', 'project-1', 'open', FALSE, 0),
+            ('maintenance-deleted', 'ada', 'project-1', 'deleted', TRUE, 0),
+            ('maintenance-reenabled', 'ada', 'project-1', 'open', TRUE, 403)
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES
+            ('ada', 'maintenance-disabled', 401, 'project-1', 'user', 'Disabled.',
+             401, 'sealed', 'closed', 'user_only', 401),
+            ('ada', 'maintenance-deleted', 402, 'project-1', 'user', 'Deleted.',
+             402, 'sealed', 'closed', 'user_only', 402),
+            ('ada', 'maintenance-reenabled', 403, 'project-1', 'user', 'Pre-frontier.',
+             403, 'sealed', 'closed', 'user_only', 403)
+        """
+    )
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+
+    preview = await service.preview_merge(
+        survivor_entity_id=2,
+        retired_entity_id=3,
+    )
+
+    assert preview["frontiers"]["project-1"]["message_id"] == 0
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (
+            'ada', 'maintenance-reenabled', 404, 'project-1', 'user',
+            'Post-frontier.', 404, 'sealed', 'closed', 'user_only', 404
+        )
+        """
+    )
+
+    with pytest.raises(ValueError, match="ingestion advanced after review"):
+        await service.merge(preview["plan"])
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT status FROM public.entities WHERE entity_id = 3"
+    ) == {"status": "active"}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_maintenance_frontier_blocks_all_active_window_origins_and_tracks_completion(
+    real_postgres_client,
+):
+    service = EntityMaintenanceService(
+        postgres=real_postgres_client,
+        user_name="ada",
+    )
+    human_window_id = await _seed_semantic_window(
+        real_postgres_client,
+        origin="human_edit",
+        stage="context_committed",
+    )
+
+    with pytest.raises(RuntimeError, match="active semantic windows"):
+        await service.capture_frontier(["project-1"])
+
+    await _complete_semantic_window(real_postgres_client, human_window_id)
+    human_frontier = await service.capture_frontier(["project-1"])
+    assert (
+        str(human_window_id) in human_frontier["project-1"]["completed_window_boundary"]
+    )
+
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('maintenance-conversation', 'ada', 'project-1')
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES (
+            'ada', 'maintenance-conversation', 501, 'project-1', 'user',
+            'Conversation semantic work.', 501, 'sealed', 'closed',
+            'user_only', 501
+        )
+        """
+    )
+    conversation_window_id = await _seed_semantic_window(
+        real_postgres_client,
+        origin="conversation",
+        stage="claimed",
+    )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_semantic_window_messages (
+            window_id, project_id, message_id, session_id,
+            exchange_user_message_id, role, ordinal
+        ) VALUES (%s, 'project-1', 501, 'maintenance-conversation', 501, 'user', 0)
+        """,
+        (conversation_window_id,),
+    )
+
+    with pytest.raises(RuntimeError, match="active semantic windows"):
+        await service.capture_frontier(["project-1"])
+
+    await _complete_semantic_window(real_postgres_client, conversation_window_id)
+    completed_frontier = await service.capture_frontier(["project-1"])
+    assert (
+        completed_frontier["project-1"]["token"] != human_frontier["project-1"]["token"]
+    )
 
 
 @pytest.mark.storage
