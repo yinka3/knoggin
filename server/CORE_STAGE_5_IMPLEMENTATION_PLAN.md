@@ -364,7 +364,7 @@ to the locked Knowledge review and maintenance correction review.
 - [x] A: merge/rollback includes Context entity associations.
 - [x] B: Project cleanup includes Context entity associations.
 - [x] C: participation-aware, all-origin maintenance frontier.
-- [ ] D: merge/semantic-commit ordering is proven and minimally enforced.
+- [x] D: merge/semantic-commit ordering is proven by existing row locks.
 - [ ] E: projection-repair obligation is durable before rebuild.
 - [ ] F: conflict discovery/review identity, evidence, and resolution are stable.
 - [ ] G: configurable maintenance review burden.
@@ -421,3 +421,31 @@ pending set; a newly eligible post-frontier exchange invalidates the merge
 plan.
 
 Next implementation task: Stage 5 Chunk D.
+
+Chunk D validation on 2026-09-12:
+
+- `uv run pytest -q tests/contract/storage/test_semantic_commit_contract.py -k 'merge_first_rejects_a_stale_semantic_commit_without_partial_state or semantic_commit_first_is_migrated_by_the_waiting_global_merge'` → 2 passed.
+- `uv run pytest -q tests/contract/storage/test_semantic_commit_contract.py` → 13 passed.
+- `uv run pytest -q tests/contract/storage/test_maintenance_application_real_postgres.py` → 7 passed; the environment emitted its existing Requests dependency warning.
+- `uv run pytest -q tests/contract/storage/test_semantic_commit_contract.py tests/contract/storage/test_maintenance_application_real_postgres.py` → 20 passed; the same existing warning appeared.
+- Focused Ruff, `uv run python -m compileall`, and `git diff --check` passed. MyPy remains deferred because its configured path baseline is still stale, as recorded separately in `MYPY_BASELINE.md`.
+
+The real-PostgreSQL regression uses the fixture's two connections and bounded
+timeouts to force both canonical orders. A merge first holds `entities` with
+`FOR UPDATE`; the stale semantic commit waits at its reused-identity
+`FOR KEY SHARE` validation, observes the redirected identity, and rolls its
+whole transaction back. A semantic commit first holds that key-share lock;
+the merge waits, snapshots the committed association and relationship, then
+migrates them before redirecting the retired identity. Both tests assert no
+remaining Context association, relationship, observation, message reference,
+or Project classification names the retired identity.
+
+No shared user-global lock was added. The existing lock order is sufficient:
+semantic commit takes its window/context locks before key-sharing each reused
+identity, while global merge takes its merge advisory lock and then updates
+the relevant entity rows. Neither path takes those resources in reverse order,
+and model/extraction work is complete before `SemanticCommitWriter.commit()`
+opens its transaction. The regression releases the waiting task in each order
+and completes it under its deadlock guard.
+
+Next implementation task: Stage 5 Chunk E.

@@ -1,5 +1,6 @@
 """Fresh-schema contracts for Context-first semantic Knowledge commits."""
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -33,6 +34,7 @@ from core.knowledge.context.models import ContextBlockSupport, ContextMaterializ
 from core.knowledge.context.render import context_block_hash, context_document_hash
 from core.knowledge.db.readers.conflict_discovery_reader import ConflictDiscoveryReader
 from core.knowledge.db.readers.project_context_reader import ProjectContextReader
+from core.knowledge.db.writers.global_entity_merge_writer import GlobalEntityMergeWriter
 from core.knowledge.db.writers.project_context_writer import ProjectContextWriter
 from core.knowledge.db.writers.semantic_commit_writer import SemanticCommitWriter
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
@@ -284,6 +286,156 @@ class _WindowContext:
     def __init__(self, window_id, context):
         self.window_id = window_id
         self.context = context
+
+
+class _PausedMergeWriter(GlobalEntityMergeWriter):
+    """Pause after the merge has locked its identity rows."""
+
+    def __init__(self, client, locked: asyncio.Event, release: asyncio.Event):
+        super().__init__(client)
+        self._locked = locked
+        self._release = release
+
+    async def snapshot(
+        self,
+        user_name: str,
+        survivor_id: int,
+        retired_id: int,
+        *,
+        cur=None,
+    ) -> dict:
+        snapshot = await super().snapshot(
+            user_name,
+            survivor_id,
+            retired_id,
+            cur=cur,
+        )
+        if cur is not None and not self._locked.is_set():
+            self._locked.set()
+            await self._release.wait()
+        return snapshot
+
+
+class _PausedSemanticCommitWriter(SemanticCommitWriter):
+    """Pause after reused identities have been durably locked for publication."""
+
+    def __init__(self, client, locked: asyncio.Event, release: asyncio.Event):
+        super().__init__(client)
+        self._locked = locked
+        self._release = release
+
+    async def _write_aliases(
+        self,
+        cur,
+        result: ContextEntityResult,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> int:
+        if not self._locked.is_set():
+            self._locked.set()
+            await self._release.wait()
+        return await super()._write_aliases(
+            cur,
+            result,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+
+async def _seed_merge_entities(client):
+    await client.execute(
+        """
+        INSERT INTO public.entities (entity_id, user_name, canonical_name)
+        VALUES
+            (2, 'ada', 'Ada Lovelace'),
+            (3, 'ada', 'Augusta Ada King'),
+            (4, 'ada', 'Analytical Engine');
+        INSERT INTO public.project_entity_contexts (
+            project_id, entity_id, user_name, entity_type, topic
+        ) VALUES
+            ('project-1', 2, 'ada', 'Person', 'Work'),
+            ('project-1', 3, 'ada', 'Person', 'Work'),
+            ('project-1', 4, 'ada', 'Company', 'Work');
+        """
+    )
+
+
+async def _prepare_merge_commit_interleaving(client):
+    await _seed_merge_entities(client)
+    await _seed_message(client)
+    window = _window()
+    window_writer = SemanticWindowWriter(client)
+    assert (await window_writer.claim_window(window, _membership())).claimed
+    block = _block("Augusta Ada King is active in this project.")
+    context = await _commit_context(client, window, (block,))
+    assert await window_writer.advance_stage(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        context_revision_id=context.revision_id,
+    )
+    build = _build(
+        _WindowContext(window.window_id, context),
+        impact=(block.block_id,),
+        entity_ids=(3, 4),
+        entities={},
+        existing_classifications={3: "Person", 4: "Company"},
+        associations=(
+            ContextBlockEntityAssociation(
+                block_id=block.block_id,
+                entity_id=3,
+                mention_text="Augusta Ada King",
+            ),
+            ContextBlockEntityAssociation(
+                block_id=block.block_id,
+                entity_id=4,
+                mention_text="Analytical Engine",
+            ),
+        ),
+        relationship=ContextRelationshipWrite(
+            support_block_ids=(block.block_id,),
+            entity_a_id=3,
+            entity_b_id=4,
+            relationship_type="owns",
+            canonical_type="OWNS",
+            source_type="Person",
+            target_type="Company",
+            domain_version=1,
+        ),
+    )
+    return build, block.block_id
+
+
+async def _assert_no_retired_identity_references(client):
+    assert await client.fetch_one(
+        """
+        SELECT
+            (SELECT count(*) FROM public.context_block_entities
+             WHERE entity_id = 3) AS association_count,
+            (SELECT count(*) FROM public.message_entity_refs
+             WHERE entity_id = 3) AS message_ref_count,
+            (SELECT count(*) FROM public.project_entity_contexts
+             WHERE entity_id = 3) AS classification_count,
+            (SELECT count(*) FROM public.relationships
+             WHERE entity_a_id = 3 OR entity_b_id = 3) AS relationship_count,
+            (SELECT count(*) FROM public.relationship_observations
+             WHERE source_entity_id = 3 OR target_entity_id = 3) AS observation_count
+        """
+    ) == {
+        "association_count": 0,
+        "message_ref_count": 0,
+        "classification_count": 0,
+        "relationship_count": 0,
+        "observation_count": 0,
+    }
+
+
+async def _assert_waiting(task):
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
 
 
 @pytest.mark.storage
@@ -1221,3 +1373,132 @@ async def test_semantic_commit_rejects_wholly_untimed_context_support(
         "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
         (window.window_id,),
     ) == {"stage": "context_committed"}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_merge_first_rejects_a_stale_semantic_commit_without_partial_state(
+    real_postgres_client,
+):
+    build, _ = await _prepare_merge_commit_interleaving(real_postgres_client)
+    merge_locked = asyncio.Event()
+    release_merge = asyncio.Event()
+    merge_task = asyncio.create_task(
+        _PausedMergeWriter(
+            real_postgres_client,
+            merge_locked,
+            release_merge,
+        ).merge(
+            user_name="ada",
+            survivor_id=2,
+            retired_id=3,
+            merge_id=str(uuid4()),
+        )
+    )
+    commit_task = None
+    try:
+        await asyncio.wait_for(merge_locked.wait(), timeout=2)
+        commit_task = asyncio.create_task(
+            SemanticCommitWriter(real_postgres_client).commit(build)
+        )
+        await _assert_waiting(commit_task)
+
+        release_merge.set()
+        await asyncio.wait_for(merge_task, timeout=5)
+        with pytest.raises(ValueError, match="inactive or unreadable"):
+            await asyncio.wait_for(commit_task, timeout=5)
+    finally:
+        release_merge.set()
+        await asyncio.gather(
+            merge_task,
+            *(task for task in (commit_task,) if task is not None),
+            return_exceptions=True,
+        )
+
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT status, redirect_entity_id
+        FROM public.entities
+        WHERE entity_id = 3
+        """
+    ) == {"status": "redirected", "redirect_entity_id": 2}
+    assert await real_postgres_client.fetch_one(
+        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        (build.window_id,),
+    ) == {"stage": "context_committed"}
+    await _assert_no_retired_identity_references(real_postgres_client)
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_commit_first_is_migrated_by_the_waiting_global_merge(
+    real_postgres_client,
+):
+    build, block_id = await _prepare_merge_commit_interleaving(real_postgres_client)
+    semantic_locked = asyncio.Event()
+    release_semantic_commit = asyncio.Event()
+    semantic_task = asyncio.create_task(
+        _PausedSemanticCommitWriter(
+            real_postgres_client,
+            semantic_locked,
+            release_semantic_commit,
+        ).commit(build)
+    )
+    merge_task = None
+    try:
+        await asyncio.wait_for(semantic_locked.wait(), timeout=2)
+        merge_task = asyncio.create_task(
+            GlobalEntityMergeWriter(real_postgres_client).merge(
+                user_name="ada",
+                survivor_id=2,
+                retired_id=3,
+                merge_id=str(uuid4()),
+            )
+        )
+        await _assert_waiting(merge_task)
+
+        release_semantic_commit.set()
+        summary = await asyncio.wait_for(semantic_task, timeout=5)
+        merged = await asyncio.wait_for(merge_task, timeout=5)
+    finally:
+        release_semantic_commit.set()
+        await asyncio.gather(
+            semantic_task,
+            *(task for task in (merge_task,) if task is not None),
+            return_exceptions=True,
+        )
+
+    assert summary.resumed is False
+    assert summary.block_entity_associations_written == 2
+    assert summary.relationships_written == 1
+    assert merged["mutation_count"] > 0
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT entity_id
+        FROM public.context_block_entities
+        WHERE block_id = %s
+        ORDER BY entity_id
+        """,
+        (block_id,),
+    ) == [{"entity_id": 2}, {"entity_id": 4}]
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT entity_a_id, entity_b_id
+        FROM public.relationships
+        WHERE project_id = 'project-1'
+        """
+    ) == {"entity_a_id": 2, "entity_b_id": 4}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT source_entity_id, target_entity_id
+        FROM public.relationship_observations
+        WHERE project_id = 'project-1'
+        """
+    ) == {"source_entity_id": 2, "target_entity_id": 4}
+    assert await real_postgres_client.fetch_one(
+        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        (build.window_id,),
+    ) == {"stage": "knowledge_committed"}
+    await _assert_no_retired_identity_references(real_postgres_client)
