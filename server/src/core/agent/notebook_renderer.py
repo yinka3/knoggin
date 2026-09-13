@@ -7,11 +7,13 @@ text back into state and never mutates the canonical notebook records.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Callable
 
 from jinja2 import Environment, StrictUndefined
 
+from common.utils.local_references import register_short_uuid_references
 from core.agent.notebook import RunNotebook
 
 _IDENTIFIER_KEYS = {
@@ -53,37 +55,48 @@ Entity pages:
 {% for page in entity_pages %}- {{ page.reference }}{% if page.name %} {{ page.name }}{% endif %}
   relationships: {{ page.relationships|join(', ') if page.relationships else 'none' }}
   episodes: {{ page.episodes|join(', ') if page.episodes else 'none' }}
-  evidence: {{ page.evidence|join(', ') if page.evidence else 'none' }}
+  evidence: {{ page.evidence|join(', ') if page.evidence else 'none' }}{{ '\n' }}
 {% endfor %}{% endif %}{% if entities %}
 Entities:
-{% for item in entities %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.details %} — {{ item.details }}{% endif %}
+{% for item in entities %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.details %} — {{ item.details }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if relationships %}
 Relationships:
-{% for item in relationships %}- {{ item.reference }}{% if item.endpoints %} {{ item.endpoints }}{% endif %}{% if item.label %}: {{ item.label }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}
+{% for item in relationships %}- {{ item.reference }}{% if item.endpoints %} {{ item.endpoints }}{% endif %}{% if item.label %}: {{ item.label }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
+  qualification: observed evidence, not a current-state claim
+{% if item.context %}  context: {{ item.context }}
+{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if episodes %}
 Episodes:
-{% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}
+{% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}
+{% if item.chronology %}  chronology: {{ item.chronology }}
+{% endif %}{% if item.developments %}  developments: {{ item.developments|join('; ') }}
+{% endif %}{% if item.updates %}  updates: {{ item.updates|join('; ') }}
+{% endif %}{% if item.unresolved %}  unresolved: {{ item.unresolved|join('; ') }}
+{% endif %}{% if item.evidence %}  evidence in notebook: {{ item.evidence|join(', ') }}
+{% endif %}{% if item.support %}  historical support:
+{% for source in item.support %}  - {{ source.label }}{% if source.url %}: {{ source.url }}{% endif %}{% if source.excerpt %} — {{ source.excerpt }}{% endif %}{{ '\n' }}
+{% endfor %}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if paths %}
 Paths:
-{% for item in paths %}- {{ item.reference }}{% if item.description %}: {{ item.description }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}
+{% for item in paths %}- {{ item.reference }}{% if item.description %}: {{ item.description }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if messages %}
 Messages:
-{% for item in messages %}- {{ item.reference }}{% if item.content %}: {{ item.content }}{% endif %}{% endfor %}
+{% for item in messages %}- {{ item.reference }}{% if item.content %}: {{ item.content }}{% endif %}{{ '\n' }}{% endfor %}
 {% endif %}{% if documents %}
 Documents:
 {% for item in documents %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.content %}: {{ item.content }}{% endif %}
-{% endfor %}{% endif %}{% if web_discoveries %}
-Web discoveries:
-{% for item in web_discoveries %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.snippet %} — {{ item.snippet }}{% endif %}
+{{ '\n' }}{% endfor %}{% endif %}{% if web_discoveries %}
+Web discoveries (not read):
+{% for item in web_discoveries %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.snippet %} — discovery snippet: {{ item.snippet }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if web_reads %}
 Web reads:
-{% for item in web_reads %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.content %} — {{ item.content }}{% endif %}
+{% for item in web_reads %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.content %} — read passage: {{ item.content }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if actions %}
 Actions:
-{% for item in actions %}- {{ item.reference }} {{ item.tool }}{% if item.result %}: {{ item.result }}{% endif %}
+{% for item in actions %}- {{ item.reference }} {{ item.tool }}{% if item.result %}: {{ item.result }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if possible_next_steps %}
 Possible next steps:
-{% for item in possible_next_steps %}- [{{ item.audience }}] {{ item.tool }}{% if item.arguments %} {{ item.arguments }}{% endif %}{% if item.reason %} — {{ item.reason }}{% elif item.when %} — {{ item.when }}{% endif %}
+{% for item in possible_next_steps %}- [{{ item.audience }}] {{ item.tool }}{% if item.arguments %} {{ item.arguments }}{% endif %}{% if item.reason %} — {{ item.reason }}{% elif item.when %} — {{ item.when }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}"""
 
 
@@ -100,14 +113,24 @@ def notebook_environment() -> Environment:
 
 
 class _ReferenceLocalizer:
-    def __init__(self, snapshot: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        snapshot: dict[str, Any],
+        *,
+        local_uuid_references: Mapping[str, str] | None = None,
+    ) -> None:
         self._handles: dict[str, str] = {}
         counters: dict[str, int] = {}
+        episode_handles = self._episode_handles(snapshot, local_uuid_references)
         for section, records in self._record_sections(snapshot):
             prefix = _REFERENCE_PREFIXES[section]
             for reference in records:
-                counters[prefix] = counters.get(prefix, 0) + 1
-                self._handles[reference] = f"{prefix}{counters[prefix]}"
+                if section == "episodes":
+                    episode_id = reference.removeprefix("episode:")
+                    self._handles[reference] = episode_handles[episode_id]
+                else:
+                    counters[prefix] = counters.get(prefix, 0) + 1
+                    self._handles[reference] = f"{prefix}{counters[prefix]}"
 
         for reference in snapshot.get("entity_pages", {}):
             if reference not in self._handles:
@@ -132,6 +155,26 @@ class _ReferenceLocalizer:
         yield "web_reads", web.get("reads", {})
 
     @staticmethod
+    def _episode_handles(
+        snapshot: dict[str, Any],
+        local_uuid_references: Mapping[str, str] | None,
+    ) -> dict[str, str]:
+        episode_ids = [
+            reference.removeprefix("episode:")
+            for reference in snapshot.get("knowledge", {}).get("episodes", {})
+        ]
+        fallback = register_short_uuid_references(episode_ids, "ep", {})
+        known_handles = {
+            str(actual_id): str(handle)
+            for handle, actual_id in (local_uuid_references or {}).items()
+            if isinstance(handle, str) and handle.startswith("ep_")
+        }
+        return {
+            episode_id: known_handles.get(episode_id, fallback[episode_id])
+            for episode_id in episode_ids
+        }
+
+    @staticmethod
     def _new_handle(prefix: str, counters: dict[str, int]) -> str:
         counters[prefix] = counters.get(prefix, 0) + 1
         return f"{prefix}{counters[prefix]}"
@@ -146,16 +189,8 @@ class _ReferenceLocalizer:
                 return display_prefix
         return str(value)
 
-    def identifier(self, key: str, value: object) -> object:
-        if key == "entity_id":
-            return self.reference(f"entity:{value}")
-        if key == "relationship_id":
-            return self.reference(f"relationship:{value}")
-        if key == "episode_id":
-            return self.reference(f"episode:{value}")
-        if key == "document_id":
-            return self.reference(f"document:{value}:0")
-        return value
+    def known_reference(self, value: str) -> str | None:
+        return self._handles.get(value)
 
 
 def _safe_text(value: object, *, limit: int = 320) -> str:
@@ -163,6 +198,75 @@ def _safe_text(value: object, *, limit: int = 320) -> str:
         return ""
     text = str(value).strip()
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _bounded_text_items(
+    value: object,
+    *,
+    max_items: int = 3,
+    item_limit: int = 160,
+) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [
+        _safe_text(item, limit=item_limit)
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ][:max_items]
+
+
+def _episode_chronology(item: dict[str, Any]) -> str:
+    first = _safe_text(item.get("first_message_at"), limit=80)
+    last = _safe_text(item.get("last_message_at"), limit=80)
+    if first and last:
+        return first if first == last else f"{first} to {last}"
+    return first or last
+
+
+def _historical_episode_support(item: dict[str, Any]) -> list[dict[str, str]]:
+    sources = item.get("sources_consulted", [])
+    if not isinstance(sources, list):
+        return []
+    support = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        kind = _safe_text(source.get("source_kind") or "source", limit=64).replace(
+            "_", " "
+        )
+        status = _safe_text(source.get("source_status") or "unknown", limit=64).replace(
+            "_", " "
+        )
+        support.append(
+            {
+                "label": f"{kind} ({status})",
+                "url": _safe_text(source.get("canonical_url") or "", limit=200),
+                "excerpt": _safe_text(source.get("excerpt") or "", limit=160),
+            }
+        )
+        if len(support) == 3:
+            break
+    return support
+
+
+def _entity_display_reference(
+    localizer: _ReferenceLocalizer,
+    identifier: object,
+) -> str:
+    if identifier is None:
+        return "?"
+    reference = f"entity:{identifier}"
+    return localizer.known_reference(reference) or _safe_text(identifier, limit=100)
+
+
+def _path_description(item: dict[str, Any], localizer: _ReferenceLocalizer) -> str:
+    source = item.get("entity_a", item.get("source_entity_id", item.get("source")))
+    target = item.get("entity_b", item.get("target_entity_id", item.get("target")))
+    if source is not None and target is not None:
+        return f"{_entity_display_reference(localizer, source)} -> {_entity_display_reference(localizer, target)}"
+    return _safe_text(
+        item.get("description") or item.get("path") or item.get("step") or ""
+    )
 
 
 def _localize_arguments(value: Any, localizer: _ReferenceLocalizer, key: str = ""):
@@ -176,7 +280,7 @@ def _localize_arguments(value: Any, localizer: _ReferenceLocalizer, key: str = "
             return [localizer.reference(item) for item in value]
         return [_localize_arguments(item, localizer, key) for item in value]
     if key == "entity_id" and value is not None:
-        return localizer.reference(f"entity:{value}")
+        return value
     if key == "relationship_id" and value is not None:
         return localizer.reference(f"relationship:{value}")
     if key == "episode_id" and value is not None:
@@ -186,9 +290,7 @@ def _localize_arguments(value: Any, localizer: _ReferenceLocalizer, key: str = "
     return value
 
 
-def _public_details(
-    record: dict[str, Any], localizer: _ReferenceLocalizer
-) -> str:
+def _public_details(record: dict[str, Any], localizer: _ReferenceLocalizer) -> str:
     details = []
     for key, value in record.items():
         if (
@@ -227,8 +329,8 @@ def _record_list(
         elif section == "relationships":
             source = item.get("source_entity_id", item.get("source"))
             target = item.get("target_entity_id", item.get("target"))
-            source_ref = localizer.reference(f"entity:{source}") if source is not None else "?"
-            target_ref = localizer.reference(f"entity:{target}") if target is not None else "?"
+            source_ref = _entity_display_reference(localizer, source)
+            target_ref = _entity_display_reference(localizer, target)
             item["endpoints"] = f"{source_ref} -> {target_ref}"
             item["label"] = _safe_text(
                 item.get("observed_relationship_label")
@@ -236,17 +338,25 @@ def _record_list(
                 or item.get("label")
                 or ""
             )
+            item["context"] = _safe_text(item.get("context") or "")
         elif section == "episodes":
             item["summary"] = _safe_text(item.get("summary") or "")
+            item["chronology"] = _episode_chronology(item)
+            item["developments"] = _bounded_text_items(item.get("new_developments"))
+            item["updates"] = _bounded_text_items(item.get("updates"))
+            item["unresolved"] = _bounded_text_items(item.get("unresolved"))
+            item["support"] = _historical_episode_support(item)
         elif section == "paths":
-            item["description"] = _safe_text(
-                item.get("description")
-                or item.get("path")
-                or item.get("step")
-                or ""
-            )
+            item["description"] = _path_description(item, localizer)
         elif section in {"messages", "documents"}:
-            item["content"] = _safe_text(item.get("message") or item.get("content") or "")
+            content = item.get("message") or item.get("content") or ""
+            if not content and isinstance(item.get("context"), list):
+                content = " ".join(
+                    str(context.get("content", ""))
+                    for context in item["context"]
+                    if isinstance(context, dict) and context.get("content")
+                )
+            item["content"] = _safe_text(content)
             item["name"] = _safe_text(
                 item.get("document_name") or item.get("original_name") or ""
             )
@@ -259,9 +369,16 @@ def _record_list(
     return values
 
 
-def _render_context(notebook: RunNotebook) -> dict[str, Any]:
+def _render_context(
+    notebook: RunNotebook,
+    *,
+    local_uuid_references: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     snapshot = notebook.as_dict()
-    localizer = _ReferenceLocalizer(snapshot)
+    localizer = _ReferenceLocalizer(
+        snapshot,
+        local_uuid_references=local_uuid_references,
+    )
     knowledge = snapshot["knowledge"]
     evidence = snapshot["evidence"]
     web = evidence["web"]
@@ -272,8 +389,12 @@ def _render_context(notebook: RunNotebook) -> dict[str, Any]:
         entity_pages.append(
             {
                 "reference": localizer.reference(reference),
-                "name": _safe_text(entity.get("canonical_name") or entity.get("name") or ""),
-                "relationships": [localizer.reference(ref) for ref in page["relationship_refs"]],
+                "name": _safe_text(
+                    entity.get("canonical_name") or entity.get("name") or ""
+                ),
+                "relationships": [
+                    localizer.reference(ref) for ref in page["relationship_refs"]
+                ],
                 "episodes": [localizer.reference(ref) for ref in page["episode_refs"]],
                 "evidence": [localizer.reference(ref) for ref in page["evidence_refs"]],
             }
@@ -301,16 +422,25 @@ def _render_context(notebook: RunNotebook) -> dict[str, Any]:
     return {
         "summary": {
             "text": _safe_text(snapshot["summary"].get("text") or ""),
-            "references": [localizer.reference(ref) for ref in snapshot["summary"].get("references", [])],
+            "references": [
+                localizer.reference(ref)
+                for ref in snapshot["summary"].get("references", [])
+            ],
         },
         "entity_pages": entity_pages,
         "entities": _record_list(knowledge["entities"], localizer, section="entities"),
-        "relationships": _record_list(knowledge["relationships"], localizer, section="relationships"),
+        "relationships": _record_list(
+            knowledge["relationships"], localizer, section="relationships"
+        ),
         "episodes": _record_list(knowledge["episodes"], localizer, section="episodes"),
         "paths": _record_list(knowledge["paths"], localizer, section="paths"),
         "messages": _record_list(evidence["messages"], localizer, section="messages"),
-        "documents": _record_list(evidence["documents"], localizer, section="documents"),
-        "web_discoveries": _record_list(web["discoveries"], localizer, section="web_discoveries"),
+        "documents": _record_list(
+            evidence["documents"], localizer, section="documents"
+        ),
+        "web_discoveries": _record_list(
+            web["discoveries"], localizer, section="web_discoveries"
+        ),
         "web_reads": _record_list(web["reads"], localizer, section="web_reads"),
         "actions": actions,
         "possible_next_steps": possible_next_steps,
@@ -320,6 +450,7 @@ def _render_context(notebook: RunNotebook) -> dict[str, Any]:
 def render_notebook(
     notebook: RunNotebook,
     *,
+    local_uuid_references: Mapping[str, str] | None = None,
     template: str = NOTEBOOK_TEMPLATE,
     environment_factory: Callable[[], Environment] = notebook_environment,
 ) -> str:
@@ -328,7 +459,16 @@ def render_notebook(
     if not isinstance(notebook, RunNotebook):
         raise TypeError("render_notebook expects a RunNotebook")
     environment = environment_factory()
-    return environment.from_string(template).render(**_render_context(notebook)).strip()
+    return (
+        environment.from_string(template)
+        .render(
+            **_render_context(
+                notebook,
+                local_uuid_references=local_uuid_references,
+            )
+        )
+        .strip()
+    )
 
 
 __all__ = [

@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.evidence import EvidenceBundle
-from core.agent.formatters import format_graph_results, format_path_results
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 
@@ -69,7 +68,9 @@ async def test_recent_activity_uses_stable_id_and_message_evidence():
             ]
 
     store = Store()
-    result = await _retrieval(store).get_recent_activity(2, session_id="session-1", hours=0)
+    result = await _retrieval(store).get_recent_activity(
+        2, session_id="session-1", hours=0
+    )
 
     assert store.calls == [
         (
@@ -160,7 +161,9 @@ async def test_path_returns_canonical_direction_and_project_attribution():
                 }
             ]
 
-        async def get_relationship_observations_evidence(self, observation_ids, **kwargs):
+        async def get_relationship_observations_evidence(
+            self, observation_ids, **kwargs
+        ):
             self.evidence_calls.append((observation_ids, kwargs))
             return (_observation_bundle(17), _missing_observation_bundle(18))
 
@@ -288,40 +291,3 @@ def _missing_observation_bundle(observation_id: int) -> EvidenceBundle:
             "state_token": "b" * 64,
         }
     )
-
-
-@pytest.mark.no_network
-def test_graph_result_format_states_that_relationships_are_observed_evidence():
-    result = format_graph_results(
-        [
-            {
-                "source": "Ade",
-                "target": "Acme",
-                "observed_relationship_label": "works at",
-                "evidence_message_count": 2,
-                "observation_count": 3,
-                "first_observed": 100,
-                "last_observed": 200,
-            }
-        ]
-    )
-
-    assert "Observed: Ade --works at--> Acme" in result
-    assert "not a current-state claim" in result
-    assert "2 messages, 3 observations" in result
-
-
-@pytest.mark.no_network
-def test_path_formatter_does_not_render_structured_observation_support_as_message_text():
-    rendered = format_path_results(
-        [
-            {
-                "step": 0,
-                "entity_a": "Ade",
-                "entity_b": "Acme",
-                "evidence": [_observation_bundle(17).model_dump(mode="json")],
-            }
-        ]
-    )
-
-    assert '"" [unknown]' not in rendered

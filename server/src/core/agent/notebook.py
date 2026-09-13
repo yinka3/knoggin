@@ -80,9 +80,7 @@ class NotebookCapacity:
             ),
             max_web_reads=_positive_limit(limits, "max_accumulated_web_reads", 12),
             max_actions=_positive_limit(limits, "max_accumulated_actions", 12),
-            max_next_steps=_positive_limit(
-                limits, "max_accumulated_next_steps", 12
-            ),
+            max_next_steps=_positive_limit(limits, "max_accumulated_next_steps", 12),
             max_summary_chars=_positive_limit(
                 limits, "max_accumulated_summary_chars", 4000
             ),
@@ -205,9 +203,7 @@ class RunNotebook:
         self._token_counter = token_counter
 
     def _counts(self) -> dict[str, int]:
-        return {
-            section: len(self._orders[section]) for section in _ALL_SECTIONS
-        } | {
+        return {section: len(self._orders[section]) for section in _ALL_SECTIONS} | {
             "actions": len(self._actions),
             "possible_next_steps": len(self.possible_next_steps),
         }
@@ -237,10 +233,7 @@ class RunNotebook:
     def _fits_capacity(self) -> bool:
         counts = self._counts()
         return (
-            all(
-                counts[key] <= limit
-                for key, limit in self._capacity_limits().items()
-            )
+            all(counts[key] <= limit for key, limit in self._capacity_limits().items())
             and len(self.summary.text or "") <= self.capacity.max_summary_chars
             and self._render_token_count() <= self.capacity.max_render_tokens
         )
@@ -252,12 +245,23 @@ class RunNotebook:
             "render_tokens": self.capacity.max_render_tokens,
         }
         token_count = self._render_token_count()
-        pressured = any(
-            counts[key] >= max(1, int(limit * 0.8))
-            for key, limit in limits.items()
-            if key in counts
-        ) or len(self.summary.text or "") >= int(self.capacity.max_summary_chars * 0.8) or token_count >= int(self.capacity.max_render_tokens * 0.8)
-        status = "FULL" if not self._fits_capacity() else "PRESSURED" if pressured else "OPEN"
+        pressured = (
+            any(
+                counts[key] >= max(1, int(limit * 0.8))
+                for key, limit in limits.items()
+                if key in counts
+            )
+            or len(self.summary.text or "")
+            >= int(self.capacity.max_summary_chars * 0.8)
+            or token_count >= int(self.capacity.max_render_tokens * 0.8)
+        )
+        status = (
+            "FULL"
+            if not self._fits_capacity()
+            else "PRESSURED"
+            if pressured
+            else "OPEN"
+        )
         return {
             "status": status,
             "generation": self.generation,
@@ -278,12 +282,18 @@ class RunNotebook:
         return self._reference_for_section(section, item)
 
     def is_last_applied(self, section: str, item: dict[str, Any]) -> bool:
-        return self._reference_for_section(section, item) in self._last_applied_references
+        return (
+            self._reference_for_section(section, item) in self._last_applied_references
+        )
 
     def _reference_for_section(self, section: str, item: dict[str, Any]) -> str:
         if section == "entities":
             identifier = item.get("entity_id", item.get("id"))
-            return f"entity:{identifier}" if identifier is not None else self._hash_ref(section, item)
+            return (
+                f"entity:{identifier}"
+                if identifier is not None
+                else self._hash_ref(section, item)
+            )
         if section == "relationships":
             identifier = item.get("relationship_id")
             if identifier is not None:
@@ -305,7 +315,11 @@ class RunNotebook:
             )
         if section == "episodes":
             identifier = item.get("episode_id", item.get("id"))
-            return f"episode:{identifier}" if identifier is not None else self._hash_ref(section, item)
+            return (
+                f"episode:{identifier}"
+                if identifier is not None
+                else self._hash_ref(section, item)
+            )
         if section == "paths":
             identifier = item.get("path_id")
             if identifier is not None:
@@ -485,7 +499,17 @@ class RunNotebook:
                     value[key] = group[key]
         self._admit_evidence(value)
         ref = self._upsert("episodes", value)
-        for entity in value.get("entities", []) if isinstance(value.get("entities"), list) else []:
+        episode_id = value.get("episode_id", value.get("id"))
+        if isinstance(episode_id, (str, int)) and str(episode_id).strip():
+            self._add_system_hint(
+                "read_episode",
+                {"episode_id": episode_id},
+                "when message-level detail is needed",
+                [ref],
+            )
+        for entity in (
+            value.get("entities", []) if isinstance(value.get("entities"), list) else []
+        ):
             if not isinstance(entity, dict):
                 continue
             entity_ref = self._link_entity(entity.get("entity_id", entity.get("id")))
@@ -573,7 +597,9 @@ class RunNotebook:
             raise ValueError("notebook next-step guidance exceeds capacity")
         return hint
 
-    def set_summary(self, text: str | None, references: list[str] | tuple[str, ...] = ()) -> None:
+    def set_summary(
+        self, text: str | None, references: list[str] | tuple[str, ...] = ()
+    ) -> None:
         if text is not None and (not isinstance(text, str) or not text.strip()):
             raise ValueError("notebook summary must be non-blank when provided")
         previous_summary = self.summary
@@ -661,7 +687,9 @@ class RunNotebook:
                     "context": [
                         {
                             "role": "document",
-                            "timestamp": document.get("document_name", "uploaded document"),
+                            "timestamp": document.get(
+                                "document_name", "uploaded document"
+                            ),
                             "content": content,
                             "is_hit": True,
                         }
@@ -689,7 +717,9 @@ class RunNotebook:
             "summary": self.summary.as_dict(),
         }
 
-    def _apply_unchecked(self, tool_name: str, result: dict[str, Any]) -> NotebookApplyResult:
+    def _apply_unchecked(
+        self, tool_name: str, result: dict[str, Any]
+    ) -> NotebookApplyResult:
         """Normalize one result without evaluating capacity.
 
         Callers should use :meth:`apply`; this unchecked form exists so an
@@ -980,7 +1010,9 @@ class RunNotebook:
         else:
             identifiers = ()
         dependencies.update(
-            f"entity:{identifier}" for identifier in identifiers if identifier is not None
+            f"entity:{identifier}"
+            for identifier in identifiers
+            if identifier is not None
         )
         return dependencies
 
@@ -993,13 +1025,13 @@ class RunNotebook:
             ref for ref in (active_references or ()) if self._known_reference(ref)
         ]
         roots.extend(
-            ref
-            for ref in self._last_applied_references
-            if self._known_reference(ref)
+            ref for ref in self._last_applied_references if self._known_reference(ref)
         )
         for _, references in self._contribution_history[-recent_contributions:]:
             roots.extend(references)
-        roots.extend(ref for ref in self.summary.references if self._known_reference(ref))
+        roots.extend(
+            ref for ref in self.summary.references if self._known_reference(ref)
+        )
 
         retained = {ref for ref in roots if self._known_reference(ref)}
         for hint in self.possible_next_steps:
@@ -1021,7 +1053,10 @@ class RunNotebook:
                     if not item:
                         continue
                     for dependency in self._dependency_references(section, item):
-                        if self._known_reference(dependency) and dependency not in retained:
+                        if (
+                            self._known_reference(dependency)
+                            and dependency not in retained
+                        ):
                             retained.add(dependency)
                             changed = True
         return retained
@@ -1033,14 +1068,10 @@ class RunNotebook:
             limit = limits[section]
             ordered = [ref for ref in self._orders[section] if ref in retained]
             bounded.update(ordered[-limit:])
-        page_entities = [
-            ref for ref in self._entity_pages if ref in retained
-        ]
+        page_entities = [ref for ref in self._entity_pages if ref in retained]
         bounded.update(page_entities[-self.capacity.max_entities :])
         bounded.update(
-            ref
-            for ref in list(retained)
-            if self._ref_section(ref) == "action"
+            ref for ref in list(retained) if self._ref_section(ref) == "action"
         )
         actions = [ref for ref in self._actions if ref in bounded]
         bounded.difference_update(
@@ -1099,14 +1130,27 @@ class RunNotebook:
             for reference in self._orders[section]:
                 item = self._records[section][reference]
                 for entity_ref in self._dependency_references(section, item):
-                    if entity_ref.startswith("entity:") and entity_ref in self._entity_pages:
+                    if (
+                        entity_ref.startswith("entity:")
+                        and entity_ref in self._entity_pages
+                    ):
                         page = self._entity_pages[entity_ref]
-                        key = "relationship_refs" if section == "relationships" else "episode_refs"
+                        key = (
+                            "relationship_refs"
+                            if section == "relationships"
+                            else "episode_refs"
+                        )
                         page[key].append(reference)
                 for evidence_ref in item.get("evidence_refs", []):
-                    if isinstance(evidence_ref, str) and evidence_ref in self._records["messages"]:
+                    if (
+                        isinstance(evidence_ref, str)
+                        and evidence_ref in self._records["messages"]
+                    ):
                         for page in self._entity_pages.values():
-                            if reference in page["relationship_refs"] + page["episode_refs"]:
+                            if (
+                                reference
+                                in page["relationship_refs"] + page["episode_refs"]
+                            ):
                                 if evidence_ref not in page["evidence_refs"]:
                                     page["evidence_refs"].append(evidence_ref)
 
@@ -1124,9 +1168,7 @@ class RunNotebook:
         )
         if summary is not None and not summary_references:
             summary_references = tuple(
-                ref
-                for section in _ALL_SECTIONS
-                for ref in self._orders[section]
+                ref for section in _ALL_SECTIONS for ref in self._orders[section]
             )[: self.capacity.max_next_steps]
         if summary is None:
             summary = (
@@ -1137,25 +1179,24 @@ class RunNotebook:
                 f"{sum(len(self._orders[name]) for name in _EVIDENCE_SECTIONS)} evidence objects."
             )
             summary_references = tuple(
-                ref
-                for section in _ALL_SECTIONS
-                for ref in self._orders[section]
+                ref for section in _ALL_SECTIONS for ref in self._orders[section]
             )[: self.capacity.max_next_steps]
         self.generation += 1
         normalized_summary = " ".join(summary.split()) if summary else None
-        if normalized_summary and len(normalized_summary) > self.capacity.max_summary_chars:
-            normalized_summary = normalized_summary[: self.capacity.max_summary_chars - 1] + "…"
+        if (
+            normalized_summary
+            and len(normalized_summary) > self.capacity.max_summary_chars
+        ):
+            normalized_summary = (
+                normalized_summary[: self.capacity.max_summary_chars - 1] + "…"
+            )
         self.set_summary(normalized_summary, summary_references)
         self._contribution_history = [("rollover", tuple(retained))]
         self._last_applied_references = ()
         self._last_apply_result = NotebookApplyResult(False)
         return NotebookRolloverResult(
             self.generation,
-            tuple(
-                ref
-                for section in _ALL_SECTIONS
-                for ref in self._orders[section]
-            ),
+            tuple(ref for section in _ALL_SECTIONS for ref in self._orders[section]),
             tuple(self.summary.references),
         )
 
@@ -1205,7 +1246,9 @@ class RunNotebook:
         )
 
     def fingerprint(self) -> str:
-        return json.dumps(self.as_dict(), sort_keys=True, default=str, separators=(",", ":"))
+        return json.dumps(
+            self.as_dict(), sort_keys=True, default=str, separators=(",", ":")
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {

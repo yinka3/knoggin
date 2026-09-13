@@ -106,7 +106,7 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "The profile changed."}',
+                    '{"content": "Both facts are retained."}',
                     "submit-1",
                 ),
                 completed_event(),
@@ -114,7 +114,7 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "The profile changed."}',
+                    '{"content": "Both facts are retained."}',
                     "submit-2",
                 ),
                 completed_event(),
@@ -128,17 +128,29 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
         if name == "search_messages":
             return {
                 "data": [
-                    {"id": "message-1", "message": "Profile changed", "score": 0.9}
+                    {
+                        "id": "message-1",
+                        "message": "LAUNCH_FACT_VIOLET",
+                        "score": 0.9,
+                    }
                 ]
             }
-        return {"data": [{"source": "Knoggin", "target": "Profile"}]}
+        return {
+            "data": [
+                {
+                    "source": "Knoggin",
+                    "target": "Profile",
+                    "observed_relationship_label": "OWNER_FACT_ADA",
+                }
+            ]
+        }
 
     monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
 
     events = [event async for event in executor._execute_run()]
 
     assert events[-1]["event"] == "response"
-    assert events[-1]["data"]["content"] == "The profile changed."
+    assert events[-1]["data"]["content"] == "Both facts are retained."
     assert len(llm.calls) == 4
     assert [call["model"] for call in llm.calls] == [
         "architect",
@@ -159,13 +171,25 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
         "request_clarification",
         "submit_answer",
     ]
+    assert "LAUNCH_FACT_VIOLET" in llm.calls[-1]["user"]
+    assert "OWNER_FACT_ADA" in llm.calls[-1]["user"]
+    assert (
+        "Relationships:\n- R1 Knoggin -> Profile: OWNER_FACT_ADA\n"
+        in llm.calls[-1]["user"]
+    )
+    assert "Messages:\n- M1: LAUNCH_FACT_VIOLET" in llm.calls[-1]["user"]
+    assert "observed evidence, not a current-state claim" in llm.calls[-1]["user"]
     assert run.attempt_count == 4
     assert run.call_count == 2
     assert run.notebook.section_items("messages") == (
-        {"id": "message-1", "message": "Profile changed", "score": 0.9},
+        {"id": "message-1", "message": "LAUNCH_FACT_VIOLET", "score": 0.9},
     )
     assert run.notebook.section_items("relationships") == (
-        {"source": "Knoggin", "target": "Profile"},
+        {
+            "source": "Knoggin",
+            "target": "Profile",
+            "observed_relationship_label": "OWNER_FACT_ADA",
+        },
     )
     assert run.usage["total_tokens"] == 20
     assert run.sealed is True
@@ -177,9 +201,22 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
 async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
     llm = ScriptedLLM(
         [
-            [tool_call_event("search_messages", '{"query": "missing"}', "search-1"), completed_event()],
-            [tool_call_event("submit_answer", '{"content": "Still looking."}', "submit-1"), completed_event()],
-            [tool_call_event("submit_answer", '{"content": "No matching evidence."}', "submit-2"), completed_event()],
+            [
+                tool_call_event("search_messages", '{"query": "missing"}', "search-1"),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer", '{"content": "Still looking."}', "submit-1"
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer", '{"content": "No matching evidence."}', "submit-2"
+                ),
+                completed_event(),
+            ],
         ]
     )
     run = make_run(
@@ -240,9 +277,7 @@ async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
 
     async def evidence_result(*_args):
         return {
-            "data": [
-                {"id": "message-1", "message": "Profile changed", "score": 0.9}
-            ]
+            "data": [{"id": "message-1", "message": "Profile changed", "score": 0.9}]
         }
 
     monkeypatch.setattr("core.agent.executor.execute_tool", evidence_result)
@@ -319,9 +354,7 @@ async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
     messages = run.notebook.model_view()["messages"]
     assert messages[0]["id"] == "msg_7"
-    assert messages[0]["context"][0]["content"] == (
-        "The offer changes compensation."
-    )
+    assert messages[0]["context"][0]["content"] == ("The offer changes compensation.")
 
 
 @pytest.mark.no_network
@@ -379,9 +412,7 @@ async def test_fallback_summary_uses_all_canonical_evidence_categories():
                 "results": [
                     {
                         "entity_name": "Ada",
-                        "episodes": [
-                            {"episode_id": "ep-1", "summary": "Found clue"}
-                        ],
+                        "episodes": [{"episode_id": "ep-1", "summary": "Found clue"}],
                     }
                 ],
             }
@@ -419,10 +450,12 @@ async def test_fallback_summary_uses_all_canonical_evidence_categories():
     assert event["data"]["content"] == "Fallback answer."
     assert prompts
     prompt = prompts[0]
-    assert "Core Evidence Summary" in prompt
-    assert "Episode Check" in prompt
-    assert "Path: Ada -> Knoggin" in prompt
+    assert "RUN NOTEBOOK" in prompt
+    assert "Summary: Previously compacted evidence." in prompt
+    assert "Found clue" in prompt
+    assert "Ada -> Knoggin" in prompt
     assert "Useful source" in prompt
+    assert "discovery snippet: Useful evidence." in prompt
 
 
 @pytest.mark.no_network
@@ -447,9 +480,8 @@ async def test_compaction_token_count_matches_post_compaction_context(monkeypatc
 
     await executor._manage_context_size()
 
-    assert run.evidence_token_count == llm.count_tokens(
-        build_evidence_context(run)
-    )
+    assert build_evidence_context(run) == run.notebook.render()
+    assert run.evidence_token_count == llm.count_tokens(build_evidence_context(run))
 
 
 @pytest.mark.no_network

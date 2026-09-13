@@ -4,8 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from common.utils.time_utils import frozen_time
-from core.agent.prompt_context import build_user_message
+from core.agent.prompt_context import build_evidence_context, build_user_message
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
+from core.agent.tool_references import localize_agent_tool_result
 from core.agent.tool_runtime import summarize_result
 
 
@@ -99,8 +100,10 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert "`search_messages`: Error - boom" in message
     assert "[HOT: Identity]" in message
     assert "Ada: prefers scoped profile updates" in message
-    assert "Previously retrieved entities: Grace" in message
-    assert "**New entity results:**" in message
+    assert "**Accumulated context:**" in message
+    assert "RUN NOTEBOOK" in message
+    assert "E1 Grace" in message
+    assert "E2 Ada" in message
 
 
 @pytest.mark.no_network
@@ -162,11 +165,71 @@ def test_topic_context_tool_accumulates_messages_as_evidence():
 def test_topic_context_without_messages_does_not_count_as_new_evidence():
     ctx = make_ctx()
 
-    assert ctx.accumulate_tool_result(
-        "load_topic_context",
-        {"data": {"Work": {"entities": [{"name": "Acme"}], "messages": []}}},
-    ) is False
+    assert (
+        ctx.accumulate_tool_result(
+            "load_topic_context",
+            {"data": {"Work": {"entities": [{"name": "Acme"}], "messages": []}}},
+        )
+        is False
+    )
     assert ctx.new_evidence_gathered is False
+
+
+@pytest.mark.no_network
+def test_build_user_message_renders_an_episode_with_its_usable_local_handle():
+    ctx = make_ctx()
+    episode_id = "a3f91c84-1111-4444-8888-111111111111"
+    result = {
+        "data": {
+            "resolution": "exact",
+            "results": [
+                {
+                    "entity_name": "Ada",
+                    "episodes": [
+                        {
+                            "episode_id": episode_id,
+                            "summary": "The durable launch phrase is violet.",
+                            "first_message_at": "2026-01-01T10:00:00+00:00",
+                            "last_message_at": "2026-01-02T11:00:00+00:00",
+                            "unresolved": ["Confirm the production launch date."],
+                            "sources_consulted": [
+                                {
+                                    "source_kind": "web_search_result",
+                                    "source_status": "search_result_snippet",
+                                    "canonical_url": "https://example.test/launch",
+                                    "excerpt": "The launch phrase is violet.",
+                                    "contributing_message_id": 7,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    assert ctx.accumulate_tool_result("episode_check", result) is True
+    model_result = localize_agent_tool_result(ctx, "episode_check", result)
+
+    message = build_user_message(
+        ctx,
+        last_result={"tool": "episode_check", "result": model_result},
+    )
+
+    assert "ep_a3f91c: The durable launch phrase is violet." in message
+    assert (
+        "chronology: 2026-01-01T10:00:00+00:00 to 2026-01-02T11:00:00+00:00" in message
+    )
+    assert "unresolved: Confirm the production launch date." in message
+    assert "historical support:" in message
+    assert "web search result (search result snippet)" in message
+    assert "The launch phrase is violet." in message
+    assert "\nPossible next steps:\n- [system] read_episode" in message
+    assert '"episode_id": "ep_a3f91c"' in message
+    assert episode_id not in message
+    assert "contributing_message_id" not in message
+    assert build_evidence_context(ctx) in message
+    assert build_evidence_context(ctx) == ctx.notebook.render()
 
 
 @pytest.mark.no_network
@@ -203,13 +266,12 @@ def test_build_user_message_renders_discovered_sources_for_next_step():
         ],
     )
 
-    assert "**New web sources (discovery only):**" in message
-    assert "Title: Profile behavior release notes" in message
-    assert "Provider: brave" in message
-    assert "Query: profile behavior changes" in message
-    assert "URL: https://example.test/release-notes" in message
-    assert "Snippet (discovery only): The release changed profile behavior." in message
-    assert "--- News search discovery result #2 ---" in message
+    assert "Web discoveries (not read):" in message
+    assert "Profile behavior release notes" in message
+    assert "https://example.test/release-notes" in message
+    assert "discovery snippet: The release changed profile behavior." in message
+    assert "Profile behavior news" in message
+    assert "discovery snippet: A news report describes the change." in message
 
 
 @pytest.mark.no_network
@@ -237,10 +299,10 @@ def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
         },
     )
 
-    assert "**Previously discovered web sources:**" in message
+    assert "Web discoveries (not read):" in message
     assert "Useful source" in message
     assert "https://example.test/source" in message
-    assert "The source contains useful context." not in message
+    assert "discovery snippet: The source contains useful context." in message
 
 
 @pytest.mark.no_network
@@ -287,7 +349,9 @@ def test_rollover_evidence_preserves_sources_and_summary_references():
         f"Source {index}" for index in range(6)
     ]
     assert ctx.notebook.summary.references
-    assert all(ctx.notebook._known_reference(ref) for ref in ctx.notebook.summary.references)
+    assert all(
+        ctx.notebook._known_reference(ref) for ref in ctx.notebook.summary.references
+    )
 
 
 @pytest.mark.no_network
@@ -324,22 +388,18 @@ def test_read_web_page_ranges_remain_distinct_and_visible_after_later_tool_calls
         },
     )
 
-    assert "**Previously read web content:**" in later_message
-    assert "Webpage read lines 1-1" in later_message
-    assert "Webpage read lines 2-2" in later_message
-    assert "First observed range." not in later_message
-    assert "Second observed range." not in later_message
+    assert "Web reads:" in later_message
+    assert "First observed range." in later_message
+    assert "Second observed range." in later_message
 
     current_message = build_user_message(
         ctx,
         last_result={"tool": "read_web_page", "result": {"data": [second_range]}},
     )
 
-    assert "**Web content actually read:**" in current_message
-    assert "Content (untrusted external evidence):" in current_message
+    assert "Web reads:" in current_message
+    assert "First observed range." in current_message
     assert "Second observed range." in current_message
-    assert "**Previously read web content:**" in current_message
-    assert "First observed range." not in current_message
 
 
 @pytest.mark.no_network
@@ -362,10 +422,11 @@ def test_read_external_pdf_page_is_rendered_as_read_content_not_discovery():
         last_result={"tool": "read_web_page", "result": {"data": [pdf_page]}},
     )
 
-    assert "**Web content actually read:**" in message
-    assert "External PDF read page 2 lines 1-1" in message
+    assert "Web reads:" in message
+    assert "External report" in message
+    assert "https://example.test/report.pdf" in message
     assert "The observed PDF page passage." in message
-    assert "discovery only" not in message
+    assert "Web discoveries (not read):" not in message
 
 
 @pytest.mark.no_network
@@ -390,8 +451,7 @@ def test_build_user_message_includes_absolute_and_elapsed_last_turn_time():
         message = build_user_message(ctx)
 
     assert (
-        "**Last successful turn:** "
-        "2026-08-24T15:30:00+00:00 (2h 35m ago)"
+        "**Last successful turn:** 2026-08-24T15:30:00+00:00 (2h 35m ago)"
     ) in message
 
 
@@ -478,11 +538,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         "data": {
             "resolution": "exact",
             "results": [
-                {
-                    "episodes": [
-                        {"episode_id": "ep-1", "summary": "Profile changed"}
-                    ]
-                }
+                {"episodes": [{"episode_id": "ep-1", "summary": "Profile changed"}]}
             ],
         }
     }
@@ -612,9 +668,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
 
 @pytest.mark.no_network
 def test_notebook_rejects_oversized_buckets_atomically():
-    ctx = make_ctx(
-        limits=AgentRunLimits(max_accumulated_profiles=2)
-    )
+    ctx = make_ctx(limits=AgentRunLimits(max_accumulated_profiles=2))
     ctx.accumulate_tool_result(
         "search_entity",
         {

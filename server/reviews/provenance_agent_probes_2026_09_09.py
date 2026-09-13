@@ -1,8 +1,9 @@
 """Review reproductions: passing asserts describe defects at acc0cac, not desired behavior.
 
 Explicitly invoke this file with pytest; it is outside normal test discovery.
-PA3 and PA4 are skipped historical records after Stage 4 because normal
-regressions now assert their desired behavior.
+PA1 and PA2 are skipped historical records after Stage 6 Chunk A, and PA3 and
+PA4 after Stage 4, because normal regressions now assert their desired
+behavior.
 """
 
 from dataclasses import replace
@@ -35,6 +36,7 @@ def step(name, args, identifier):
     return [tool_call_event(name, args, identifier), completed_event()]
 
 
+@pytest.mark.skip(reason="PA1 is covered by the canonical notebook prompt regression.")
 def test_episode_payload_is_retained_but_missing_from_model_prompt():
     run = make_run()
     result = {
@@ -66,6 +68,9 @@ def test_episode_payload_is_retained_but_missing_from_model_prompt():
 
 
 @pytest.mark.no_network
+@pytest.mark.skip(
+    reason="PA2 is covered by the final synthesis accumulated-evidence regression."
+)
 async def test_earlier_fact_disappears_from_final_synthesis_prompt(monkeypatch):
     run = make_run()
     llm = ScriptedLLM(

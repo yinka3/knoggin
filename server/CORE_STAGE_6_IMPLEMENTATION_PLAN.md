@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Planned 2026-09-11. No implementation has started.
+Status: Chunk A complete 2026-09-13. Chunks B–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -120,6 +120,43 @@ Acceptance:
   current localized contract forbids them.
 
 Commit boundary: renderer consolidation and model-input regressions.
+
+### Chunk A completion — 2026-09-13
+
+render_notebook() is now the one accumulated-evidence projection for planning,
+execution, synthesis, evidence summarization, fallback generation, and
+notebook capacity. prompt_context.py retains only immediate tool feedback,
+conversation context, and hot-topic context around that render; its competing
+formatter-based evidence path is gone.
+
+Episode cards retain a model-callable compact ep_… handle, narrative,
+chronology, bounded developments/updates/unresolved items, local evidence
+references, and clearly labeled historical source support. The renderer does
+not represent historical support as newly consulted in this run. It preserves
+bounded message/document content, relationship qualifications, path endpoints,
+web-read passages, and distinct discovery snippets. RunNotebook now records a
+read_episode follow-up hint that uses the same compact episode handle.
+
+The obsolete notebook-result helpers were removed from formatters.py; the
+independent hot-topic, document-list, and document-focus renderers remain.
+model_view() remains a test/inspection adapter, not a production prompt
+source.
+
+The normal regression gate passed:
+
+- uv run pytest -q tests/unit/core/agent/test_run_notebook.py tests/unit/core/agent/test_run_notebook_core.py tests/unit/core/agent/test_agent_runtime_context_contract.py tests/unit/core/agent/test_executor_loop_contract.py tests/unit/core/agent/test_agent_prompt_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py tests/unit/core/agent/test_episode_retrieval_contract.py tests/unit/core/agent/test_graph_retrieval_contract.py tests/unit/common/test_local_references.py → **99 passed** with the existing Requests dependency warning.
+- uv run pytest -q tests/unit/core/agent tests/unit/common/test_local_references.py → **226 passed** with the same warning.
+- The former PA1/PA2 reproductions first failed as expected because episode
+  narrative and both earlier facts now reach the prompt. They are retained as
+  skipped historical probes; the normal prompt/executor regressions are the
+  acceptance evidence.
+- Touched-path Ruff check/format, the architecture import check, compileall,
+  and git diff --check passed. The configured MyPy baseline remains deferred
+  because it still names stale paths, as recorded in MYPY_BASELINE.md.
+
+Chunk B remains responsible for typed admission and encounter ordering.
+Chunk F will add on-demand, model-callable provenance/support affordances; its
+work is deliberately separate from this bounded historical presentation.
 
 ## Chunk B — Typed notebook admission and source encounter ordering
 
@@ -395,7 +432,7 @@ limitations, and local commit IDs. Retire PA1/PA2/PA5/PA6/PA7 probes only after
 normal desired-behavior regressions exist. Append status to the locked Agent and
 provenance/Agent reviews.
 
-- [ ] A: one canonical model-facing notebook projection.
+- [x] A: one canonical model-facing notebook projection.
 - [ ] B: typed notebook admission and source encounter ordering.
 - [ ] C: phase authorization and protocol exclusivity.
 - [ ] D: enforced research/deep-research semantics and profile cleanup.

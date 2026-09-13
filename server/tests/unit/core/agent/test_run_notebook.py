@@ -18,14 +18,20 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
     notebook = RunNotebook()
     notebook.apply(
         "search_entity",
-        {"data": [{"id": 24, "canonical_name": "Sarah Johnson", "project_id": "project-a"}]},
+        {
+            "data": [
+                {"id": 24, "canonical_name": "Sarah Johnson", "project_id": "project-a"}
+            ]
+        },
     )
     notebook.apply(
         "episode_check",
         {
             "data": {
                 "resolution": "semantic",
-                "results": [{"episodes": [{"episode_id": "ep-secret", "summary": "Changed"}]}],
+                "results": [
+                    {"episodes": [{"episode_id": "ep-secret", "summary": "Changed"}]}
+                ],
             }
         },
     )
@@ -37,8 +43,9 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
     rendered = render_notebook(notebook)
 
     assert "E1 Sarah Johnson" in rendered
-    assert "EP1: Changed" in rendered
-    assert '"entity_id": "E1"' in rendered
+    assert "ep_epsecr: Changed" in rendered
+    assert '"entity_id": 24' in rendered
+    assert '"episode_id": "ep_epsecr"' in rendered
     assert "ep-secret" not in rendered
     assert "project-a" not in rendered
     assert notebook.as_dict() == before
