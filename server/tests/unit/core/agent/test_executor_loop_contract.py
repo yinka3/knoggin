@@ -58,11 +58,18 @@ class ScriptedLLM:
 
 
 def tool_call_event(name, arguments, call_id):
+    return tool_calls_event([(name, arguments, call_id)])
+
+
+def tool_calls_event(calls):
     return {
         "event": "tool_calls",
         "data": {
-            "content": f"Calling {name}",
-            "calls": [{"name": name, "arguments": arguments, "id": call_id}],
+            "content": "Calling tools",
+            "calls": [
+                {"name": name, "arguments": arguments, "id": call_id}
+                for name, arguments, call_id in calls
+            ],
         },
     }
 
@@ -446,6 +453,145 @@ async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
     assert run.attempt_count == 3
     assert run.synthesis_attempt_count == 1
+
+
+@pytest.mark.no_network
+async def test_executor_replans_after_mixed_terminal_batch_without_dispatch(
+    monkeypatch,
+):
+    secret = "RAW_SENSITIVE_MIXED_BATCH_VALUE"
+    llm = ScriptedLLM(
+        [
+            [
+                tool_calls_event(
+                    [
+                        (
+                            "submit_answer",
+                            '{"content": "This answer must not be accepted."}',
+                            "submit-mixed",
+                        ),
+                        (
+                            "search_messages",
+                            f'{{"query": "{secret}"}}',
+                            "search-mixed",
+                        ),
+                    ]
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "request_clarification",
+                    '{"question": "Which profile should I use?"}',
+                    "clarify-after-mixed",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=2, max_calls=2))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    dispatched = []
+
+    async def fake_execute(_tools, name, args):
+        dispatched.append((name, args))
+        return {"data": []}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert [event["event"] for event in events] == ["clarification"]
+    assert events[-1]["event"] == "clarification"
+    assert dispatched == []
+    assert run.call_count == 0
+    assert run.tools_used == []
+    assert len(llm.calls) == 2
+    assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
+    assert "Terminal protocol tools must be called alone." in llm.calls[1]["user"]
+    assert secret not in llm.calls[1]["user"]
+
+
+@pytest.mark.no_network
+async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypatch):
+    secret = "RAW_SENSITIVE_SYNTHESIS_VALUE"
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "profile", "limit": 3}',
+                    "search-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft answer."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "edit_brain",
+                    (
+                        '{"section": "Role", "content": "'
+                        f"{secret}"
+                        '", "expected_revision": 1}'
+                    ),
+                    "edit-hidden",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "request_clarification",
+                    '{"question": "Which detail should I verify?"}',
+                    "clarify-after-synthesis",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=4, max_calls=2))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    dispatched = []
+
+    async def fake_execute(_tools, name, args):
+        dispatched.append((name, args))
+        if name == "search_messages":
+            return {
+                "data": [
+                    {
+                        "id": "message-1",
+                        "message": "Profile changed",
+                        "score": 0.9,
+                    }
+                ]
+            }
+        return {"data": {"success": True}}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "clarification"
+    assert [
+        event["data"]["tool"] for event in events if event["event"] == "tool_start"
+    ] == ["search_messages"]
+    assert dispatched == [("search_messages", {"query": "profile", "limit": 3})]
+    assert run.call_count == 1
+    assert len(llm.calls) == 4
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
+    assert [schema["function"]["name"] for schema in llm.calls[2]["tools"]] == [
+        "request_clarification",
+        "submit_answer",
+    ]
+    assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[3]["system"]
+    assert "Returned tool is not allowed during SYNTHESIZE." in llm.calls[3]["user"]
+    assert secret not in llm.calls[3]["user"]
 
 
 @pytest.mark.no_network

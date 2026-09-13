@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Chunks A–B complete 2026-09-13. Chunks C–G remain planned.
+Status: Chunks A–C complete 2026-09-13. Chunks D–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -259,6 +259,34 @@ Acceptance:
 
 Commit boundary: executor-owned phase enforcement.
 
+### Chunk C completion — 2026-09-13
+
+`AgentExecutor` now derives a phase-specific allowlist from the exact schemas
+shown to the model and validates the complete returned batch before terminal
+handling, call counters, audit setup, or backend dispatch. A provider-returned
+tool outside that phase, an unknown tool, or malformed JSON arguments produces
+one bounded formatting/replan error with no raw argument value retained in the
+parsed call state.
+
+Terminal protocol calls are now exclusive: a batch containing a terminal call
+plus an ordinary call, both protocol calls, or duplicate terminal calls is
+rejected as a whole. The immutable run-wide `ToolRuntime` and registry protocol
+metadata remain the authorization source for PLAN and EXECUTE dispatch; the
+existing workspace write authorization/audit regression continues to cover that
+boundary.
+
+The scripted regressions prove that a mixed `submit_answer`/search batch emits
+no tool events, records no calls, and takes one PLAN retry. They also prove a
+run-authorized `edit_brain` call returned during SYNTHESIZE never reaches the
+backend; the next PLAN prompt receives only a bounded phase rejection, without
+the sensitive argument value.
+
+Validation passed:
+
+- `uv run pytest -q tests/unit/core/agent/test_agent_executor_step_contract.py tests/unit/core/agent/test_executor_loop_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py tests/unit/core/agent/test_workspace_tools_contract.py` → **49 passed** with the existing Requests dependency warning.
+- `uv run pytest -q tests/unit/core/agent tests/unit/common/test_local_references.py` → **239 passed** with the same warning.
+- Touched-path Ruff check/format, `python -m compileall -q src/core/agent`, architecture imports, and `git diff --check` passed.
+
 ## Chunk D — Enforced research and deep-research state
 
 Simplify `ResearchProfile` to the fields the executor uses:
@@ -460,7 +488,7 @@ provenance/Agent reviews.
 
 - [x] A: one canonical model-facing notebook projection.
 - [x] B: typed notebook admission and source encounter ordering.
-- [ ] C: phase authorization and protocol exclusivity.
+- [x] C: phase authorization and protocol exclusivity.
 - [ ] D: enforced research/deep-research semantics and profile cleanup.
 - [ ] E: default-Agent lifecycle and Brain CAS.
 - [ ] F: model-facing provenance and qualified Context briefing.
@@ -468,4 +496,4 @@ provenance/Agent reviews.
 - [ ] Combined scripted-provider and PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 6 Chunk C.
+Next implementation task: Stage 6 Chunk D.

@@ -300,6 +300,15 @@ class AgentExecutor:
                         step_failed = True
                         break
 
+                    batch_error = self._validate_tool_call_batch(
+                        pending_tool_calls,
+                        phase,
+                    )
+                    if batch_error is not None:
+                        self._record_step_error(batch_error, "formatting")
+                        step_failed = True
+                        break
+
                     submit = next(
                         (
                             call
@@ -455,6 +464,31 @@ class AgentExecutor:
             is not None
             and definition.executor_protocol
         ]
+
+    def _validate_tool_call_batch(
+        self,
+        tool_calls: List[_ToolCall],
+        phase: _AgentPhase,
+    ) -> str | None:
+        """Reject provider calls outside this phase before any dispatch state changes."""
+
+        allowed_names = {
+            schema["function"]["name"] for schema in self._tool_schemas_for_phase(phase)
+        }
+        has_terminal_protocol = False
+        for call in tool_calls:
+            definition = get_tool_definition(call.name)
+            if definition is None or call.name not in allowed_names:
+                return f"Returned tool is not allowed during {phase.value}."
+            if call.args.get("_parse_error"):
+                return "Returned tool call contains invalid arguments."
+            has_terminal_protocol = (
+                has_terminal_protocol or definition.executor_protocol
+            )
+
+        if has_terminal_protocol and len(tool_calls) != 1:
+            return "Terminal protocol tools must be called alone."
+        return None
 
     async def _step(
         self,
@@ -633,8 +667,8 @@ class AgentExecutor:
         if isinstance(parsed_clean, dict):
             return parsed_clean
 
-        logger.warning(f"Failed to parse tool arguments: {json_str[:200]}")
-        return {"_parse_error": True, "_raw": json_str[:500]}
+        logger.warning("Failed to parse tool arguments")
+        return {"_parse_error": True}
 
     async def _execute_tools(
         self, tool_calls: List[_ToolCall], results_out: List[Dict]
