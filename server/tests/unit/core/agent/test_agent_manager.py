@@ -1,10 +1,24 @@
+import asyncio
 import math
 
 import pytest
 
 from common.schema.agent.identity import AgentConfig
-from core.agent.services.agent_manager import AgentManager
-from tests.fixtures.fakes import FakeResources
+from core.agent.services.agent_manager import (
+    AgentBrainRevisionConflictError,
+    AgentManager,
+)
+from tests.fixtures.fakes import FakePostgresClient, FakeResources
+
+
+class _RejectedBrainWritePostgres(FakePostgresClient):
+    """Preserve the newer row when a revision-CAS write loses its race."""
+
+    async def execute(self, query, params=None):
+        if "brain_revision = %(expected_brain_revision)s" in query:
+            self.calls.append(("execute", query, params))
+            return 0
+        return await super().execute(query, params)
 
 
 @pytest.fixture
@@ -162,6 +176,7 @@ async def test_agent_manager_set_default_unsets_previous_default(manager):
     agent_manager, resources = manager
     old_default_id = await agent_manager.ensure_default_agent()
     created = await agent_manager.create_agent("Alt", "Alternative")
+    resources.postgres.read_results = [{"agent_id": created.id}]
 
     assert await agent_manager.set_default_agent(created.id) is True
 
@@ -176,6 +191,133 @@ async def test_agent_manager_set_default_unsets_previous_default(manager):
         if call[0] == "execute" and "UPDATE public.agents" in call[1]
     ]
     assert len(default_updates) == 2
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_serializes_overlapping_default_and_delete(manager):
+    agent_manager, resources = manager
+    old_default_id = await agent_manager.ensure_default_agent()
+    created = await agent_manager.create_agent("Alt", "Alternative")
+
+    async with agent_manager._lifecycle_lock:
+        resources.postgres.read_results = [{"agent_id": created.id}]
+        promote_task = asyncio.create_task(agent_manager.set_default_agent(created.id))
+        await asyncio.sleep(0)
+        delete_task = asyncio.create_task(agent_manager.delete_agent(created.id))
+        await asyncio.sleep(0)
+        assert not promote_task.done()
+        assert not delete_task.done()
+
+    promoted, deleted = await asyncio.gather(promote_task, delete_task)
+
+    assert promoted is True
+    assert deleted is False
+    assert await agent_manager.get_default_agent_id() == created.id
+    assert (await agent_manager.get_agent(old_default_id)).is_default is False
+    assert (await agent_manager.get_agent(created.id)).is_default is True
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_ensure_default_shares_lifecycle_lock(manager):
+    agent_manager, _ = manager
+    established_id = await agent_manager.ensure_default_agent()
+
+    async with agent_manager._lifecycle_lock:
+        pending = asyncio.create_task(agent_manager.ensure_default_agent())
+        await asyncio.sleep(0)
+        assert not pending.done()
+
+    assert await pending == established_id
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_validates_default_target_in_mutation_transaction(manager):
+    agent_manager, resources = manager
+    default_id = await agent_manager.ensure_default_agent()
+
+    assert await agent_manager.set_default_agent("missing-agent") is False
+    assert await agent_manager.get_default_agent_id() == default_id
+    target_lock = next(
+        call
+        for call in resources.postgres.calls
+        if call[0] == "execute"
+        and "SELECT agent_id" in call[1]
+        and "FOR UPDATE" in call[1]
+    )
+    assert target_lock[2]["agent_id"] == "missing-agent"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_requires_revision_for_full_brain_replacement(manager):
+    agent_manager, resources = manager
+    created = await agent_manager.create_agent("Researcher", "Careful")
+    writes_before = len(
+        [call for call in resources.postgres.calls if call[0] == "execute"]
+    )
+
+    with pytest.raises(ValueError, match="expected_brain_revision"):
+        await agent_manager.update_agent(created.id, brain="Use sources")
+
+    assert resources.postgres.agents[created.id]["brain_revision"] == 1
+    assert len([call for call in resources.postgres.calls if call[0] == "execute"]) == (
+        writes_before
+    )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_brain_replace_uses_cas_and_snapshots_committed_revision(
+    manager,
+):
+    agent_manager, resources = manager
+    created = await agent_manager.create_agent("Researcher", "Careful")
+
+    for expected_revision in range(1, 5):
+        updated = await agent_manager.update_agent(
+            created.id,
+            brain=f"Directive {expected_revision}",
+            expected_brain_revision=expected_revision,
+        )
+        assert updated.brain_revision == expected_revision + 1
+
+    committed_snapshot_writes = [
+        call
+        for call in resources.postgres.calls
+        if call[0] == "execute" and "'full_user_update'" in call[1]
+    ]
+    assert len(committed_snapshot_writes) == 1
+    query, params = committed_snapshot_writes[0][1:]
+    assert "AND brain_revision = %(expected_brain_revision)s" in query
+    assert params["expected_brain_revision"] == 4
+    assert resources.postgres.agents[created.id]["brain_revision"] == 5
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_agent_manager_rejects_stale_full_brain_replacement():
+    resources = FakeResources()
+    resources.postgres = _RejectedBrainWritePostgres()
+    agent_manager = AgentManager(resources, user_name="ada")
+    created = await agent_manager.create_agent("Researcher", "Careful")
+    resources.postgres.agents[created.id]["brain"] = "## Role\nNewer Brain"
+    resources.postgres.agents[created.id]["brain_revision"] = 2
+
+    with pytest.raises(AgentBrainRevisionConflictError) as caught:
+        await agent_manager.update_agent(
+            created.id,
+            brain="Older Brain",
+            expected_brain_revision=1,
+        )
+
+    assert caught.value.expected_revision == 1
+    assert caught.value.current_revision == 2
+    stored = await agent_manager.get_agent(created.id)
+    assert stored.brain_revision == 2
+    assert "Newer Brain" in stored.brain
 
 
 @pytest.mark.runtime

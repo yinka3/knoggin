@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Chunks A–D complete 2026-09-13. Chunks E–G remain planned.
+Status: Chunks A–E complete 2026-09-13. Chunks F–G remain planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -391,6 +391,37 @@ Acceptance:
 - Snapshot creation uses the committed new revision exactly once.
 
 Commit boundary: durable Agent configuration concurrency.
+
+### Chunk E completion — 2026-09-13
+
+`AgentManager` now serializes `ensure_default_agent()`,
+`set_default_agent()`, and `delete_agent()` with one local lifecycle lock.
+Default promotion locks and validates its target in the same database
+transaction that changes default state. Deletion retains a defensive
+`is_default = false` predicate in the mutation and only reports success for
+one affected row.
+
+Full Brain replacement through `update_agent(brain=...)` now requires a
+positive `expected_brain_revision`. Both ordinary and snapshot-producing
+writes include that revision in their mutation predicate. A lost compare-and-
+swap raises `AgentBrainRevisionConflictError` with the expected and current
+revision, preserving the later Brain. Persona/model/tool updates remain
+revision-free. There is no separate settings/API caller for `update_agent` in
+the current server checkout, so this service boundary owns the requirement.
+
+The unit contract covers locked overlapping promotion/deletion, startup-default
+locking, target validation inside the transaction, required revision input,
+stale writes, and snapshot selection. A real PostgreSQL contract confirms the
+conditional delete after a stale read, one durable default under overlapping
+operations, CAS preservation of revision 5, and exactly one committed
+revision-5 snapshot.
+
+Validation passed:
+
+- `uv run pytest -q tests/unit/core/agent/test_agent_manager.py` → **20 passed**.
+- `uv run pytest -q tests/contract/storage/test_agent_manager_lifecycle_contract.py` → **2 passed**.
+- `uv run pytest -q tests/unit/core/agent tests/unit/core/community` → **273 passed**.
+- Touched-path Ruff check, `python -m compileall -q src/core/agent/services tests/unit/core/agent/test_agent_manager.py tests/contract/storage/test_agent_manager_lifecycle_contract.py`, and `git diff --check` passed.
 
 ## Chunk F — Provenance affordances and qualified Context briefing
 
