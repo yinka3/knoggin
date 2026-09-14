@@ -153,3 +153,34 @@ passed **307 tests** with the existing Requests dependency warning. PA3 and
 PA4 are retained as skipped historical probes; the normal graph and
 source-reference/finalization contracts are the acceptance evidence. PA1,
 PA2, PA5, PA6, and PA7 remain open.
+
+## Stage 6 implementation closeout — 2026-09-14
+
+PA1, PA2, PA5, PA6, and PA7 are now resolved. The original descriptions above
+remain the historical review evidence, not the current behavior.
+
+- **PA1/PA2:** `3601bf3` made the bounded notebook renderer the model-facing
+  projection. `716953e` adds a scripted multi-step synthesis contract that
+  retains an Episode handle/chronology, message, graph path, document passage,
+  and web passage together.
+- **PA5:** `347d660` records source encounters only after notebook admission;
+  an oversized result reports a narrow-retry instruction and creates no
+  model-visible evidence or final source reference.
+- **PA6:** `037de22` rejects phase-forbidden calls and mixed terminal batches
+  before dispatch.
+- **PA7:** `72b30e1` requires admitted grounded evidence for research and one
+  executor-owned deep-research gap-review pass.
+
+`fab2b4a` also completed the related default-Agent lifecycle lock and full-Brain
+CAS contracts. `7c0c21c` introduced the adaptive Brief/Context policy, and the
+closeout correction in `716953e` places the indexed-document manifest behind the
+same one-load policy. An adaptive greeting now has no persistent Project read;
+substantive signals and a nonterminal fast-path tool transition load the cached
+material once.
+
+The closeout gate passed **379** Agent/notebook/prompt/provenance unit tests and
+**54** targeted storage contracts against local PostgreSQL, plus Ruff, compile,
+architecture, and diff checks. A fixed greeting payload measured 943 local
+word-token proxy words in adaptive mode versus 1,072 in always mode, with one
+scripted model step in both cases. This remains a deterministic prompt-shape
+measure; no live-provider quality or latency claim was made.

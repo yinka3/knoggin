@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Chunks A–G complete 2026-09-14. Combined scenarios and closeout remain.
+Status: Complete 2026-09-14. Chunks A–G and the combined closeout are committed locally.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -457,6 +457,8 @@ Acceptance:
   content is exposed in this run.
 - The model can inspect a path observation's support on demand.
 - Context origin qualifications survive into model input.
+- Historical decisions and later reversals retain their chronology and source
+  labels so the model can distinguish prior state from current state.
 - Ordinary file reads cannot silently bypass provenance for registered evidence
   documents.
 
@@ -576,6 +578,8 @@ Use scripted providers and deterministic tool results:
    PostgreSQL or a synchronization-aware fake.
 7. Compare `always` and `adaptive` briefing on the agreed conversational and
    substantive examples, recording prompt size and additional model steps.
+8. Retrieve an old decision and its later reversal; prove final synthesis sees
+   both chronologies and treats the later supported state as current.
 
 ## Validation and closeout
 
@@ -601,7 +605,44 @@ provenance/Agent reviews.
 - [x] E: default-Agent lifecycle and Brain CAS.
 - [x] F: model-facing provenance and qualified Context briefing.
 - [x] G: configurable adaptive Project briefing.
-- [ ] Combined scripted-provider and PostgreSQL scenarios pass.
-- [ ] Review/probe/operations closeout is recorded and committed locally.
+- [x] Combined scripted-provider and PostgreSQL scenarios pass.
+- [x] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 6 combined scenarios and closeout.
+### Stage 6 closeout — 2026-09-14
+
+The final combined contract pass found one remaining Chunk G gap: the executor
+skipped Brief and canonical Context for an adaptive greeting, but it still eagerly
+listed the indexed-document manifest. `716953e fix(agent): complete adaptive
+briefing contracts` moves that manifest into the same one-load, run-local
+projection. A fast-path greeting now starts without Brief, Context, or document
+manifest reads; substantive signals and the first nonterminal tool transition
+load all three once for later steps. Release clears all cached persistent prompt
+material.
+
+The closeout contracts cover all eight scenarios above. The combined executor
+flow admits an Episode, message, graph path, document passage, and web passage
+over separate steps and verifies all five categories and their local handles in
+the final synthesis prompt. A separate reversal flow verifies older and later
+Episode chronology reaches synthesis in order; the prompt directs the model to
+treat a later supported state as current only when it addresses the same subject
+without an unresolved qualification. Existing normal regressions remain the
+acceptance evidence for PA1/PA2/PA5/PA6/PA7; historical probes remain historical.
+
+Validation passed with the existing Requests dependency warning:
+
+- `uv run pytest -q tests/unit/core/agent tests/unit/common/test_local_references.py tests/unit/core/knowledge/test_context_render.py tests/unit/core/knowledge/test_evidence_service.py tests/unit/core/knowledge/test_document_service.py` → **379 passed**.
+- `uv run pytest -q tests/contract/storage/test_agent_manager_lifecycle_contract.py tests/contract/storage/test_source_reference_storage_contract.py tests/contract/storage/test_knowledge_store_source_reference_transaction.py tests/contract/storage/test_current_observation_reader_contract.py tests/contract/storage/test_graph_reader_contract.py tests/contract/storage/test_episode_reader_contract.py tests/contract/storage/test_episode_scope_integrity_contract.py tests/contract/storage/test_episode_writer_contract.py` → **54 passed** against local PostgreSQL.
+- Touched-path Ruff, `python -m compileall`, the architecture import check, and `git diff --check` passed.
+
+For the same greeting and fixed Project payload, the deterministic local
+word-token proxy measured **943** prompt words in adaptive mode and **1,072** in
+always mode: **129** fewer words with the same one model step. The substantive
+Project-memory example intentionally matched always mode in prompt size and step
+count. This is a repeatable prompt-shape measure, not a provider token, latency,
+or answer-quality claim; production events retain provider usage plus briefing
+load/transition telemetry for a separately configured live sample.
+
+The configured MyPy baseline remains deferred because it still names stale paths.
+The untracked locked Agent review was left untouched so its existing authored
+review material is not accidentally included in this closeout commit; this plan
+and the tracked provenance/Agent review record Stage 6 completion.
