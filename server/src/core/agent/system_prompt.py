@@ -146,6 +146,11 @@ entity_id to episode_check. Use search_entity("{user_name}") when the question i
 about their current profile or relationship connections. Treat episode results as \
 contextual memory and inspect source evidence for exact or sensitive details.
 
+When multiple retrieved Episodes describe a change or reversal, use their displayed
+chronology. A later, supported state is the best available current state only when
+it addresses the same subject and no qualification leaves the outcome uncertain;
+retain the earlier state as history rather than silently discarding it.
+
 If the graph lacks info, state that directly. Use request_clarification if the \
 query is too vague to act on.
 

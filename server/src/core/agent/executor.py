@@ -195,17 +195,13 @@ class AgentExecutor:
         tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
         current_time = get_now().astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
-        documents_context = ""
-        if self.tools.document_service:
-            manifest = await self.tools.get_document_manifest()
-            if manifest:
-                documents_context = format_documents_context(manifest)
         document_focus_context = format_document_focus_context(
             getattr(self.tools, "document_focus", None),
             getattr(self.ctx, "document_selection_context", None),
         )
         project_brief = ""
         project_context = ""
+        documents_context = ""
 
         last_result = None
 
@@ -258,7 +254,11 @@ class AgentExecutor:
             needs_final_synthesis = False
             needs_deep_research_gap_review = False
 
-            project_brief, project_context = await self._ensure_project_briefing()
+            (
+                project_brief,
+                project_context,
+                documents_context,
+            ) = await self._ensure_project_briefing()
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
@@ -604,37 +604,43 @@ class AgentExecutor:
                 },
             }
 
-    async def _ensure_project_briefing(self) -> tuple[str, str]:
-        """Return the run-cached Project material, loading it once if requested."""
+    async def _ensure_project_briefing(self) -> tuple[str, str, str]:
+        """Return run-cached persistent Project prompt material."""
 
         briefing = self.ctx.project_briefing
         if not briefing.needs_load:
-            return briefing.brief, briefing.context
+            return briefing.brief, briefing.context, briefing.documents_context
 
-        brief, context = await asyncio.gather(
+        brief, context, documents_context = await asyncio.gather(
             self._load_project_brief(),
             self._load_project_context(),
+            self._load_documents_context(),
         )
         self.ctx.record_project_briefing_loaded(
             brief=brief,
             context=context,
-            content_token_count=self._count_project_briefing_tokens(brief, context),
+            documents_context=documents_context,
+            content_token_count=self._count_project_briefing_tokens(
+                brief,
+                context,
+                documents_context,
+            ),
         )
         logger.info(
             "AgentExecutor: loaded Project briefing ({}, {} content tokens).",
             briefing.requested_reason,
             self.ctx.project_briefing.content_token_count,
         )
-        return brief, context
+        return brief, context, documents_context
 
-    def _count_project_briefing_tokens(self, brief: str, context: str) -> int:
+    def _count_project_briefing_tokens(self, *parts: str) -> int:
         """Measure the optional Project payload without requiring provider usage data."""
 
         counter = getattr(self.llm, "count_tokens", None)
         if not callable(counter):
             return 0
         try:
-            count = counter("\n".join(part for part in (brief, context) if part))
+            count = counter("\n".join(part for part in parts if part))
         except Exception:
             return 0
         return count if isinstance(count, int) and count >= 0 else 0
@@ -658,6 +664,26 @@ class AgentExecutor:
         if not isinstance(content, str):
             return ""
         return content
+
+    async def _load_documents_context(self) -> str:
+        """Load the indexed-document manifest only with persistent Project context."""
+
+        if not getattr(self.tools, "document_service", None):
+            return ""
+        loader = getattr(self.tools, "get_document_manifest", None)
+        if not callable(loader):
+            return ""
+        try:
+            manifest = await loader()
+        except Exception as exc:
+            logger.warning(
+                "AgentExecutor: document manifest unavailable ({})",
+                type(exc).__name__,
+            )
+            return ""
+        if not isinstance(manifest, list) or not manifest:
+            return ""
+        return format_documents_context(manifest)
 
     async def _load_project_context(self) -> str:
         """Render bounded current Context from canonical storage only."""

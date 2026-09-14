@@ -143,6 +143,7 @@ class ProjectBriefing:
     content_token_count: int = 0
     brief: str = ""
     context: str = ""
+    documents_context: str = ""
 
     @classmethod
     def for_run(
@@ -196,12 +197,14 @@ class ProjectBriefing:
         *,
         brief: str,
         context: str,
+        documents_context: str = "",
         content_token_count: int,
     ) -> None:
         if self.loaded:
             return
         self.brief = brief
         self.context = context
+        self.documents_context = documents_context
         self.content_token_count = content_token_count
         self.loaded = True
         self.load_count += 1
@@ -209,6 +212,7 @@ class ProjectBriefing:
     def clear_content(self) -> None:
         self.brief = ""
         self.context = ""
+        self.documents_context = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -685,6 +689,7 @@ class AgentRun:
         *,
         brief: str,
         context: str,
+        documents_context: str = "",
         content_token_count: int,
     ) -> None:
         """Cache the Project material after its single load attempt for this run."""
@@ -693,6 +698,7 @@ class AgentRun:
         self.project_briefing.record_loaded(
             brief=brief,
             context=context,
+            documents_context=documents_context,
             content_token_count=content_token_count,
         )
 

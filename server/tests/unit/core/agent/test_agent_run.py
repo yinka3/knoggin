@@ -151,7 +151,8 @@ def test_adaptive_briefing_allows_one_deferred_transition_and_caches_content():
     run.record_project_briefing_loaded(
         brief="Project Brief",
         context="Project Context",
-        content_token_count=4,
+        documents_context="- project-notes.md (2KB, 3 chunks)",
+        content_token_count=9,
     )
     run.record_project_briefing_loaded(
         brief="later brief",
@@ -163,7 +164,14 @@ def test_adaptive_briefing_allows_one_deferred_transition_and_caches_content():
     assert run.project_briefing.load_count == 1
     assert run.project_briefing.brief == "Project Brief"
     assert run.project_briefing.context == "Project Context"
-    assert run.project_briefing.content_token_count == 4
+    assert run.project_briefing.documents_context == "- project-notes.md (2KB, 3 chunks)"
+    assert run.project_briefing.content_token_count == 9
+
+    run.release()
+
+    assert run.project_briefing.brief == ""
+    assert run.project_briefing.context == ""
+    assert run.project_briefing.documents_context == ""
 
 
 @pytest.mark.no_network

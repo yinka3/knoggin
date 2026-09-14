@@ -277,6 +277,96 @@ async def test_always_mode_loads_briefing_for_a_greeting(monkeypatch):
 
 
 @pytest.mark.no_network
+async def test_briefing_policy_compares_persistent_prompt_cost_and_steps(monkeypatch):
+    async def run_case(mode, query):
+        llm = ScriptedLLM(
+            [
+                [
+                    tool_call_event(
+                        "submit_answer",
+                        '{"content": "Acknowledged."}',
+                        "submit-1",
+                    ),
+                    completed_event(),
+                ]
+            ]
+        )
+        run = make_run(
+            user_query=query,
+            limits=AgentRunLimits(
+                max_attempts=1,
+                max_calls=1,
+                project_briefing_mode=mode,
+            ),
+        )
+        manifest_calls = 0
+
+        async def get_document_manifest():
+            nonlocal manifest_calls
+            manifest_calls += 1
+            return [
+                {
+                    "original_name": "project-notes.md",
+                    "size_bytes": 2048,
+                    "chunk_count": 3,
+                }
+            ]
+
+        executor = AgentExecutor(
+            run,
+            llm,
+            SimpleNamespace(
+                document_service=object(),
+                get_document_manifest=get_document_manifest,
+            ),
+        )
+        briefing_counts = install_counted_project_briefing(monkeypatch, executor)
+
+        events = [event async for event in executor._execute_run()]
+        assert events[-1]["event"] == "response"
+        assert len(llm.calls) == 1
+        return {
+            "briefing_counts": briefing_counts,
+            "manifest_calls": manifest_calls,
+            "steps": len(llm.calls),
+            "prompt_tokens": llm.count_tokens(
+                f"{llm.calls[0]['system']}\n{llm.calls[0]['user']}"
+            ),
+            "system": llm.calls[0]["system"],
+        }
+
+    adaptive_greeting = await run_case("adaptive", "Hey")
+    always_greeting = await run_case("always", "Hey")
+    adaptive_project_question = await run_case(
+        "adaptive",
+        "What did we decide about this project?",
+    )
+    always_project_question = await run_case(
+        "always",
+        "What did we decide about this project?",
+    )
+
+    assert adaptive_greeting["briefing_counts"] == {"brief": 0, "context": 0}
+    assert adaptive_greeting["manifest_calls"] == 0
+    assert "<project_brief>" not in adaptive_greeting["system"]
+    assert "<project_context>" not in adaptive_greeting["system"]
+    assert "<uploaded_documents>" not in adaptive_greeting["system"]
+    assert always_greeting["briefing_counts"] == {"brief": 1, "context": 1}
+    assert always_greeting["manifest_calls"] == 1
+    assert "<uploaded_documents>" in always_greeting["system"]
+    assert adaptive_greeting["prompt_tokens"] < always_greeting["prompt_tokens"]
+    assert adaptive_greeting["steps"] == always_greeting["steps"] == 1
+
+    assert adaptive_project_question["briefing_counts"] == {"brief": 1, "context": 1}
+    assert adaptive_project_question["manifest_calls"] == 1
+    assert (
+        adaptive_project_question["prompt_tokens"]
+        == always_project_question["prompt_tokens"]
+    )
+    assert adaptive_project_question["steps"] == always_project_question["steps"] == 1
+
+
+@pytest.mark.no_network
 async def test_adaptive_tool_followup_loads_cached_briefing_once(monkeypatch):
     llm = ScriptedLLM(
         [
@@ -310,7 +400,27 @@ async def test_adaptive_tool_followup_loads_cached_briefing_once(monkeypatch):
         user_query="Nice, go to the next one",
         limits=AgentRunLimits(max_attempts=3, max_calls=2),
     )
-    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    manifest_calls = 0
+
+    async def get_document_manifest():
+        nonlocal manifest_calls
+        manifest_calls += 1
+        return [
+            {
+                "original_name": "project-notes.md",
+                "size_bytes": 2048,
+                "chunk_count": 3,
+            }
+        ]
+
+    executor = AgentExecutor(
+        run,
+        llm,
+        SimpleNamespace(
+            document_service=object(),
+            get_document_manifest=get_document_manifest,
+        ),
+    )
     counts = install_counted_project_briefing(monkeypatch, executor)
 
     async def searched_evidence(*_args):
@@ -325,6 +435,10 @@ async def test_adaptive_tool_followup_loads_cached_briefing_once(monkeypatch):
     assert "<project_brief>" not in llm.calls[0]["system"]
     assert "BRIEF_PAYLOAD" in llm.calls[1]["system"]
     assert "BRIEF_PAYLOAD" in llm.calls[2]["system"]
+    assert "<uploaded_documents>" not in llm.calls[0]["system"]
+    assert "project-notes.md" in llm.calls[1]["system"]
+    assert "project-notes.md" in llm.calls[2]["system"]
+    assert manifest_calls == 1
     assert run.project_briefing.transition_count == 1
     assert run.project_briefing.load_count == 1
 
@@ -475,6 +589,232 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert run.sealed is True
     run.release()
     assert run.released is True
+
+
+@pytest.mark.no_network
+async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "episode_check",
+                    '{"query": "launch history"}',
+                    "episode-a",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "launch decision"}',
+                    "message-b",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "find_path",
+                    '{"entity_a": "Ada", "entity_b": "Knoggin"}',
+                    "path-c",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "read_document",
+                    '{"document_id": "doc-d"}',
+                    "document-d",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "read_web_page",
+                    '{"url": "https://example.test/release"}',
+                    "web-d",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft from all admitted evidence."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final answer from all admitted evidence."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=6, max_calls=5))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def fake_execute(_tools, name, _args):
+        if name == "episode_check":
+            return {
+                "data": {
+                    "resolution": "exact",
+                    "results": [
+                        {
+                            "entity_name": "Knoggin",
+                            "episodes": [
+                                {
+                                    "episode_id": "a3f91c84-1111-4444-8888-111111111111",
+                                    "summary": "EPISODE_A",
+                                    "first_message_at": "2026-01-01T10:00:00+00:00",
+                                    "last_message_at": "2026-01-02T10:00:00+00:00",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        if name == "search_messages":
+            return {"data": [{"id": "message-b", "message": "MESSAGE_B"}]}
+        if name == "find_path":
+            return {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]}
+        if name == "read_document":
+            return {
+                "data": [
+                    {
+                        "document_id": "doc-d",
+                        "document_name": "evidence.md",
+                        "chunk_index": "lines:1-2",
+                        "content": "DOCUMENT_D",
+                    }
+                ]
+            }
+        if name == "read_web_page":
+            return {
+                "data": [
+                    {
+                        "title": "Release source",
+                        "url": "https://example.test/release",
+                        "content": "WEB_D",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "content_hash": "d" * 64,
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected tool: {name}")
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["data"]["content"] == "Final answer from all admitted evidence."
+    assert len(llm.calls) == 7
+    assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
+    final_prompt = llm.calls[-1]["user"]
+    assert "ep_a3f91c: EPISODE_A" in final_prompt
+    assert (
+        "chronology: 2026-01-01T10:00:00+00:00 to 2026-01-02T10:00:00+00:00"
+        in final_prompt
+    )
+    assert "Messages:\n- M1: MESSAGE_B" in final_prompt
+    assert "Paths:\n- P1: Ada -> Knoggin" in final_prompt
+    assert "Documents:\n- D1 evidence.md: DOCUMENT_D" in final_prompt
+    assert (
+        "Web reads:\n- WR1 Release source: https://example.test/release" in final_prompt
+    )
+    assert "read passage: WEB_D" in final_prompt
+    assert all(
+        "Result was not added to the run notebook"
+        not in event["data"].get("result", "")
+        for event in events
+        if event["event"] == "tool_end"
+    )
+
+
+@pytest.mark.no_network
+async def test_final_synthesis_receives_episode_reversal_chronology(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "episode_check",
+                    '{"query": "current deployment policy"}',
+                    "episodes-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft based on the later policy."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "The current supported policy is the later replacement."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(limits=AgentRunLimits(max_attempts=2, max_calls=1))
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def episode_reversal(_tools, name, _args):
+        assert name == "episode_check"
+        return {
+            "data": {
+                "resolution": "exact",
+                "results": [
+                    {
+                        "entity_name": "Knoggin",
+                        "episodes": [
+                            {
+                                "episode_id": "11111111-1111-4444-8888-111111111111",
+                                "summary": "OLDER_POLICY: deploy manually.",
+                                "first_message_at": "2026-01-01T10:00:00+00:00",
+                                "last_message_at": "2026-01-01T10:00:00+00:00",
+                            },
+                            {
+                                "episode_id": "22222222-1111-4444-8888-111111111111",
+                                "summary": "LATER_POLICY: deploy through CI.",
+                                "first_message_at": "2026-02-01T10:00:00+00:00",
+                                "last_message_at": "2026-02-01T10:00:00+00:00",
+                            },
+                        ],
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", episode_reversal)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["data"]["content"] == (
+        "The current supported policy is the later replacement."
+    )
+    final_prompt = llm.calls[-1]["user"]
+    assert final_prompt.index("OLDER_POLICY: deploy manually.") < final_prompt.index(
+        "LATER_POLICY: deploy through CI."
+    )
+    assert "chronology: 2026-01-01T10:00:00+00:00" in final_prompt
+    assert "chronology: 2026-02-01T10:00:00+00:00" in final_prompt
+    assert (
+        "When multiple retrieved Episodes describe a change or reversal"
+        in llm.calls[-1]["system"]
+    )
+    assert (
+        "A later, supported state is the best available current state"
+        in llm.calls[-1]["system"]
+    )
 
 
 @pytest.mark.no_network
