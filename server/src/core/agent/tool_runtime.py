@@ -83,6 +83,11 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0
 
+    if tool_name == "read_observation_evidence":
+        if isinstance(data, dict) and data.get("subject"):
+            return "Loaded observation support", 1
+        return "No observation support found", 0
+
     if tool_name in ("episode_check", "read_recent_episodes"):
         if isinstance(data, dict):
             res_type = data.get("resolution", "unknown")

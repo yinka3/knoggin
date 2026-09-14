@@ -7,10 +7,12 @@ from common.schema.context import (
     AssertionKind,
     ContextAdd,
     ContextBlockRecord,
+    ContextBlockSupportRecord,
     ContextDelete,
     ContextReplace,
     ContextRevisionOrigin,
     ContextSnapshot,
+    ContextSupportKind,
 )
 from core.knowledge.context.models import ContextProjectionConflictError
 from core.knowledge.context.projection import _materialize_human_edit, _parse_markdown
@@ -26,14 +28,19 @@ def _domain():
     return DomainConfig(version=1, topics=(), entity_types=()).compile()
 
 
-def _block(*, section_key: str, markdown: str) -> ContextBlockRecord:
+def _block(
+    *,
+    section_key: str,
+    markdown: str,
+    assertion_kind: AssertionKind = AssertionKind.AGENT_DERIVED,
+) -> ContextBlockRecord:
     return ContextBlockRecord(
         block_id=uuid4(),
         project_id="project-1",
         section_key=section_key,
         markdown=markdown,
         content_hash=context_block_hash(markdown),
-        assertion_kind=AssertionKind.AGENT_DERIVED,
+        assertion_kind=assertion_kind,
     )
 
 
@@ -66,6 +73,62 @@ def test_context_markdown_is_stable_and_keeps_local_handles_out_of_canonical_fil
     assert "C1" not in first
     assert "C1" in model_input and "C2" in model_input
     assert first.index("## Current State") < first.index("## Active Work")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_model_context_keeps_assertion_kind_and_compact_support_handles_out_of_projection():
+    user_block = _block(
+        section_key="current_state",
+        markdown="The user chose SQLite.",
+        assertion_kind=AssertionKind.USER_ASSERTED,
+    )
+    source_block = ContextBlockRecord(
+        block_id=uuid4(),
+        project_id="project-1",
+        section_key="active_work",
+        markdown="The migration guide supports a staged rollout.",
+        content_hash=context_block_hash("The migration guide supports a staged rollout."),
+        assertion_kind=AssertionKind.SOURCE_GROUNDED,
+    )
+    source_ref_id = uuid4()
+    snapshot = _snapshot(user_block, source_block)
+    supports = {
+        user_block.block_id: (
+            ContextBlockSupportRecord(
+                block_id=user_block.block_id,
+                project_id="project-1",
+                message_id=17,
+                session_id="session-1",
+                support_kind=ContextSupportKind.USER_MESSAGE,
+            ),
+        ),
+        source_block.block_id: (
+            ContextBlockSupportRecord(
+                block_id=source_block.block_id,
+                project_id="project-1",
+                message_id=18,
+                session_id="session-1",
+                support_kind=ContextSupportKind.ASSISTANT_SOURCE,
+                source_ref_id=source_ref_id,
+            ),
+        ),
+    }
+
+    projection = render_context_markdown(snapshot, _domain())
+    model_input = render_context_model_input(
+        snapshot,
+        _domain(),
+        supports_by_block=supports,
+    )
+
+    assert "C1 [user_asserted; support: M1]" in model_input
+    assert "C2 [source_grounded; support: S1]" in model_input
+    assert "M1: user_message" in model_input
+    assert "S1: assistant source" in model_input
+    assert str(source_ref_id) not in model_input
+    assert "user_asserted" not in projection
+    assert "support: M1" not in projection
 
 
 @pytest.mark.unit

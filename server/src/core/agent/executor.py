@@ -52,7 +52,7 @@ from core.agent.tools.registry import (
     get_tool_definition,
     install_tool_runtime,
 )
-from core.knowledge.context.render import canonical_context_markdown
+from core.knowledge.context.render import render_context_model_input
 from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
@@ -637,7 +637,16 @@ class AgentExecutor:
             )
             if snapshot is None or not snapshot.blocks:
                 return ""
-            rendered = canonical_context_markdown(snapshot.blocks, domain)
+            supports_by_block = await reader.get_block_supports(
+                [block.block_id for block in snapshot.blocks],
+                user_name=self.ctx.user_name,
+                project_id=self.ctx.project_id,
+            )
+            rendered = render_context_model_input(
+                snapshot,
+                domain,
+                supports_by_block=supports_by_block,
+            )
         except Exception as exc:
             logger.warning(
                 "AgentExecutor: canonical Project Context unavailable ({})",

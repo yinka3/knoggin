@@ -104,6 +104,14 @@ def build_user_message(
                     )
                 else:
                     msg += f"- `{tool}`: No results found.\n"
+            elif tool == "read_observation_evidence":
+                if isinstance(data, dict) and data.get("subject"):
+                    msg += (
+                        f"- `{tool}`: Loaded observation support. "
+                        "(See accumulated notebook below)\n"
+                    )
+                else:
+                    msg += f"- `{tool}`: No results found.\n"
             elif tool == "load_topic_context":
                 topic_context = data if isinstance(data, dict) else {}
                 if topic_context:

@@ -82,6 +82,26 @@ async def test_evidence_service_builds_deterministic_bundle_with_one_query():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_evidence_service_reads_one_observation_across_visible_projects():
+    client = EvidenceClient([_row()])
+    bundle = await EvidenceService(
+        EvidenceTraversalReader(client)
+    ).for_visible_relationship_observation(
+        7,
+        user_name="ada",
+        visible_project_ids=["project-1", "project-2"],
+        limits=EvidenceTraversalLimits(max_edges=16),
+    )
+
+    assert bundle.subject.identifier == "7"
+    assert len(client.calls) == 1
+    query, params = client.calls[0]
+    assert "observation.project_id = ANY(%s)" in query
+    assert params == ("ada", ["project-1", "project-2"], [7], 17)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_evidence_service_reports_leaf_truncation_without_dangling_edges():
     client = EvidenceClient([_row(message_id=11), _row(message_id=12)])
     bundle = await EvidenceService(

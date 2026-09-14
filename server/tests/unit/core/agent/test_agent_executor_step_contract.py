@@ -10,8 +10,10 @@ from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.context import (
     AssertionKind,
     ContextBlockRecord,
+    ContextBlockSupportRecord,
     ContextRevisionOrigin,
     ContextSnapshot,
+    ContextSupportKind,
 )
 from core.agent.executor import AgentExecutor, _AgentPhase
 from core.agent.executor import _ToolCall as ToolCall
@@ -115,6 +117,21 @@ async def test_executor_renders_current_context_from_the_canonical_reader_only()
             assert kwargs == {"user_name": "ada", "project_id": "project-1"}
             return snapshot
 
+        async def get_block_supports(self, block_ids, **kwargs):
+            assert block_ids == [block.block_id]
+            assert kwargs == {"user_name": "ada", "project_id": "project-1"}
+            return {
+                block.block_id: (
+                    ContextBlockSupportRecord(
+                        block_id=block.block_id,
+                        project_id="project-1",
+                        message_id=17,
+                        session_id="session-1",
+                        support_kind=ContextSupportKind.USER_MESSAGE,
+                    ),
+                )
+            }
+
     async def projection_is_not_an_authoritative_read():
         raise AssertionError("CONTEXT.md projection must not be read by the agent")
 
@@ -128,6 +145,7 @@ async def test_executor_renders_current_context_from_the_canonical_reader_only()
 
     assert "# Project Context" in rendered
     assert "The semantic owner is project-scoped." in rendered
+    assert "C1 [user_asserted; support: M1]" in rendered
 
 
 @pytest.mark.no_network

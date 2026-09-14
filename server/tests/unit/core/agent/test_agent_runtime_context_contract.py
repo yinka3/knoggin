@@ -82,6 +82,17 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                 },
             },
             {"tool": "episode_check", "result": {"data": []}},
+            {
+                "tool": "read_observation_evidence",
+                "result": {
+                    "data": {
+                        "subject": {
+                            "kind": "relationship_observation",
+                            "identifier": "17",
+                        }
+                    }
+                },
+            },
             {"tool": "search_messages", "error": "boom"},
         ],
     )
@@ -97,6 +108,11 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert '`edit_brain`: {\n  "success": true,' in message
     assert '"section": "Project Context"' in message
     assert "`episode_check`: No results found." in message
+    assert (
+        "`read_observation_evidence`: Loaded observation support. "
+        "(See accumulated notebook below)"
+    ) in message
+    assert '"relationship_observation"' not in message
     assert "`search_messages`: Error - boom" in message
     assert "[HOT: Identity]" in message
     assert "Ada: prefers scoped profile updates" in message
@@ -216,6 +232,12 @@ def test_build_user_message_renders_an_episode_with_its_usable_local_handle():
                                 {
                                     "source_kind": "web_search_result",
                                     "source_status": "search_result_snippet",
+                                    "locator": {
+                                        "kind": "search_result",
+                                        "provider": "brave",
+                                        "query": "launch phrase",
+                                        "rank": 1,
+                                    },
                                     "canonical_url": "https://example.test/launch",
                                     "excerpt": "The launch phrase is violet.",
                                     "contributing_message_id": 7,
@@ -243,6 +265,7 @@ def test_build_user_message_renders_an_episode_with_its_usable_local_handle():
     assert "unresolved: Confirm the production launch date." in message
     assert "historical support:" in message
     assert "web search result (search result snippet)" in message
+    assert "[search result 1]" in message
     assert "The launch phrase is violet." in message
     assert "\nPossible next steps:\n- [system] read_episode" in message
     assert '"episode_id": "ep_a3f91c"' in message
@@ -726,6 +749,11 @@ def test_notebook_ignores_errors_and_empty_results():
         ("search_entity", {"data": []}, ("Found 0 results", 0)),
         ("find_path", {"data": [{"hop": 1}]}, ("Path found: 1 hops", 1)),
         ("find_path", {"data": []}, ("No path", 0)),
+        (
+            "read_observation_evidence",
+            {"data": {"subject": {"identifier": "17"}}},
+            ("Loaded observation support", 1),
+        ),
         (
             "episode_check",
             {"data": {"resolution": "exact", "results": [{}, {}]}},

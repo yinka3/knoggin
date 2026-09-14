@@ -20,7 +20,13 @@ NotebookAudience = Literal["system", "agent"]
 
 
 _KNOWLEDGE_SECTIONS = ("entities", "relationships", "episodes", "paths")
-_EVIDENCE_SECTIONS = ("messages", "documents", "web_discoveries", "web_reads")
+_EVIDENCE_SECTIONS = (
+    "messages",
+    "documents",
+    "observation_supports",
+    "web_discoveries",
+    "web_reads",
+)
 _ALL_SECTIONS = _KNOWLEDGE_SECTIONS + _EVIDENCE_SECTIONS
 _ACTION_TOOLS = frozenset(
     {
@@ -57,6 +63,7 @@ class NotebookCapacity:
     max_paths: int = 8
     max_messages: int = 30
     max_documents: int = 30
+    max_observation_supports: int = 8
     max_web_discoveries: int = 12
     max_web_reads: int = 12
     max_actions: int = 12
@@ -75,6 +82,11 @@ class NotebookCapacity:
             max_paths=_positive_limit(limits, "max_accumulated_paths", 8),
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
             max_documents=_positive_limit(limits, "max_accumulated_documents", 30),
+            max_observation_supports=_positive_limit(
+                limits,
+                "max_accumulated_observation_supports",
+                _positive_limit(limits, "max_accumulated_paths", 8),
+            ),
             max_web_discoveries=_positive_limit(
                 limits, "max_accumulated_web_discoveries", 12
             ),
@@ -218,6 +230,7 @@ class RunNotebook:
             "paths": self.capacity.max_paths,
             "messages": self.capacity.max_messages,
             "documents": self.capacity.max_documents,
+            "observation_supports": self.capacity.max_observation_supports,
             "web_discoveries": self.capacity.max_web_discoveries,
             "web_reads": self.capacity.max_web_reads,
             "actions": self.capacity.max_actions,
@@ -349,6 +362,17 @@ class RunNotebook:
             document_id = item.get("document_id", item.get("id", "document"))
             chunk = item.get("chunk_index", 0)
             return f"document:{document_id}:{chunk}"
+        if section == "observation_supports":
+            subject = item.get("subject")
+            if isinstance(subject, dict):
+                identifier = subject.get("identifier")
+                if (
+                    subject.get("kind") == "relationship_observation"
+                    and isinstance(identifier, str)
+                    and identifier.isdecimal()
+                    and int(identifier) > 0
+                ):
+                    return f"observation_support:{identifier}"
         if section in {"web_discoveries", "web_reads"}:
             return self._hash_ref(section, self._source_identity(item))
         return self._hash_ref(section, item)
@@ -519,10 +543,68 @@ class RunNotebook:
                     page["episode_refs"].append(ref)
         return ref
 
+    @staticmethod
+    def _observation_id_from_bundle(value: object) -> int | None:
+        if not isinstance(value, dict):
+            return None
+        subject = value.get("subject")
+        if not isinstance(subject, dict):
+            return None
+        identifier = subject.get("identifier")
+        if (
+            subject.get("kind") != "relationship_observation"
+            or not isinstance(identifier, str)
+            or not identifier.isdecimal()
+        ):
+            return None
+        observation_id = int(identifier)
+        return observation_id if observation_id > 0 else None
+
+    def _add_observation_support(self, bundle: dict[str, Any]) -> str:
+        observation_id = self._observation_id_from_bundle(bundle)
+        if observation_id is None:
+            raise ValueError("observation evidence must identify one observation")
+        return self._upsert("observation_supports", bundle)
+
     def _add_path(self, item: dict[str, Any]) -> str:
         value = deepcopy(item)
+        raw_evidence = value.get("evidence")
+        observation_ids: list[int] = []
+        if isinstance(raw_evidence, list):
+            retained_evidence = []
+            for evidence in raw_evidence:
+                observation_id = self._observation_id_from_bundle(evidence)
+                if observation_id is None:
+                    retained_evidence.append(evidence)
+                elif observation_id not in observation_ids:
+                    observation_ids.append(observation_id)
+            value["evidence"] = retained_evidence
+        observation_refs = []
+        for observation_id in observation_ids:
+            observation_refs.append(
+                self._add_observation_support(
+                    {
+                        "subject": {
+                            "kind": "relationship_observation",
+                            "identifier": str(observation_id),
+                        },
+                        "nodes": [],
+                        "edges": [],
+                    }
+                )
+            )
+        if observation_refs:
+            value["observation_refs"] = observation_refs
         self._admit_evidence(value)
-        return self._upsert("paths", value)
+        ref = self._upsert("paths", value)
+        for observation_id, observation_ref in zip(observation_ids, observation_refs):
+            self._add_system_hint(
+                "read_observation_evidence",
+                {"observation_id": observation_id},
+                "when this path's durable support needs inspection",
+                [ref, observation_ref],
+            )
+        return ref
 
     @staticmethod
     def _valid_url(value: object) -> bool:
@@ -772,6 +854,8 @@ class RunNotebook:
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_path(item))
+        elif tool_name == "read_observation_evidence" and isinstance(data, dict):
+            references.append(self._add_observation_support(data))
         elif tool_name in {"episode_check", "read_recent_episodes"}:
             groups = data.get("results", []) if isinstance(data, dict) else []
             resolution = data.get("resolution") if isinstance(data, dict) else None
@@ -969,6 +1053,7 @@ class RunNotebook:
             "path": "paths",
             "message": "messages",
             "document": "documents",
+            "observation_support": "observation_supports",
             "web_discovery": "web_discoveries",
             "web_read": "web_reads",
         }.get(prefix, prefix)
@@ -991,6 +1076,10 @@ class RunNotebook:
         for reference in item.get("evidence_refs", []):
             if isinstance(reference, str):
                 dependencies.add(reference)
+        if section == "paths":
+            for reference in item.get("observation_refs", []):
+                if isinstance(reference, str):
+                    dependencies.add(reference)
         if section == "relationships":
             identifiers = (
                 item.get("source_entity_id"),
@@ -1280,6 +1369,10 @@ class RunNotebook:
                 "documents": {
                     reference: deepcopy(self._records["documents"][reference])
                     for reference in self._orders["documents"]
+                },
+                "observation_supports": {
+                    reference: deepcopy(self._records["observation_supports"][reference])
+                    for reference in self._orders["observation_supports"]
                 },
                 "web": {
                     "discoveries": {

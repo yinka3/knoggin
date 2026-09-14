@@ -37,12 +37,14 @@ _REFERENCE_PREFIXES = {
     "paths": "P",
     "messages": "M",
     "documents": "D",
+    "observation_supports": "O",
     "entity": "E",
     "relationship": "R",
     "episode": "EP",
     "path": "P",
     "message": "M",
     "document": "D",
+    "observation_support": "O",
     "web_discoveries": "W",
     "web_reads": "WR",
     "action": "A",
@@ -74,18 +76,23 @@ Episodes:
 {% endif %}{% if item.unresolved %}  unresolved: {{ item.unresolved|join('; ') }}
 {% endif %}{% if item.evidence %}  evidence in notebook: {{ item.evidence|join(', ') }}
 {% endif %}{% if item.support %}  historical support:
-{% for source in item.support %}  - {{ source.label }}{% if source.url %}: {{ source.url }}{% endif %}{% if source.excerpt %} — {{ source.excerpt }}{% endif %}{{ '\n' }}
+{% for source in item.support %}  - {{ source.label }}{% if source.locator %} [{{ source.locator }}]{% endif %}{% if source.url %}: {{ source.url }}{% endif %}{% if source.excerpt %} — {{ source.excerpt }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if paths %}
 Paths:
-{% for item in paths %}- {{ item.reference }}{% if item.description %}: {{ item.description }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
+{% for item in paths %}- {{ item.reference }}{% if item.description %}: {{ item.description }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{% if item.observation_supports %} (support: {{ item.observation_supports|join(', ') }}){% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if messages %}
 Messages:
 {% for item in messages %}- {{ item.reference }}{% if item.content %}: {{ item.content }}{% endif %}{{ '\n' }}{% endfor %}
 {% endif %}{% if documents %}
 Documents:
 {% for item in documents %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.content %}: {{ item.content }}{% endif %}
-{{ '\n' }}{% endfor %}{% endif %}{% if web_discoveries %}
+{{ '\n' }}{% endfor %}{% endif %}{% if observation_supports %}Observation support (expanded on demand):
+{% for item in observation_supports %}- {{ item.reference }} observation {{ item.observation_id }}{% if item.status %} ({{ item.status }}){% endif %}
+{% if item.context_blocks %}  context blocks: {{ item.context_blocks|join('; ') }}
+{% endif %}{% if item.sources %}  source excerpts:
+{% for source in item.sources %}  - {{ source.label }}{% if source.locator %} [{{ source.locator }}]{% endif %}{% if source.excerpt %}: {{ source.excerpt }}{% endif %}{{ '\n' }}
+{% endfor %}{% endif %}{% endfor %}{% endif %}{% if web_discoveries %}
 Web discoveries (not read):
 {% for item in web_discoveries %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.snippet %} — discovery snippet: {{ item.snippet }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if web_reads %}
@@ -150,6 +157,7 @@ class _ReferenceLocalizer:
         )
         yield "messages", evidence.get("messages", {})
         yield "documents", evidence.get("documents", {})
+        yield "observation_supports", evidence.get("observation_supports", {})
         web = evidence.get("web", {})
         yield "web_discoveries", web.get("discoveries", {})
         yield "web_reads", web.get("reads", {})
@@ -240,6 +248,7 @@ def _historical_episode_support(item: dict[str, Any]) -> list[dict[str, str]]:
         support.append(
             {
                 "label": f"{kind} ({status})",
+                "locator": _format_locator(source.get("locator")),
                 "url": _safe_text(source.get("canonical_url") or "", limit=200),
                 "excerpt": _safe_text(source.get("excerpt") or "", limit=160),
             }
@@ -247,6 +256,76 @@ def _historical_episode_support(item: dict[str, Any]) -> list[dict[str, str]]:
         if len(support) == 3:
             break
     return support
+
+
+def _format_locator(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    kind = value.get("kind")
+    if kind in {"text_lines", "code_lines"}:
+        start = value.get("start_line")
+        end = value.get("end_line")
+        if isinstance(start, int) and isinstance(end, int):
+            return f"lines {start}-{end}"
+    if kind == "csv_rows":
+        start = value.get("start_row")
+        end = value.get("end_row")
+        if isinstance(start, int) and isinstance(end, int):
+            return f"rows {start}-{end}"
+    if kind == "docx_paragraphs":
+        start = value.get("start_paragraph")
+        end = value.get("end_paragraph")
+        if isinstance(start, int) and isinstance(end, int):
+            return f"paragraphs {start}-{end}"
+    if kind == "pdf_page" and isinstance(value.get("page"), int):
+        return f"page {value['page']}"
+    if kind == "search_result" and isinstance(value.get("rank"), int):
+        return f"search result {value['rank']}"
+    return _safe_text(kind or "", limit=48).replace("_", " ")
+
+
+def _observation_support(item: dict[str, Any]) -> dict[str, Any]:
+    subject = item.get("subject")
+    observation_id = (
+        _safe_text(subject.get("identifier"), limit=32)
+        if isinstance(subject, dict)
+        else ""
+    )
+    nodes = item.get("nodes")
+    if not isinstance(nodes, list):
+        nodes = []
+    status = ""
+    context_blocks: list[str] = []
+    sources: list[dict[str, str]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        pointer = node.get("pointer")
+        kind = pointer.get("kind") if isinstance(pointer, dict) else None
+        if kind == "relationship_observation" and not status:
+            status = _safe_text(node.get("status"), limit=32)
+        elif kind == "context_block":
+            excerpt = _safe_text(node.get("excerpt"), limit=160)
+            if excerpt:
+                context_blocks.append(excerpt)
+        elif kind == "source_reference":
+            label = _safe_text(node.get("source_kind") or "source", limit=64).replace(
+                "_", " "
+            )
+            sources.append(
+                {
+                    "label": label,
+                    "locator": _format_locator(node.get("locator")),
+                    "excerpt": _safe_text(node.get("excerpt"), limit=160),
+                }
+            )
+    return {
+        "observation_id": observation_id,
+        "status": status,
+        "context_blocks": context_blocks[:2],
+        "sources": sources[:3],
+        "expanded": bool(nodes),
+    }
 
 
 def _entity_display_reference(
@@ -348,6 +427,13 @@ def _record_list(
             item["support"] = _historical_episode_support(item)
         elif section == "paths":
             item["description"] = _path_description(item, localizer)
+            item["observation_supports"] = [
+                localizer.reference(reference)
+                for reference in item.get("observation_refs", [])
+                if isinstance(reference, str)
+            ]
+        elif section == "observation_supports":
+            item.update(_observation_support(item))
         elif section in {"messages", "documents"}:
             content = item.get("message") or item.get("content") or ""
             if not content and isinstance(item.get("context"), list):
@@ -382,6 +468,15 @@ def _render_context(
     knowledge = snapshot["knowledge"]
     evidence = snapshot["evidence"]
     web = evidence["web"]
+    observation_supports = [
+        item
+        for item in _record_list(
+            evidence["observation_supports"],
+            localizer,
+            section="observation_supports",
+        )
+        if item["expanded"]
+    ]
 
     entity_pages = []
     for reference, page in snapshot["entity_pages"].items():
@@ -438,6 +533,7 @@ def _render_context(
         "documents": _record_list(
             evidence["documents"], localizer, section="documents"
         ),
+        "observation_supports": observation_supports,
         "web_discoveries": _record_list(
             web["discoveries"], localizer, section="web_discoveries"
         ),

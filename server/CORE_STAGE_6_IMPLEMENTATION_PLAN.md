@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Chunks A–E complete 2026-09-13. Chunks F–G remain planned.
+Status: Chunks A–F complete 2026-09-13. Chunk G remains planned.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -462,6 +462,28 @@ Acceptance:
 
 Commit boundary: model-facing provenance affordances.
 
+### Chunk F completion — 2026-09-13
+
+The executor now loads the separate model-only Context projection, which keeps
+assertion kinds and compact support handles out of user-editable `CONTEXT.md`.
+Path results retain local observation handles and an on-demand
+`read_observation_evidence` follow-up. Its traversal is bounded to one
+observation, four Context blocks, eight leaf evidence nodes, and 16 edges
+within the caller's readable-project scope. Historical episode support now
+renders locators without treating stored sources as newly consulted.
+
+`read_file` rejects active-project registered evidence documents with guidance
+to use `read_document`; `PROJECT.md` remains readable instruction context and
+controlled `CONTEXT.md` remains unavailable through generic workspace tools.
+
+Validation passed:
+
+- `uv run pytest -q tests/unit/core/knowledge/test_evidence_service.py tests/unit/core/agent/test_graph_retrieval_contract.py tests/unit/core/agent/test_run_notebook.py tests/unit/core/agent/test_agent_runtime_context_contract.py` → **49 passed**.
+- `uv run pytest -q tests/unit/core/knowledge/test_context_render.py tests/unit/core/agent/test_agent_executor_step_contract.py tests/unit/core/agent/test_workspace_tools_contract.py tests/unit/core/agent/test_tool_dispatch_contract.py` → **41 passed**.
+- `uv run pytest -q tests/contract/storage/test_current_observation_reader_contract.py -k visible_observation` → **1 passed, 3 deselected**.
+- `uv run pytest -q tests/unit/core/agent` → **251 passed**.
+- Touched-path Ruff check, targeted compileall, and `git diff --check` passed.
+
 ## Chunk G — Configurable adaptive Project briefing
 
 Add a small per-run briefing policy with two supported modes:
@@ -546,10 +568,10 @@ provenance/Agent reviews.
 - [x] B: typed notebook admission and source encounter ordering.
 - [x] C: phase authorization and protocol exclusivity.
 - [x] D: enforced research/deep-research semantics and profile cleanup.
-- [ ] E: default-Agent lifecycle and Brain CAS.
-- [ ] F: model-facing provenance and qualified Context briefing.
+- [x] E: default-Agent lifecycle and Brain CAS.
+- [x] F: model-facing provenance and qualified Context briefing.
 - [ ] G: configurable adaptive Project briefing.
 - [ ] Combined scripted-provider and PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 6 Chunk E.
+Next implementation task: Stage 6 Chunk G.

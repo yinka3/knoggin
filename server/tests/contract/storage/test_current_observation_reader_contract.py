@@ -144,6 +144,38 @@ async def test_current_context_backed_observations_reach_conflict_discovery(
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_visible_observation_evidence_uses_the_readable_project_scope(
+    real_postgres_client,
+):
+    await _seed_observation_matrix(real_postgres_client)
+    evidence = EvidenceService(EvidenceTraversalReader(real_postgres_client))
+
+    readable = await evidence.for_visible_relationship_observation(
+        1,
+        user_name="ada",
+        visible_project_ids=["project-1", "project-2"],
+    )
+    excluded = await evidence.for_visible_relationship_observation(
+        1,
+        user_name="ada",
+        visible_project_ids=["project-2"],
+    )
+
+    assert next(
+        node.status
+        for node in readable.nodes
+        if node.pointer.kind == "relationship_observation"
+    ) == "active"
+    assert next(
+        node.status
+        for node in excluded.nodes
+        if node.pointer.kind == "relationship_observation"
+    ) == "missing"
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_new_direct_conflict_review_is_current_against_its_cited_evidence(
     real_postgres_client,
 ):

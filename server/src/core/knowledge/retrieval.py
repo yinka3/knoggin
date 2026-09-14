@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from common.schema.evidence import EvidenceTraversalLimits
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
 
@@ -355,6 +356,32 @@ class KnowledgeRetrieval:
             visible_project_ids=self.readable_project_ids,
         )
         return await self._hydrate_result_evidence(path, session_id=session_id)
+
+    async def read_observation_evidence(self, observation_id: int) -> Dict:
+        """Expand one path observation through the scoped evidence traversal."""
+
+        if (
+            not isinstance(observation_id, int)
+            or isinstance(observation_id, bool)
+            or observation_id <= 0
+        ):
+            raise ValueError("observation_id must be a positive integer")
+        bundle = await self.knowledge_store.get_visible_relationship_observation_evidence(
+            observation_id,
+            user_name=self.user_name,
+            visible_project_ids=self.readable_project_ids,
+            limits=EvidenceTraversalLimits(
+                max_observations=1,
+                max_context_blocks=4,
+                max_leaf_evidence=8,
+                max_edges=16,
+            ),
+        )
+        return (
+            bundle.model_dump(mode="json")
+            if hasattr(bundle, "model_dump")
+            else dict(bundle)
+        )
 
     async def get_hot_topic_context(
         self, hot_topics: List[str], *, session_id: str

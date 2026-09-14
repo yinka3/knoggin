@@ -11,7 +11,7 @@ class _Postgres:
         return [{"session_id": "session-1"}]
 
 
-def _retrieval(store):
+def _retrieval(store, *, readable_project_ids=None):
     class Entities:
         async def get_profile(self, entity_id):
             if entity_id in {2, 3}:
@@ -20,7 +20,7 @@ def _retrieval(store):
 
     return KnowledgeRetrieval(
         project_id="project-1",
-        readable_project_ids=["project-1"],
+        readable_project_ids=readable_project_ids or ["project-1"],
         user_name="ada",
         entities=Entities(),
         embedding_service=SimpleNamespace(),
@@ -196,6 +196,43 @@ async def test_path_returns_canonical_direction_and_project_attribution():
         "identifier": "18",
     }
     assert evidence["nodes"][0]["status"] == "missing"
+
+
+@pytest.mark.no_network
+async def test_observation_evidence_read_uses_a_bounded_readable_traversal():
+    class Store:
+        def __init__(self):
+            self.calls = []
+
+        async def get_visible_relationship_observation_evidence(
+            self, observation_id, **kwargs
+        ):
+            self.calls.append((observation_id, kwargs))
+            return _observation_bundle(observation_id)
+
+    store = Store()
+
+    result = await _retrieval(
+        store,
+        readable_project_ids=["project-1", "project-2"],
+    ).read_observation_evidence(17)
+
+    assert result["subject"] == {
+        "kind": "relationship_observation",
+        "identifier": "17",
+    }
+    assert len(store.calls) == 1
+    observation_id, kwargs = store.calls[0]
+    assert observation_id == 17
+    assert kwargs["user_name"] == "ada"
+    assert kwargs["visible_project_ids"] == ["project-1", "project-2"]
+    limits = kwargs["limits"]
+    assert (
+        limits.max_observations,
+        limits.max_context_blocks,
+        limits.max_leaf_evidence,
+        limits.max_edges,
+    ) == (1, 4, 8, 16)
 
 
 def _observation_bundle(observation_id: int) -> EvidenceBundle:

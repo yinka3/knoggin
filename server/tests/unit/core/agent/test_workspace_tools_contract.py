@@ -17,6 +17,8 @@ from core.agent.tools.workspace import ProjectFileTools
 class FakeDocumentService:
     def __init__(self):
         self.calls = []
+        self.project_id = "project-1"
+        self.registered_documents = {}
 
     async def list_project_files(self, *, path_prefix=None, limit=100):
         self.calls.append(("list", path_prefix, limit))
@@ -25,6 +27,12 @@ class FakeDocumentService:
     async def read_project_file(self, path, **kwargs):
         self.calls.append(("read", path, kwargs))
         return {"relative_path": path, "content": "hello\n"}
+
+    async def get_document_info(self, *, relative_path=None, document_id=None):
+        self.calls.append(("document_info", relative_path, document_id))
+        if relative_path in self.registered_documents:
+            return self.registered_documents[relative_path]
+        raise FileNotFoundError("Document not found")
 
     async def create_project_file(self, path, content):
         self.calls.append(("create", path, content))
@@ -69,6 +77,7 @@ async def test_project_file_tools_forward_bounded_project_scoped_operations():
 
     assert service.calls == [
         ("list", "docs", 3),
+        ("document_info", "docs/notes.md", None),
         (
             "read",
             "docs/notes.md",
@@ -82,6 +91,21 @@ async def test_project_file_tools_forward_bounded_project_scoped_operations():
         ("update", "docs/new.md", "replacement", expected_hash),
         ("append", "docs/new.md", "more", expected_hash),
     ]
+
+
+@pytest.mark.no_network
+async def test_registered_evidence_document_cannot_bypass_provenance_aware_read():
+    service = FakeDocumentService()
+    service.registered_documents["docs/evidence.md"] = {
+        "document_id": "document-1",
+        "project_id": "project-1",
+    }
+    tools = ProjectFileHarness(service)
+
+    with pytest.raises(ToolExecutionError, match="read_document"):
+        await tools.read_file("docs/evidence.md")
+
+    assert service.calls == [("document_info", "docs/evidence.md", None)]
 
 
 @pytest.mark.no_network

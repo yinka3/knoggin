@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from common.exceptions import ToolExecutionError
 from core.knowledge.documents.scanning import normalize_relative_path
 from core.project.project_files import (
     CONTEXT_FILE_PATH,
@@ -92,6 +93,29 @@ class ProjectFileTools:
             raise PermissionError(
                 f"{CONTEXT_FILE_PATH} is managed through the controlled Context importer"
             )
+        if normalized_path.casefold() != PROJECT_FILE_PATH.casefold():
+            try:
+                document = await self.document_service.get_document_info(
+                    relative_path=normalized_path,
+                )
+            except FileNotFoundError:
+                document = None
+            except ValueError as exc:
+                raise ToolExecutionError(
+                    "read_file",
+                    "This path has ambiguous managed-document identity; use "
+                    "read_document with a document_id instead.",
+                ) from exc
+            active_project_id = getattr(self.document_service, "project_id", None)
+            if document is not None and (
+                active_project_id is None
+                or document.get("project_id") == active_project_id
+            ):
+                raise ToolExecutionError(
+                    "read_file",
+                    "This path is a registered evidence document. Use "
+                    "read_document so the passage keeps source provenance.",
+                )
         if not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1:
             raise ValueError("start_line must be a positive integer")
         if end_line is not None and (

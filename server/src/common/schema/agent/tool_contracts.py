@@ -174,6 +174,31 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "read_observation_evidence",
+            "description": (
+                "Expand the bounded durable support for one relationship observation "
+                "shown by a path result. Use this when an observation handle needs "
+                "verification; it explains historical support and does not make a "
+                "current-state claim."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Positive observation ID shown by a path support handle.",
+                    }
+                },
+                "required": ["observation_id"],
+                "additionalProperties": False,
+            },
+            "tags": ["graph:read", "core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_messages",
             "description": (
                 "A fallback tool for raw keyword recall. "
@@ -952,7 +977,8 @@ TOOL_SCHEMAS = [
                 "Read a bounded line and character slice from one file in the "
                 "current project's local folder. PROJECT.md is readable "
                 "but remains user-owned; controlled CONTEXT.md is unavailable "
-                "through ordinary workspace tools."
+                "through ordinary workspace tools. Registered evidence documents "
+                "must be read with read_document so source provenance is retained."
             ),
             "parameters": {
                 "type": "object",

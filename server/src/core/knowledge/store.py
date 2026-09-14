@@ -145,6 +145,23 @@ class KnowledgeStore:
             limits=limits,
         )
 
+    async def get_visible_relationship_observation_evidence(
+        self,
+        observation_id: int,
+        *,
+        user_name: str,
+        visible_project_ids: list[str],
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one observation in the read scope."""
+
+        return await self._evidence_service.for_visible_relationship_observation(
+            observation_id,
+            user_name=user_name,
+            visible_project_ids=visible_project_ids,
+            limits=limits,
+        )
+
     async def get_context_block_evidence(
         self,
         block_id: str,
