@@ -84,6 +84,89 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
 
 
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    "user_query",
+    [
+        "Hey",
+        "nice",
+        "Nice, go to the next one",
+        "go to the next one",
+    ],
+)
+def test_adaptive_briefing_uses_a_narrow_conversational_fast_path(user_query):
+    run = make_run(user_query=user_query)
+
+    assert run.project_briefing.mode == "adaptive"
+    assert run.project_briefing.initial_reason is None
+    assert run.project_briefing.needs_load is False
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("overrides", "expected_reason"),
+    [
+        (
+            {"user_query": "What did we decide about the ingestion project?"},
+            "explicit_project_memory_intent",
+        ),
+        (
+            {"user_query": "Explain this architecture."},
+            "conservative_default",
+        ),
+        (
+            {"research_profile": resolve_research_profile("research")},
+            "research_mode",
+        ),
+        (
+            {"document_selection_context": {"excerpt": "selected passage"}},
+            "document_selection",
+        ),
+        ({"hot_topics": ["ingestion"]}, "hot_topic_preload"),
+        (
+            {"limits": AgentRunLimits(project_briefing_mode="always")},
+            "always",
+        ),
+    ],
+)
+def test_agent_run_freezes_observable_briefing_signals(
+    overrides,
+    expected_reason,
+):
+    run = make_run(**overrides)
+
+    assert run.project_briefing.initial_reason == expected_reason
+    assert run.project_briefing.requested_reason == expected_reason
+    assert run.project_briefing.needs_load is True
+
+
+@pytest.mark.no_network
+def test_adaptive_briefing_allows_one_deferred_transition_and_caches_content():
+    run = make_run(user_query="hey")
+
+    assert run.request_project_briefing_transition() is True
+    assert run.request_project_briefing_transition() is False
+    assert run.project_briefing.transition_count == 1
+    assert run.project_briefing.requested_reason == "tool_followup"
+
+    run.record_project_briefing_loaded(
+        brief="Project Brief",
+        context="Project Context",
+        content_token_count=4,
+    )
+    run.record_project_briefing_loaded(
+        brief="later brief",
+        context="later context",
+        content_token_count=8,
+    )
+
+    assert run.project_briefing.loaded is True
+    assert run.project_briefing.load_count == 1
+    assert run.project_briefing.brief == "Project Brief"
+    assert run.project_briefing.context == "Project Context"
+    assert run.project_briefing.content_token_count == 4
+
+
+@pytest.mark.no_network
 def test_agent_run_rejects_unregistered_additional_tool_schema():
     with pytest.raises(ValueError, match="no registered implementation"):
         make_run(

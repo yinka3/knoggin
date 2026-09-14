@@ -14,12 +14,19 @@ from core.agent.sources.document_selection import build_document_selection_candi
 from core.agent.sources.pasted_text import build_pasted_text_candidates
 
 
-def make_run(*, limits=None, research_profile=None, initial_source_candidates=None):
+def make_run(
+    *,
+    limits=None,
+    research_profile=None,
+    initial_source_candidates=None,
+    user_query="What changed?",
+    document_selection_context=None,
+):
     return AgentRun.open(
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
-        user_query="What changed?",
+        user_query=user_query,
         run_id="run-1",
         agent=AgentIdentity(
             config=AgentConfig(
@@ -39,6 +46,7 @@ def make_run(*, limits=None, research_profile=None, initial_source_candidates=No
         limits=limits or AgentRunLimits(max_attempts=3, max_calls=4),
         research_profile=research_profile,
         initial_source_candidates=initial_source_candidates,
+        document_selection_context=document_selection_context,
     )
 
 
@@ -91,6 +99,266 @@ def completed_event():
             }
         },
     }
+
+
+def install_counted_project_briefing(monkeypatch, executor):
+    counts = {"brief": 0, "context": 0}
+
+    async def load_brief():
+        counts["brief"] += 1
+        return "BRIEF_PAYLOAD"
+
+    async def load_context():
+        counts["context"] += 1
+        return "CONTEXT_PAYLOAD"
+
+    monkeypatch.setattr(executor, "_load_project_brief", load_brief)
+    monkeypatch.setattr(executor, "_load_project_context", load_context)
+    return counts
+
+
+@pytest.mark.no_network
+async def test_adaptive_greeting_skips_project_briefing_and_answers_directly(
+    monkeypatch,
+):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Hey! What would you like to work on?"}',
+                    "submit-1",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(user_query="Hey")
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    counts = install_counted_project_briefing(monkeypatch, executor)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert counts == {"brief": 0, "context": 0}
+    assert "<project_brief>" not in llm.calls[0]["system"]
+    assert "<project_context>" not in llm.calls[0]["system"]
+    assert run.project_briefing.loaded is False
+    assert run.project_briefing.transition_count == 0
+    assert run.project_briefing.content_token_count == 0
+
+
+@pytest.mark.no_network
+async def test_adaptive_project_memory_request_loads_briefing_before_first_step(
+    monkeypatch,
+):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "The decision was retained."}',
+                    "submit-1",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(user_query="What did we decide about the ingestion project?")
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    counts = install_counted_project_briefing(monkeypatch, executor)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert counts == {"brief": 1, "context": 1}
+    assert "BRIEF_PAYLOAD" in llm.calls[0]["system"]
+    assert "CONTEXT_PAYLOAD" in llm.calls[0]["system"]
+    assert run.project_briefing.initial_reason == "explicit_project_memory_intent"
+    assert run.project_briefing.load_count == 1
+    assert run.project_briefing.content_token_count == 2
+
+
+@pytest.mark.no_network
+async def test_research_mode_loads_briefing_before_the_first_step(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "source"}',
+                    "search-1",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        user_query="Investigate the source.",
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    counts = install_counted_project_briefing(monkeypatch, executor)
+
+    async def searched_evidence(*_args):
+        return {"data": [{"id": "message-1", "message": "SOURCE_FACT"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", searched_evidence)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert counts == {"brief": 1, "context": 1}
+    assert run.project_briefing.initial_reason == "research_mode"
+    assert "BRIEF_PAYLOAD" in llm.calls[0]["system"]
+
+
+@pytest.mark.no_network
+async def test_document_selection_loads_briefing_before_the_first_step(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "The selected passage is clear."}',
+                    "submit-1",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        user_query="hey",
+        document_selection_context={"excerpt": "selected passage"},
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    counts = install_counted_project_briefing(monkeypatch, executor)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert counts == {"brief": 1, "context": 1}
+    assert run.project_briefing.initial_reason == "document_selection"
+    assert "BRIEF_PAYLOAD" in llm.calls[0]["system"]
+
+
+@pytest.mark.no_network
+async def test_always_mode_loads_briefing_for_a_greeting(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Hey!"}',
+                    "submit-1",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        user_query="hey",
+        limits=AgentRunLimits(
+            max_attempts=1,
+            max_calls=1,
+            project_briefing_mode="always",
+        ),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    counts = install_counted_project_briefing(monkeypatch, executor)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert counts == {"brief": 1, "context": 1}
+    assert run.project_briefing.initial_reason == "always"
+    assert "BRIEF_PAYLOAD" in llm.calls[0]["system"]
+
+
+@pytest.mark.no_network
+async def test_adaptive_tool_followup_loads_cached_briefing_once(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "scope"}',
+                    "search-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft from the retrieved result."}',
+                    "draft-1",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final from the retrieved result."}',
+                    "final-1",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        user_query="Nice, go to the next one",
+        limits=AgentRunLimits(max_attempts=3, max_calls=2),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    counts = install_counted_project_briefing(monkeypatch, executor)
+
+    async def searched_evidence(*_args):
+        return {"data": [{"id": "message-1", "message": "SCOPE_FACT"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", searched_evidence)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert counts == {"brief": 1, "context": 1}
+    assert "<project_brief>" not in llm.calls[0]["system"]
+    assert "BRIEF_PAYLOAD" in llm.calls[1]["system"]
+    assert "BRIEF_PAYLOAD" in llm.calls[2]["system"]
+    assert run.project_briefing.transition_count == 1
+    assert run.project_briefing.load_count == 1
+
+
+@pytest.mark.no_network
+async def test_llm_call_telemetry_records_briefing_cost_and_transition(monkeypatch):
+    run = make_run(user_query="hey")
+    run.request_project_briefing_transition()
+    run.record_project_briefing_loaded(
+        brief="Project Brief",
+        context="Project Context",
+        content_token_count=4,
+    )
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
+    emitted = []
+
+    async def capture_emit(*args, **kwargs):
+        emitted.append((args, kwargs))
+
+    monkeypatch.setattr("core.agent.executor.emit", capture_emit)
+
+    await executor._emit_llm_call("architect", "high")
+
+    args, kwargs = emitted[0]
+    assert args[:3] == ("session-1", "agent", "llm_call")
+    assert args[3]["project_briefing"] == {
+        "mode": "adaptive",
+        "reason": "tool_followup",
+        "loaded": True,
+        "load_count": 1,
+        "transition_count": 1,
+        "content_token_count": 4,
+    }
+    assert kwargs == {"verbose_only": True}
 
 
 @pytest.mark.no_network

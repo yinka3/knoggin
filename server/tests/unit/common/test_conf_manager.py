@@ -133,6 +133,38 @@ def test_agent_limits_reject_boolean_and_duplicate_normalized_overrides():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_agent_limits_default_to_adaptive_project_briefing_and_validate_modes():
+    assert AgentLimitSettings().project_briefing_mode == "adaptive"
+    assert AgentLimitSettings(project_briefing_mode="always").project_briefing_mode == (
+        "always"
+    )
+    with pytest.raises(ValueError):
+        AgentLimitSettings(project_briefing_mode="never")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_project_briefing_mode_is_persisted_by_config_updates(
+    mock_config_paths,
+    reset_config_manager,
+):
+    mgr = ConfigManager.get()
+
+    assert mgr.update_settings(
+        {
+            "developer_settings": {
+                "limits": {"project_briefing_mode": "always"}
+            }
+        }
+    )
+    assert mgr.config.developer_settings.limits.project_briefing_mode == "always"
+    assert "project_briefing_mode: always" in mock_config_paths["yaml"].read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_unknown_tool_limit_does_not_activate(mock_config_paths, reset_config_manager):
     mgr = ConfigManager.get()
     previous = mgr.config

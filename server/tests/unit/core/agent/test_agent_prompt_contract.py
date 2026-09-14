@@ -143,6 +143,8 @@ def test_agent_prompt_renders_distinct_project_brief_and_engine_context():
 def test_agent_prompt_omits_persistent_context_when_no_memory_or_files():
     prompt = get_agent_prompt(user_name="Ada")
 
+    assert "<project_brief>" not in prompt
+    assert "<project_context>" not in prompt
     assert "<retrieved_context>" not in prompt
     assert "<uploaded_documents>" not in prompt
     assert "\n<agent_brain>\nPersistent" not in prompt

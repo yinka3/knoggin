@@ -218,6 +218,8 @@ async def test_orchestrator_compiles_selected_research_mode_into_same_agent_run(
     assert run.research_profile.mode == "research"
     assert run.limits.max_calls == FakeLimits.max_tool_calls * 2
     assert run.limits.max_attempts == FakeLimits.max_attempts * 2
+    assert run.project_briefing.mode == "adaptive"
+    assert run.project_briefing.initial_reason == "research_mode"
 
 
 @pytest.mark.runtime
@@ -272,6 +274,8 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.temperature == 0.25
     assert "Use memory" in executor.ctx.brain
     assert executor.ctx.enabled_tools == ("episode_check",)
+    assert executor.ctx.project_briefing.mode == "adaptive"
+    assert executor.ctx.project_briefing.initial_reason is None
     assert executor.execute_kwargs == {"user_timezone": None}
     assert tools.closed is True
 

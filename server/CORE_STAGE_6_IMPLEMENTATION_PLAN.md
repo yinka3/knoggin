@@ -1,6 +1,6 @@
 # Core Stage 6 — Agent Evidence Delivery and Research Execution
 
-Status: Chunks A–F complete 2026-09-13. Chunk G remains planned.
+Status: Chunks A–G complete 2026-09-14. Combined scenarios and closeout remain.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
@@ -506,7 +506,7 @@ Primary files:
 
 | File | Planned change |
 | --- | --- |
-| `src/common/schema/settings.py` | Add the compact `always`/`adaptive` policy. |
+| `src/common/schema/agent/settings.py` | Add the compact `always`/`adaptive` policy. |
 | `src/core/agent/orchestrator.py` | Freeze briefing mode/signals into the run. |
 | `src/core/agent/run.py` | Track whether Project briefing has been loaded. |
 | `src/core/agent/executor.py` | Gate and cache Brief/Context loading without requiring a normal tool call. |
@@ -525,6 +525,36 @@ Acceptance:
   declared successful solely because unit tests pass.
 
 Commit boundary: briefing efficiency after evidence correctness.
+
+### Chunk G completion — 2026-09-14
+
+`developer_settings.limits.project_briefing_mode` now accepts `adaptive`
+(the default) and `always`. The per-run decision is frozen when `AgentRun` is
+opened. Adaptive mode only skips Brief/Context for a deliberately small,
+tested conversational set such as greetings, acknowledgements, and “go to the
+next one”; uncertain substantive prompts retain the existing pre-first-step
+load. Research mode, document focus or a selected passage, hot-topic preload,
+and explicit Project-memory wording all require briefing before the first
+model step. `always` preserves the prior behavior.
+
+Brief and canonical Context are loaded concurrently once, then held in
+run-local state for all later steps. If an initially unbriefed fast-path turn
+makes a nonterminal tool call, the executor requests one `tool_followup`
+transition and loads the cached briefing before its next reasoning step. The
+verbose `llm_call` event records the policy, reason, load and transition
+counts, and the Project payload token count. Provider-reported prompt-token
+usage remains in the response usage already captured by the run.
+
+Validation passed:
+
+- `uv run pytest -q tests/unit/common/test_conf_manager.py tests/unit/core/agent/test_agent_run.py tests/unit/core/agent/test_agent_prompt_contract.py tests/unit/core/agent/test_agent_executor_step_contract.py tests/unit/core/agent/test_executor_loop_contract.py tests/unit/core/agent/test_orchestrator.py` → **108 passed**.
+- `uv run pytest -q tests/unit/core/agent` → **269 passed**.
+- Touched-path Ruff check, focused `python -m compileall`, and `git diff --check` passed.
+- Scripted-provider contracts prove the first greeting step omits both Project
+  blocks, direct Project-memory/document/research signals preload them, and a
+  deferred follow-up loads exactly once. The telemetry fields provide the
+  prompt-cost and extra-step inputs for the Stage 6 combined comparison; no
+  live-provider quality or latency claim was made here.
 
 ## Combined Stage 6 scenarios
 
@@ -570,8 +600,8 @@ provenance/Agent reviews.
 - [x] D: enforced research/deep-research semantics and profile cleanup.
 - [x] E: default-Agent lifecycle and Brain CAS.
 - [x] F: model-facing provenance and qualified Context briefing.
-- [ ] G: configurable adaptive Project briefing.
+- [x] G: configurable adaptive Project briefing.
 - [ ] Combined scripted-provider and PostgreSQL scenarios pass.
 - [ ] Review/probe/operations closeout is recorded and committed locally.
 
-Next implementation task: Stage 6 Chunk G.
+Next implementation task: Stage 6 combined scenarios and closeout.

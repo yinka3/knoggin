@@ -204,8 +204,8 @@ class AgentExecutor:
             getattr(self.tools, "document_focus", None),
             getattr(self.ctx, "document_selection_context", None),
         )
-        project_brief = await self._load_project_brief()
-        project_context = await self._load_project_context()
+        project_brief = ""
+        project_context = ""
 
         last_result = None
 
@@ -257,6 +257,8 @@ class AgentExecutor:
             needs_replan = False
             needs_final_synthesis = False
             needs_deep_research_gap_review = False
+
+            project_brief, project_context = await self._ensure_project_briefing()
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
@@ -409,6 +411,12 @@ class AgentExecutor:
                             },
                         }
                         return
+
+                    if self.ctx.request_project_briefing_transition():
+                        logger.info(
+                            "AgentExecutor: loading Project briefing after a "
+                            "fast-path tool transition."
+                        )
 
                     async for tool_event in self._execute_tools(
                         pending_tool_calls,
@@ -595,6 +603,41 @@ class AgentExecutor:
                     "message": "LLM provider unavailable",
                 },
             }
+
+    async def _ensure_project_briefing(self) -> tuple[str, str]:
+        """Return the run-cached Project material, loading it once if requested."""
+
+        briefing = self.ctx.project_briefing
+        if not briefing.needs_load:
+            return briefing.brief, briefing.context
+
+        brief, context = await asyncio.gather(
+            self._load_project_brief(),
+            self._load_project_context(),
+        )
+        self.ctx.record_project_briefing_loaded(
+            brief=brief,
+            context=context,
+            content_token_count=self._count_project_briefing_tokens(brief, context),
+        )
+        logger.info(
+            "AgentExecutor: loaded Project briefing ({}, {} content tokens).",
+            briefing.requested_reason,
+            self.ctx.project_briefing.content_token_count,
+        )
+        return brief, context
+
+    def _count_project_briefing_tokens(self, brief: str, context: str) -> int:
+        """Measure the optional Project payload without requiring provider usage data."""
+
+        counter = getattr(self.llm, "count_tokens", None)
+        if not callable(counter):
+            return 0
+        try:
+            count = counter("\n".join(part for part in (brief, context) if part))
+        except Exception:
+            return 0
+        return count if isinstance(count, int) and count >= 0 else 0
 
     async def _load_project_brief(self) -> str:
         """Load the user-owned PROJECT.md brief without making a run block."""
@@ -1065,6 +1108,7 @@ class AgentExecutor:
             return None
 
     async def _emit_llm_call(self, model: Optional[str], reasoning: str):
+        briefing = self.ctx.project_briefing
         await emit(
             self.ctx.session_id,
             "agent",
@@ -1076,6 +1120,14 @@ class AgentExecutor:
                 "turn": self.ctx.attempt_count,
                 "evidence_state": {
                     **self.ctx.notebook.capacity_report(),
+                },
+                "project_briefing": {
+                    "mode": briefing.mode,
+                    "reason": briefing.requested_reason,
+                    "loaded": briefing.loaded,
+                    "load_count": briefing.load_count,
+                    "transition_count": briefing.transition_count,
+                    "content_token_count": briefing.content_token_count,
                 },
             },
             verbose_only=True,

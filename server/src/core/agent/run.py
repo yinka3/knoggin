@@ -7,6 +7,7 @@ reasoning loop.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
@@ -17,7 +18,10 @@ from common.schema.agent.research import (
     DEFAULT_RESEARCH_PROFILES,
     ResearchProfile,
 )
-from common.schema.agent.settings import validate_tool_limit_overrides
+from common.schema.agent.settings import (
+    ProjectBriefingMode,
+    validate_tool_limit_overrides,
+)
 from common.schema.agent.stream import StreamUsage
 from common.schema.document import DocumentFocus
 from common.schema.source.references import SourceReferenceCandidate
@@ -45,6 +49,166 @@ def _empty_usage() -> StreamUsage:
 
 AAC_DIAGNOSTIC_PROJECT_ID = "__aac__"
 _UNSET_AUDIT_PROJECT_ID = object()
+
+_PROJECT_MEMORY_CUES = (
+    "project",
+    "memory",
+    "remember",
+    "remind",
+    "previous",
+    "earlier",
+    "history",
+    "decision",
+    "decided",
+    "context",
+    "codebase",
+    "repository",
+    "repo",
+    "document",
+    "docs",
+    "file",
+    "folder",
+    "note",
+    "we discussed",
+    "we talked",
+    "last time",
+)
+_SIMPLE_CONVERSATIONAL_TURNS = frozenset(
+    {
+        "hey",
+        "hi",
+        "hello",
+        "yo",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "nice",
+        "cool",
+        "great",
+        "awesome",
+        "okay",
+        "ok",
+        "sounds good",
+        "got it",
+        "gotcha",
+        "thanks",
+        "thank you",
+        "yeah",
+        "yep",
+        "yes",
+        "sure",
+        "continue",
+        "keep going",
+        "next",
+        "next one",
+        "go next",
+        "go to next one",
+        "go to the next one",
+    }
+)
+_CONTINUATION_TURN_RE = re.compile(
+    r"(?:nice|okay|ok|cool|great|awesome|sounds good|yeah|yep|yes|sure)?"
+    r"\s*(?:go\s+to\s+)?(?:the\s+)?next(?:\s+one)?"
+)
+
+
+def _normalized_turn_text(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def _has_explicit_project_memory_intent(user_query: str) -> bool:
+    normalized = _normalized_turn_text(user_query)
+    padded = f" {normalized} "
+    return any(f" {cue} " in padded for cue in _PROJECT_MEMORY_CUES)
+
+
+def _is_simple_conversational_turn(user_query: str) -> bool:
+    normalized = _normalized_turn_text(user_query)
+    return (
+        normalized in _SIMPLE_CONVERSATIONAL_TURNS
+        or _CONTINUATION_TURN_RE.fullmatch(normalized) is not None
+    )
+
+
+@dataclass(slots=True)
+class ProjectBriefing:
+    """Frozen briefing decision plus one run-local cached Project projection."""
+
+    mode: ProjectBriefingMode
+    initial_reason: Optional[str]
+    requested_reason: Optional[str]
+    loaded: bool = False
+    load_count: int = 0
+    transition_count: int = 0
+    content_token_count: int = 0
+    brief: str = ""
+    context: str = ""
+
+    @classmethod
+    def for_run(
+        cls,
+        *,
+        mode: ProjectBriefingMode,
+        user_query: str,
+        research_profile: ResearchProfile,
+        document_focus: Optional[DocumentFocus],
+        document_selection_context: Optional[Dict[str, Any]],
+        hot_topics: List[str],
+        hot_topic_context: Dict[str, Dict],
+    ) -> "ProjectBriefing":
+        if mode not in {"always", "adaptive"}:
+            raise ValueError("project briefing mode must be 'always' or 'adaptive'")
+        if mode == "always":
+            reason: Optional[str] = "always"
+        elif research_profile.mode != "normal":
+            reason = "research_mode"
+        elif document_selection_context is not None:
+            reason = "document_selection"
+        elif document_focus is not None:
+            reason = "document_focus"
+        elif hot_topics or hot_topic_context:
+            reason = "hot_topic_preload"
+        elif _has_explicit_project_memory_intent(user_query):
+            reason = "explicit_project_memory_intent"
+        elif _is_simple_conversational_turn(user_query):
+            reason = None
+        else:
+            # The fast path is intentionally small. A prompt not recognized as
+            # conversational retains the Project briefing rather than guessing.
+            reason = "conservative_default"
+        return cls(mode=mode, initial_reason=reason, requested_reason=reason)
+
+    @property
+    def needs_load(self) -> bool:
+        return self.requested_reason is not None and not self.loaded
+
+    def request_transition(self, reason: str) -> bool:
+        """Request one later briefing load after the fast path proves insufficient."""
+
+        if self.loaded or self.requested_reason is not None:
+            return False
+        self.requested_reason = reason
+        self.transition_count += 1
+        return True
+
+    def record_loaded(
+        self,
+        *,
+        brief: str,
+        context: str,
+        content_token_count: int,
+    ) -> None:
+        if self.loaded:
+            return
+        self.brief = brief
+        self.context = context
+        self.content_token_count = content_token_count
+        self.loaded = True
+        self.load_count += 1
+
+    def clear_content(self) -> None:
+        self.brief = ""
+        self.context = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +240,7 @@ class AgentRunLimits:
     max_accumulated_summary_chars: int = 4000
     max_notebook_render_tokens: int = 10000
     max_consecutive_errors: int = 3
+    project_briefing_mode: ProjectBriefingMode = "adaptive"
     empty_result_replan_threshold: int = 3
     tool_timeout: float = 30.0
     tool_limits: Tuple[Tuple[str, int], ...] = field(
@@ -88,6 +253,12 @@ class AgentRunLimits:
 
         defaults = get_default_tool_limits()
         overrides = dict(getattr(settings, "tool_limit_overrides", {}))
+        briefing_mode = cast(
+            ProjectBriefingMode,
+            getattr(settings, "project_briefing_mode", "adaptive"),
+        )
+        if briefing_mode not in {"always", "adaptive"}:
+            raise ValueError("project_briefing_mode must be 'always' or 'adaptive'")
         validate_tool_limit_overrides(settings, get_registered_tool_names())
         return cls(
             max_calls=settings.max_tool_calls,
@@ -107,6 +278,7 @@ class AgentRunLimits:
             max_accumulated_summary_chars=settings.max_accumulated_summary_chars,
             max_notebook_render_tokens=settings.max_notebook_render_tokens,
             max_consecutive_errors=settings.max_consecutive_errors,
+            project_briefing_mode=briefing_mode,
             tool_limits=tuple((defaults | overrides).items()),
         )
 
@@ -164,6 +336,13 @@ class AgentRun:
     document_selection_context: Optional[Dict[str, Any]] = None
     hot_topics: List[str] = field(default_factory=list)
     hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
+    project_briefing: ProjectBriefing = field(
+        default_factory=lambda: ProjectBriefing(
+            mode="adaptive",
+            initial_reason=None,
+            requested_reason=None,
+        )
+    )
     notebook: RunNotebook = field(default_factory=RunNotebook)
     is_community: bool = False
     current_participants: List[str] = field(default_factory=list)
@@ -256,6 +435,11 @@ class AgentRun:
             session_id=session_id,
             run_id=effective_run_id,
         )
+        effective_research_profile = (
+            research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
+        )
+        effective_hot_topics = list(hot_topics or [])
+        effective_hot_topic_context = dict(hot_topic_context or {})
         return cls(
             run_id=effective_run_id,
             user_name=user_name,
@@ -270,12 +454,21 @@ class AgentRun:
             additional_tool_schemas=effective_additional_schemas,
             tool_runtime=tool_runtime,
             limits=limits,
-            research_profile=research_profile or DEFAULT_RESEARCH_PROFILES["normal"],
+            research_profile=effective_research_profile,
             history=list(history or []),
             document_focus=document_focus,
             document_selection_context=document_selection_context,
-            hot_topics=list(hot_topics or []),
-            hot_topic_context=dict(hot_topic_context or {}),
+            hot_topics=effective_hot_topics,
+            hot_topic_context=effective_hot_topic_context,
+            project_briefing=ProjectBriefing.for_run(
+                mode=limits.project_briefing_mode,
+                user_query=user_query,
+                research_profile=effective_research_profile,
+                document_focus=document_focus,
+                document_selection_context=document_selection_context,
+                hot_topics=effective_hot_topics,
+                hot_topic_context=effective_hot_topic_context,
+            ),
             notebook=notebook or RunNotebook(limits=limits),
             is_community=is_community,
             current_participants=list(current_participants or []),
@@ -481,6 +674,28 @@ class AgentRun:
         self._require_active()
         self.consecutive_empty_results = 0
 
+    def request_project_briefing_transition(self) -> bool:
+        """Request the one deferred Project load after a fast-path tool turn."""
+
+        self._require_active()
+        return self.project_briefing.request_transition("tool_followup")
+
+    def record_project_briefing_loaded(
+        self,
+        *,
+        brief: str,
+        context: str,
+        content_token_count: int,
+    ) -> None:
+        """Cache the Project material after its single load attempt for this run."""
+
+        self._require_active()
+        self.project_briefing.record_loaded(
+            brief=brief,
+            context=context,
+            content_token_count=content_token_count,
+        )
+
     def has_any(self) -> bool:
         """Whether this run has accumulated any model-visible evidence."""
 
@@ -532,6 +747,7 @@ class AgentRun:
         self.short_uuid_references.clear()
         self.history.clear()
         self.initial_source_candidates.clear()
+        self.project_briefing.clear_content()
         self.notebook.clear()
         self.source_candidates.clear()
         self.released = True
