@@ -798,7 +798,9 @@ async def test_real_postgres_preserves_cross_project_provenance_after_source_del
         session_id="session-1",
     )
 
-    assert deleted == {"entities": 0, "projects": 1}
+    assert deleted is not None
+    assert deleted["entities"] == 0
+    assert deleted["projects"] == 1
     assert len(sources) == 1
     assert sources[0].document_id == CROSS_PROJECT_DOCUMENT_ID
     assert sources[0].source_project_id == "project-2"

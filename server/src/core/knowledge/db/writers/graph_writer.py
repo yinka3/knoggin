@@ -125,6 +125,10 @@ class GraphWriter:
                     "Entity ID 1 is occupied by a non-identity entity; "
                     "reset the development database before startup"
                 )
+            stored_canonical_name = (
+                str(existing["canonical_name"]) if existing else user_name
+            )
+            identity["canonical_name"] = stored_canonical_name
 
             await cur.execute(
                 """
@@ -146,6 +150,23 @@ class GraphWriter:
                 "DELETE FROM entity_aliases WHERE entity_id = %s",
                 (IDENTITY_ENTITY_ID,),
             )
+            current_names = [stored_canonical_name, *clean_aliases]
+            await cur.execute(
+                """
+                DELETE FROM public.entity_name_supports
+                WHERE entity_id = %s
+                  AND source_kind = 'user'
+                """,
+                (IDENTITY_ENTITY_ID,),
+            )
+            await cur.execute(
+                """
+                DELETE FROM public.entity_name_supports
+                WHERE entity_id = %s
+                  AND name <> ALL(%s)
+                """,
+                (IDENTITY_ENTITY_ID, current_names),
+            )
             for alias in clean_aliases:
                 await cur.execute(
                     """
@@ -154,6 +175,17 @@ class GraphWriter:
                     ON CONFLICT (entity_id, alias) DO NOTHING
                     """,
                     (IDENTITY_ENTITY_ID, alias),
+                )
+            for name in current_names:
+                await cur.execute(
+                    """
+                    INSERT INTO public.entity_name_supports (
+                        entity_id, name, project_id, source_kind, source_key
+                    ) VALUES (%s, %s, NULL, 'user', %s)
+                    ON CONFLICT (entity_id, name, source_kind, source_key)
+                    DO NOTHING
+                    """,
+                    (IDENTITY_ENTITY_ID, name, user_name),
                 )
             await self.projection.project_identity(cur, identity)
 
@@ -199,6 +231,41 @@ class GraphWriter:
                         """,
                         (
                             item["id"],
+                            alias,
+                            item["id"],
+                            IDENTITY_ENTITY_ID,
+                            project_id,
+                        ),
+                    )
+                    await cur.execute(
+                        """
+                        INSERT INTO public.entity_name_supports (
+                            entity_id, name, project_id, source_kind, source_key
+                        )
+                        SELECT %s, %s, %s, 'project', %s
+                        WHERE btrim(%s) <> ''
+                          AND EXISTS (
+                              SELECT 1
+                              FROM entities entity
+                              WHERE entity.entity_id = %s
+                                AND (
+                                    entity.entity_id = %s
+                                    OR EXISTS (
+                                        SELECT 1
+                                        FROM project_entity_contexts context
+                                        WHERE context.entity_id = entity.entity_id
+                                          AND context.project_id = %s
+                                    )
+                                )
+                          )
+                        ON CONFLICT (entity_id, name, source_kind, source_key)
+                        DO NOTHING
+                        """,
+                        (
+                            item["id"],
+                            alias,
+                            project_id,
+                            project_id,
                             alias,
                             item["id"],
                             IDENTITY_ENTITY_ID,

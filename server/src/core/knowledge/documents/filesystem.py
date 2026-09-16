@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -289,19 +290,53 @@ class ProjectFilesystemFactory:
     """Create one confined filesystem boundary for each local project root."""
 
     def __init__(self, library_root: Path | str) -> None:
-        self._library_root = Path(library_root).expanduser().resolve()
+        configured_root = Path(library_root).expanduser()
+        if not configured_root.is_absolute():
+            configured_root = Path.cwd() / configured_root
+        self._library_root = Path(os.path.abspath(configured_root))
 
     @property
     def library_root(self) -> Path:
         return self._library_root
 
-    def for_project(self, project_id: str) -> ProjectFilesystem:
+    def _project_root(self, project_id: str) -> Path:
         if (
             not isinstance(project_id, str)
             or not project_id.strip()
+            or project_id in {".", ".."}
             or any(separator in project_id for separator in ("/", "\\", "\x00"))
         ):
             raise ValueError("project_id must be a single path component")
         if self._library_root.is_symlink():
             raise ValueError("project library root must not be a symlink")
-        return ProjectFilesystem(self._library_root / project_id)
+        return self._library_root / project_id
+
+    def for_project(self, project_id: str) -> ProjectFilesystem:
+        return ProjectFilesystem(self._project_root(project_id))
+
+    def remove_project_directory(self, project_id: str) -> bool:
+        """Remove one direct project child without traversing symlinks.
+
+        A project directory is the complete native-file ownership boundary. A
+        missing directory is already clean. A symlink at that direct child is
+        unlinked rather than traversed so cleanup cannot reach outside the
+        configured project library.
+        """
+
+        root = self._project_root(project_id)
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            return False
+
+        if root.is_symlink() or not root.is_dir():
+            try:
+                root.unlink()
+            except FileNotFoundError:
+                return False
+            return True
+
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise RuntimeError("safe project-directory removal is unavailable")
+        shutil.rmtree(root)
+        return True

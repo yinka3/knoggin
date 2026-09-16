@@ -94,7 +94,9 @@ BEGIN
     IF NEW.user_name IS DISTINCT FROM OLD.user_name THEN
         RAISE EXCEPTION 'Entity user ownership is immutable';
     END IF;
-    IF NEW.canonical_name IS DISTINCT FROM OLD.canonical_name THEN
+    IF NEW.canonical_name IS DISTINCT FROM OLD.canonical_name
+       AND current_setting('knoggin.project_deletion_name_cleanup', true)
+           IS DISTINCT FROM 'on' THEN
         RAISE EXCEPTION 'Entity canonical_name is immutable';
     END IF;
     NEW.updated_at_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
@@ -278,6 +280,16 @@ CREATE TABLE public.entities (
 CREATE TABLE public.entity_aliases (
     entity_id bigint NOT NULL,
     alias text NOT NULL
+);
+CREATE TABLE public.entity_name_supports (
+    entity_id bigint NOT NULL,
+    name text NOT NULL,
+    project_id text,
+    source_kind text NOT NULL,
+    source_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT entity_name_supports_name_check CHECK ((btrim(name) <> ''::text)),
+    CONSTRAINT entity_name_supports_source_shape_check CHECK (((source_kind = 'project'::text) AND (project_id IS NOT NULL) AND (source_key = project_id)) OR ((source_kind = 'user'::text) AND (project_id IS NULL) AND (btrim(source_key) <> ''::text)))
 );
 CREATE TABLE public.entity_global_merge_audits (
     merge_id text NOT NULL,
@@ -595,6 +607,13 @@ CREATE TABLE public.project_documents (
     CONSTRAINT project_documents_size_check CHECK ((size_bytes >= 0)),
     CONSTRAINT project_documents_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'indexing'::text, 'indexed'::text, 'failed'::text, 'deleted'::text])))
 );
+CREATE TABLE public.project_file_cleanup_tasks (
+    project_id text NOT NULL,
+    user_name text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_file_cleanup_tasks_project_id_check CHECK ((btrim(project_id) <> ''::text)),
+    CONSTRAINT project_file_cleanup_tasks_user_name_check CHECK ((btrim(user_name) <> ''::text))
+);
 CREATE TABLE public.project_entity_contexts (
     project_id text NOT NULL,
     entity_id bigint NOT NULL,
@@ -876,6 +895,8 @@ ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_pkey PRIMARY KEY (entity_id);
 ALTER TABLE ONLY public.entity_aliases
     ADD CONSTRAINT entity_aliases_pkey PRIMARY KEY (entity_id, alias);
+ALTER TABLE ONLY public.entity_name_supports
+    ADD CONSTRAINT entity_name_supports_pkey PRIMARY KEY (entity_id, name, source_kind, source_key);
 ALTER TABLE ONLY public.entity_global_merge_audits
     ADD CONSTRAINT entity_global_merge_audits_pkey PRIMARY KEY (merge_id);
 ALTER TABLE ONLY public.entity_global_merge_mutations
@@ -976,6 +997,8 @@ ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_id_project_key UNIQUE (document_id, project_id);
 ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_pkey PRIMARY KEY (document_id);
+ALTER TABLE ONLY public.project_file_cleanup_tasks
+    ADD CONSTRAINT project_file_cleanup_tasks_pkey PRIMARY KEY (project_id);
 ALTER TABLE ONLY public.project_contexts
     ADD CONSTRAINT project_contexts_pkey PRIMARY KEY (project_id);
 ALTER TABLE ONLY public.project_contexts
@@ -1055,6 +1078,7 @@ CREATE INDEX document_chunks_search_vector_idx ON public.document_chunks USING g
 CREATE INDEX context_block_entities_entity_idx ON public.context_block_entities USING btree (project_id, entity_id);
 CREATE INDEX entities_user_name_idx ON public.entities USING btree (user_name, canonical_name);
 CREATE INDEX entity_aliases_alias_idx ON public.entity_aliases USING btree (alias);
+CREATE INDEX entity_name_supports_project_idx ON public.entity_name_supports USING btree (project_id, entity_id);
 CREATE INDEX entity_global_merge_audits_user_idx ON public.entity_global_merge_audits USING btree (user_name, created_at DESC);
 CREATE INDEX entity_global_merge_mutations_merge_idx ON public.entity_global_merge_mutations USING btree (merge_id, mutation_id);
 CREATE INDEX episode_entities_lookup_idx ON public.episode_entities USING btree (entity_id, episode_id);
@@ -1092,6 +1116,7 @@ CREATE INDEX project_artifacts_session_updated_idx ON public.project_artifacts U
 CREATE INDEX project_documents_hash_idx ON public.project_documents USING btree (project_id, content_hash);
 CREATE UNIQUE INDEX project_documents_live_path_idx ON public.project_documents USING btree (project_id, relative_path) WHERE (status <> 'deleted'::text);
 CREATE INDEX project_documents_project_idx ON public.project_documents USING btree (project_id, created_at DESC);
+CREATE INDEX project_file_cleanup_tasks_user_idx ON public.project_file_cleanup_tasks USING btree (user_name, created_at, project_id);
 CREATE INDEX project_entity_contexts_activity_idx ON public.project_entity_contexts USING btree (project_id, last_mentioned_ms DESC NULLS LAST);
 CREATE INDEX project_entity_contexts_entity_idx ON public.project_entity_contexts USING btree (user_name, entity_id);
 CREATE INDEX project_entity_contexts_topic_idx ON public.project_entity_contexts USING btree (project_id, topic);
@@ -1127,6 +1152,10 @@ ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_redirect_entity_fk FOREIGN KEY (redirect_entity_id) REFERENCES public.entities(entity_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.entity_aliases
     ADD CONSTRAINT entity_aliases_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.entity_name_supports
+    ADD CONSTRAINT entity_name_supports_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.entity_name_supports
+    ADD CONSTRAINT entity_name_supports_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.entity_global_merge_mutations
     ADD CONSTRAINT entity_global_merge_mutations_merge_id_fkey FOREIGN KEY (merge_id) REFERENCES public.entity_global_merge_audits(merge_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.episode_entities

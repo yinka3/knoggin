@@ -555,6 +555,8 @@ class EntityMaintenanceService:
         audit = await self.writer.get_audit(merge_id)
         if audit is None or audit["user_name"] != actor:
             raise ValueError("Unknown entity merge audit")
+        if audit["status"] == "failed":
+            raise ValueError("Cannot repair projections for an invalidated merge")
         project_ids = sorted(
             {str(value) for value in (audit.get("affected_project_ids") or [])}
         )

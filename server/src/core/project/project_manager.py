@@ -124,18 +124,26 @@ class ProjectManager:
         self._closed = False
 
     def _invalidate_entity_caches(self, result: dict) -> dict[str, int]:
+        explicit_entity_ids = result.get("affected_entity_ids")
         entity_ids = {
             int(entity_id)
             for entity_id in (
-                result.get("survivor_entity_id"),
-                result.get("retired_entity_id"),
+                explicit_entity_ids
+                if explicit_entity_ids is not None
+                else (
+                    result.get("survivor_entity_id"),
+                    result.get("retired_entity_id"),
+                )
             )
             if entity_id is not None
         }
         invalidated: dict[str, int] = {}
         if not entity_ids:
             return invalidated
-        for project_id in result.get("affected_project_ids") or ():
+        project_ids = result.get("cache_project_ids")
+        if project_ids is None:
+            project_ids = result.get("affected_project_ids") or ()
+        for project_id in project_ids:
             runtime = self.active_projects.get(project_id)
             if runtime is not None:
                 invalidated[project_id] = runtime.entities.remove_entities(
@@ -221,7 +229,48 @@ class ProjectManager:
         """Start application-owned maintenance triggers."""
         if self._closed:
             raise RuntimeError("ProjectManager is shut down")
+        async with self.maintenance_service.lock:
+            await self._recover_pending_project_file_cleanup()
         await self.maintenance_scheduler.start()
+
+    async def _recover_pending_project_file_cleanup(self) -> None:
+        """Retry file removal left after a committed project deletion."""
+
+        project_ids = (
+            await self._project_deletion_writer.list_pending_file_cleanup_project_ids(
+                user_name=self.user_name
+            )
+        )
+        for project_id in project_ids:
+            await self._finish_project_file_cleanup(project_id)
+
+    async def _finish_project_file_cleanup(self, project_id: str) -> str:
+        """Remove one owned directory and clear its durable retry task."""
+
+        try:
+            await asyncio.to_thread(
+                self._filesystem_factory.remove_project_directory,
+                project_id,
+            )
+        except Exception:
+            logger.exception(
+                "Project {} database state was deleted but file cleanup is pending",
+                project_id,
+            )
+            return "pending"
+
+        try:
+            await self._project_deletion_writer.complete_file_cleanup(
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+        except Exception:
+            logger.exception(
+                "Project {} files were removed but cleanup completion is pending",
+                project_id,
+            )
+            return "pending"
+        return "complete"
 
     async def create_project(
         self,
@@ -713,11 +762,22 @@ class ProjectManager:
         return await self.get_project(project_id)
 
     async def delete_project(self, project_id: str) -> Optional[dict]:
-        """Hard delete every durable PostgreSQL and AGE record owned by a project."""
+        """Hard delete one project and retry any pending owned-file cleanup."""
         async with self.maintenance_service.lock:
             meta = await self.get_project(project_id)
             if not meta:
-                return None
+                if not await self._project_deletion_writer.has_pending_file_cleanup(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                ):
+                    return None
+                return {
+                    "id": project_id,
+                    "status": ProjectStatus.DELETED.value,
+                    "file_cleanup_status": await self._finish_project_file_cleanup(
+                        project_id
+                    ),
+                }
 
             active_state = self.active_projects.get(project_id)
             if self._project_leases.get(project_id):
@@ -738,10 +798,19 @@ class ProjectManager:
                     f"Project '{project_id}' disappeared during deletion"
                 )
 
+            cache_invalidations = self._invalidate_entity_caches(deleted)
+            file_cleanup_status = await self._finish_project_file_cleanup(project_id)
+
             logger.info(
-                f"Hard deleted project {project_id} and all owned state: {deleted}"
+                "Hard deleted project {} database state: {}; file cleanup: {}; "
+                "invalidated resolver caches: {}",
+                project_id,
+                deleted,
+                file_cleanup_status,
+                cache_invalidations,
             )
             meta["status"] = ProjectStatus.DELETED.value
+            meta["file_cleanup_status"] = file_cleanup_status
             return meta
 
     async def acquire_project_for_session(

@@ -32,19 +32,8 @@ class AgeProjectionWriter:
         UNWIND $batch AS data
         MERGE (e:Entity {id: data.id})
         SET e.user_name = data.user_name,
-            e.canonical_name = data.canonical_name
-
-        WITH e, data,
-            coalesce(e.aliases, []) + coalesce(data.aliases, []) AS all_aliases
-        WITH e,
-            CASE WHEN size(all_aliases) = 0
-                 THEN [null]
-                 ELSE all_aliases
-            END AS safe_aliases
-        UNWIND safe_aliases AS alias
-        WITH e, collect(DISTINCT alias) AS merged_aliases
-        WITH e, [x IN merged_aliases WHERE x IS NOT NULL] AS final_aliases
-        SET e.aliases = final_aliases
+            e.canonical_name = data.canonical_name,
+            e.aliases = data.aliases
 
         RETURN e.id
         """

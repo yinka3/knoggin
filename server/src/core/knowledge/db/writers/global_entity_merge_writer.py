@@ -86,6 +86,16 @@ class GlobalEntityMergeWriter:
                 """,
                 (ids,),
             )
+            name_supports = await self._fetch_all(
+                active_cur,
+                """
+                SELECT entity_id, name, project_id, source_kind, source_key
+                FROM public.entity_name_supports
+                WHERE entity_id = ANY(%s)
+                ORDER BY entity_id, name, source_kind, source_key
+                """,
+                (ids,),
+            )
             contexts = await self._fetch_all(
                 active_cur,
                 """
@@ -184,6 +194,7 @@ class GlobalEntityMergeWriter:
         return {
             "entities": entities,
             "aliases": aliases,
+            "name_supports": name_supports,
             "contexts": contexts,
             "context_block_entities": context_block_entities,
             "message_refs": message_refs,
@@ -275,6 +286,11 @@ class GlobalEntityMergeWriter:
                     for association in before["context_block_entities"]
                 }
                 | {row["project_id"] for row in before["relationships"]}
+                | {
+                    row["project_id"]
+                    for row in before["name_supports"]
+                    if row["project_id"] is not None
+                }
             )
             await active_cur.execute(
                 """
@@ -343,6 +359,45 @@ class GlobalEntityMergeWriter:
                 by_id[survivor_id],
                 {**by_id[survivor_id], "status": "active"},
             )
+
+            # A merge changes which identity owns a name, not who supplied
+            # that name. Keep the original project/user source rows and move
+            # their identity reference with the merge.
+            if before["name_supports"]:
+                await active_cur.execute(
+                    """
+                    INSERT INTO public.entity_name_supports (
+                        entity_id, name, project_id, source_kind, source_key
+                    )
+                    SELECT %s, name, project_id, source_kind, source_key
+                    FROM public.entity_name_supports
+                    WHERE entity_id = %s
+                    ON CONFLICT (entity_id, name, source_kind, source_key)
+                    DO NOTHING
+                    """,
+                    (survivor_id, retired_id),
+                )
+                await active_cur.execute(
+                    "DELETE FROM public.entity_name_supports WHERE entity_id = %s",
+                    (retired_id,),
+                )
+                after_name_supports = await self._fetch_all(
+                    active_cur,
+                    """
+                    SELECT entity_id, name, project_id, source_kind, source_key
+                    FROM public.entity_name_supports
+                    WHERE entity_id = ANY(%s)
+                    ORDER BY entity_id, name, source_kind, source_key
+                    """,
+                    ([survivor_id, retired_id],),
+                )
+                if after_name_supports != before["name_supports"]:
+                    await record(
+                        "entity_name_supports",
+                        f"{survivor_id}:{retired_id}",
+                        before["name_supports"],
+                        after_name_supports,
+                    )
 
             # Reconcile every project context before moving references.  The
             # max activity timestamp is deterministic and never rewrites source
@@ -909,7 +964,7 @@ class GlobalEntityMergeWriter:
             """
             UPDATE public.entity_global_merge_audits
             SET failure_reason = %s
-            WHERE merge_id = %s
+            WHERE merge_id = %s AND status IN ('executed', 'rolled_back')
             """,
             (_PROJECTION_REPAIR_PENDING if repair_pending else None, merge_id),
         )
@@ -963,6 +1018,18 @@ class GlobalEntityMergeWriter:
                 (int(key),),
             )
             return [item["alias"] for item in rows]
+        if kind == "entity_name_supports":
+            survivor_id, retired_id = (int(value) for value in key.split(":", 1))
+            return await self._fetch_all(
+                cur,
+                """
+                SELECT entity_id, name, project_id, source_kind, source_key
+                FROM public.entity_name_supports
+                WHERE entity_id = ANY(%s)
+                ORDER BY entity_id, name, source_kind, source_key
+                """,
+                ([survivor_id, retired_id],),
+            )
         if kind == "project_context":
             return await self._fetch_one(
                 cur,
@@ -1187,12 +1254,13 @@ class GlobalEntityMergeWriter:
                 "entity": 0,
                 "entity_aliases": 1,
                 "project_context": 2,
-                "context_block_entity": 3,
-                "relationship": 4,
-                "relationship_observation": 5,
-                "episode_relationship": 6,
-                "message_entity_ref": 7,
-                "episode_entity": 8,
+                "entity_name_supports": 3,
+                "context_block_entity": 4,
+                "relationship": 5,
+                "relationship_observation": 6,
+                "episode_relationship": 7,
+                "message_entity_ref": 8,
+                "episode_entity": 9,
             }
             for mutation in sorted(selected.values(), key=lambda item: order.get(item["object_kind"], 99)):
                 await self._apply_inverse(active_cur, mutation)
@@ -1261,6 +1329,29 @@ class GlobalEntityMergeWriter:
                 await cur.execute(
                     "INSERT INTO public.entity_aliases (entity_id, alias) VALUES (%s, %s)",
                     (int(key), alias),
+                )
+        elif kind == "entity_name_supports":
+            survivor_id, retired_id = (int(value) for value in key.split(":", 1))
+            await cur.execute(
+                "DELETE FROM public.entity_name_supports WHERE entity_id = ANY(%s)",
+                ([survivor_id, retired_id],),
+            )
+            for support in before or []:
+                await cur.execute(
+                    """
+                    INSERT INTO public.entity_name_supports (
+                        entity_id, name, project_id, source_kind, source_key
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (entity_id, name, source_kind, source_key)
+                    DO NOTHING
+                    """,
+                    (
+                        support["entity_id"],
+                        support["name"],
+                        support["project_id"],
+                        support["source_kind"],
+                        support["source_key"],
+                    ),
                 )
         elif kind == "project_context":
             survivor = before["survivor"]

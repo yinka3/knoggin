@@ -67,18 +67,42 @@ class _RecordingCursor:
 
 
 class RecordingProjectDeletionWriter:
-    def __init__(self):
+    def __init__(self, result=None, *, pending_file_cleanup_project_ids=()):
         self.calls = []
+        self.result = result or {"projects": 1}
+        self.pending_file_cleanup_project_ids = set(pending_file_cleanup_project_ids)
+        self.completed_file_cleanups = []
 
     async def delete_project(self, *, user_name, project_id):
         self.calls.append((user_name, project_id))
-        return {"projects": 1}
+        self.pending_file_cleanup_project_ids.add(project_id)
+        return self.result
+
+    async def has_pending_file_cleanup(self, *, user_name, project_id):
+        return project_id in self.pending_file_cleanup_project_ids
+
+    async def list_pending_file_cleanup_project_ids(self, *, user_name):
+        return sorted(self.pending_file_cleanup_project_ids)
+
+    async def complete_file_cleanup(self, *, user_name, project_id):
+        self.completed_file_cleanups.append((user_name, project_id))
+        self.pending_file_cleanup_project_ids.discard(project_id)
 
 
-def make_manager(postgres):
+class RecordingEntityCache:
+    def __init__(self):
+        self.removed = []
+
+    def remove_entities(self, entity_ids):
+        self.removed.append(entity_ids)
+        return len(entity_ids)
+
+
+def make_manager(postgres, *, filesystem_factory=None):
     return ProjectManager(
         resources=SimpleNamespace(postgres=postgres),
         user_name="ada",
+        filesystem_factory=filesystem_factory,
     )
 
 
@@ -337,9 +361,32 @@ async def test_archive_and_reactivate_project_update_durable_status():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_delete_project_uses_cascading_postgres_boundary():
+async def test_archive_retains_owned_project_files(tmp_path):
+    postgres = RecordingPostgres(
+        [
+            [project_row()],
+            [project_row(status=ProjectStatus.ARCHIVED.value)],
+        ]
+    )
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = filesystem_factory.for_project("project-1")
+    filesystem.write_bytes("documents/source.md", b"keep for reactivation")
+    manager = make_manager(postgres, filesystem_factory=filesystem_factory)
+
+    archived = await manager.archive_project("project-1")
+
+    assert archived["status"] == ProjectStatus.ARCHIVED.value
+    assert filesystem.read_bytes("documents/source.md") == b"keep for reactivation"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_project_uses_cascading_postgres_boundary(tmp_path):
     postgres = RecordingPostgres([[project_row()]])
-    manager = make_manager(postgres)
+    manager = make_manager(
+        postgres,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
     writer = RecordingProjectDeletionWriter()
     manager._project_deletion_writer = writer
 
@@ -347,6 +394,171 @@ async def test_delete_project_uses_cascading_postgres_boundary():
 
     assert writer.calls == [("ada", "project-1")]
     assert deleted["status"] == ProjectStatus.DELETED.value
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_project_invalidates_shared_entity_caches(tmp_path):
+    postgres = RecordingPostgres([[project_row()]])
+    manager = make_manager(
+        postgres,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
+    cache = RecordingEntityCache()
+    manager.active_projects["project-2"] = SimpleNamespace(entities=cache)
+    writer = RecordingProjectDeletionWriter(
+        {
+            "projects": 1,
+            "entities": 1,
+            "affected_entity_ids": [2, 3],
+            "cache_project_ids": ["project-2"],
+        }
+    )
+    manager._project_deletion_writer = writer
+
+    deleted = await manager.delete_project("project-1")
+
+    assert deleted["status"] == ProjectStatus.DELETED.value
+    assert cache.removed == [[2, 3]]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_project_refuses_active_runtime_sessions(tmp_path):
+    manager = make_manager(
+        RecordingPostgres([[project_row()]]),
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
+    manager._project_leases["project-1"] = {"session-1"}
+    writer = RecordingProjectDeletionWriter()
+    manager._project_deletion_writer = writer
+
+    with pytest.raises(RuntimeError, match="cannot be deleted"):
+        await manager.delete_project("project-1")
+
+    assert writer.calls == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_project_stops_loaded_runtime_before_database_deletion(tmp_path):
+    manager = make_manager(
+        RecordingPostgres([[project_row()]]),
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
+    events = []
+
+    async def shutdown():
+        events.append("shutdown")
+
+    manager.active_projects["project-1"] = SimpleNamespace(shutdown=shutdown)
+    writer = RecordingProjectDeletionWriter()
+    original_delete = writer.delete_project
+
+    async def delete_project(**kwargs):
+        events.append("database_delete")
+        return await original_delete(**kwargs)
+
+    writer.delete_project = delete_project
+    manager._project_deletion_writer = writer
+
+    await manager.delete_project("project-1")
+
+    assert events == ["shutdown", "database_delete"]
+    assert manager.active_projects == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_delete_project_removes_owned_project_files_after_database_deletion(tmp_path):
+    postgres = RecordingPostgres([[project_row()]])
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = filesystem_factory.for_project("project-1")
+    filesystem.write_bytes("PROJECT.md", b"# Research\n")
+    filesystem.write_bytes("CONTEXT.md", b"## Context\n")
+    filesystem.write_bytes("documents/source.md", b"project-owned source")
+    manager = ProjectManager(
+        resources=SimpleNamespace(postgres=postgres),
+        user_name="ada",
+        filesystem_factory=filesystem_factory,
+    )
+    writer = RecordingProjectDeletionWriter()
+    manager._project_deletion_writer = writer
+
+    deleted = await manager.delete_project("project-1")
+
+    assert deleted["status"] == ProjectStatus.DELETED.value
+    assert deleted["file_cleanup_status"] == "complete"
+    assert not filesystem.root.exists()
+    assert writer.completed_file_cleanups == [("ada", "project-1")]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_repeated_delete_retries_pending_file_cleanup(tmp_path, monkeypatch):
+    postgres = RecordingPostgres([[project_row()], []])
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = filesystem_factory.for_project("project-1")
+    filesystem.write_bytes("documents/source.md", b"project-owned source")
+    manager = ProjectManager(
+        resources=SimpleNamespace(postgres=postgres),
+        user_name="ada",
+        filesystem_factory=filesystem_factory,
+    )
+    writer = RecordingProjectDeletionWriter()
+    manager._project_deletion_writer = writer
+    remove_project_directory = filesystem_factory.remove_project_directory
+
+    def fail_cleanup(project_id):
+        raise OSError(f"cannot remove {project_id}")
+
+    monkeypatch.setattr(filesystem_factory, "remove_project_directory", fail_cleanup)
+    first = await manager.delete_project("project-1")
+    monkeypatch.setattr(
+        filesystem_factory,
+        "remove_project_directory",
+        remove_project_directory,
+    )
+
+    retried = await manager.delete_project("project-1")
+
+    assert first["file_cleanup_status"] == "pending"
+    assert retried == {
+        "id": "project-1",
+        "status": ProjectStatus.DELETED.value,
+        "file_cleanup_status": "complete",
+    }
+    assert not filesystem.root.exists()
+    assert writer.completed_file_cleanups == [("ada", "project-1")]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_project_manager_start_retries_pending_file_cleanup(tmp_path):
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = filesystem_factory.for_project("project-1")
+    filesystem.write_bytes("documents/source.md", b"project-owned source")
+    manager = ProjectManager(
+        resources=SimpleNamespace(postgres=RecordingPostgres()),
+        user_name="ada",
+        filesystem_factory=filesystem_factory,
+    )
+    writer = RecordingProjectDeletionWriter(
+        pending_file_cleanup_project_ids=("project-1",)
+    )
+    manager._project_deletion_writer = writer
+    starts = []
+
+    async def start_scheduler():
+        starts.append(True)
+
+    manager.maintenance_scheduler = SimpleNamespace(start=start_scheduler)
+
+    await manager.start()
+
+    assert starts == [True]
+    assert not filesystem.root.exists()
+    assert writer.completed_file_cleanups == [("ada", "project-1")]
 
 
 @pytest.mark.runtime

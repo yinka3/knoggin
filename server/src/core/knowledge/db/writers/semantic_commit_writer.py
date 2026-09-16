@@ -121,6 +121,12 @@ class SemanticCommitWriter:
                         user_name=user_name,
                         project_id=project_id,
                     )
+                    await self._write_name_supports(
+                        cur,
+                        entity_result,
+                        user_name=user_name,
+                        project_id=project_id,
+                    )
                     associations_written = await self._write_block_entity_associations(
                         cur,
                         entity_result,
@@ -623,6 +629,103 @@ class SemanticCommitWriter:
                     ON CONFLICT (entity_id, alias) DO NOTHING
                     """,
                     (entity_id, alias),
+                )
+                count += cur.rowcount
+        return count
+
+    @staticmethod
+    async def _write_name_supports(
+        cur,
+        result: ContextEntityResult,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> int:
+        """Record the project that directly supplied each persisted entity name."""
+
+        names_by_entity_id: dict[int, set[str]] = {}
+        for entity in result.pending_entity_writes.values():
+            names_by_entity_id.setdefault(entity.entity_id, set()).update(
+                (entity.canonical_name, *entity.aliases)
+            )
+        for entity_id, aliases in result.alias_updates.items():
+            names_by_entity_id.setdefault(entity_id, set()).update(aliases)
+        for association in result.block_entity_associations:
+            names_by_entity_id.setdefault(association.entity_id, set()).add(
+                association.mention_text
+            )
+
+        count = 0
+        for entity_id in sorted(names_by_entity_id):
+            for source_name in sorted(
+                (
+                    name.strip()
+                    for name in names_by_entity_id[entity_id]
+                    if isinstance(name, str) and name.strip()
+                ),
+                key=lambda name: (name.casefold(), name),
+            ):
+                await cur.execute(
+                    """
+                    INSERT INTO public.entity_name_supports (
+                        entity_id, name, project_id, source_kind, source_key
+                    )
+                    SELECT
+                        entity.entity_id,
+                        CASE
+                            WHEN lower(btrim(entity.canonical_name))
+                                 = lower(btrim(%s)) THEN entity.canonical_name
+                            ELSE (
+                                SELECT alias.alias
+                                FROM public.entity_aliases AS alias
+                                WHERE alias.entity_id = entity.entity_id
+                                  AND lower(btrim(alias.alias)) = lower(btrim(%s))
+                                ORDER BY alias.alias
+                                LIMIT 1
+                            )
+                        END,
+                        %s,
+                        'project',
+                        %s
+                    FROM public.entities AS entity
+                    WHERE entity.entity_id = %s
+                      AND entity.user_name = %s
+                      AND entity.status = 'active'
+                      AND (
+                          entity.entity_id = %s
+                          OR EXISTS (
+                              SELECT 1
+                              FROM public.project_entity_contexts AS context
+                              WHERE context.project_id = %s
+                                AND context.entity_id = entity.entity_id
+                                AND context.user_name = %s
+                          )
+                      )
+                      AND (
+                          lower(btrim(entity.canonical_name)) = lower(btrim(%s))
+                          OR EXISTS (
+                              SELECT 1
+                              FROM public.entity_aliases AS alias
+                              WHERE alias.entity_id = entity.entity_id
+                                AND lower(btrim(alias.alias)) = lower(btrim(%s))
+                          )
+                      )
+                    ON CONFLICT (entity_id, name, source_kind, source_key)
+                    DO NOTHING
+                    """,
+                    (
+                        source_name,
+                        source_name,
+                        project_id,
+                        project_id,
+                        entity_id,
+                        user_name,
+                        IDENTITY_ENTITY_ID,
+                        project_id,
+                        user_name,
+                        source_name,
+                        source_name,
+                    ),
                 )
                 count += cur.rowcount
         return count
