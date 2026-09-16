@@ -2,6 +2,11 @@
 
 Status: Complete 2026-09-14. Chunks A–G and the combined closeout are committed locally.
 
+Coordination: `KNOWLEDGE_INGESTION_SIMPLIFICATION_PLAN.md` records the agreed
+removal of cross-window episode consolidation (completed in work group 4). Stage 6
+must support separate finalized episodes for earlier decisions and later reversals;
+episode chronology, source handles, and retrieval contracts remain required.
+
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Stage 6 consumes Stage 4's corrected graph/source contracts. Recheck
 the checkout because Agent and provenance work may advance independently.
@@ -56,8 +61,11 @@ Included:
 
 Deferred:
 
-- Retrieval ranking/backend changes and SQLite migration remain in the separate
-  SQLite/agent retrieval plan.
+- Further retrieval ranking/backend changes and SQLite migration remain in the
+  separate SQLite/agent retrieval plan. The independent 2026-09-13 retrieval
+  slice already removed entity-name vectors, made episode search hybrid, and
+  separated query encoding from corpus encoding; Stage 6 should consume those
+  contracts rather than recreate them.
 - Claim-level semantic entailment verification remains out of scope.
 - AAC/community behavior remains a separate optional/fun feature.
 - Public thinking-event projection belongs to API work.
