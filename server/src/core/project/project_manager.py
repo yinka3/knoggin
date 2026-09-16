@@ -96,23 +96,13 @@ class ProjectManager:
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.active_projects: Dict[str, ProjectRuntime] = {}
         self._project_leases: Dict[str, set[str]] = {}
-        conflict_discovery_settings = (
-            ConfigManager.get().config.developer_settings.jobs.conflict_discovery
-        )
         self.maintenance_service = ProjectMaintenanceService(
             resources=resources,
             user_name=user_name,
             project_lookup=self.get_project,
             active_projects=self.active_projects,
             project_leases=self._project_leases,
-            conflict_discovery_settings=conflict_discovery_settings,
         )
-        self._config_unsubscribers = [
-            ConfigManager.get().subscribe(
-                self.maintenance_service.update_conflict_discovery_settings,
-                "developer_settings.jobs.conflict_discovery",
-            )
-        ]
         self.project_factory = ProjectRuntimeFactory(
             resources=resources,
             user_name=user_name,
@@ -839,13 +829,6 @@ class ProjectManager:
         """Stop every remaining project runtime before shared resources close."""
 
         await self.maintenance_scheduler.stop()
-
-        unsubscribers, self._config_unsubscribers = self._config_unsubscribers, []
-        for unsubscribe in unsubscribers:
-            try:
-                unsubscribe()
-            except Exception:
-                logger.exception("Project maintenance configuration cleanup failed")
 
         async with self.maintenance_service.lock:
             if self._closed and not self.active_projects:

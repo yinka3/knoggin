@@ -88,7 +88,6 @@ def _build(*blocks):
         canonical_name="Alice",
         entity_type="Person",
         topic="Work",
-        embedding=None,
         aliases=("Alice",),
     )
     delta = EntityWrite(
@@ -97,7 +96,6 @@ def _build(*blocks):
         canonical_name="Delta",
         entity_type="Company",
         topic="Work",
-        embedding=None,
         aliases=("Delta",),
     )
     build.set_entity_result(
@@ -143,7 +141,6 @@ def _set_pending_entities(build, *, entities, associations):
             canonical_name=canonical_name,
             entity_type=entity_type,
             topic="Work",
-            embedding=None,
             aliases=(canonical_name,),
         )
         for entity_id, (canonical_name, entity_type) in entities.items()

@@ -62,7 +62,6 @@ class AACReadContext:
             project_id=IDENTITY_SCOPE,
             readable_project_ids=list(readable_project_ids),
             knowledge_store=knowledge_store,
-            embedding_service=embedding_service,
         )
         retrieval = KnowledgeRetrieval(
             project_id=IDENTITY_SCOPE,

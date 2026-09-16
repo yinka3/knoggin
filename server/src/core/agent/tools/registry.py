@@ -473,7 +473,7 @@ class Tools(
         self.postgres = postgres
         self.entities = entities
         self.user_name = user_name
-        self.embedding_service = entities.embedding_service
+        self.embedding_service = getattr(knowledge_retrieval, "embedding_service", None)
         self.project_id = entities.project_id
         self.readable_project_ids = entities.readable_project_ids
         self.compiled_domain = compiled_domain

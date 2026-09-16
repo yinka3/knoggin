@@ -18,6 +18,7 @@ from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
 from common.utils.coordination_log import configure_coordination_log
 from core.ingestion.vp01 import GLiNER25VP01Adapter
+from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.services.embedding_service import EmbeddingService
 from core.knowledge.store import KnowledgeStore
 from infrastructure.background_work import BackgroundWorkCoordinator
@@ -281,6 +282,7 @@ class RuntimeResources:
                 load_spacy(),
                 load_vp01(),
             )
+            await EmbeddingRebuilder(self.postgres, self.embedding).ensure_configuration()
         except Exception as exc:
             logger.critical(f"Global resource initialization failed: {exc}")
             raise DependencyError(

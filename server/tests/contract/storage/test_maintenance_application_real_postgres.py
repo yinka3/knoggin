@@ -8,7 +8,7 @@ from core.knowledge.db.readers.entity_reader import EntityReader
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     RelationshipInterpretationChange,
     RelationshipInterpretationPlan,
 )

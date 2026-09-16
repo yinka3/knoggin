@@ -623,6 +623,9 @@ class FakeEmbeddingService:
         self.single_calls.append(value)
         return self.single_embedding
 
+    async def encode_query(self, value):
+        return await self.encode_single(value)
+
     async def rerank(self, query, candidates):
         self.rerank_calls.append((query, list(candidates)))
         return list(range(len(candidates)))

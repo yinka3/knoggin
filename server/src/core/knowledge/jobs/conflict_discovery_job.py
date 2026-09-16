@@ -7,8 +7,7 @@ from typing import Any
 from loguru import logger
 
 from common.schema.settings import ConflictDiscoverySettings
-from core.knowledge.conflicts import LLMConflictDiscoveryResult
-from core.knowledge.maintenance_policy import MaintenanceTrustPolicy
+from core.knowledge.conflict.conflicts import LLMConflictDiscoveryResult
 from core.project.maintenance_service import ProjectMaintenanceService
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 
@@ -37,7 +36,7 @@ class ConflictDiscoveryJob(BaseJob):
     ) -> None:
         self.maintenance_service = maintenance_service
         self.llm = llm
-        self._policy = MaintenanceTrustPolicy.capture(settings)
+        self._mode = settings.mode
         self._last_run: dict[str, int] | None = None
         self.update_settings(settings)
 
@@ -76,7 +75,7 @@ class ConflictDiscoveryJob(BaseJob):
             }
             return JobResult(
                 success=True,
-                summary=f"[{self._policy.mode}] No relationship evidence to review",
+                summary=f"[{self._mode}] No relationship evidence to review",
             )
         if not package.observations:
             await self.maintenance_service.complete_conflict_discovery(
@@ -91,7 +90,7 @@ class ConflictDiscoveryJob(BaseJob):
             return JobResult(
                 success=True,
                 summary=(
-                    f"[{self._policy.mode}] Advanced conflict discovery cursor "
+                    f"[{self._mode}] Advanced conflict discovery cursor "
                     "without evidence"
                 ),
             )
@@ -130,7 +129,7 @@ class ConflictDiscoveryJob(BaseJob):
         return JobResult(
             success=True,
             summary=(
-                f"[{self._policy.mode}] Reviewed {len(package.observations)} "
+                f"[{self._mode}] Reviewed {len(package.observations)} "
                 "relationship observations; "
                 f"opened or updated {written} conflict groups"
                 + (f"; ignored {skipped} invalid candidates" if skipped else "")
@@ -138,8 +137,10 @@ class ConflictDiscoveryJob(BaseJob):
         )
 
     def update_settings(self, settings: ConflictDiscoverySettings) -> None:
-        self._policy = MaintenanceTrustPolicy.capture(settings)
-        self.enabled = self._policy.scheduler_enabled and self.llm is not None
+        self._mode = settings.mode
+        self.enabled = (
+            settings.enabled and self._mode == "assisted" and self.llm is not None
+        )
         self._interval_seconds = settings.interval_hours * 3600
         self.max_seed_span_days = settings.max_seed_span_days
         self.max_package_tokens = settings.max_package_tokens
@@ -148,7 +149,8 @@ class ConflictDiscoveryJob(BaseJob):
         """Expose bounded policy and outcome counts without evidence payloads."""
 
         return {
-            **self._policy.health_snapshot(),
+            "mode": self._mode,
+            "scheduler_enabled": self.enabled,
             "interval_hours": self._interval_seconds // 3600,
             "llm_available": self.llm is not None,
             "last_run": dict(self._last_run) if self._last_run is not None else None,

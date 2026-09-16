@@ -18,7 +18,6 @@ class EpisodeGenerationPolicy:
     max_episode_source_messages: int
     max_episode_source_tokens: int
     max_narrative_chars: int
-    prior_episode_candidate_count: int
 
     @classmethod
     def capture(
@@ -31,7 +30,6 @@ class EpisodeGenerationPolicy:
             "max_episode_source_messages": settings.max_episode_source_messages,
             "max_episode_source_tokens": settings.max_episode_source_tokens,
             "max_narrative_chars": settings.max_narrative_chars,
-            "prior_episode_candidate_count": settings.prior_episode_candidate_count,
         }
         encoded = json.dumps(values, sort_keys=True, separators=(",", ":"))
         return cls(
@@ -48,7 +46,6 @@ class EpisodeGenerationPolicy:
             "max_episode_source_tokens": self.max_episode_source_tokens,
             "max_narrative_chars": self.max_narrative_chars,
             "prompt_narrative_chars": self.prompt_narrative_chars,
-            "prior_episode_candidate_count": self.prior_episode_candidate_count,
         }
 
     def semantic_window_snapshot(self) -> dict[str, object]:
@@ -60,7 +57,6 @@ class EpisodeGenerationPolicy:
             "max_episode_source_messages": self.max_episode_source_messages,
             "max_episode_source_tokens": self.max_episode_source_tokens,
             "max_narrative_chars": self.max_narrative_chars,
-            "prior_episode_candidate_count": self.prior_episode_candidate_count,
         }
 
     @classmethod
@@ -77,7 +73,6 @@ class EpisodeGenerationPolicy:
             "max_episode_source_messages",
             "max_episode_source_tokens",
             "max_narrative_chars",
-            "prior_episode_candidate_count",
         }
         if set(snapshot) != expected:
             raise ValueError("semantic window episode policy has an invalid shape")
@@ -96,9 +91,6 @@ class EpisodeGenerationPolicy:
             "max_episode_source_messages": snapshot["max_episode_source_messages"],
             "max_episode_source_tokens": snapshot["max_episode_source_tokens"],
             "max_narrative_chars": snapshot["max_narrative_chars"],
-            "prior_episode_candidate_count": snapshot[
-                "prior_episode_candidate_count"
-            ],
         }
         encoded = json.dumps(values, sort_keys=True, separators=(",", ":"))
         expected_version = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
@@ -116,7 +108,6 @@ class EpisodeGenerationPolicy:
             or policy.max_episode_source_messages <= 0
             or policy.max_episode_source_tokens <= 0
             or policy.max_narrative_chars <= 0
-            or policy.prior_episode_candidate_count < 0
         ):
             raise ValueError("semantic window episode policy has invalid values")
         return policy

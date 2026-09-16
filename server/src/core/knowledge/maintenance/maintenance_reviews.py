@@ -13,7 +13,8 @@ from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
-from core.knowledge.conflicts import ConflictResolutionKind
+from core.knowledge.conflict.conflicts import ConflictResolutionKind
+from core.knowledge.relationship_advisories import AdvisoryAction
 
 ReviewScope = Literal["project", "user-global"]
 ReviewStatus = Literal["open", "applied", "dismissed", "stale"]
@@ -146,7 +147,6 @@ class ConflictResolutionPlan(BaseModel):
     ] = "user_created"
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     discovery_packet_tokens: int | None = Field(default=None, ge=0)
-    packet_compacted: bool = False
     supersedes_review_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
@@ -175,7 +175,7 @@ class RelationshipAdvisoryPlan(BaseModel):
     pattern_key: str = Field(min_length=1, max_length=500)
     observed_label: str | None = None
     proposed_relationship_type: str | None = None
-    action: str | None = None
+    action: AdvisoryAction | None = None
     note: str | None = None
 
 

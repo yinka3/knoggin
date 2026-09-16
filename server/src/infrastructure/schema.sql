@@ -260,11 +260,14 @@ CREATE TABLE public.document_extractions (
     extracted_text text,
     extracted_content_hash text
 );
+CREATE TABLE public.embedding_configuration (
+    singleton boolean PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    fingerprint text NOT NULL
+);
 CREATE TABLE public.entities (
     entity_id bigint NOT NULL,
     user_name text NOT NULL,
     canonical_name text NOT NULL,
-    embedding public.vector(1024),
     status text DEFAULT 'active'::text NOT NULL,
     redirect_entity_id bigint,
     created_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,
@@ -1050,7 +1053,6 @@ CREATE INDEX document_chunks_document_idx ON public.document_chunks USING btree 
 CREATE INDEX document_chunks_embedding_idx ON public.document_chunks USING hnsw (embedding public.vector_cosine_ops);
 CREATE INDEX document_chunks_search_vector_idx ON public.document_chunks USING gin (search_vector);
 CREATE INDEX context_block_entities_entity_idx ON public.context_block_entities USING btree (project_id, entity_id);
-CREATE INDEX entities_embedding_idx ON public.entities USING hnsw (embedding public.vector_cosine_ops);
 CREATE INDEX entities_user_name_idx ON public.entities USING btree (user_name, canonical_name);
 CREATE INDEX entity_aliases_alias_idx ON public.entity_aliases USING btree (alias);
 CREATE INDEX entity_global_merge_audits_user_idx ON public.entity_global_merge_audits USING btree (user_name, created_at DESC);

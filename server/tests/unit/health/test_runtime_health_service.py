@@ -152,9 +152,8 @@ class FakeConflictDiscoveryJob:
     def snapshot_for_health(self):
         self.calls += 1
         return {
-            "mode": "trusted",
+            "mode": "assisted",
             "scheduler_enabled": True,
-            "trusted_action_count": 1,
             "interval_hours": 48,
             "llm_available": True,
             "last_run": {
@@ -528,9 +527,8 @@ async def test_background_health_combines_scheduler_queue_and_document_indexing(
     assert payload["details"]["document_indexing"]["pending_document_count"] == 3
     assert payload["details"]["background_work"]["queued_for_project"] == 1
     assert payload["details"]["conflict_discovery"] == {
-        "mode": "trusted",
+        "mode": "assisted",
         "scheduler_enabled": True,
-        "trusted_action_count": 1,
         "interval_hours": 48,
         "llm_available": True,
         "last_run": {

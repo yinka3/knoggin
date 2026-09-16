@@ -10,7 +10,6 @@ def seed_entity(
     entity_type="person",
     topic="Identity",
     project_id="project-1",
-    embedding=None,
 ):
     entities._populate_cache(
         {
@@ -20,7 +19,6 @@ def seed_entity(
             "type": entity_type,
             "topic": topic,
             "project_id": project_id,
-            "embedding": embedding,
         }
     )
 

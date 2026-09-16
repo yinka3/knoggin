@@ -1,6 +1,5 @@
 import pytest
 
-from core.knowledge.entity.embedding import build_entity_embedding_text
 from core.knowledge.entity.profile import EntityIdentity, ProjectEntityContext
 
 
@@ -30,15 +29,3 @@ def test_global_identity_and_project_context_are_separate_records():
 
     assert identity.canonical_name == "Sarah Johnson"
     assert {work_context.topic, personal_context.topic} == {"Career", "Relationships"}
-
-
-@pytest.mark.unit
-@pytest.mark.no_network
-def test_entity_embedding_text_uses_only_the_normalized_global_identity_name():
-    identity = EntityIdentity(
-        entity_id=7,
-        user_name="ada",
-        canonical_name=" Sarah Johnson ",
-    )
-
-    assert build_entity_embedding_text(identity.canonical_name) == "Sarah Johnson"

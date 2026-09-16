@@ -107,6 +107,5 @@ class ContextEntityBuildService:
             },
             policy=semantic_build.policy,
             allocate_entity_id=self._allocate_entity_id,
-            issues=semantic_build.issues,
         )
         return assemble_context_entity_result(semantic_build, resolution)

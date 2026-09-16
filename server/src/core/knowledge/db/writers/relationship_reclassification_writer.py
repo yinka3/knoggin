@@ -15,7 +15,7 @@ from common.scoping import require_scope_value
 from core.knowledge.db.writers.relationship_interpretation_writer import (
     RelationshipInterpretationWriter,
 )
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     RelationshipInterpretationChange,
     RelationshipInterpretationPlan,
 )

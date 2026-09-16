@@ -29,7 +29,7 @@ from common.schema.semantic_window import (
 from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.policy import IngestionPolicy
-from core.knowledge.conflicts import ConflictDiscoveryCursor
+from core.knowledge.conflict.conflicts import ConflictDiscoveryCursor
 from core.knowledge.context.models import ContextBlockSupport, ContextMaterialization
 from core.knowledge.context.render import context_block_hash, context_document_hash
 from core.knowledge.db.readers.conflict_discovery_reader import ConflictDiscoveryReader
@@ -167,7 +167,6 @@ def _entity(entity_id, name, entity_type):
         canonical_name=name,
         entity_type=entity_type,
         topic="Work",
-        embedding=None,
         aliases=(name,),
     )
 

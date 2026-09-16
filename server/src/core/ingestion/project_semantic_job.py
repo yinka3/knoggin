@@ -200,15 +200,10 @@ class ProjectSemanticJob(BaseJob):
                 or self._knowledge_is_due(active)
                 or self._finalization_is_due(active)
             )
-        policy = await self._capture_semantic_policy()
-        return (
-            await self.admission.select(
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-                domain=policy.domain,
-            )
-            is not None
-        )
+        # New conversation windows use this job's existing immediate/30-second
+        # cadence. Selecting here would build and tokenize an unclaimed proposal
+        # only for execute() to select it again before the durable claim.
+        return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
         window = await self.knowledge_store.get_active_project_semantic_window(

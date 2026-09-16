@@ -8,14 +8,14 @@ from typing import Any, Iterable
 
 from common.schema.evidence import EvidenceSnapshot
 from common.scoping import require_scope_value
-from core.knowledge.conflicts import (
+from core.knowledge.conflict.conflicts import (
     ConflictGroup,
     ConflictOrigin,
     ConflictResolutionKind,
     ConflictWriteResult,
 )
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
-from core.knowledge.maintenance_reviews import ConflictResolutionPlan
+from core.knowledge.maintenance.maintenance_reviews import ConflictResolutionPlan
 
 
 class ConflictWriter:
@@ -140,9 +140,6 @@ class ConflictWriter:
                     discovery_packet_tokens=(metadata or {}).get(
                         "discovery_packet_tokens"
                     ),
-                    packet_compacted=bool(
-                        (metadata or {}).get("packet_compacted", False)
-                    ),
                     supersedes_review_id=supersedes_review_id,
                 ),
                 cur=active_cur,
@@ -215,7 +212,6 @@ class ConflictWriter:
             resolution_note=resolution_note,
             metadata={
                 "discovery_packet_tokens": plan.discovery_packet_tokens,
-                "packet_compacted": plan.packet_compacted,
                 "supersedes_review_id": plan.supersedes_review_id,
             },
         )

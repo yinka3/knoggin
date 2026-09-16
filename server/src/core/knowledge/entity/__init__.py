@@ -1,4 +1,3 @@
-from core.knowledge.entity.embedding import build_entity_embedding_text
 from core.knowledge.entity.index import EntityIndex
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.entity.profile import EntityProfile
@@ -16,6 +15,5 @@ __all__ = [
     "EntityResolver",
     "EntityReclassification",
     "ReclassificationPlan",
-    "build_entity_embedding_text",
     "plan_reclassification",
 ]

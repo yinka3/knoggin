@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from common.scoping import require_scope_value
-from core.knowledge.conflicts import ConflictDiscoveryCursor
+from core.knowledge.conflict.conflicts import ConflictDiscoveryCursor
 
 
 class ConflictDiscoveryReader:
@@ -78,11 +78,12 @@ class ConflictDiscoveryReader:
             return []
         max_span_ms = max_span_days * 86_400_000
         anchor_ms = int(rows[0]["observed_at_ms"])
-        return [
-            row
-            for row in rows
-            if abs(int(row["observed_at_ms"]) - anchor_ms) <= max_span_ms
-        ]
+        seeds = []
+        for row in rows:
+            if abs(int(row["observed_at_ms"]) - anchor_ms) > max_span_ms:
+                break
+            seeds.append(row)
+        return seeds
 
     async def get_direct_neighborhood(
         self,

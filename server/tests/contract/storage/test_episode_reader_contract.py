@@ -215,7 +215,7 @@ async def test_episode_reader_uses_the_stored_lexical_search_vector():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_episode_reader_ranks_prior_episodes_by_source_entity_overlap():
+async def test_episode_reader_ranks_episodes_by_source_entity_overlap():
     client = RecordingPostgresClient(
         fetch_all_results=[[episode_row()], *card_attachment_results()]
     )
@@ -254,43 +254,6 @@ async def test_episode_reader_loads_the_immediately_previous_episode():
     query, params = client.calls[0][1], client.calls[0][2]
     assert "ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC" in query
     assert params == ("ada", "project-1", "session-1", 1)
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_selects_nearby_candidates_by_source_session_and_time():
-    client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *attachment_results()]
-    )
-    reader = EpisodeReader(client)
-
-    episodes = await reader.get_nearby_project_episodes(
-        user_name="ada",
-        project_id="project-1",
-        session_ids=["session-1"],
-        before_message_id=20,
-        before_timestamp_ms=1700000001000,
-        limit=3,
-    )
-
-    assert [episode.episode_id for episode in episodes] == ["episode-1"]
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "m.session_id = ANY(%s)" in query
-    assert "m.timestamp_ms < %s" in query
-    assert "e.user_modified = FALSE" in query
-    assert "entity_overlap" not in query
-    assert params == (
-        "project-1",
-        "ada",
-        ["session-1"],
-        1700000001000,
-        1700000001000,
-        1700000001000,
-        20,
-        1700000001000,
-        20,
-        3,
-    )
 
 
 @pytest.mark.storage

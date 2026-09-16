@@ -7,12 +7,17 @@ import pytest
 from psycopg.errors import CheckViolation, ForeignKeyViolation, UniqueViolation
 
 import core.knowledge.db.writers.project_context_writer as project_context_writer
+import core.knowledge.retrieval as retrieval_module
 from common.conf.domain_config import DomainConfig
 from common.schema.context import (
     AssertionKind,
     ContextBlockRecord,
     ContextRevisionOrigin,
     ContextSupportKind,
+)
+from common.schema.episode.generation import (
+    LLMEpisodeDecision,
+    LLMEpisodeWindowDecision,
 )
 from common.schema.episode.models import Episode, MessageEpisode
 from common.schema.semantic_window import (
@@ -21,7 +26,14 @@ from common.schema.semantic_window import (
     SemanticWindowRecord,
     SemanticWindowStage,
 )
-from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from common.schema.settings import (
+    EntityResolutionSettings,
+    EpisodeSettings,
+    TextProcessorSettings,
+)
+from core.agent.notebook import RunNotebook
+from core.agent.notebook_renderer import render_notebook
+from core.agent.system_prompt import get_agent_prompt
 from core.ingestion.policy import IngestionPolicy
 from core.knowledge.context.models import (
     ContextBlockSupport,
@@ -37,6 +49,9 @@ from core.knowledge.db.writers.project_context_writer import ProjectContextWrite
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.documents.filesystem import ProjectFilesystem
+from core.knowledge.episodes.generator import EpisodeGenerator
+from core.knowledge.episodes.policy import EpisodeGenerationPolicy
+from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
 from core.project.project_manager import ProjectManager
 
@@ -402,7 +417,6 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
                 message_position=0,
             )
         ],
-        generator_metadata={"decision_action": "create"},
     )
 
     assert await store.get_project_semantic_window_episode_result(
@@ -467,7 +481,7 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_semantic_episode_consolidation_keeps_complete_canonical_membership(
+async def test_semantic_episode_rejects_foreign_window_sources_even_with_forged_metadata(
     real_postgres_client,
 ):
     await _seed_messages(real_postgres_client)
@@ -500,10 +514,10 @@ async def test_semantic_episode_consolidation_keeps_complete_canonical_membershi
         user_name="ada",
         project_id="project-1",
     )
-    consolidated = Episode(
-        episode_id="prior-semantic-episode",
+    forged = Episode(
+        episode_id="new-semantic-episode",
         project_id="project-1",
-        summary="Earlier and later project memory are one episode.",
+        summary="A later episode tries to include earlier evidence.",
         messages=[
             MessageEpisode(message_id=101, session_id="session-1", message_position=0),
             MessageEpisode(message_id=102, session_id="session-1", message_position=1),
@@ -511,20 +525,309 @@ async def test_semantic_episode_consolidation_keeps_complete_canonical_membershi
         generator_metadata={"decision_action": "consolidate"},
     )
 
-    assert await store.write_project_semantic_window_episodes(
-        window_id=str(window.window_id),
-        episodes=[consolidated],
-        window_messages=messages,
+    with pytest.raises(ValueError, match="must come from the semantic window"):
+        await store.write_project_semantic_window_episodes(
+            window_id=str(window.window_id),
+            episodes=[forged],
+            window_messages=messages,
+            user_name="ada",
+            project_id="project-1",
+        )
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT summary FROM episodes WHERE episode_id = 'prior-semantic-episode'"
+    ) == {"summary": "Earlier project memory"}
+    assert await real_postgres_client.fetch_all(
+        "SELECT message_id FROM episode_messages WHERE episode_id = 'prior-semantic-episode'"
+    ) == [{"message_id": 101}]
+    assert await store.get_project_semantic_window_episode_result(
+        str(window.window_id),
         user_name="ada",
         project_id="project-1",
+    ) is None
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_semantic_episode_rejects_reused_identity_without_rewriting_history(
+    real_postgres_client,
+):
+    await _seed_messages(real_postgres_client)
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            lifecycle_state, exchange_state, exchange_outcome, exchange_closed_at_ms
+        ) VALUES (
+            'ada', 'session-1', 102, 'project-1', 'user', 'Later project message',
+            'sealed', 'closed', 'user_only', 102
+        );
+        INSERT INTO public.episodes (
+            episode_id, project_id, summary, embedding, generator_metadata
+        ) VALUES (
+            'prior-semantic-episode', 'project-1', 'Earlier project memory',
+            NULL, '{"retained": true}'::jsonb
+        );
+        INSERT INTO public.episode_messages (
+            episode_id, project_id, session_id, message_id, message_position
+        ) VALUES ('prior-semantic-episode', 'project-1', 'session-1', 101, 0);
+        """
     )
-    result = await store.get_project_semantic_window_episode_result(
+    store = KnowledgeStore(real_postgres_client, object())
+    window = _window()
+    assert (
+        await store.claim_project_semantic_window(
+            window,
+            _membership(message_id=102),
+        )
+    ).claimed
+    messages = await store.get_project_semantic_window_evidence_messages(
         str(window.window_id),
         user_name="ada",
         project_id="project-1",
     )
-    assert result is not None
-    assert [message.message_id for message in result[0].messages] == [101, 102]
+    reused = Episode(
+        episode_id="prior-semantic-episode",
+        project_id="project-1",
+        summary="A later result must not replace the earlier episode.",
+        embedding=[0.5] * 1024,
+        messages=[
+            MessageEpisode(message_id=102, session_id="session-1", message_position=0)
+        ],
+    )
+
+    with pytest.raises(ValueError, match="identities cannot be reused"):
+        await store.write_project_semantic_window_episodes(
+            window_id=str(window.window_id),
+            episodes=[reused],
+            window_messages=messages,
+            user_name="ada",
+            project_id="project-1",
+        )
+
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT summary, embedding IS NULL AS embedding_is_null, generator_metadata
+        FROM episodes WHERE episode_id = 'prior-semantic-episode'
+        """
+    ) == {
+        "summary": "Earlier project memory",
+        "embedding_is_null": True,
+        "generator_metadata": {"retained": True},
+    }
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT message_id, message_position
+        FROM episode_messages
+        WHERE episode_id = 'prior-semantic-episode'
+        """
+    ) == [{"message_id": 101, "message_position": 0}]
+    assert await store.get_project_semantic_window_episode_result(
+        str(window.window_id),
+        user_name="ada",
+        project_id="project-1",
+    ) is None
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_history(
+    real_postgres_client,
+    monkeypatch,
+):
+    """Produce two windows, then retain both historical states for synthesis."""
+
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-1', 'ada', 'project-1');
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            timestamp_ms, lifecycle_state, exchange_state, exchange_outcome,
+            exchange_closed_at_ms
+        ) VALUES
+            (
+                'ada', 'session-1', 101, 'project-1', 'user',
+                'Deployment policy: deploy manually.', 1760000000000,
+                'sealed', 'closed', 'user_only', 1760000000000
+            ),
+            (
+                'ada', 'session-1', 102, 'project-1', 'user',
+                'Deployment policy reversed: deploy through CI.', 1762600000000,
+                'sealed', 'closed', 'user_only', 1762600000000
+            );
+        """
+    )
+
+    class ScriptedEpisodeLLM:
+        def __init__(self):
+            self.calls = []
+            self.outputs = [
+                LLMEpisodeWindowDecision(
+                    proposals=[
+                        LLMEpisodeDecision(
+                            summary="OLDER_POLICY: deploy manually.",
+                            unresolved=["Manual deploy approval was required."],
+                            message_influences=["message:1"],
+                        )
+                    ]
+                ),
+                LLMEpisodeWindowDecision(
+                    proposals=[
+                        LLMEpisodeDecision(
+                            summary="LATER_POLICY: deploy through CI.",
+                            unresolved=["Monitor the first CI rollout."],
+                            message_influences=["message:1"],
+                        )
+                    ]
+                ),
+            ]
+
+        async def generate_structured(self, **kwargs):
+            self.calls.append(kwargs)
+            return self.outputs.pop(0)
+
+    class EpisodeEmbeddings:
+        async def encode(self, texts):
+            return [[0.25] * 1024 for _ in texts]
+
+    async def ignore_retrieval_event(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(retrieval_module, "emit", ignore_retrieval_event)
+    store = KnowledgeStore(real_postgres_client, object())
+    policy = EpisodeGenerationPolicy.capture(settings=EpisodeSettings())
+    episode_llm = ScriptedEpisodeLLM()
+    generator = EpisodeGenerator(
+        llm=episode_llm,
+        embedding_service=EpisodeEmbeddings(),
+    )
+    windows = [
+        (_window(), _membership(message_id=101)),
+        (_window(), _membership(message_id=102)),
+    ]
+    generated = []
+    for revision_number, (window, membership) in enumerate(windows, start=1):
+        assert (await store.claim_project_semantic_window(window, membership)).claimed
+        messages = await store.get_project_semantic_window_evidence_messages(
+            str(window.window_id),
+            user_name="ada",
+            project_id="project-1",
+        )
+        build = await generator.generate(
+            user_name="ada",
+            project_id="project-1",
+            messages=messages,
+            policy=policy,
+        )
+        assert await store.write_project_semantic_window_episodes(
+            window_id=str(window.window_id),
+            episodes=build.final_episodes,
+            window_messages=messages,
+            user_name="ada",
+            project_id="project-1",
+        )
+        context_revision_id = uuid4()
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.project_context_revisions (
+                revision_id, project_id, revision_number, window_id, origin,
+                domain_version, content_hash
+            ) VALUES (%s, 'project-1', %s, %s, 'conversation', 1, %s)
+            """,
+            (context_revision_id, revision_number, window.window_id, _HASH),
+        )
+        for expected_stage, next_stage in (
+            (SemanticWindowStage.CLAIMED, SemanticWindowStage.CONTEXT_COMMITTED),
+            (
+                SemanticWindowStage.CONTEXT_COMMITTED,
+                SemanticWindowStage.KNOWLEDGE_COMMITTED,
+            ),
+            (SemanticWindowStage.KNOWLEDGE_COMMITTED, SemanticWindowStage.COMPLETED),
+        ):
+            assert await store.advance_project_semantic_window_stage(
+                window_id=str(window.window_id),
+                user_name="ada",
+                project_id="project-1",
+                expected_stage=expected_stage,
+                next_stage=next_stage,
+                context_revision_id=(
+                    str(context_revision_id)
+                    if next_stage is SemanticWindowStage.CONTEXT_COMMITTED
+                    else None
+                ),
+            )
+        generated.extend(build.final_episodes)
+
+    assert len({episode.episode_id for episode in generated}) == 2
+    assert len(episode_llm.calls) == 2
+    assert all(
+        call["response_model"] is LLMEpisodeWindowDecision
+        for call in episode_llm.calls
+    )
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=object(),
+        embedding_service=None,
+        knowledge_store=store,
+        postgres=real_postgres_client,
+    )
+    result = await retrieval.episode_check(
+        "deploy",
+        session_id="session-1",
+    )
+    retrieved = result["results"][0]["episodes"]
+    by_summary = {episode["summary"]: episode for episode in retrieved}
+
+    assert set(by_summary) == {
+        "OLDER_POLICY: deploy manually.",
+        "LATER_POLICY: deploy through CI.",
+    }
+    assert (
+        by_summary["OLDER_POLICY: deploy manually."]["first_message_at"]
+        < by_summary["LATER_POLICY: deploy through CI."]["first_message_at"]
+    )
+    assert by_summary["OLDER_POLICY: deploy manually."]["unresolved"] == [
+        "Manual deploy approval was required."
+    ]
+    assert by_summary["LATER_POLICY: deploy through CI."]["unresolved"] == [
+        "Monitor the first CI rollout."
+    ]
+
+    notebook = RunNotebook()
+    admission = notebook.apply("episode_check", {"data": result})
+    assert admission.accepted
+    assert set(admission.references) == {
+        f"episode:{episode.episode_id}" for episode in generated
+    }
+    for episode in retrieved:
+        sources = await retrieval.read_episode(
+            episode["episode_id"],
+            session_id="session-1",
+        )
+        assert len(sources) == 1
+        assert notebook.apply("read_episode", {"data": sources}).accepted
+
+    rendered_notebook = render_notebook(notebook)
+    synthesis_prompt = get_agent_prompt(
+        user_name="ada",
+        phase="SYNTHESIZE",
+        project_context="CURRENT_CONTEXT: deployment through CI is current.",
+    )
+
+    assert "OLDER_POLICY: deploy manually." in rendered_notebook
+    assert "LATER_POLICY: deploy through CI." in rendered_notebook
+    assert "Manual deploy approval was required." in rendered_notebook
+    assert "Monitor the first CI rollout." in rendered_notebook
+    assert "Deployment policy: deploy manually." in rendered_notebook
+    assert "Deployment policy reversed: deploy through CI." in rendered_notebook
+    assert "chronology:" in rendered_notebook
+    assert "CURRENT_CONTEXT: deployment through CI is current." in synthesis_prompt
+    assert "When multiple retrieved Episodes describe a change or reversal" in synthesis_prompt
 
 
 @pytest.mark.storage

@@ -1,6 +1,5 @@
 """Typed contracts for Context-first semantic processing."""
 
-import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
@@ -114,7 +113,6 @@ class EntityWrite:
     canonical_name: str
     entity_type: str
     topic: str
-    embedding: Optional[tuple[float, ...]]
     aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -134,25 +132,6 @@ class EntityWrite:
         object.__setattr__(
             self, "topic", _require_nonblank_text(self.topic, "EntityWrite.topic")
         )
-        if self.embedding is not None:
-            if not isinstance(self.embedding, (list, tuple)):
-                raise ValueError("EntityWrite.embedding must be a sequence of numbers")
-            if not self.embedding:
-                raise ValueError("EntityWrite.embedding must not be empty")
-            normalized_embedding = []
-            for index, value in enumerate(self.embedding):
-                if (
-                    not isinstance(value, (int, float))
-                    or isinstance(value, bool)
-                    or not math.isfinite(value)
-                ):
-                    raise ValueError(
-                        "EntityWrite.embedding values must be finite numbers "
-                        f"(invalid index {index})"
-                    )
-                normalized_embedding.append(float(value))
-            object.__setattr__(self, "embedding", tuple(normalized_embedding))
-
         if not isinstance(self.aliases, tuple):
             raise ValueError("EntityWrite.aliases must be a tuple of strings")
         object.__setattr__(

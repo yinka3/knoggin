@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from common.scoping import require_scope_value
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     ConflictResolutionInput,
     ConflictResolutionRecord,
     MaintenancePlan,

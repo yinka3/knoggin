@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from common.schema.evidence import EvidencePointer
-from core.knowledge.conflict_service import (
+from core.knowledge.conflict.conflict_service import (
     ConflictService,
     snapshot_conflict_evidence,
 )

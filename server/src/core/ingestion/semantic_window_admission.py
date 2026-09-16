@@ -122,11 +122,11 @@ class SemanticWindowAdmission:
         selected: list[_Exchange] = []
         target = self._settings.semantic_window_tokens
         close_reason: str | None = None
+        selected_token_count = 0
         for exchange in exchanges:
-            prospective = [*selected, exchange]
-            prospective_tokens = self._count_tokens(prospective)
             selected.append(exchange)
-            if prospective_tokens >= target:
+            selected_token_count = self._count_tokens(selected)
+            if selected_token_count >= target:
                 close_reason = (
                     "oversized_exchange" if len(selected) == 1 else "target_crossed"
                 )
@@ -141,7 +141,9 @@ class SemanticWindowAdmission:
             else:
                 return None
 
-        source_token_count = self._count_tokens(selected)
+        # The last exact prefix count is the rendered membership selected above.
+        # Reuse it rather than rendering and tokenizing the same window again.
+        source_token_count = selected_token_count
         overfill = max(0, source_token_count - target)
         # A flattened comprehension cannot retain one monotonic ordinal across
         # exchange bundles without obscuring the invariant; keep it explicit.

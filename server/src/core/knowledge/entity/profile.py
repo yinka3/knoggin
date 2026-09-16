@@ -12,7 +12,6 @@ class EntityIdentity:
     user_name: str
     canonical_name: str
     aliases: tuple[str, ...] = ()
-    embedding: Optional[list[float]] = None
     status: str = "active"
     redirect_entity_id: Optional[int] = None
 
@@ -35,7 +34,6 @@ class EntityProfile:
     entity_type: str = ""
     topic: str = "General"
     project_id: Optional[str] = None
-    embedding: Optional[list[float]] = None
 
     @classmethod
     def from_entity_record(cls, entity: Mapping[str, Any]) -> "EntityProfile":
@@ -44,7 +42,6 @@ class EntityProfile:
             entity_type=entity.get("type") or entity.get("entity_type") or "",
             topic=entity.get("topic") or "General",
             project_id=entity.get("project_id"),
-            embedding=entity.get("embedding"),
         )
 
     @classmethod
@@ -54,14 +51,12 @@ class EntityProfile:
         entity_type: str,
         topic: Optional[str],
         project_id: Optional[str],
-        embedding: Optional[list[float]],
     ) -> "EntityProfile":
         return cls(
             canonical_name=canonical_name,
             entity_type=entity_type,
             topic=topic or "General",
             project_id=project_id,
-            embedding=embedding,
         )
 
     @property
@@ -73,8 +68,6 @@ class EntityProfile:
 
         return bool(project_id and self.project_id == project_id)
 
-    def set_embedding(self, embedding: list[float]) -> None:
-        self.embedding = embedding
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,5 +75,4 @@ class EntityProfile:
             "type": self.entity_type,
             "topic": self.topic,
             "project_id": self.project_id,
-            "embedding": self.embedding,
         }

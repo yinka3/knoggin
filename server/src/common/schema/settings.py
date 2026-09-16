@@ -1,6 +1,6 @@
 from typing import Dict, List, Literal, Optional
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 
 from common.schema.agent.settings import AgentLimitSettings
 from common.schema.config import ConfigModel
@@ -95,43 +95,16 @@ class EpisodeSettings(ConfigModel):
     # A server-owned hard cap across every persisted narrative field.  The
     # prompt uses 90% of this value; persistence validates the full limit.
     max_narrative_chars: int = Field(4000, ge=500, le=20000)
-    prior_episode_candidate_count: int = Field(3, ge=1, le=3)
 
 
 class ConflictDiscoverySettings(ConfigModel):
-    """Bounded relationship-conflict review and trusted disposition policy."""
+    """Bounded relationship-conflict discovery and review settings."""
 
     enabled: bool = Field(True)
-    mode: Literal["manual", "assisted", "trusted"] = Field("assisted")
-    # These are deliberately a closed vocabulary of classification-only
-    # dispositions. Canonical maintenance plans such as entity merges, Context
-    # changes, or Project cleanup cannot be enabled through this setting.
-    trusted_actions: List[
-        Literal[
-            "resolve_conflict:confirmed_conflict",
-            "resolve_conflict:normal_temporal_change",
-            "resolve_conflict:not_a_conflict",
-            "resolve_conflict:insufficient_evidence",
-        ]
-    ] = Field(default_factory=list, max_length=4)
+    mode: Literal["manual", "assisted"] = Field("assisted")
     interval_hours: int = Field(48, ge=1)
     max_seed_span_days: int = Field(60, ge=1, le=365)
     max_package_tokens: int = Field(50_000, ge=1_000, le=200_000)
-
-    @field_validator("trusted_actions")
-    @classmethod
-    def unique_trusted_actions(cls, values):
-        if len(set(values)) != len(values):
-            raise ValueError("trusted_actions must not contain duplicates")
-        return values
-
-    @model_validator(mode="after")
-    def trusted_actions_require_trusted_mode(self):
-        if self.mode != "trusted" and self.trusted_actions:
-            raise ValueError(
-                "trusted_actions require conflict discovery mode='trusted'"
-            )
-        return self
 
 
 class JobSettings(ConfigModel):
@@ -164,7 +137,6 @@ class EntityResolutionSettings(ConfigModel):
     fuzzy_non_substring_threshold: int = Field(91, ge=50, le=100)
     generic_token_freq: int = Field(10, ge=1)
     candidate_fuzzy_threshold: int = Field(85, ge=50, le=100)
-    candidate_vector_threshold: float = Field(0.85, ge=0.0, le=1.0)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
     common_word_frequency_threshold: float = Field(1e-5, ge=0.0)
     sparse_context_verbs: List[str] = Field(

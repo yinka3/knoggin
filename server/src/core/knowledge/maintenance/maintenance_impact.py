@@ -8,7 +8,7 @@ from common.schema.maintenance import (
     MaintenanceImpactItem,
     MaintenanceImpactPreview,
 )
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     ConflictResolutionPlan,
     EntityContextChangePlan,
     EntityMergePlan,

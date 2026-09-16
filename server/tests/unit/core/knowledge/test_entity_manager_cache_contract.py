@@ -17,7 +17,6 @@ def test_entity_index_populate_register_and_alias_views_are_coherent():
             "type": "person",
             "topic": "Identity",
             "project_id": "project-1",
-            "embedding": [0.1, 0.2],
         }
     )
     registered_changed = index.register(
@@ -27,7 +26,6 @@ def test_entity_index_populate_register_and_alias_views_are_coherent():
             entity_type="project",
             topic="General",
             project_id="project-1",
-            embedding=[0.3, 0.4],
         ),
         "Knoggin",
         ["Memory Project"],
@@ -245,14 +243,13 @@ def test_entity_index_normalizes_aliases_and_ignores_blanks():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_entity_index_remove_and_embedding_update_keep_views_coherent():
+def test_entity_index_remove_keeps_alias_views_coherent():
     index = EntityIndex()
     index.populate(
         {
             "id": 101,
             "canonical_name": "Robert Chen",
             "aliases": ["Bob"],
-            "embedding": [0.1],
         }
     )
     index.populate(
@@ -260,12 +257,8 @@ def test_entity_index_remove_and_embedding_update_keep_views_coherent():
             "id": 202,
             "canonical_name": "Rob Chen",
             "aliases": ["Robbie"],
-            "embedding": [0.2],
         }
     )
-
-    assert index.update_embedding(101, [0.9, 0.8]) is True
-    assert index.get_profile(101).embedding == [0.9, 0.8]
 
     removed, aliases_changed = index.remove([101])
 
@@ -332,7 +325,6 @@ def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness)
             "type": "person",
             "topic": "Identity",
             "project_id": "project-1",
-            "embedding": [0.1, 0.2, 0.3],
         }
     )
 
@@ -341,7 +333,6 @@ def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness)
         entity_type="person",
         topic="Identity",
         project_id="project-1",
-        embedding=[0.1, 0.2, 0.3],
     )
     assert entities.get_known_aliases()["robert chen"] == 101
     assert entities.get_known_aliases()["bob"] == 101
@@ -367,7 +358,6 @@ def test_repeated_identical_populate_cache_does_not_bump_alias_version(
         "type": "person",
         "topic": "Identity",
         "project_id": "project-1",
-        "embedding": [0.1, 0.2, 0.3],
     }
 
     entities._populate_cache(record)

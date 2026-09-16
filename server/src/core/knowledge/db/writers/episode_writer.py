@@ -119,17 +119,17 @@ class EpisodeWriter:
             if window["origin"] == "human_edit" and (expected_membership or episodes):
                 raise ValueError("Human-edit semantic windows have no episode result")
 
-            window_message_ids = {message_id for message_id, _ in expected_membership}
+            window_sources = set(expected_membership)
             for ordinal, episode in enumerate(episodes):
-                source_message_ids = {message.message_id for message in episode.messages}
-                if not source_message_ids.intersection(window_message_ids):
+                episode_sources = {
+                    (message.message_id, message.session_id)
+                    for message in episode.messages
+                }
+                if not episode_sources:
                     raise ValueError("Episode result must include semantic-window evidence")
-                action = episode.generator_metadata.get("decision_action")
-                if action != "consolidate" and not source_message_ids.issubset(
-                    window_message_ids
-                ):
+                if not episode_sources.issubset(window_sources):
                     raise ValueError(
-                        "New episode source evidence must come from the semantic window"
+                        "Episode source evidence must come from the semantic window"
                     )
                 await self._write_semantic_episode(
                     cur,
@@ -402,15 +402,11 @@ class EpisodeWriter:
         """Persist narrative and canonical sources only; Knowledge owns graph links."""
 
         await cur.execute(
-            """
-            SELECT user_modified FROM episodes
-            WHERE episode_id = %s AND project_id = %s FOR UPDATE
-            """,
-            (episode.episode_id, episode.project_id),
+            "SELECT episode_id FROM episodes WHERE episode_id = %s FOR UPDATE",
+            (episode.episode_id,),
         )
-        existing = await cur.fetchone()
-        if existing is not None and bool(existing["user_modified"]):
-            raise ValueError("User-modified episodes cannot be regenerated automatically")
+        if await cur.fetchone() is not None:
+            raise ValueError("Finalized episode identities cannot be reused")
         source_ids = [item.message_id for item in episode.messages]
         expected_sessions = {item.message_id: item.session_id for item in episode.messages}
         await cur.execute(
@@ -428,13 +424,8 @@ class EpisodeWriter:
         ):
             raise ValueError("Episode source messages must exist in their recorded sessions")
         timestamps = {int(row["message_id"]): row.get("timestamp_ms") for row in rows}
-        await self._upsert_episode(cur, episode, timestamps)
-        for table in ("episode_messages", "episode_entities", "episode_relationships"):
-            await cur.execute(
-                f"DELETE FROM {table} WHERE episode_id = %s AND project_id = %s",
-                (episode.episode_id, episode.project_id),
-            )
-        await self._upsert_messages(cur, episode)
+        await self._insert_semantic_episode(cur, episode, timestamps)
+        await self._insert_messages(cur, episode)
 
     @staticmethod
     def _validate_ranked_context(
@@ -458,7 +449,7 @@ class EpisodeWriter:
             )
 
     @staticmethod
-    async def _upsert_episode(
+    async def _insert_semantic_episode(
         cur,
         episode: Episode,
         source_message_timestamps: Dict[int, int | None],
@@ -500,18 +491,7 @@ class EpisodeWriter:
                 %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
                 %s, %s, %s, %s::vector, %s::jsonb, %s, %s, %s
             )
-            ON CONFLICT (episode_id) DO UPDATE
-            SET summary = EXCLUDED.summary,
-                new_developments = EXCLUDED.new_developments,
-                updates = EXCLUDED.updates,
-                unresolved = EXCLUDED.unresolved,
-                source_message_count = EXCLUDED.source_message_count,
-                first_message_at = EXCLUDED.first_message_at,
-                last_message_at = EXCLUDED.last_message_at,
-                embedding = EXCLUDED.embedding,
-                generator_metadata = EXCLUDED.generator_metadata,
-                updated_at = EXCLUDED.updated_at
-            WHERE episodes.project_id = EXCLUDED.project_id
+            ON CONFLICT (episode_id) DO NOTHING
             RETURNING episode_id
             """,
             (
@@ -536,10 +516,10 @@ class EpisodeWriter:
             ),
         )
         if await cur.fetchone() is None:
-            raise ValueError("Episode ID belongs to a different episode scope")
+            raise ValueError("Finalized episode identities cannot be reused")
 
     @staticmethod
-    async def _upsert_messages(cur, episode: Episode) -> None:
+    async def _insert_messages(cur, episode: Episode) -> None:
         for message in episode.messages:
             await cur.execute(
                 """
@@ -551,8 +531,6 @@ class EpisodeWriter:
                     message_position
                 )
                 VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (episode_id, message_id) DO UPDATE
-                SET message_position = EXCLUDED.message_position
                 """,
                 (
                     episode.episode_id,

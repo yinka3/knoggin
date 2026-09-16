@@ -19,7 +19,6 @@ from common.schema.ingestion.contracts import (
     EntityWrite,
     ProjectEntityClassification,
     ResolvedContextBlockMention,
-    ValidationIssue,
 )
 from common.schema.settings import EntityResolutionSettings
 from common.scoping import (
@@ -29,10 +28,12 @@ from common.scoping import (
 )
 from common.utils.events import emit_sync
 from core.ingestion.policy import IngestionPolicy
-from core.knowledge.entity.embedding import build_entity_embedding_text
+from core.knowledge.entity.candidates import (
+    EntityCandidateSnapshot,
+    entity_record_for_project,
+)
 from core.knowledge.entity.index import EntityIndex
 from core.knowledge.entity.profile import EntityProfile
-from core.knowledge.services.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:
     from core.knowledge.store import KnowledgeStore
@@ -45,7 +46,6 @@ class EntityCandidate:
     signals: set[str] = field(default_factory=set)
     exact_score: Optional[float] = None
     fuzzy_score: Optional[float] = None
-    vector_score: Optional[float] = None
 
     def __iter__(self):
         yield self.entity_id
@@ -64,7 +64,6 @@ class EntityCandidate:
                 and self.signals == other.signals
                 and self.exact_score == other.exact_score
                 and self.fuzzy_score == other.fuzzy_score
-                and self.vector_score == other.vector_score
             )
         return False
 
@@ -75,8 +74,6 @@ class EntityCandidate:
             self.exact_score = max(self.exact_score or 0.0, score)
         elif signal == "fuzzy":
             self.fuzzy_score = max(self.fuzzy_score or 0.0, score)
-        elif signal == "vector":
-            self.vector_score = max(self.vector_score or 0.0, score)
 
     @property
     def has_direct_name_evidence(self) -> bool:
@@ -87,14 +84,12 @@ class EntityResolver:
     def __init__(
         self,
         knowledge_store: "KnowledgeStore",
-        embedding_service: EmbeddingService,
         project_id: str,
         readable_project_ids: List[str],
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
         generic_token_freq: int = 10,
         candidate_fuzzy_threshold: int = 85,
-        candidate_vector_threshold: float = 0.85,
     ):
 
         self.knowledge_store = knowledge_store
@@ -107,14 +102,12 @@ class EntityResolver:
             readable_project_ids,
             "EntityResolver",
         )
-        self.embedding_service = embedding_service
         self._index = EntityIndex()
         self._alias_version = 0
         self._lock = threading.RLock()
         self._resolution_lock = asyncio.Lock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
-        self.candidate_vector_threshold = candidate_vector_threshold
         self.fuzzy_substring_threshold = fuzzy_substring_threshold
         self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
         self.generic_token_freq = generic_token_freq
@@ -136,7 +129,6 @@ class EntityResolver:
         self.fuzzy_non_substring_threshold = config.fuzzy_non_substring_threshold
         self.generic_token_freq = config.generic_token_freq
         self.candidate_fuzzy_threshold = config.candidate_fuzzy_threshold
-        self.candidate_vector_threshold = config.candidate_vector_threshold
 
         logger.info(
             "EntityResolver settings updated: "
@@ -157,9 +149,7 @@ class EntityResolver:
         *,
         block_text_by_id: dict[object, str],
         policy: IngestionPolicy,
-        parent_work_record=None,
         allocate_entity_id,
-        issues: Optional[List[ValidationIssue]] = None,
     ) -> Dict[str, Any]:
         """Resolve typed Context-block mentions without manufacturing message refs.
 
@@ -169,7 +159,9 @@ class EntityResolver:
         """
 
         if any(not isinstance(mention, ContextBlockMention) for mention in mentions):
-            raise TypeError("Context entity resolution requires ContextBlockMention values")
+            raise TypeError(
+                "Context entity resolution requires ContextBlockMention values"
+            )
         if not isinstance(block_text_by_id, dict) or any(
             not isinstance(text, str) for text in block_text_by_id.values()
         ):
@@ -187,11 +179,15 @@ class EntityResolver:
             resolved_mentions: list[ResolvedContextBlockMention] = []
             associations: list[ContextBlockEntityAssociation] = []
 
-            candidate_entries = await self.candidate_entries_for_context_block_mentions(
-                mentions,
-                policy=policy,
-                parent_work_record=parent_work_record,
-            )
+            candidate_snapshot: EntityCandidateSnapshot | None = None
+            candidate_entries: list[Optional[Tuple[str, Any]]] = []
+            if mentions:
+                candidate_snapshot = await self._load_candidate_snapshot()
+                candidate_entries = self._candidate_entries_for_context_block_mentions(
+                    mentions,
+                    policy=policy,
+                    snapshot=candidate_snapshot,
+                )
 
             for index, mention in enumerate(mentions):
                 entry = candidate_entries[index]
@@ -205,9 +201,11 @@ class EntityResolver:
                 )
 
                 if entry[0] == "candidates":
+                    if candidate_snapshot is None:
+                        raise RuntimeError("Context candidate snapshot is unavailable")
                     for candidate in entry[1]:
                         candidate_id = candidate.entity_id
-                        profile = await self.get_profile(candidate_id)
+                        profile = candidate_snapshot.get_profile(candidate_id)
                         compatibility = (
                             self.schema_compatibility(
                                 mention.entity_type,
@@ -234,6 +232,7 @@ class EntityResolver:
                             policy=policy,
                             compatibility=compatibility,
                             candidate=candidate,
+                            candidate_snapshot=candidate_snapshot,
                         ):
                             classification = self._classification_for_resolution(
                                 candidate_id,
@@ -250,6 +249,7 @@ class EntityResolver:
                             new_aliases = self._new_aliases_for_selected_entity(
                                 candidate_id,
                                 [mention.name.strip()],
+                                candidate_snapshot=candidate_snapshot,
                             )
                             if new_aliases:
                                 alias_ids.add(candidate_id)
@@ -318,7 +318,11 @@ class EntityResolver:
 
             unique_associations = tuple(
                 {
-                    (association.block_id, association.entity_id, association.mention_text.casefold()): association
+                    (
+                        association.block_id,
+                        association.entity_id,
+                        association.mention_text.casefold(),
+                    ): association
                     for association in associations
                 }.values()
             )
@@ -370,47 +374,33 @@ class EntityResolver:
         previous = staged.get(classification.entity_id)
         return previous is not None and previous != classification
 
-    async def candidate_entries_for_context_block_mentions(
+    async def _load_candidate_snapshot(self) -> EntityCandidateSnapshot:
+        entities = await self.knowledge_store.get_visible_entities_for_resolution(
+            visible_project_ids=self.readable_project_ids,
+        )
+        return EntityCandidateSnapshot.from_entity_records(
+            entities,
+            project_id=self.project_id,
+        )
+
+    def _candidate_entries_for_context_block_mentions(
         self,
         mentions: list[ContextBlockMention],
         *,
         policy: IngestionPolicy,
-        parent_work_record=None,
+        snapshot: EntityCandidateSnapshot,
     ) -> list[Optional[Tuple[str, Any]]]:
         """Build candidate searches for Context-block mention identity decisions."""
-
-        names_by_key: Dict[str, str] = {}
-        for mention in mentions:
-            if mention.name:
-                names_by_key.setdefault(
-                    self._candidate_search_key(mention.name), mention.name
-                )
-        unique_names = list(names_by_key.values())
-        embedding_map = {}
-        if unique_names:
-            if getattr(self.embedding_service, "supports_model_work_records", False):
-                embeddings = await self.embedding_service.encode(
-                    unique_names,
-                    parent_work_record=parent_work_record,
-                )
-            else:
-                embeddings = await self.embedding_service.encode(unique_names)
-            embedding_map = {
-                self._candidate_search_key(name): embedding
-                for name, embedding in zip(unique_names, embeddings)
-            }
 
         entries: list[Optional[Tuple[str, Any]]] = []
         seen: Dict[str, Tuple[str, Any]] = {}
         for mention in mentions:
             search_key = self._candidate_search_key(mention.name)
             if search_key not in seen:
-                candidates = await self.get_candidate_ids(
+                candidates = self._get_candidate_ids_from_snapshot(
                     mention.name,
-                    precomputed_embedding=embedding_map.get(search_key),
                     candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
-                    candidate_vector_threshold=policy.candidate_vector_threshold,
-                    strict=True,
+                    snapshot=snapshot,
                 )
                 seen[search_key] = (
                     ("candidates", candidates) if candidates else ("new", None)
@@ -437,7 +427,6 @@ class EntityResolver:
             entity_type=pending_write.entity_type,
             topic=pending_write.topic,
             project_id=self.project_id,
-            embedding=None,
         )
         if (
             self.schema_compatibility(
@@ -472,6 +461,7 @@ class EntityResolver:
         policy: IngestionPolicy,
         compatibility: Optional[str] = None,
         candidate: EntityCandidate | None = None,
+        candidate_snapshot: EntityCandidateSnapshot,
     ) -> bool:
         """Apply all conservative reuse policy for one existing entity candidate."""
 
@@ -492,6 +482,7 @@ class EntityResolver:
             policy=policy,
             compatibility=compatibility,
             candidate=candidate,
+            candidate_snapshot=candidate_snapshot,
         )
         if evidence == "strong":
             return True
@@ -500,7 +491,13 @@ class EntityResolver:
                 name, mention_type, message_text, profile, compatibility, policy
             )
         return compatibility == "compatible" and self._has_contextual_support(
-            name, message_text, profile, compatibility, candidate_id, policy
+            name,
+            message_text,
+            profile,
+            compatibility,
+            candidate_id,
+            policy,
+            candidate_snapshot=candidate_snapshot,
         )
 
     def schema_compatibility(
@@ -566,13 +563,14 @@ class EntityResolver:
         policy: IngestionPolicy,
         compatibility: str,
         candidate: EntityCandidate | None,
+        candidate_snapshot: EntityCandidateSnapshot,
     ) -> str:
         mention = name.strip().casefold()
         if not mention:
             return "none"
         if candidate is not None and "ambiguous_alias" in candidate.signals:
             return "weak"
-        owners = self.get_entity_ids_for_name(mention)
+        owners = candidate_snapshot.get_entity_ids_for_name(mention)
         if owners and candidate_id not in owners:
             return "none"
         if len(owners) > 1:
@@ -580,7 +578,7 @@ class EntityResolver:
 
         aliases = {
             alias.strip().casefold()
-            for alias in self.get_mentions_for_id(candidate_id)
+            for alias in candidate_snapshot.get_mentions(candidate_id)
             if alias and alias.strip()
         }
         exact_name = mention == (profile.canonical_name or "").strip().casefold() or (
@@ -598,7 +596,7 @@ class EntityResolver:
             return "weak"
         if (
             candidate is not None
-            and len(candidate.signals & {"exact", "fuzzy", "vector"}) > 1
+            and len(candidate.signals & {"exact", "fuzzy"}) > 1
         ):
             return "strong"
         if len(self._word_tokens(name)) > 1:
@@ -650,9 +648,13 @@ class EntityResolver:
         compatibility: str,
         candidate_id: int,
         policy: IngestionPolicy,
+        *,
+        candidate_snapshot: EntityCandidateSnapshot,
     ) -> bool:
         if self._is_acronym_alias(
-            name, profile.canonical_name or "", self.get_mentions_for_id(candidate_id)
+            name,
+            profile.canonical_name or "",
+            list(candidate_snapshot.get_mentions(candidate_id)),
         ):
             return True
         return compatibility == "compatible" and self._has_rich_context(
@@ -703,23 +705,7 @@ class EntityResolver:
     def _cache_record_for_project(self, entity: dict) -> dict:
         """Select this resolver's local classification from a durable entity row."""
 
-        contexts = entity.get("contexts")
-        if contexts:
-            context = next(
-                (
-                    item
-                    for item in contexts
-                    if item.get("project_id") == self.project_id
-                ),
-                contexts[0],
-            )
-            entity = {
-                **entity,
-                "project_id": context.get("project_id"),
-                "type": context.get("entity_type"),
-                "topic": context.get("topic"),
-            }
-        return entity
+        return entity_record_for_project(entity, project_id=self.project_id)
 
     def _populate_cache(self, entity: dict) -> EntityProfile:
         """Hydrate internal indexes from a KnowledgeStore entity record."""
@@ -863,26 +849,6 @@ class EntityResolver:
         with self._lock:
             return self._index.get_entity_ids_for_name(name)
 
-    async def get_embedding_for_id(self, entity_id: int) -> List[float]:
-        """Retrieve embedding from graph by ID."""
-        with self._lock:
-            profile = self._index.get_profile(entity_id)
-            if profile and profile.embedding:
-                return profile.embedding
-        return await self.knowledge_store.get_entity_embedding(
-            entity_id,
-            visible_project_ids=self.readable_project_ids,
-        )
-
-    async def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """
-        Compute embeddings for a batch of texts (used by Processor).
-        """
-        if not texts:
-            return []
-
-        return await self.embedding_service.encode(texts)
-
     async def get_neighbor_ids_batch(
         self, candidate_ids: List[int]
     ) -> Dict[int, set[int]]:
@@ -893,9 +859,24 @@ class EntityResolver:
         )
 
     def _new_aliases_for_selected_entity(
-        self, entity_id: int, mentions: List[str]
+        self,
+        entity_id: int,
+        mentions: List[str],
+        *,
+        candidate_snapshot: EntityCandidateSnapshot | None = None,
     ) -> List[str]:
         """Return collision-free aliases for the candidate ID already selected."""
+
+        if candidate_snapshot is not None:
+            if candidate_snapshot.get_profile(entity_id) is None:
+                return []
+            return [
+                mention
+                for mention in mentions
+                if mention
+                and mention.strip()
+                and not candidate_snapshot.get_entity_ids_for_name(mention)
+            ]
 
         with self._lock:
             if not self._index.has_entity(entity_id):
@@ -959,11 +940,27 @@ class EntityResolver:
     async def get_candidate_ids(
         self,
         mention: str,
-        precomputed_embedding: List[float] = None,
         *,
         candidate_fuzzy_threshold: int | None = None,
-        candidate_vector_threshold: float | None = None,
-        strict: bool = False,
+    ) -> List[EntityCandidate]:
+        """Resolve one mention from a fresh authoritative candidate snapshot."""
+
+        mention_lower = self._candidate_search_key(mention) if mention else ""
+        if not mention_lower:
+            return []
+        snapshot = await self._load_candidate_snapshot()
+        return self._get_candidate_ids_from_snapshot(
+            mention,
+            candidate_fuzzy_threshold=candidate_fuzzy_threshold,
+            snapshot=snapshot,
+        )
+
+    def _get_candidate_ids_from_snapshot(
+        self,
+        mention: str,
+        *,
+        candidate_fuzzy_threshold: int | None,
+        snapshot: EntityCandidateSnapshot,
     ) -> List[EntityCandidate]:
         mention_lower = self._candidate_search_key(mention) if mention else ""
         if not mention_lower:
@@ -975,129 +972,42 @@ class EntityResolver:
             if candidate_fuzzy_threshold is None
             else candidate_fuzzy_threshold
         )
-        vector_threshold = (
-            self.candidate_vector_threshold
-            if candidate_vector_threshold is None
-            else candidate_vector_threshold
-        )
-
-        # The name index is a cache, not a complete owner set. Always consult
-        # durable scoped state before treating an exact name or alias as direct
-        # identity evidence.
-        durable_exact_ids: set[int] = set()
-        try:
-            durable_exact_rows = await self.knowledge_store.get_entities_by_names(
-                [mention_lower],
-                visible_project_ids=self.readable_project_ids,
-            )
-            for entity in durable_exact_rows:
-                entity_id = int(entity["id"])
-                self._populate_cache(entity)
-                durable_exact_ids.add(entity_id)
-        except Exception as exc:
-            if strict:
-                raise
-            logger.warning("Durable exact candidate lookup failed: {}", exc)
-
-        exact_is_ambiguous = len(durable_exact_ids) > 1
-        for entity_id in durable_exact_ids:
+        exact_ids = snapshot.get_entity_ids_for_name(mention_lower)
+        exact_is_ambiguous = len(exact_ids) > 1
+        for entity_id in exact_ids:
             candidate = candidates.setdefault(entity_id, EntityCandidate(entity_id))
             candidate.add_signal("exact", 1.0)
             if exact_is_ambiguous:
                 candidate.add_signal("ambiguous_alias", 1.0)
 
-        with self._lock:
-            choices = self._index.iter_aliases()
-            scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
-            results = process.extract(
-                mention_lower,
-                choices,
-                limit=50,
-                score_cutoff=fuzzy_threshold,
-                scorer=scorer,
-            )
+        scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
+        results = process.extract(
+            mention_lower,
+            snapshot.iter_names(),
+            limit=50,
+            score_cutoff=fuzzy_threshold,
+            scorer=scorer,
+        )
 
-            for alias, fuzz_score, _ in results:
-                # Exact identity evidence comes only from the durable lookup.
-                # A stale cached alias must not come back as fuzzy score 1.0.
-                if alias == mention_lower:
-                    continue
-                owner_ids = self._index.get_entity_ids_for_name(alias)
-                if owner_ids:
-                    normalized = fuzz_score / 100.0
-                    alias_is_ambiguous = len(owner_ids) > 1
-                    for entity_id in owner_ids:
-                        candidate = candidates.setdefault(
-                            entity_id,
-                            EntityCandidate(entity_id),
-                        )
-                        candidate.add_signal("fuzzy", normalized)
-                        # A unique durable exact match stays direct evidence.
-                        # A different shared alias may be a fuzzy neighbor of
-                        # that name, but it cannot make the exact owner
-                        # ambiguous after the durable lookup proved otherwise.
-                        if alias_is_ambiguous and entity_id not in durable_exact_ids:
-                            candidate.add_signal("ambiguous_alias", normalized)
-
-        vector = precomputed_embedding
-        if vector is None:
-            try:
-                vector = await self.embedding_service.encode_single(mention)
-            except Exception as exc:
-                if strict:
-                    raise
-                logger.warning("Encoding failed: {}", exc)
-                vector = None
-
-        vector_results = []
-        if vector:
-            try:
-                vector_results = (
-                    await self.knowledge_store.search_entities_by_embedding(
-                        vector,
-                        limit=5,
-                        score_threshold=vector_threshold,
-                        visible_project_ids=self.readable_project_ids,
-                    )
-                )
-            except Exception as exc:
-                if strict:
-                    raise
-                logger.warning("Vector search failed, using fuzzy only: {}", exc)
-                vector_results = []
-        for entity_id, vector_score in vector_results:
-            if entity_id:
-                candidates.setdefault(
+        for alias, fuzz_score, _ in results:
+            if alias == mention_lower:
+                continue
+            owner_ids = snapshot.get_entity_ids_for_name(alias)
+            normalized = fuzz_score / 100.0
+            alias_is_ambiguous = len(owner_ids) > 1
+            for entity_id in sorted(owner_ids):
+                candidate = candidates.setdefault(
                     entity_id,
                     EntityCandidate(entity_id),
-                ).add_signal("vector", vector_score)
-
-        # Exact rows were just read from durable active/scoped state. Every
-        # other cache or vector candidate must be revalidated before it can be
-        # accepted, since a warmed resolver may retain a retired identity.
-        non_exact_ids = sorted(set(candidates) - durable_exact_ids)
-        verified_ids = set(durable_exact_ids)
-        if non_exact_ids:
-            try:
-                hydrated = await self.knowledge_store.get_entities_by_ids(
-                    non_exact_ids,
-                    visible_project_ids=self.readable_project_ids,
                 )
-                for entity in hydrated:
-                    entity_id = int(entity["id"])
-                    self._populate_cache(entity)
-                    verified_ids.add(entity_id)
-            except Exception as exc:
-                if strict:
-                    raise
-                logger.warning("Candidate hydration failed: {}", exc)
+                candidate.add_signal("fuzzy", normalized)
+                # A unique exact owner remains direct evidence even if a
+                # different shared alias is a fuzzy neighbor of that name.
+                if alias_is_ambiguous and entity_id not in exact_ids:
+                    candidate.add_signal("ambiguous_alias", normalized)
 
         return sorted(
-            (
-                candidate
-                for entity_id, candidate in candidates.items()
-                if entity_id in verified_ids
-            ),
+            candidates.values(),
             key=lambda candidate: (-candidate.score, candidate.entity_id),
         )
 
@@ -1111,16 +1021,12 @@ class EntityResolver:
     ) -> EntityWrite:
         """Build a new entity write without exposing it through shared indexes."""
 
-        embedding = await self.embedding_service.encode_single(
-            build_entity_embedding_text(canonical_name)
-        )
         return EntityWrite(
             entity_id=entity_id,
             is_new=True,
             canonical_name=canonical_name,
             entity_type=entity_type,
             topic=topic,
-            embedding=tuple(embedding) if embedding is not None else None,
             aliases=tuple(alias for alias in aliases if alias and alias.strip()),
         )
 

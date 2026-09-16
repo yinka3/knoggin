@@ -222,7 +222,6 @@ class _RelationshipEntityBuilder:
                 canonical_name="Sarah",
                 entity_type="Person",
                 topic="Work",
-                embedding=None,
                 aliases=("Sarah",),
             ),
             delta_id: EntityWrite(
@@ -231,7 +230,6 @@ class _RelationshipEntityBuilder:
                 canonical_name="Delta",
                 entity_type="Company",
                 topic="Work",
-                embedding=None,
                 aliases=("Delta",),
             ),
         }
@@ -419,7 +417,6 @@ class _HomonymRelationshipEntityBuilder:
                 canonical_name="Alex",
                 entity_type="Person",
                 topic="Work",
-                embedding=None,
                 aliases=("Alex",),
             ),
             second_alex_id: EntityWrite(
@@ -428,7 +425,6 @@ class _HomonymRelationshipEntityBuilder:
                 canonical_name="Alex",
                 entity_type="Person",
                 topic="Work",
-                embedding=None,
                 aliases=("Alex",),
             ),
             delta_id: EntityWrite(
@@ -437,7 +433,6 @@ class _HomonymRelationshipEntityBuilder:
                 canonical_name="Delta",
                 entity_type="Company",
                 topic="Work",
-                embedding=None,
                 aliases=("Delta",),
             ),
         }
@@ -546,7 +541,6 @@ class _CorrectionEntityBuilder:
                     canonical_name=source_name,
                     entity_type="Person",
                     topic="Work",
-                    embedding=None,
                     aliases=(source_name,),
                 ),
                 self.delta_id: EntityWrite(
@@ -555,7 +549,6 @@ class _CorrectionEntityBuilder:
                     canonical_name="Delta",
                     entity_type="Company",
                     topic="Work",
-                    embedding=None,
                     aliases=("Delta",),
                 ),
             }
@@ -570,7 +563,6 @@ class _CorrectionEntityBuilder:
                     canonical_name=source_name,
                     entity_type="Person",
                     topic="Work",
-                    embedding=None,
                     aliases=(source_name,),
                 )
             }
@@ -741,7 +733,8 @@ async def test_semantic_participation_claim_and_runtime_policy_are_coherent(
         "runtime.project_runtime.ConfigManager.get",
         staticmethod(
             lambda: SimpleNamespace(
-                config=RootConfig(developer_settings=DeveloperSettings())
+                config=RootConfig(developer_settings=DeveloperSettings()),
+                subscribe=lambda *_args, **_kwargs: lambda: None,
             )
         ),
     )
@@ -1207,7 +1200,6 @@ async def test_project_semantic_job_recovers_resolver_publication_and_commits_so
     now[0] = 1_030_001
     recovered_resolver = EntityResolver(
         store,
-        object(),
         project_id,
         [project_id],
     )
@@ -1740,7 +1732,6 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
         compiled_domain=domain,
     )
     store = KnowledgeStore(postgres, object())
-    embedding = _Stage2Embedding()
     vp01 = _Stage2VP01()
     context_model = _Stage2ContextModel()
     relationship_llm = _ContextRelationshipLLM(
@@ -1779,9 +1770,9 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
     homonym_id = await store.allocate_entity_id()
     await postgres.execute(
         """
-        INSERT INTO public.entities (entity_id, user_name, canonical_name, embedding)
-        VALUES (%s, %s, 'Avery Stone', NULL),
-               (%s, %s, 'Avery Quinn', NULL)
+        INSERT INTO public.entities (entity_id, user_name, canonical_name)
+        VALUES (%s, %s, 'Avery Stone'),
+               (%s, %s, 'Avery Quinn')
         """,
         (target_id, user_name, homonym_id, user_name),
     )
@@ -1808,13 +1799,6 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
             user_name,
         ),
     )
-    assert await store.search_entities_by_embedding(
-        [0.25] * 1024,
-        limit=5,
-        score_threshold=0.8,
-        visible_project_ids=[project_id, shared_project_id],
-    ) == []
-
     async def capture_semantic_policy():
         return policy
 
@@ -1888,7 +1872,6 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
     context = JobContext(user_name=user_name, project_id=project_id)
     cold_resolver = EntityResolver(
         store,
-        embedding,
         project_id,
         [project_id, shared_project_id],
     )
@@ -2006,7 +1989,6 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
     now[0] = 1_030_001
     recovered_resolver = EntityResolver(
         store,
-        embedding,
         project_id,
         [project_id, shared_project_id],
     )
@@ -2105,13 +2087,12 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
 
     homonym_audit = EntityResolver(
         store,
-        embedding,
         project_id,
         [project_id, shared_project_id],
     )
     homonym_candidates = {
         candidate.entity_id: candidate
-        for candidate in await homonym_audit.get_candidate_ids("Avery", strict=True)
+        for candidate in await homonym_audit.get_candidate_ids("Avery")
     }
     assert {target_id, homonym_id}.issubset(homonym_candidates)
     assert "ambiguous_alias" in homonym_candidates[target_id].signals

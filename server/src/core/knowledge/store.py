@@ -981,25 +981,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_nearby_project_episodes(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_ids: List[str],
-        before_message_id: int,
-        before_timestamp_ms: int | None,
-        limit: int,
-    ) -> List[Episode]:
-        return await self._episode_reader.get_nearby_project_episodes(
-            user_name=user_name,
-            project_id=project_id,
-            session_ids=session_ids,
-            before_message_id=before_message_id,
-            before_timestamp_ms=before_timestamp_ms,
-            limit=limit,
-        )
-
     async def search_project_episodes(
         self,
         query: str,
@@ -1203,12 +1184,6 @@ class KnowledgeStore:
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
 
-    async def update_entity_embedding(
-        self, entity_id: int, embedding: List[float], *, project_id: str
-    ):
-        return await self._graph_writer.update_entity_embedding(
-            entity_id, embedding, project_id=project_id
-        )
 
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], *, project_id: str
@@ -1329,13 +1304,6 @@ class KnowledgeStore:
             user_name,
         )
 
-    async def get_entity_embedding(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[float]:
-        return await self._entity_reader.get_entity_embedding(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
 
     async def get_message_text(
         self,
@@ -1418,20 +1386,15 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def search_entities_by_embedding(
+    async def get_visible_entities_for_resolution(
         self,
-        embedding: List[float],
         *,
         visible_project_ids: List[str],
-        limit: int = 10,
-        score_threshold: float = 0.8,
-    ) -> List[Tuple[int, float]]:
-        return await self._entity_reader.search_entities_by_embedding(
-            embedding,
+    ) -> List[Dict]:
+        return await self._entity_reader.get_visible_entities_for_resolution(
             visible_project_ids=visible_project_ids,
-            limit=limit,
-            score_threshold=score_threshold,
         )
+
 
     async def list_entities(
         self,

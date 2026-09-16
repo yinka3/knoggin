@@ -191,12 +191,6 @@ class EntityIndex:
 
         return aliases_changed
 
-    def update_embedding(self, entity_id: int, embedding: List[float]) -> bool:
-        profile = self._profiles.get(entity_id)
-        if not profile:
-            return False
-        profile.set_embedding(embedding)
-        return True
 
     def remove(self, entity_ids: List[int]) -> Tuple[int, bool]:
         removed = 0

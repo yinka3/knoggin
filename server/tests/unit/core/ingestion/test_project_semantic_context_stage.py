@@ -235,9 +235,6 @@ class _IdleAdmission:
     def update_settings(self, _settings):
         pass
 
-    async def select(self, **_kwargs):
-        return None
-
     async def claim_next(self, **_kwargs):
         return None
 
@@ -328,8 +325,9 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_claim_uses_the_same_captured_policy_and_domain():
+async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
     policy = _policy()
+    policy_captures = 0
 
     class ClaimingAdmission:
         def update_settings(self, _settings):
@@ -344,6 +342,8 @@ async def test_claim_uses_the_same_captured_policy_and_domain():
             return None
 
     async def capture_semantic_policy():
+        nonlocal policy_captures
+        policy_captures += 1
         return policy
 
     admission = ClaimingAdmission()
@@ -355,9 +355,15 @@ async def test_claim_uses_the_same_captured_policy_and_domain():
         capture_semantic_policy=capture_semantic_policy,
     )
 
-    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    assert await job.should_run(context) is False
+    assert policy_captures == 0
+
+    result = await job.execute(context)
 
     assert result.success
+    assert policy_captures == 1
     assert admission.kwargs["ingestion_policy"] is policy
     assert admission.kwargs["domain"] is policy.domain
 

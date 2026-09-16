@@ -5,8 +5,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.knowledge.conflict_discovery import ConflictPacketBuilder
-from core.knowledge.conflicts import ConflictDiscoveryCursor
+from core.knowledge.conflict.conflict_discovery import ConflictPacketBuilder
+from core.knowledge.conflict.conflicts import (
+    ConflictDiscoveryCursor,
+    ConflictDiscoveryPackage,
+    LLMConflictCandidate,
+)
 from core.knowledge.db.readers.conflict_discovery_reader import (
     ConflictDiscoveryReader,
 )
@@ -23,6 +27,36 @@ _PROJECT_ONE_RELATIONSHIP = "project-1:2:3:works_at"
 _PROJECT_TWO_RELATIONSHIP = "project-2:2:4:works_at"
 _RETIRED_BLOCK_ID = "55555555-5555-4555-8555-555555555555"
 _NOW_MS = 1_700_000_100_000
+
+
+class EvidenceStore:
+    def __init__(self, client) -> None:
+        self.evidence = EvidenceService(EvidenceTraversalReader(client))
+
+    async def get_relationship_observations_evidence(self, observation_ids, **kwargs):
+        return await self.evidence.for_relationship_observations(
+            observation_ids,
+            **kwargs,
+        )
+
+
+def _discovery_package(cursor: ConflictDiscoveryCursor) -> ConflictDiscoveryPackage:
+    return ConflictDiscoveryPackage(
+        cursor=cursor,
+        observations=({"observation_id": 1}, {"observation_id": 2}),
+        next_observation_id=2,
+        prompt="RELATIONSHIP EVIDENCE",
+        estimated_tokens=12,
+    )
+
+
+def _discovery_candidate() -> LLMConflictCandidate:
+    return LLMConflictCandidate(
+        evidence_ids=[1, 2],
+        kind="possible_contradiction",
+        rationale="The two cited relationship observations need review.",
+        confidence=0.7,
+    )
 
 
 async def _seed_observation_matrix(client) -> None:
@@ -127,9 +161,18 @@ async def test_current_context_backed_observations_reach_conflict_discovery(
     real_postgres_client,
 ):
     await _seed_observation_matrix(real_postgres_client)
+    evidence = EvidenceService(EvidenceTraversalReader(real_postgres_client))
+
+    async def load_evidence(observation_ids):
+        return await evidence.for_relationship_observations(
+            observation_ids,
+            user_name="ada",
+            project_id="project-1",
+        )
 
     package = await ConflictPacketBuilder(
-        ConflictDiscoveryReader(real_postgres_client)
+        ConflictDiscoveryReader(real_postgres_client),
+        evidence_loader=load_evidence,
     ).build(
         ConflictDiscoveryCursor("ada", "project-1", 0),
         max_span_days=60,
@@ -181,16 +224,6 @@ async def test_new_direct_conflict_review_is_current_against_its_cited_evidence(
 ):
     await _seed_observation_matrix(real_postgres_client)
 
-    class EvidenceStore:
-        def __init__(self, client) -> None:
-            self.evidence = EvidenceService(EvidenceTraversalReader(client))
-
-        async def get_relationship_observations_evidence(self, observation_ids, **kwargs):
-            return await self.evidence.for_relationship_observations(
-                observation_ids,
-                **kwargs,
-            )
-
     async def project_lookup(_project_id):
         return {"status": "active"}
 
@@ -223,6 +256,134 @@ async def test_new_direct_conflict_review_is_current_against_its_cited_evidence(
     assert detail.stored_snapshot.state_token == EvidenceService.snapshot(
         detail.current_evidence
     ).state_token
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_conflict_completion_rolls_back_a_failed_review_write_and_retries_once(
+    real_postgres_client,
+    monkeypatch,
+):
+    await _seed_observation_matrix(real_postgres_client)
+
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(
+            postgres=real_postgres_client,
+            knowledge_store=EvidenceStore(real_postgres_client),
+        ),
+        user_name="ada",
+        project_lookup=project_lookup,
+        active_projects={},
+        project_leases={},
+    )
+    service._conflict_service.notify_detection = AsyncMock()
+    cursor = await service._conflict_discovery_reader.get_cursor(
+        user_name="ada",
+        project_id="project-1",
+    )
+    package = _discovery_package(cursor)
+    candidate = _discovery_candidate()
+    original_record_detection = service._conflict_writer.record_detection
+
+    async def fail_after_review_write(**kwargs):
+        await original_record_detection(**kwargs)
+        raise RuntimeError("forced review write failure")
+
+    monkeypatch.setattr(
+        service._conflict_writer,
+        "record_detection",
+        fail_after_review_write,
+    )
+    with pytest.raises(RuntimeError, match="forced review write failure"):
+        await service.complete_conflict_discovery(package, candidates=[candidate])
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.maintenance_reviews"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT last_reviewed_observation_id
+        FROM public.maintenance_review_checkpoints
+        WHERE user_name = 'ada' AND project_id = 'project-1'
+        """
+    ) == {"last_reviewed_observation_id": 0}
+
+    monkeypatch.setattr(
+        service._conflict_writer,
+        "record_detection",
+        original_record_detection,
+    )
+    assert await service.complete_conflict_discovery(package, candidates=[candidate]) == 1
+    assert await service.complete_conflict_discovery(package, candidates=[candidate]) == 0
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.maintenance_reviews"
+    ) == {"count": 1}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT last_reviewed_observation_id
+        FROM public.maintenance_review_checkpoints
+        WHERE user_name = 'ada' AND project_id = 'project-1'
+        """
+    ) == {"last_reviewed_observation_id": 2}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_conflict_completion_rolls_back_when_cursor_advance_fails(
+    real_postgres_client,
+    monkeypatch,
+):
+    await _seed_observation_matrix(real_postgres_client)
+
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(
+            postgres=real_postgres_client,
+            knowledge_store=EvidenceStore(real_postgres_client),
+        ),
+        user_name="ada",
+        project_lookup=project_lookup,
+        active_projects={},
+        project_leases={},
+    )
+    service._conflict_service.notify_detection = AsyncMock()
+    cursor = await service._conflict_discovery_reader.get_cursor(
+        user_name="ada",
+        project_id="project-1",
+    )
+    package = _discovery_package(cursor)
+    candidate = _discovery_candidate()
+    original_advance = service._conflict_discovery_reader.advance
+
+    async def fail_after_cursor_update(*args, **kwargs):
+        await original_advance(*args, **kwargs)
+        raise RuntimeError("forced cursor advance failure")
+
+    monkeypatch.setattr(
+        service._conflict_discovery_reader,
+        "advance",
+        fail_after_cursor_update,
+    )
+    with pytest.raises(RuntimeError, match="forced cursor advance failure"):
+        await service.complete_conflict_discovery(package, candidates=[candidate])
+
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.maintenance_reviews"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT last_reviewed_observation_id
+        FROM public.maintenance_review_checkpoints
+        WHERE user_name = 'ada' AND project_id = 'project-1'
+        """
+    ) == {"last_reviewed_observation_id": 0}
 
 
 @pytest.mark.storage

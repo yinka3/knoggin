@@ -16,7 +16,7 @@ from core.knowledge.db.writers.global_entity_merge_writer import (
     GlobalEntityMergeWriter,
 )
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     EntityContextMergeChoice,
     EntityMergePlan,
     EntityMergeRollbackPlan,

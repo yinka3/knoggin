@@ -344,15 +344,14 @@ class SemanticCommitWriter:
                 raise ValueError("Context pending entity writes must be new")
             await cur.execute(
                 """
-                INSERT INTO public.entities (entity_id, user_name, canonical_name, embedding)
-                VALUES (%s, %s, %s, %s::vector)
+                INSERT INTO public.entities (entity_id, user_name, canonical_name)
+                VALUES (%s, %s, %s)
                 ON CONFLICT (entity_id) DO NOTHING
                 """,
                 (
                     entity.entity_id,
                     user_name,
                     entity.canonical_name,
-                    json.dumps(entity.embedding) if entity.embedding else None,
                 ),
             )
             await cur.execute(

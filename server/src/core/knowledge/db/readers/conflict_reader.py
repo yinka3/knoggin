@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from common.scoping import require_scope_value
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     ConflictResolutionRecord,
     review_from_row,
 )

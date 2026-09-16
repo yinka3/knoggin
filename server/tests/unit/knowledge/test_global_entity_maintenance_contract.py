@@ -1,7 +1,7 @@
 import pytest
 
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     EntityContextMergeChoice,
     EntityMergePlan,
     EntityMergeRollbackPlan,

@@ -1,5 +1,7 @@
 import asyncio
 import gc
+import hashlib
+import json
 import os
 import sys
 import threading
@@ -52,8 +54,7 @@ class _DirectOnnxSentenceEmbedder:
             )
         except ValueError as exc:
             raise ValueError(
-                "Direct ONNX sentence embedder requires a "
-                "'sentence_embedding' output"
+                "Direct ONNX sentence embedder requires a 'sentence_embedding' output"
             ) from exc
 
         output_shape = outputs[self._embedding_output_index].shape
@@ -84,8 +85,7 @@ class _DirectOnnxSentenceEmbedder:
             model_inputs[model_input.name] = np.asarray(features[model_input.name])
         if missing_inputs:
             raise ValueError(
-                "Tokenizer did not provide ONNX inputs: "
-                f"{', '.join(missing_inputs)}"
+                f"Tokenizer did not provide ONNX inputs: {', '.join(missing_inputs)}"
             )
 
         outputs = self._session.run(self._output_names, model_inputs)
@@ -132,9 +132,7 @@ class EmbeddingService:
         self,
         embedding_model: str = "dunzhang/stella_en_1.5B_v5",
         reranker_model: str = "BAAI/bge-reranker-large",
-        nli_model: str = (
-            "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
-        ),
+        nli_model: str = ("MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"),
         device: str = None,
         batch_size: int = 32,
         model_work: ModelWorkCoordinator | None = None,
@@ -145,9 +143,10 @@ class EmbeddingService:
         self._lock = threading.Lock()
 
         self._backend = (
-            embedding_backend
-            or os.getenv("KNOGGIN_EMBEDDING_BACKEND", "onnx")
-        ).strip().lower()
+            (embedding_backend or os.getenv("KNOGGIN_EMBEDDING_BACKEND", "onnx"))
+            .strip()
+            .lower()
+        )
         if self._backend not in {"torch", "onnx"}:
             raise ValueError(
                 "KNOGGIN_EMBEDDING_BACKEND must be either 'torch' or 'onnx'"
@@ -163,9 +162,7 @@ class EmbeddingService:
             self._config_kwargs["unpad_inputs"] = False
         self._torch_model_kwargs = {"torch_dtype": torch.float32}
         self._onnx_provider = (
-            self._resolve_onnx_provider(
-                os.getenv("KNOGGIN_ONNX_PROVIDER", "auto")
-            )
+            self._resolve_onnx_provider(os.getenv("KNOGGIN_ONNX_PROVIDER", "auto"))
             if self._backend == "onnx"
             else None
         )
@@ -175,6 +172,7 @@ class EmbeddingService:
             else self._torch_model_kwargs
         )
         self._cross_encoder_model_kwargs = self._embedding_model_kwargs
+        self._embedding_revision = os.getenv("KNOGGIN_EMBEDDING_REVISION")
         self._embedding_model = embedding_model
         self._reranker_model = reranker_model
         self._nli_model = nli_model
@@ -224,9 +222,7 @@ class EmbeddingService:
             )
             return provider
 
-        provider = cls._ONNX_PROVIDER_ALIASES.get(
-            requested.lower(), requested
-        )
+        provider = cls._ONNX_PROVIDER_ALIASES.get(requested.lower(), requested)
         if provider not in available:
             raise ValueError(
                 f"KNOGGIN_ONNX_PROVIDER={provider!r} is unavailable; "
@@ -234,9 +230,7 @@ class EmbeddingService:
             )
         return provider
 
-    def set_model_work_coordinator(
-        self, model_work: ModelWorkCoordinator
-    ) -> None:
+    def set_model_work_coordinator(self, model_work: ModelWorkCoordinator) -> None:
         self._model_work = model_work
 
     async def _run_blocking(
@@ -283,9 +277,7 @@ class EmbeddingService:
             direct_embedder = self._load_direct_onnx_embedder()
             if direct_embedder is not None:
                 self._embedder = direct_embedder
-                self._embedding_dim = (
-                    direct_embedder.get_sentence_embedding_dimension()
-                )
+                self._embedding_dim = direct_embedder.get_sentence_embedding_dimension()
                 logger.info(
                     "Loaded direct pooled ONNX embedding model from "
                     f"{direct_embedder._model_path} | "
@@ -303,8 +295,7 @@ class EmbeddingService:
         if self._embedder:
             self._embedding_dim = self._embedder.get_sentence_embedding_dimension()
             logger.info(
-                f"Loaded embedding model on {self.device} | "
-                f"dims={self._embedding_dim}"
+                f"Loaded embedding model on {self.device} | dims={self._embedding_dim}"
             )
         else:
             logger.error("Failed to load embedder model")
@@ -312,8 +303,14 @@ class EmbeddingService:
     def _load_embedder_sync(self) -> None:
         with self._lock:
             if self._embedder is None:
+                revision_kwargs = (
+                    {"revision": self._embedding_revision}
+                    if self._embedding_revision
+                    else {}
+                )
                 self._embedder = SentenceTransformer(
                     self._embedding_model,
+                    **revision_kwargs,
                     trust_remote_code=True,
                     device=self.device,
                     model_kwargs=self._embedding_model_kwargs,
@@ -329,9 +326,15 @@ class EmbeddingService:
         model_path = Path(self._embedding_model)
         if not model_path.is_dir():
             try:
+                revision_kwargs = (
+                    {"revision": self._embedding_revision}
+                    if self._embedding_revision
+                    else {}
+                )
                 model_path = Path(
                     snapshot_download(
                         self._embedding_model,
+                        **revision_kwargs,
                         local_files_only=True,
                     )
                 )
@@ -468,6 +471,40 @@ class EmbeddingService:
 
         return np.vstack(all_embeddings).astype(np.float32).tolist()
 
+    @property
+    def configuration_fingerprint(self) -> str:
+        """Identify the corpus encoding contract, including the resolved model revision."""
+        revision = self._embedding_revision
+        if isinstance(self._embedder, _DirectOnnxSentenceEmbedder):
+            model_path = self._embedder._model_path
+            if model_path.parent.name == "snapshots":
+                revision = model_path.name
+        elif isinstance(self._embedder, SentenceTransformer):
+            config = getattr(self._embedder[0].auto_model, "config", None)
+            revision = getattr(config, "_commit_hash", None) or revision
+        payload = {
+            "model": self._embedding_model,
+            "revision": revision,
+            "backend": self._backend,
+            "dimensions": self.embedding_dim,
+            "content_format": 1,
+            "query_format": 1,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    async def encode_query(self, query: str) -> List[float]:
+        """Encode a retrieval query; corpus text remains unprompted.
+
+        Apply the Stella instruction explicitly so Torch and the direct ONNX
+        adapter receive identical input. Other models retain plain encoding.
+        """
+        if "stella" in self._embedding_model.casefold():
+            query = (
+                "Instruct: Given a web search query, retrieve relevant passages "
+                "that answer the query.\nQuery: " + query
+            )
+        return await self.encode_single(query)
+
     async def encode_single(self, text: str) -> List[float]:
         """Encode single text, returns list for JSON serialization (async)."""
         if isinstance(self._embedder, _DirectOnnxSentenceEmbedder):
@@ -574,10 +611,7 @@ class EmbeddingService:
         config = getattr(getattr(self._nli, "model", None), "config", None)
         id2label = getattr(config, "id2label", None)
         if id2label:
-            return [
-                str(id2label[index]).casefold()
-                for index in sorted(id2label)
-            ]
+            return [str(id2label[index]).casefold() for index in sorted(id2label)]
         return ["contradiction", "entailment", "neutral"]
 
     @staticmethod

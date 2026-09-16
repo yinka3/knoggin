@@ -1491,7 +1491,7 @@ class DocumentService:
         )
         normalized_prefix = self._normalize_path_prefix(path_prefix)
 
-        query_embedding = await self._embedding.encode_single(query.strip())
+        query_embedding = await self._embedding.encode_query(query.strip())
         if len(query_embedding) != EXPECTED_EMBEDDING_DIMENSION:
             raise ValueError(
                 "Document search embeddings must have exactly "

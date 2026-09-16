@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from common.schema.evidence import EvidenceBundle, EvidenceSnapshot
 from common.utils.events import emit
-from core.knowledge.conflicts import (
+from core.knowledge.conflict.conflicts import (
     ConflictGroup,
     ConflictOrigin,
     ConflictResolutionKind,

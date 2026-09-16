@@ -21,7 +21,7 @@ from core.knowledge.db.writers.relationship_interpretation_writer import (
 )
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.evidence_service import EvidenceService
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     ConflictResolutionPlan,
     EntityMergePlan,
     MaintenanceReview,

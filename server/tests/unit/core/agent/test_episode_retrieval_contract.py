@@ -302,14 +302,14 @@ async def test_episode_check_searches_episodes_before_raw_message_fallback():
     )
 
     assert tool.fallback_calls == []
-    assert result["resolution"] == "question"
+    assert result["resolution"] == "lexical"
     assert result["results"][0]["episodes"][0]["episode_id"] == "episode-question"
 
 
 @pytest.mark.no_network
-async def test_episode_check_uses_semantic_episode_matches_before_lexical_search():
+async def test_episode_check_combines_semantic_and_lexical_matches():
     class FakeEmbeddingService:
-        async def encode_single(self, query):
+        async def encode_query(self, query):
             assert query == "How will we find related memories?"
             return [0.1] * 1024
 
@@ -319,7 +319,7 @@ async def test_episode_check_uses_semantic_episode_matches_before_lexical_search
             return [(episode_card("episode-semantic"), 0.91)]
 
         async def search_project_episodes(self, query, **scope):
-            raise AssertionError("lexical search should not run after a semantic hit")
+            return [episode_card("episode-lexical")]
 
         async def get_project_episode_source_messages(self, episode_id, **scope):
             return [source_message()]
@@ -332,10 +332,40 @@ async def test_episode_check_uses_semantic_episode_matches_before_lexical_search
         "How will we find related memories?", session_id="session-1"
     )
 
-    assert result["resolution"] == "semantic"
-    semantic_episode = result["results"][0]["episodes"][0]
-    assert semantic_episode["episode_id"] == "episode-semantic"
+    assert result["resolution"] == "hybrid"
+    episodes = result["results"][0]["episodes"]
+    assert {episode["episode_id"] for episode in episodes} == {
+        "episode-semantic",
+        "episode-lexical",
+    }
+    semantic_episode = next(
+        episode for episode in episodes if episode["episode_id"] == "episode-semantic"
+    )
     assert semantic_episode["similarity"] == 0.91
+
+
+@pytest.mark.no_network
+async def test_episode_check_keeps_lexical_results_when_semantic_search_fails():
+    class FailingEmbeddingService:
+        async def encode_query(self, _query):
+            raise RuntimeError("model unavailable")
+
+    class FakeKnowledgeStore(EpisodeStore):
+        async def search_project_episodes(self, _query, **_scope):
+            return [episode_card("episode-lexical")]
+
+        async def get_project_episode_source_messages(self, _episode_id, **_scope):
+            return [source_message()]
+
+    tool = EpisodeTool()
+    tool.embedding_service = FailingEmbeddingService()
+    tool.knowledge_store = FakeKnowledgeStore()
+
+    result = await tool.episode_check("memory design", session_id="session-1")
+
+    assert result["resolution"] == "lexical"
+    assert result["results"][0]["episodes"][0]["episode_id"] == "episode-lexical"
+    assert tool.fallback_calls == []
 
 
 @pytest.mark.no_network

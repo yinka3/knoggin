@@ -6,7 +6,6 @@ from common.exceptions import StorageReadError, StorageWriteError
 from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
-from core.knowledge.db.writers.graph_writer import GraphWriter
 from core.knowledge.db.writers.message_writer import MessageWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.db.writers.relationship_reclassification_writer import (
@@ -82,25 +81,6 @@ async def test_message_search_failure_is_not_reported_as_empty_search():
 
     assert error.value.code == "storage_read_error"
     assert error.value.details["operation"] == "search_fts"
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_graph_write_failure_is_standardized():
-    writer = GraphWriter(
-        RecordingPostgresClient(
-            cursor_execute_exceptions=[OperationalError("database down")]
-        )
-    )
-
-    with pytest.raises(StorageWriteError) as error:
-        await writer.update_entity_embedding(
-            2,
-            [0.0] * 1024,
-            project_id="project-1",
-        )
-
-    assert error.value.details["operation"] == "update_entity_embedding"
 
 
 @pytest.mark.storage

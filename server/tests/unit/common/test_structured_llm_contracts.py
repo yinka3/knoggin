@@ -112,11 +112,13 @@ def test_context_connection_output_requires_local_entity_handles():
 @pytest.mark.no_network
 def test_episode_llm_output_rejects_schema_drift_and_blank_narrative_values():
     valid = {
-        "action": "create",
         "summary": "A durable decision was made.",
         "message_influences": ["message:1"],
     }
     assert LLMEpisodeDecision.model_validate(valid).summary == valid["summary"]
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        LLMEpisodeDecision.model_validate({**valid, "action": "consolidate"})
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         LLMEpisodeDecision.model_validate({**valid, "unexpected": "value"})

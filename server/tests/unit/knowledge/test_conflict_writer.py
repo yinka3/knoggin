@@ -2,7 +2,7 @@ import pytest
 
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     ConflictResolutionPlan,
     MaintenanceReview,
 )
