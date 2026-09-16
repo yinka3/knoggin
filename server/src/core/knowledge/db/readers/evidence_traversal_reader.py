@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from common.scoping import require_scope_value
+from common.scoping import require_scope_value, require_visible_project_ids
 
 
 class EvidenceTraversalReader:
@@ -23,12 +23,59 @@ class EvidenceTraversalReader:
         row_limit: int,
     ) -> list[dict[str, Any]]:
         user_name, project_id = self._scope(user_name, project_id)
+        return await self._relationship_rows(
+            observation_ids,
+            user_name=user_name,
+            project_scope=project_id,
+            project_predicate="observation.project_id = %s",
+            row_limit=row_limit,
+        )
+
+    async def get_visible_relationship_rows(
+        self,
+        observation_ids: list[int],
+        *,
+        user_name: str,
+        visible_project_ids: list[str],
+        row_limit: int,
+    ) -> list[dict[str, Any]]:
+        """Read one observation only when it belongs to the visible project set."""
+
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "read_visible_evidence_traversal",
+        )
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "read_visible_evidence_traversal",
+        )
+        return await self._relationship_rows(
+            observation_ids,
+            user_name=user_name,
+            project_scope=visible_project_ids,
+            project_predicate="observation.project_id = ANY(%s)",
+            row_limit=row_limit,
+        )
+
+    async def _relationship_rows(
+        self,
+        observation_ids: list[int],
+        *,
+        user_name: str,
+        project_scope: str | list[str],
+        project_predicate: Literal[
+            "observation.project_id = %s",
+            "observation.project_id = ANY(%s)",
+        ],
+        row_limit: int,
+    ) -> list[dict[str, Any]]:
         ids = self._observation_ids(observation_ids)
         row_limit = self._row_limit(row_limit)
         if not ids:
             return []
         return await self.client.fetch_all(
-            """
+            f"""
             SELECT
                 observation.observation_id,
                 observation.observed_relationship_label,
@@ -69,14 +116,14 @@ class EvidenceTraversalReader:
              AND source.session_id = support.session_id
              AND source.project_id = support.project_id
             WHERE observation.user_name = %s
-              AND observation.project_id = %s
+              AND {project_predicate}
               AND observation.observation_id = ANY(%s)
             ORDER BY observation.observation_id, block.block_id,
                      support.support_kind, support.message_id,
                      support.source_ref_id
             LIMIT %s
             """,
-            (user_name, project_id, ids, row_limit),
+            (user_name, project_scope, ids, row_limit),
         )
 
     async def get_context_block_rows(

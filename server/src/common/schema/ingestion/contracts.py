@@ -1,6 +1,5 @@
 """Typed contracts for Context-first semantic processing."""
 
-import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
@@ -8,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from common.conf.relationship_config import normalize_observed_relationship
+from common.scoping import IDENTITY_ENTITY_ID
 
 
 class ValidationIssue(BaseModel):
@@ -113,7 +113,6 @@ class EntityWrite:
     canonical_name: str
     entity_type: str
     topic: str
-    embedding: Optional[tuple[float, ...]]
     aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -133,25 +132,6 @@ class EntityWrite:
         object.__setattr__(
             self, "topic", _require_nonblank_text(self.topic, "EntityWrite.topic")
         )
-        if self.embedding is not None:
-            if not isinstance(self.embedding, (list, tuple)):
-                raise ValueError("EntityWrite.embedding must be a sequence of numbers")
-            if not self.embedding:
-                raise ValueError("EntityWrite.embedding must not be empty")
-            normalized_embedding = []
-            for index, value in enumerate(self.embedding):
-                if (
-                    not isinstance(value, (int, float))
-                    or isinstance(value, bool)
-                    or not math.isfinite(value)
-                ):
-                    raise ValueError(
-                        "EntityWrite.embedding values must be finite numbers "
-                        f"(invalid index {index})"
-                    )
-                normalized_embedding.append(float(value))
-            object.__setattr__(self, "embedding", tuple(normalized_embedding))
-
         if not isinstance(self.aliases, tuple):
             raise ValueError("EntityWrite.aliases must be a tuple of strings")
         object.__setattr__(
@@ -162,6 +142,52 @@ class EntityWrite:
                 for alias in self.aliases
             ),
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProjectEntityClassification:
+    """One target-project classification staged for a resolved identity.
+
+    Identity creation is user-global, while ``entity_type`` and ``topic`` belong
+    to one project. ``membership`` records what resolution observed so the
+    commit boundary can distinguish an existing local context from one it must
+    create and verify.
+    """
+
+    entity_id: int
+    entity_type: str
+    topic: str
+    membership: Literal["existing", "missing"]
+
+    def __post_init__(self) -> None:
+        entity_id = _require_positive_id(
+            self.entity_id,
+            "ProjectEntityClassification.entity_id",
+        )
+        if entity_id == IDENTITY_ENTITY_ID:
+            raise ValueError(
+                "ProjectEntityClassification cannot classify the reserved identity"
+            )
+        object.__setattr__(
+            self,
+            "entity_type",
+            _require_nonblank_text(
+                self.entity_type,
+                "ProjectEntityClassification.entity_type",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "topic",
+            _require_nonblank_text(
+                self.topic,
+                "ProjectEntityClassification.topic",
+            ),
+        )
+        if self.membership not in {"existing", "missing"}:
+            raise ValueError(
+                "ProjectEntityClassification.membership must be existing or missing"
+            )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -275,6 +301,8 @@ class ContextBlockMention:
     topic: str
     origin: Literal["known_alias", "vp01"]
     literal_message_ids: tuple[int, ...] = ()
+    source_start: int | None = None
+    source_end: int | None = None
 
     def __post_init__(self) -> None:
         if not self.block_ids or len(self.block_ids) != len(set(self.block_ids)):
@@ -309,6 +337,22 @@ class ContextBlockMention:
         if len(message_ids) != len(set(message_ids)):
             raise ValueError("ContextBlockMention literal message IDs must be unique")
         object.__setattr__(self, "literal_message_ids", message_ids)
+        if (self.source_start is None) != (self.source_end is None):
+            raise ValueError(
+                "ContextBlockMention source offsets must be provided together"
+            )
+        if self.source_start is not None:
+            if (
+                not isinstance(self.source_start, int)
+                or isinstance(self.source_start, bool)
+                or not isinstance(self.source_end, int)
+                or isinstance(self.source_end, bool)
+                or self.source_start < 0
+                or self.source_end <= self.source_start
+            ):
+                raise ValueError(
+                    "ContextBlockMention source offsets must be an increasing range"
+                )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -354,6 +398,7 @@ class ContextEntityResult:
     alias_updated_ids: frozenset[int]
     alias_updates: dict[int, tuple[str, ...]]
     pending_entity_writes: dict[int, EntityWrite]
+    project_classifications: dict[int, ProjectEntityClassification]
     block_entity_associations: tuple[ContextBlockEntityAssociation, ...]
     message_entity_refs: tuple[MessageEntityRef, ...]
 
@@ -382,6 +427,36 @@ class ContextEntityResult:
             for entity_id, write in self.pending_entity_writes.items()
         ):
             raise TypeError("pending Context entity writes must be keyed EntityWrite values")
+        if IDENTITY_ENTITY_ID in self.new_entity_ids:
+            raise ValueError("Context entity writes cannot create the reserved identity")
+        classified_ids = set(entity_ids) - {IDENTITY_ENTITY_ID}
+        if set(self.project_classifications) != classified_ids:
+            raise ValueError(
+                "Context project classifications must cover every non-identity entity"
+            )
+        if any(
+            not isinstance(entity_id, int)
+            or not isinstance(classification, ProjectEntityClassification)
+            or classification.entity_id != entity_id
+            for entity_id, classification in self.project_classifications.items()
+        ):
+            raise TypeError(
+                "Context project classifications must be keyed typed classifications"
+            )
+        for entity_id in self.new_entity_ids:
+            classification = self.project_classifications[entity_id]
+            write = self.pending_entity_writes[entity_id]
+            if classification.membership != "missing":
+                raise ValueError(
+                    "New Context identities require missing project membership"
+                )
+            if (
+                classification.entity_type != write.entity_type
+                or classification.topic != write.topic
+            ):
+                raise ValueError(
+                    "New Context identity classification must match its entity write"
+                )
         if any(
             entity_id not in set(entity_ids)
             or not isinstance(aliases, tuple)
@@ -394,6 +469,13 @@ class ContextEntityResult:
             for association in self.block_entity_associations
         ):
             raise ValueError("Context block associations must reference resolved entities")
+        associated_entity_ids = {
+            association.entity_id for association in self.block_entity_associations
+        }
+        if associated_entity_ids != set(entity_ids):
+            raise ValueError(
+                "Context block associations must cover every resolved entity"
+            )
         if any(
             reference.entity_id not in set(entity_ids)
             for reference in self.message_entity_refs

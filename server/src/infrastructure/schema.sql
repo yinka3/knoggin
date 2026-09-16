@@ -94,7 +94,9 @@ BEGIN
     IF NEW.user_name IS DISTINCT FROM OLD.user_name THEN
         RAISE EXCEPTION 'Entity user ownership is immutable';
     END IF;
-    IF NEW.canonical_name IS DISTINCT FROM OLD.canonical_name THEN
+    IF NEW.canonical_name IS DISTINCT FROM OLD.canonical_name
+       AND current_setting('knoggin.project_deletion_name_cleanup', true)
+           IS DISTINCT FROM 'on' THEN
         RAISE EXCEPTION 'Entity canonical_name is immutable';
     END IF;
     NEW.updated_at_ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT;
@@ -260,11 +262,14 @@ CREATE TABLE public.document_extractions (
     extracted_text text,
     extracted_content_hash text
 );
+CREATE TABLE public.embedding_configuration (
+    singleton boolean PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    fingerprint text NOT NULL
+);
 CREATE TABLE public.entities (
     entity_id bigint NOT NULL,
     user_name text NOT NULL,
     canonical_name text NOT NULL,
-    embedding public.vector(1024),
     status text DEFAULT 'active'::text NOT NULL,
     redirect_entity_id bigint,
     created_at_ms bigint DEFAULT (floor((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric)))::bigint NOT NULL,
@@ -275,6 +280,16 @@ CREATE TABLE public.entities (
 CREATE TABLE public.entity_aliases (
     entity_id bigint NOT NULL,
     alias text NOT NULL
+);
+CREATE TABLE public.entity_name_supports (
+    entity_id bigint NOT NULL,
+    name text NOT NULL,
+    project_id text,
+    source_kind text NOT NULL,
+    source_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT entity_name_supports_name_check CHECK ((btrim(name) <> ''::text)),
+    CONSTRAINT entity_name_supports_source_shape_check CHECK (((source_kind = 'project'::text) AND (project_id IS NOT NULL) AND (source_key = project_id)) OR ((source_kind = 'user'::text) AND (project_id IS NULL) AND (btrim(source_key) <> ''::text)))
 );
 CREATE TABLE public.entity_global_merge_audits (
     merge_id text NOT NULL,
@@ -425,6 +440,15 @@ CREATE TABLE public.maintenance_review_evidence (
     evidence_id text NOT NULL,
     observation_id bigint,
     snapshot jsonb DEFAULT '{}'::jsonb NOT NULL
+);
+CREATE TABLE public.maintenance_review_resolutions (
+    review_id text NOT NULL,
+    resolution_kind text NOT NULL,
+    resolution_note text,
+    resolved_by text NOT NULL,
+    resolved_at timestamp with time zone NOT NULL,
+    CONSTRAINT maintenance_review_resolutions_kind_check CHECK ((resolution_kind = ANY (ARRAY['confirmed_conflict'::text, 'normal_temporal_change'::text, 'not_a_conflict'::text, 'insufficient_evidence'::text, 'custom'::text]))),
+    CONSTRAINT maintenance_review_resolutions_resolved_by_nonblank_check CHECK ((btrim(resolved_by) <> ''::text))
 );
 CREATE TABLE public.maintenance_reviews (
     review_id text NOT NULL,
@@ -583,6 +607,13 @@ CREATE TABLE public.project_documents (
     CONSTRAINT project_documents_size_check CHECK ((size_bytes >= 0)),
     CONSTRAINT project_documents_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'indexing'::text, 'indexed'::text, 'failed'::text, 'deleted'::text])))
 );
+CREATE TABLE public.project_file_cleanup_tasks (
+    project_id text NOT NULL,
+    user_name text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT project_file_cleanup_tasks_project_id_check CHECK ((btrim(project_id) <> ''::text)),
+    CONSTRAINT project_file_cleanup_tasks_user_name_check CHECK ((btrim(user_name) <> ''::text))
+);
 CREATE TABLE public.project_entity_contexts (
     project_id text NOT NULL,
     entity_id bigint NOT NULL,
@@ -608,14 +639,12 @@ CREATE TABLE public.projects (
     description text,
     status text DEFAULT 'active'::text NOT NULL,
     domain_config jsonb NOT NULL,
-    episode_window_size integer DEFAULT 24 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     archived_at timestamp with time zone,
     deleted_at timestamp with time zone,
     last_activity_at timestamp with time zone,
     CONSTRAINT projects_domain_config_check CHECK ((jsonb_typeof(domain_config) = 'object'::text)),
-    CONSTRAINT projects_episode_window_size_check CHECK (((episode_window_size >= 8) AND (episode_window_size <= 72))),
     CONSTRAINT projects_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text, 'deleted'::text])))
 );
 CREATE TABLE public.project_contexts (
@@ -825,12 +854,12 @@ CREATE TABLE public.sessions (
     enabled_tools jsonb,
     document_focus jsonb,
     status text DEFAULT 'open'::text NOT NULL,
-    episode_participation_enabled boolean DEFAULT true NOT NULL,
-    episode_participation_after_message_id bigint DEFAULT 0 NOT NULL,
+    semantic_participation_enabled boolean DEFAULT true NOT NULL,
+    semantic_participation_after_message_id bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     last_active_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone,
-    CONSTRAINT sessions_episode_participation_after_message_id_check CHECK ((episode_participation_after_message_id >= 0)),
+    CONSTRAINT sessions_semantic_participation_after_message_id_check CHECK ((semantic_participation_after_message_id >= 0)),
     CONSTRAINT sessions_status_check CHECK ((status = ANY (ARRAY['open'::text, 'deleted'::text])))
 );
 ALTER TABLE ONLY public.entity_global_merge_mutations ALTER COLUMN mutation_id SET DEFAULT nextval('public.entity_global_merge_mutations_mutation_id_seq'::regclass);
@@ -866,6 +895,8 @@ ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_pkey PRIMARY KEY (entity_id);
 ALTER TABLE ONLY public.entity_aliases
     ADD CONSTRAINT entity_aliases_pkey PRIMARY KEY (entity_id, alias);
+ALTER TABLE ONLY public.entity_name_supports
+    ADD CONSTRAINT entity_name_supports_pkey PRIMARY KEY (entity_id, name, source_kind, source_key);
 ALTER TABLE ONLY public.entity_global_merge_audits
     ADD CONSTRAINT entity_global_merge_audits_pkey PRIMARY KEY (merge_id);
 ALTER TABLE ONLY public.entity_global_merge_mutations
@@ -898,6 +929,8 @@ ALTER TABLE ONLY public.maintenance_review_events
     ADD CONSTRAINT maintenance_review_events_pkey PRIMARY KEY (event_id);
 ALTER TABLE ONLY public.maintenance_review_evidence
     ADD CONSTRAINT maintenance_review_evidence_pkey PRIMARY KEY (review_id, evidence_kind, evidence_id);
+ALTER TABLE ONLY public.maintenance_review_resolutions
+    ADD CONSTRAINT maintenance_review_resolutions_pkey PRIMARY KEY (review_id);
 ALTER TABLE ONLY public.maintenance_reviews
     ADD CONSTRAINT maintenance_reviews_pkey PRIMARY KEY (review_id);
 ALTER TABLE ONLY public.maintenance_reviews
@@ -964,6 +997,8 @@ ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_id_project_key UNIQUE (document_id, project_id);
 ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_pkey PRIMARY KEY (document_id);
+ALTER TABLE ONLY public.project_file_cleanup_tasks
+    ADD CONSTRAINT project_file_cleanup_tasks_pkey PRIMARY KEY (project_id);
 ALTER TABLE ONLY public.project_contexts
     ADD CONSTRAINT project_contexts_pkey PRIMARY KEY (project_id);
 ALTER TABLE ONLY public.project_contexts
@@ -1041,9 +1076,9 @@ CREATE INDEX document_chunks_document_idx ON public.document_chunks USING btree 
 CREATE INDEX document_chunks_embedding_idx ON public.document_chunks USING hnsw (embedding public.vector_cosine_ops);
 CREATE INDEX document_chunks_search_vector_idx ON public.document_chunks USING gin (search_vector);
 CREATE INDEX context_block_entities_entity_idx ON public.context_block_entities USING btree (project_id, entity_id);
-CREATE INDEX entities_embedding_idx ON public.entities USING hnsw (embedding public.vector_cosine_ops);
 CREATE INDEX entities_user_name_idx ON public.entities USING btree (user_name, canonical_name);
 CREATE INDEX entity_aliases_alias_idx ON public.entity_aliases USING btree (alias);
+CREATE INDEX entity_name_supports_project_idx ON public.entity_name_supports USING btree (project_id, entity_id);
 CREATE INDEX entity_global_merge_audits_user_idx ON public.entity_global_merge_audits USING btree (user_name, created_at DESC);
 CREATE INDEX entity_global_merge_mutations_merge_idx ON public.entity_global_merge_mutations USING btree (merge_id, mutation_id);
 CREATE INDEX episode_entities_lookup_idx ON public.episode_entities USING btree (entity_id, episode_id);
@@ -1081,6 +1116,7 @@ CREATE INDEX project_artifacts_session_updated_idx ON public.project_artifacts U
 CREATE INDEX project_documents_hash_idx ON public.project_documents USING btree (project_id, content_hash);
 CREATE UNIQUE INDEX project_documents_live_path_idx ON public.project_documents USING btree (project_id, relative_path) WHERE (status <> 'deleted'::text);
 CREATE INDEX project_documents_project_idx ON public.project_documents USING btree (project_id, created_at DESC);
+CREATE INDEX project_file_cleanup_tasks_user_idx ON public.project_file_cleanup_tasks USING btree (user_name, created_at, project_id);
 CREATE INDEX project_entity_contexts_activity_idx ON public.project_entity_contexts USING btree (project_id, last_mentioned_ms DESC NULLS LAST);
 CREATE INDEX project_entity_contexts_entity_idx ON public.project_entity_contexts USING btree (user_name, entity_id);
 CREATE INDEX project_entity_contexts_topic_idx ON public.project_entity_contexts USING btree (project_id, topic);
@@ -1116,6 +1152,10 @@ ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_redirect_entity_fk FOREIGN KEY (redirect_entity_id) REFERENCES public.entities(entity_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.entity_aliases
     ADD CONSTRAINT entity_aliases_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.entity_name_supports
+    ADD CONSTRAINT entity_name_supports_entity_id_fkey FOREIGN KEY (entity_id) REFERENCES public.entities(entity_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.entity_name_supports
+    ADD CONSTRAINT entity_name_supports_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.entity_global_merge_mutations
     ADD CONSTRAINT entity_global_merge_mutations_merge_id_fkey FOREIGN KEY (merge_id) REFERENCES public.entity_global_merge_audits(merge_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.episode_entities
@@ -1146,6 +1186,8 @@ ALTER TABLE ONLY public.maintenance_review_evidence
     ADD CONSTRAINT maintenance_review_evidence_observation_id_fkey FOREIGN KEY (observation_id) REFERENCES public.relationship_observations(observation_id) ON DELETE SET NULL;
 ALTER TABLE ONLY public.maintenance_review_evidence
     ADD CONSTRAINT maintenance_review_evidence_review_id_fkey FOREIGN KEY (review_id) REFERENCES public.maintenance_reviews(review_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.maintenance_review_resolutions
+    ADD CONSTRAINT maintenance_review_resolutions_review_id_fkey FOREIGN KEY (review_id) REFERENCES public.maintenance_reviews(review_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.maintenance_reviews
     ADD CONSTRAINT maintenance_reviews_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.message_entity_refs

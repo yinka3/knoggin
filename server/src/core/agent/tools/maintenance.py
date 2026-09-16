@@ -3,7 +3,10 @@ from typing import Dict, List, Optional
 from loguru import logger
 
 from common.schema.evidence import EvidencePointer
-from core.knowledge.conflict_service import ConflictService
+from core.knowledge.conflict.conflict_service import (
+    ConflictService,
+    snapshot_conflict_evidence,
+)
 from core.knowledge.db.writers.conflict_writer import ConflictWriter
 
 
@@ -114,6 +117,12 @@ class MaintenanceTools:
         changes relationship evidence nor decides which observation is current.
         """
         try:
+            snapshot = await snapshot_conflict_evidence(
+                self.knowledge_store,
+                observation_ids=evidence_observation_ids,
+                user_name=self.user_name,
+                project_id=self.project_id,
+            )
             result = await ConflictService(
                 ConflictWriter(self.postgres)
             ).record_detection(
@@ -125,6 +134,7 @@ class MaintenanceTools:
                 confidence=confidence,
                 evidence_ids=evidence_observation_ids,
                 metadata={"reported_by": "agent"},
+                evidence_snapshot=snapshot,
             )
             return {
                 "review_id": result.group.conflict_id,

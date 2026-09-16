@@ -5,8 +5,9 @@ from common.conf.domain_config import DomainConfig
 from common.conf.relationship_config import normalize_relationship
 from common.schema.evidence import EvidencePointer, EvidenceSnapshot
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_reviews import (
     MaintenanceReview,
+    RelationshipAdvisoryPlan,
     RelationshipInterpretationChange,
     RelationshipInterpretationPlan,
 )
@@ -76,6 +77,12 @@ def test_review_rejects_untyped_arbitrary_patches_and_invalid_exclusion():
         ]
     )
     assert plan.changes[0].interpretation_source == "review"
+
+    with pytest.raises(ValidationError):
+        RelationshipAdvisoryPlan(
+            pattern_key="deploys to|project|technology",
+            action="merge",
+        )
 
     with pytest.raises(ValidationError, match="observation IDs must be unique"):
         RelationshipInterpretationPlan(

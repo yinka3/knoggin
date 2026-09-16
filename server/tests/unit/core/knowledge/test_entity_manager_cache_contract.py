@@ -17,7 +17,6 @@ def test_entity_index_populate_register_and_alias_views_are_coherent():
             "type": "person",
             "topic": "Identity",
             "project_id": "project-1",
-            "embedding": [0.1, 0.2],
         }
     )
     registered_changed = index.register(
@@ -27,7 +26,6 @@ def test_entity_index_populate_register_and_alias_views_are_coherent():
             entity_type="project",
             topic="General",
             project_id="project-1",
-            embedding=[0.3, 0.4],
         ),
         "Knoggin",
         ["Memory Project"],
@@ -98,6 +96,133 @@ def test_entity_index_populate_preserves_shared_alias_ambiguity():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+def test_entity_index_refresh_reconciles_removed_aliases_without_retry_churn():
+    index = EntityIndex()
+    index.populate(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Old Bob", "Bob"],
+            "type": "person",
+            "topic": "Identity",
+        }
+    )
+    index.populate(
+        {
+            "id": 202,
+            "canonical_name": "Bob Smith",
+            "aliases": ["Bob"],
+        }
+    )
+
+    profile, changed = index.refresh(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Robert", "Bob"],
+            "type": "person",
+            "topic": "Work",
+        }
+    )
+    _, repeated_changed = index.refresh(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Robert", "Bob"],
+            "type": "person",
+            "topic": "Work",
+        }
+    )
+
+    assert profile.topic == "Work"
+    assert changed is True
+    assert repeated_changed is False
+    assert index.get_entity_id_for_name("old bob") is None
+    assert index.get_entity_id_for_name("robert") == 101
+    assert index.get_entity_ids_for_name("bob") == {101, 202}
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_publish_committed_entity_ids_refreshes_local_context_and_alias_owners(
+    entity_manager_harness,
+):
+    entities, knowledge_store, _ = entity_manager_harness
+    entities._populate_cache(
+        {
+            "id": 101,
+            "canonical_name": "Robert Chen",
+            "aliases": ["Old Bob"],
+            "type": "person",
+            "topic": "Archive",
+            "project_id": "project-1",
+        }
+    )
+    initial_alias_version = entities.get_alias_version()
+    knowledge_store.entities[101] = {
+        "id": 101,
+        "canonical_name": "Robert Chen",
+        "aliases": ["Robert", "Bob"],
+        "project_id": "project-1",
+        "contexts": [
+            {
+                "project_id": "project-foreign",
+                "entity_type": "Contact",
+                "topic": "Elsewhere",
+            },
+            {
+                "project_id": "project-1",
+                "entity_type": "Person",
+                "topic": "Work",
+            },
+        ],
+    }
+    knowledge_store.add_entity(202, "Bob Smith", aliases=["Bob"])
+
+    await entities.publish_committed_entity_ids([101])
+
+    profile = entities.get_cached_profile(101)
+    assert profile is not None
+    assert profile.entity_type == "Person"
+    assert profile.topic == "Work"
+    assert profile.project_id == "project-1"
+    assert "old bob" not in entities.get_known_aliases()
+    assert entities.get_known_aliases()["robert"] == 101
+    assert entities.get_entity_ids_for_name("bob") == {101, 202}
+    assert entities.get_alias_version() == initial_alias_version + 1
+
+    await entities.publish_committed_entity_ids([101])
+
+    assert entities.get_alias_version() == initial_alias_version + 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_publish_committed_entity_ids_evicts_stale_missing_profiles(
+    entity_manager_harness,
+):
+    entities, _, _ = entity_manager_harness
+    entities._populate_cache(
+        {
+            "id": 303,
+            "canonical_name": "Retired Entity",
+            "aliases": ["Retired"],
+            "type": "person",
+            "topic": "Work",
+            "project_id": "project-1",
+        }
+    )
+    initial_alias_version = entities.get_alias_version()
+
+    await entities.publish_committed_entity_ids([303])
+
+    assert entities.get_cached_profile(303) is None
+    assert "retired" not in entities.get_known_aliases()
+    assert entities.get_alias_version() == initial_alias_version + 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 def test_entity_index_normalizes_aliases_and_ignores_blanks():
     index = EntityIndex()
 
@@ -118,14 +243,13 @@ def test_entity_index_normalizes_aliases_and_ignores_blanks():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_entity_index_remove_and_embedding_update_keep_views_coherent():
+def test_entity_index_remove_keeps_alias_views_coherent():
     index = EntityIndex()
     index.populate(
         {
             "id": 101,
             "canonical_name": "Robert Chen",
             "aliases": ["Bob"],
-            "embedding": [0.1],
         }
     )
     index.populate(
@@ -133,12 +257,8 @@ def test_entity_index_remove_and_embedding_update_keep_views_coherent():
             "id": 202,
             "canonical_name": "Rob Chen",
             "aliases": ["Robbie"],
-            "embedding": [0.2],
         }
     )
-
-    assert index.update_embedding(101, [0.9, 0.8]) is True
-    assert index.get_profile(101).embedding == [0.9, 0.8]
 
     removed, aliases_changed = index.remove([101])
 
@@ -205,7 +325,6 @@ def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness)
             "type": "person",
             "topic": "Identity",
             "project_id": "project-1",
-            "embedding": [0.1, 0.2, 0.3],
         }
     )
 
@@ -214,7 +333,6 @@ def test_populate_cache_loads_profiles_names_and_aliases(entity_manager_harness)
         entity_type="person",
         topic="Identity",
         project_id="project-1",
-        embedding=[0.1, 0.2, 0.3],
     )
     assert entities.get_known_aliases()["robert chen"] == 101
     assert entities.get_known_aliases()["bob"] == 101
@@ -240,7 +358,6 @@ def test_repeated_identical_populate_cache_does_not_bump_alias_version(
         "type": "person",
         "topic": "Identity",
         "project_id": "project-1",
-        "embedding": [0.1, 0.2, 0.3],
     }
 
     entities._populate_cache(record)
@@ -455,103 +572,6 @@ def test_known_aliases_and_mentions_are_lowercase_cache_truth(
         "countess ada",
         "ada",
     }
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_register_entity_updates_profile_aliases_and_embedding(
-    entity_manager_harness,
-):
-    entities, _, embedding = entity_manager_harness
-
-    assert entities.get_alias_version() == 0
-    vector = await entities.register_entity(
-        404,
-        "Notion",
-        ["Notion", "workspace notes"],
-        "tool",
-        "General",
-        session_id="session-1",
-    )
-
-    # Global identity vectors exclude project-context classification such as
-    # type and topic, which can legitimately differ between projects.
-    assert vector == embedding.vector_for("Notion (unknown)")
-    assert embedding.single_calls == ["Notion (unknown)"]
-    profile = await entities.get_profile(404)
-    assert profile == EntityProfile(
-        canonical_name="Notion",
-        entity_type="tool",
-        topic="General",
-        project_id="project-1",
-        embedding=vector,
-    )
-    assert entities.get_known_aliases()["notion"] == 404
-    assert entities.get_known_aliases()["workspace notes"] == 404
-    assert set(entities.get_mentions_for_id(404)) == {"notion", "workspace notes"}
-    assert entities.get_alias_version() == 1
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_register_entity_skips_alias_collisions(entity_manager_harness):
-    entities, _, _ = entity_manager_harness
-    await entities.register_entity(
-        101,
-        "Robert Chen",
-        ["Robert Chen", "Bob"],
-        "person",
-        "Identity",
-    )
-
-    await entities.register_entity(
-        202,
-        "Bob Smith",
-        ["Bob Smith", "Bob"],
-        "person",
-        "Identity",
-    )
-
-    aliases = entities.get_known_aliases()
-    assert aliases["bob"] == 101
-    assert aliases["bob smith"] == 202
-    assert "bob" not in set(entities.get_mentions_for_id(202))
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_compute_embedding_updates_known_profile_and_skips_unknown(
-    entity_manager_harness,
-):
-    entities, _, embedding = entity_manager_harness
-    entities._populate_cache(
-        {
-            "id": 101,
-            "canonical_name": "Knoggin",
-            "aliases": [],
-            "type": "project",
-            "topic": "General",
-            "project_id": "project-1",
-            "embedding": [0.0],
-        }
-    )
-    alias_version = entities.get_alias_version()
-
-    vector = await entities.compute_embedding(
-        101,
-        "Knoggin (project). Context: Builds a memory graph.",
-    )
-    missing_vector = await entities.compute_embedding(999, "Unknown")
-
-    assert vector == embedding.vector_for(
-        "Knoggin (project). Context: Builds a memory graph."
-    )
-    assert missing_vector == []
-    assert (await entities.get_profile(101)).embedding == vector
-    assert embedding.single_calls == [
-        "Knoggin (project). Context: Builds a memory graph."
-    ]
-    assert entities.get_alias_version() == alias_version
 
 
 @pytest.mark.storage

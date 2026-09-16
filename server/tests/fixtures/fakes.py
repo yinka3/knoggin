@@ -444,7 +444,7 @@ class FakeKnowledgeStore:
             "user_name": user_name,
         }
         self.embedding_rebuild_calls.append(call)
-        return {"messages": 0, "entities": 0, "episodes": 0, "identity": 1}
+        return {"episodes": 0, "document_chunks": 0}
 
     async def ensure_identity_entity(self, user_name, aliases=None):
         self.identity_calls.append((user_name, list(aliases or [])))
@@ -504,6 +504,10 @@ class FakeKnowledgeStore:
 class FakeEmbeddingService:
     async def encode(self, values):
         return [[0.1, 0.2, 0.3] for _ in values]
+
+    async def encode_query(self, value):
+        vectors = await self.encode([value])
+        return vectors[0]
 
     def cleanup(self):
         pass

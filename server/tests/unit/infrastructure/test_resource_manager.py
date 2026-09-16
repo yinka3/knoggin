@@ -39,7 +39,19 @@ def _inline_model_work(monkeypatch):
         async def shutdown(self):
             self.shutdown_calls += 1
 
+    class ConfigurationCheckedEmbeddingRebuilder:
+        def __init__(self, _postgres, _embedding):
+            pass
+
+        async def ensure_configuration(self):
+            return None
+
     monkeypatch.setattr(resources_module, "ModelWorkCoordinator", InlineModelWork)
+    monkeypatch.setattr(
+        resources_module,
+        "EmbeddingRebuilder",
+        ConfigurationCheckedEmbeddingRebuilder,
+    )
 
 
 @pytest.mark.no_network

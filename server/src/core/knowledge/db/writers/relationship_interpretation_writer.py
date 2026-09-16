@@ -13,7 +13,9 @@ from common.schema.ingestion.contracts import relationship_identity
 from common.scoping import require_scope_value
 from core.knowledge.db.projection_rebuilder import GraphBuilder
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
-from core.knowledge.maintenance_reviews import RelationshipInterpretationPlan
+from core.knowledge.maintenance.maintenance_reviews import (
+    RelationshipInterpretationPlan,
+)
 
 
 @dataclass(frozen=True, slots=True)

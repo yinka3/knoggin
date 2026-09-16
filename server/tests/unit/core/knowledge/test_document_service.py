@@ -623,6 +623,9 @@ class FakeEmbeddingService:
         self.single_calls.append(value)
         return self.single_embedding
 
+    async def encode_query(self, value):
+        return await self.encode_single(value)
+
     async def rerank(self, query, candidates):
         self.rerank_calls.append((query, list(candidates)))
         return list(range(len(candidates)))
@@ -2173,24 +2176,76 @@ async def test_index_document_is_idempotent_after_success(document_harness):
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_index_document_does_not_publish_after_content_changes(document_harness):
+async def test_index_document_reconciles_before_extraction_when_source_bytes_change(
+    document_harness,
+    monkeypatch,
+):
     service, postgres = document_harness
     uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("notes.txt", b"beta", overwrite=True)
+    from core.knowledge.documents import indexer as indexer_module
+
+    extraction_calls = 0
+    original_extract = indexer_module.extract_and_split_document
+
+    def count_extractions(*args, **kwargs):
+        nonlocal extraction_calls
+        extraction_calls += 1
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(indexer_module, "extract_and_split_document", count_extractions)
+
+    reconciled = await service.index_document(document_id=uploaded["document_id"])
+
+    assert extraction_calls == 0
+    assert reconciled["status"] == "queued"
+    assert reconciled["document_id"] != uploaded["document_id"]
+    assert reconciled["content_hash"] == hashlib.sha256(b"beta").hexdigest()
+    assert postgres.chunks == []
+    assert postgres.extracted_text == {}
+    assert next(
+        row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
+    )["status"] == "deleted"
+
+    indexed = await service.index_document(document_id=reconciled["document_id"])
+
+    assert indexed["status"] == "indexed"
+    assert extraction_calls == 1
+    assert postgres.chunks[0]["content"] == "beta"
+    assert postgres.extracted_text[indexed["document_id"]][0] == indexed["content_hash"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_index_document_does_not_publish_after_catalog_changes_during_derivation(
+    document_harness,
+):
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
+    filesystem = service._filesystem
+    assert filesystem is not None
     original_encode = service._embedding.encode
 
-    async def change_content_hash(values):
+    async def change_catalog_version(values):
+        filesystem.write_bytes("notes.txt", b"beta", overwrite=True)
+        await service.reconcile_project_files()
         embeddings = await original_encode(values)
-        postgres.rows[0]["content_hash"] = "b" * 64
-        postgres.rows[0]["status"] = "queued"
         return embeddings
 
-    service._embedding.encode = change_content_hash
+    service._embedding.encode = change_catalog_version
 
     result = await service.index_document(document_id=uploaded["document_id"])
 
     assert result["status"] == "queued"
-    assert result["content_hash"] == "b" * 64
+    assert result["document_id"] != uploaded["document_id"]
+    assert result["content_hash"] == hashlib.sha256(b"beta").hexdigest()
     assert postgres.chunks == []
+    assert postgres.extracted_text == {}
+    assert next(
+        row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
+    )["status"] == "deleted"
 
 
 @pytest.mark.storage

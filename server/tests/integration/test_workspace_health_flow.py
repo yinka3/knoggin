@@ -22,6 +22,9 @@ class IndexingEmbedding:
     async def encode_single(self, _value):
         return [0.0] * 1024
 
+    async def encode_query(self, value):
+        return await self.encode_single(value)
+
 
 async def run_inline(function, *args, **kwargs):
     return function(*args, **kwargs)

@@ -175,6 +175,153 @@ async def test_real_postgres_final_assistant_response_and_exchange_close_are_ato
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_real_postgres_finalizes_historical_document_sources_and_rolls_back_fabrication(
+    real_postgres_client,
+):
+    session_id = "session-final-history"
+    await _seed_session(real_postgres_client, session_id)
+    lifecycle = MessageLifecycleWriter(
+        real_postgres_client,
+        MessageWriter(real_postgres_client),
+    )
+    await lifecycle.create_editable_user_message(
+        {
+            "id": 511,
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": session_id,
+            "role": "user",
+            "content": "Use the captured document passage.",
+            "timestamp": 1_000,
+            "metadata": {},
+            "acceptance_key": "request:history-511",
+        },
+        edit_window_seconds=600,
+    )
+    document_id = "00000000-0000-0000-0000-000000000511"
+    captured_hash = "a" * 64
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.project_documents (
+            document_id, project_id, original_name, relative_path, extension,
+            size_bytes, content_hash
+        ) VALUES (%s, 'project-1', 'history.pdf', '/history.pdf', '.pdf', 10, %s)
+        """,
+        (document_id, captured_hash),
+    )
+    candidate = SourceReferenceCandidate(
+        project_id="project-1",
+        session_id=session_id,
+        source_kind="pdf_document",
+        document_id=document_id,
+        source_project_id="project-1",
+        content_hash=captured_hash,
+        locator={"kind": "pdf_page", "page": 1},
+        excerpt="The version-A passage.",
+        metadata={"document_name": "history.pdf"},
+        encounter_kind="document_search",
+        agent_run_id="run-history-511",
+        tool_call_id="call-history-511",
+        result_position=0,
+    )
+    await real_postgres_client.execute(
+        "UPDATE public.project_documents SET content_hash = %s WHERE document_id = %s",
+        ("b" * 64, document_id),
+    )
+    store = KnowledgeStore(real_postgres_client, object())
+    message = {
+        "id": 512,
+        "role": "assistant",
+        "user_name": "ada",
+        "project_id": "project-1",
+        "session_id": session_id,
+        "content": "The answer used version A.",
+        "timestamp": 2_000,
+        "metadata": {},
+        "user_msg_id": 511,
+        "lifecycle_state": "sealed",
+        "sealed_at_ms": 2_000,
+    }
+
+    persisted_id, source_ref_ids, created = await store.finalize_assistant_exchange(
+        message,
+        [candidate],
+        readable_project_ids=["project-1"],
+    )
+    duplicate_id, duplicate_ref_ids, duplicate_created = (
+        await store.finalize_assistant_exchange(
+            {**message, "id": 513, "content": "Duplicate answer."},
+            [candidate],
+            readable_project_ids=["project-1"],
+        )
+    )
+    sources = await store.get_message_source_refs(
+        512,
+        user_name="ada",
+        project_id="project-1",
+        session_id=session_id,
+    )
+
+    assert (persisted_id, created) == (512, True)
+    assert source_ref_ids
+    assert (duplicate_id, duplicate_ref_ids, duplicate_created) == (
+        512,
+        source_ref_ids,
+        False,
+    )
+    assert sources[0].source_status == "historical"
+    assert sources[0].excerpt == candidate.excerpt
+
+    await lifecycle.create_editable_user_message(
+        {
+            "id": 521,
+            "user_name": "ada",
+            "project_id": "project-1",
+            "session_id": session_id,
+            "role": "user",
+            "content": "Reject an invented document.",
+            "timestamp": 3_000,
+            "metadata": {},
+            "acceptance_key": "request:history-521",
+        },
+        edit_window_seconds=600,
+    )
+    fabricated = candidate.model_copy(
+        update={
+            "document_id": "00000000-0000-0000-0000-000000000599",
+            "agent_run_id": "run-history-521",
+            "tool_call_id": "call-history-521",
+        }
+    )
+
+    with pytest.raises(ValueError, match="document is not visible"):
+        await store.finalize_assistant_exchange(
+            {**message, "id": 522, "user_msg_id": 521},
+            [fabricated],
+            readable_project_ids=["project-1"],
+        )
+
+    assert await real_postgres_client.fetch_all(
+        """
+        SELECT message_id, role
+        FROM public.messages
+        WHERE session_id = %s
+        ORDER BY message_id
+        """,
+        (session_id,),
+    ) == [
+        {"message_id": 511, "role": "user"},
+        {"message_id": 512, "role": "assistant"},
+        {"message_id": 521, "role": "user"},
+    ]
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.message_source_refs WHERE message_id = 522"
+    ) == {"count": 0}
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_real_postgres_failure_and_cancellation_close_user_evidence(real_postgres_client):
     await _seed_session(real_postgres_client, "session-terminal")
     lifecycle = MessageLifecycleWriter(

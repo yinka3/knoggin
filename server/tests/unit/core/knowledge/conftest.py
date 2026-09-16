@@ -3,27 +3,6 @@ import pytest
 from core.knowledge.entity.resolver import EntityResolver
 
 
-class FakeEmbeddingService:
-    def __init__(self):
-        self.batch_calls = []
-        self.single_calls = []
-        self.fail_single_texts = set()
-        self.fail_single = False
-
-    async def encode(self, texts):
-        self.batch_calls.append(list(texts))
-        return [self.vector_for(text) for text in texts]
-
-    async def encode_single(self, text):
-        self.single_calls.append(text)
-        if self.fail_single or text in self.fail_single_texts:
-            raise RuntimeError(f"embedding failed for {text}")
-        return self.vector_for(text)
-
-    def vector_for(self, text):
-        total = sum(ord(ch) for ch in text)
-        return [float(total % 97), float(len(text)), float(total % 13)]
-
 class FakeEntityKnowledgeStore:
     def __init__(self, entities=None):
         self.entities = {
@@ -31,9 +10,9 @@ class FakeEntityKnowledgeStore:
         }
         self.name_lookups = []
         self.profile_lookups = []
-        self.embedding_lookups = []
-        self.vector_searches = []
-        self.vector_results = {}
+        self.catalog_lookups = []
+        self.fail_name_lookup = False
+        self.fail_catalog_lookup = False
 
     def add_entity(
         self,
@@ -44,7 +23,7 @@ class FakeEntityKnowledgeStore:
         entity_type="person",
         topic="Identity",
         project_id="project-1",
-        embedding=None,
+        status="active",
     ):
         entity = {
             "id": entity_id,
@@ -53,12 +32,14 @@ class FakeEntityKnowledgeStore:
             "type": entity_type,
             "topic": topic,
             "project_id": project_id,
-            "embedding": embedding,
+            "status": status,
         }
         self.entities[entity_id] = entity
         return entity
 
     async def get_entities_by_names(self, names, visible_project_ids=None):
+        if self.fail_name_lookup:
+            raise RuntimeError("name lookup failed")
         self.name_lookups.append(
             {
                 "names": list(names),
@@ -98,37 +79,19 @@ class FakeEntityKnowledgeStore:
             and self._is_visible(entity, visible_project_ids)
         ]
 
-    async def get_entity_embedding(self, entity_id, *, visible_project_ids):
-        self.embedding_lookups.append(entity_id)
-        entity = self.entities.get(entity_id)
-        return list(entity.get("embedding") or []) if entity else []
-
-    async def search_entities_by_embedding(
-        self,
-        vector,
-        limit=5,
-        score_threshold=0.85,
-        visible_project_ids=None,
-    ):
-        self.vector_searches.append(
-            {
-                "vector": list(vector),
-                "limit": limit,
-                "score_threshold": score_threshold,
-                "visible_project_ids": visible_project_ids,
-            }
-        )
-        results = self.vector_results.get(tuple(vector), [])
-        visible_results = []
-        for entity_id, score in results:
-            entity = self.entities.get(entity_id)
-            if entity and not self._is_visible(entity, visible_project_ids):
-                continue
-            if score >= score_threshold:
-                visible_results.append((entity_id, score))
-        return visible_results[:limit]
+    async def get_visible_entities_for_resolution(self, *, visible_project_ids):
+        if self.fail_catalog_lookup:
+            raise RuntimeError("candidate catalog lookup failed")
+        self.catalog_lookups.append({"visible_project_ids": list(visible_project_ids)})
+        return [
+            dict(entity)
+            for entity in self.entities.values()
+            if self._is_visible(entity, visible_project_ids)
+        ]
 
     def _is_visible(self, entity, visible_project_ids):
+        if entity.get("status", "active") != "active":
+            return False
         if visible_project_ids is None:
             return True
         return entity.get("project_id") in visible_project_ids
@@ -137,11 +100,9 @@ class FakeEntityKnowledgeStore:
 @pytest.fixture
 def entity_manager_harness():
     knowledge_store = FakeEntityKnowledgeStore()
-    embedding = FakeEmbeddingService()
     entities = EntityResolver(
         knowledge_store=knowledge_store,
-        embedding_service=embedding,
         project_id="project-1",
         readable_project_ids=["project-1"],
     )
-    return entities, knowledge_store, embedding
+    return entities, knowledge_store, None

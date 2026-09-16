@@ -209,6 +209,48 @@ class ProjectContextReader:
         )
         return frozenset(UUID(str(row["block_id"])) for row in rows)
 
+    async def get_committed_window_affected_entity_ids(
+        self,
+        window_id: UUID | str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> tuple[int, ...]:
+        """Return the entity IDs durably affected by one owned committed window.
+
+        A later no-op window can reuse an earlier Context revision.  Requiring
+        the revision owner to equal the requested window prevents that later
+        window from publishing the earlier window's cached entity changes.
+        """
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "get_committed_window_affected_entity_ids"
+        )
+        window_id = self._uuid(window_id, "window_id")
+        rows = await self.client.fetch_all(
+            """
+            SELECT DISTINCT association.entity_id
+            FROM public.project_semantic_windows AS semantic_window
+            JOIN public.project_context_revisions AS revision
+              ON revision.revision_id = semantic_window.context_revision_id
+             AND revision.project_id = semantic_window.project_id
+             AND revision.window_id = semantic_window.window_id
+            JOIN public.project_context_revision_impact_blocks AS impact
+              ON impact.revision_id = revision.revision_id
+             AND impact.project_id = revision.project_id
+            JOIN public.context_block_entities AS association
+              ON association.block_id = impact.block_id
+             AND association.project_id = impact.project_id
+            WHERE semantic_window.window_id = %s
+              AND semantic_window.user_name = %s
+              AND semantic_window.project_id = %s
+              AND semantic_window.stage = 'knowledge_committed'
+            ORDER BY association.entity_id ASC
+            """,
+            (window_id, user_name, project_id),
+        )
+        return tuple(int(row["entity_id"]) for row in rows)
+
     async def get_block_supports(
         self,
         block_ids: list[UUID | str],

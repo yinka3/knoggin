@@ -43,6 +43,15 @@ class DispatchTools:
         self.calls.append(("read_episode", episode_id))
         return [{"id": episode_id}]
 
+    async def read_observation_evidence(self, observation_id):
+        self.calls.append(("read_observation_evidence", observation_id))
+        return {
+            "subject": {
+                "kind": "relationship_observation",
+                "identifier": str(observation_id),
+            }
+        }
+
     async def read_document(
         self,
         document_id=None,
@@ -122,6 +131,11 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         "read_episode",
         {"episode_id": 42},
     )
+    observation = await execute_tool(
+        tools,
+        "read_observation_evidence",
+        {"observation_id": "17"},
+    )
 
     assert result == {"data": [{"id": "msg_1"}]}
     assert activity == {"data": [{"entity_id": 7}]}
@@ -146,6 +160,14 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     }
     assert episode == {"data": {"resolution": "exact"}}
     assert expanded_episode == {"data": [{"id": "42"}]}
+    assert observation == {
+        "data": {
+            "subject": {
+                "kind": "relationship_observation",
+                "identifier": "17",
+            }
+        }
+    }
     assert tools.calls == [
         ("search_messages", "1234", 5),
         ("get_recent_activity", 7, 48),
@@ -164,6 +186,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         ("read_web_page", "https://example.test/report.pdf", None, 150, None, 2),
         ("episode_check", "What changed?", 7),
         ("read_episode", "42"),
+        ("read_observation_evidence", 17),
     ]
 
 

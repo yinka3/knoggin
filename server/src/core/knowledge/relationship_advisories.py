@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from common.conf.relationship_config import normalize_observed_relationship
 
@@ -12,9 +12,8 @@ _RELATIONSHIP_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,39}$")
 ADVISORY_DISPOSITIONS = frozenset(
     {"pending", "accepted", "dismissed", "suppressed"}
 )
-ADVISORY_ACTIONS = frozenset(
-    {"accept", "edit", "dismiss", "reopen", "suppress", "merge"}
-)
+AdvisoryAction = Literal["accept", "edit", "dismiss", "reopen", "suppress"]
+ADVISORY_ACTIONS = frozenset({"accept", "edit", "dismiss", "reopen", "suppress"})
 
 
 class RelationshipAdvisoryDecisionError(ValueError):
@@ -94,7 +93,6 @@ class RelationshipAdvisoryDecision:
     proposed_relationship_type: str | None = None
     last_action: str | None = None
     decision_note: str | None = None
-    decided_by: str | None = None
     revision: int = 0
 
     def __post_init__(self) -> None:
@@ -122,7 +120,6 @@ class RelationshipAdvisoryDecision:
             "proposed_relationship_type": self.proposed_relationship_type,
             "last_action": self.last_action,
             "decision_note": self.decision_note,
-            "decided_by": self.decided_by,
             "revision": self.revision,
         }
 
@@ -149,7 +146,6 @@ def apply_advisory_action(
     action: str,
     relationship_type: str | None = None,
     note: str | None = None,
-    decided_by: str | None = None,
 ) -> RelationshipAdvisoryDecision:
     """Apply one explicit advisory action to the current durable state.
 
@@ -169,7 +165,7 @@ def apply_advisory_action(
     proposed = _relationship_type(relationship_type)
     if proposed is None:
         proposed = current.proposed_relationship_type
-    if action in {"accept", "merge"} and proposed is None:
+    if action == "accept" and proposed is None:
         raise RelationshipAdvisoryDecisionError(
             f"{action} requires a proposed relationship type"
         )
@@ -180,7 +176,6 @@ def apply_advisory_action(
 
     allowed = {
         "accept": {"pending"},
-        "merge": {"pending"},
         "edit": {"pending"},
         "dismiss": {"pending"},
         "suppress": {"pending", "dismissed"},
@@ -192,7 +187,7 @@ def apply_advisory_action(
         )
 
     disposition = current.disposition
-    if action == "accept" or action == "merge":
+    if action == "accept":
         disposition = "accepted"
     elif action == "dismiss":
         disposition = "dismissed"
@@ -213,7 +208,6 @@ def apply_advisory_action(
         proposed_relationship_type=proposed,
         last_action=action,
         decision_note=normalized_note,
-        decided_by=decided_by,
         revision=current.revision + 1,
     )
 

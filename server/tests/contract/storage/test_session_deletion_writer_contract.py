@@ -49,6 +49,7 @@ async def test_session_deletion_tombstones_only_session_state_and_preserves_evid
     assert len(queries) == 1
     assert "UPDATE public.sessions" in queries[0]
     assert "status = 'deleted'" in queries[0]
+    assert "semantic_participation_enabled = FALSE" in queries[0]
     assert not any("DELETE FROM public.messages" in query for query in queries)
     assert not any("DELETE FROM public.sessions" in query for query in queries)
     assert not any("UPDATE public.messages" in query for query in queries)
@@ -112,8 +113,12 @@ async def test_session_deletion_preserves_canonical_messages(
         "SELECT count(*) AS count FROM messages WHERE message_id = 101"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(
-        "SELECT status FROM sessions WHERE session_id = 'session-1'"
-    ) == {"status": "deleted"}
+        """
+        SELECT status, semantic_participation_enabled
+        FROM sessions
+        WHERE session_id = 'session-1'
+        """
+    ) == {"status": "deleted", "semantic_participation_enabled": False}
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres

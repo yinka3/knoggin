@@ -18,14 +18,20 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
     notebook = RunNotebook()
     notebook.apply(
         "search_entity",
-        {"data": [{"id": 24, "canonical_name": "Sarah Johnson", "project_id": "project-a"}]},
+        {
+            "data": [
+                {"id": 24, "canonical_name": "Sarah Johnson", "project_id": "project-a"}
+            ]
+        },
     )
     notebook.apply(
         "episode_check",
         {
             "data": {
                 "resolution": "semantic",
-                "results": [{"episodes": [{"episode_id": "ep-secret", "summary": "Changed"}]}],
+                "results": [
+                    {"episodes": [{"episode_id": "ep-secret", "summary": "Changed"}]}
+                ],
             }
         },
     )
@@ -37,8 +43,9 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
     rendered = render_notebook(notebook)
 
     assert "E1 Sarah Johnson" in rendered
-    assert "EP1: Changed" in rendered
-    assert '"entity_id": "E1"' in rendered
+    assert "ep_epsecr: Changed" in rendered
+    assert '"entity_id": 24' in rendered
+    assert '"episode_id": "ep_epsecr"' in rendered
     assert "ep-secret" not in rendered
     assert "project-a" not in rendered
     assert notebook.as_dict() == before
@@ -68,3 +75,71 @@ def test_notebook_renderer_preserves_cross_project_records_without_duplicate_ids
     assert "M2: B" in rendered
     assert "project-a" not in rendered
     assert "project-b" not in rendered
+
+
+def test_path_observation_handles_are_retained_and_expand_only_on_demand():
+    notebook = RunNotebook()
+    bundle = {
+        "subject": {"kind": "relationship_observation", "identifier": "17"},
+        "nodes": [
+            {
+                "pointer": {
+                    "kind": "relationship_observation",
+                    "identifier": "17",
+                },
+                "label": "works at",
+                "status": "active",
+            },
+            {
+                "pointer": {
+                    "kind": "context_block",
+                    "identifier": "00000000-0000-0000-0000-000000000017",
+                },
+                "excerpt": "Ada joined Acme.",
+            },
+            {
+                "pointer": {
+                    "kind": "source_reference",
+                    "identifier": "00000000-0000-0000-0000-000000000018",
+                },
+                "source_kind": "text_document",
+                "locator": {"kind": "text_lines", "start_line": 4, "end_line": 6},
+                "excerpt": "Ada joined Acme.",
+            },
+        ],
+        "edges": [],
+        "total_nodes": 3,
+        "total_edges": 0,
+        "nodes_truncated": False,
+        "edges_truncated": False,
+        "state_token": "a" * 64,
+    }
+
+    notebook.apply(
+        "find_path",
+        {
+            "data": [
+                {
+                    "entity_a": "Ada",
+                    "entity_b": "Acme",
+                    "evidence": [bundle],
+                }
+            ]
+        },
+    )
+
+    initial = render_notebook(notebook)
+
+    assert "Paths:" in initial
+    assert "(support: O1)" in initial
+    assert "read_observation_evidence" in initial
+    assert "Observation support (expanded on demand):" not in initial
+    assert "Ada joined Acme." not in initial
+
+    notebook.apply("read_observation_evidence", {"data": bundle})
+    expanded = render_notebook(notebook)
+
+    assert "Observation support (expanded on demand):" in expanded
+    assert "O1 observation 17 (active)" in expanded
+    assert "context blocks: Ada joined Acme." in expanded
+    assert "text document [lines 4-6]: Ada joined Acme." in expanded

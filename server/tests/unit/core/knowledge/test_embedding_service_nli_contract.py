@@ -179,9 +179,7 @@ async def test_embedding_service_loads_embedder_before_lazy_onnx_reranker(
 
     class FakeSentenceTransformer:
         def __init__(self, model_name, **kwargs):
-            sentence_transformer_calls.append(
-                {"model_name": model_name, **kwargs}
-            )
+            sentence_transformer_calls.append({"model_name": model_name, **kwargs})
 
         def get_sentence_embedding_dimension(self):
             return 1024
@@ -303,3 +301,46 @@ async def test_embedding_service_runs_pooled_onnx_sentence_export_directly(
         await service.encode(["first", "second"]),
         [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
     )
+
+
+@pytest.mark.no_network
+async def test_stella_retrieval_query_uses_document_search_instruction(monkeypatch):
+    service = EmbeddingService(
+        embedding_model="dunzhang/stella_en_1.5B_v5",
+        embedding_backend="torch",
+        device="cpu",
+    )
+    calls = []
+
+    async def encode_single(text):
+        calls.append(text)
+        return [0.1] * 1024
+
+    monkeypatch.setattr(service, "encode_single", encode_single)
+
+    await service.encode_query("What changed in the project?")
+
+    assert calls == [
+        "Instruct: Given a web search query, retrieve relevant passages that "
+        "answer the query.\nQuery: What changed in the project?"
+    ]
+
+
+@pytest.mark.no_network
+async def test_non_stella_retrieval_query_remains_unprompted(monkeypatch):
+    service = EmbeddingService(
+        embedding_model="local/custom-retriever",
+        embedding_backend="torch",
+        device="cpu",
+    )
+    calls = []
+
+    async def encode_single(text):
+        calls.append(text)
+        return [0.1] * 1024
+
+    monkeypatch.setattr(service, "encode_single", encode_single)
+
+    await service.encode_query("project decision")
+
+    assert calls == ["project decision"]

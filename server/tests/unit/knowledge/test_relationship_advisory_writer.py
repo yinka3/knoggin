@@ -3,7 +3,7 @@ import pytest
 from core.knowledge.db.writers.relationship_advisory_writer import (
     RelationshipAdvisoryWriter,
 )
-from core.knowledge.maintenance_reviews import MaintenanceReview
+from core.knowledge.maintenance.maintenance_reviews import MaintenanceReview
 from core.knowledge.relationship_advisories import RelationshipAdvisory
 
 
@@ -51,16 +51,27 @@ async def test_writer_persists_acceptance_as_a_typed_review_transition():
         pattern_key="deploys to|project|technology",
         action="accept",
         relationship_type="DEPLOYS_TO",
+        note="Approved after reviewing the evidence.",
         decided_by="ada",
     )
 
     assert decision.disposition == "accepted"
     assert decision.revision == 1
     assert reviews.opened[0]["kind"] == "relationship_advisory"
-    assert reviews.opened[0]["proposed_plan"].proposed_relationship_type == (
+    plan = reviews.opened[0]["proposed_plan"]
+    assert plan.proposed_relationship_type == (
         "DEPLOYS_TO"
     )
-    assert reviews.transitions[-1][1]["status"] == "applied"
+    assert plan.action == "accept"
+    assert plan.note == "Approved after reviewing the evidence."
+    assert reviews.opened[0]["expected_state"] == {"revision": 1}
+    assert reviews.transitions[-1][1] == {
+        "user_name": "ada",
+        "project_id": "project-1",
+        "status": "applied",
+        "actor": "ada",
+        "reason": "Approved after reviewing the evidence.",
+    }
 
 
 @pytest.mark.unit

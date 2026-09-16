@@ -89,10 +89,6 @@ class ProjectManager:
     ):
         self.resources = resources
         self.user_name = user_name
-        self.project_factory = ProjectRuntimeFactory(
-            resources=resources,
-            user_name=user_name,
-        )
         self.pg = resources.postgres
         self._filesystem_factory = filesystem_factory or ProjectFilesystemFactory(
             ConfigManager.get().config.developer_settings.documents.project_library_root
@@ -106,6 +102,11 @@ class ProjectManager:
             project_lookup=self.get_project,
             active_projects=self.active_projects,
             project_leases=self._project_leases,
+        )
+        self.project_factory = ProjectRuntimeFactory(
+            resources=resources,
+            user_name=user_name,
+            maintenance_service=self.maintenance_service,
         )
         # Entity identity maintenance is user-global and must not be tied to a
         # loaded ProjectRuntime.  ProjectManager exposes the application-owned
@@ -123,18 +124,26 @@ class ProjectManager:
         self._closed = False
 
     def _invalidate_entity_caches(self, result: dict) -> dict[str, int]:
+        explicit_entity_ids = result.get("affected_entity_ids")
         entity_ids = {
             int(entity_id)
             for entity_id in (
-                result.get("survivor_entity_id"),
-                result.get("retired_entity_id"),
+                explicit_entity_ids
+                if explicit_entity_ids is not None
+                else (
+                    result.get("survivor_entity_id"),
+                    result.get("retired_entity_id"),
+                )
             )
             if entity_id is not None
         }
         invalidated: dict[str, int] = {}
         if not entity_ids:
             return invalidated
-        for project_id in result.get("affected_project_ids") or ():
+        project_ids = result.get("cache_project_ids")
+        if project_ids is None:
+            project_ids = result.get("affected_project_ids") or ()
+        for project_id in project_ids:
             runtime = self.active_projects.get(project_id)
             if runtime is not None:
                 invalidated[project_id] = runtime.entities.remove_entities(
@@ -220,7 +229,48 @@ class ProjectManager:
         """Start application-owned maintenance triggers."""
         if self._closed:
             raise RuntimeError("ProjectManager is shut down")
+        async with self.maintenance_service.lock:
+            await self._recover_pending_project_file_cleanup()
         await self.maintenance_scheduler.start()
+
+    async def _recover_pending_project_file_cleanup(self) -> None:
+        """Retry file removal left after a committed project deletion."""
+
+        project_ids = (
+            await self._project_deletion_writer.list_pending_file_cleanup_project_ids(
+                user_name=self.user_name
+            )
+        )
+        for project_id in project_ids:
+            await self._finish_project_file_cleanup(project_id)
+
+    async def _finish_project_file_cleanup(self, project_id: str) -> str:
+        """Remove one owned directory and clear its durable retry task."""
+
+        try:
+            await asyncio.to_thread(
+                self._filesystem_factory.remove_project_directory,
+                project_id,
+            )
+        except Exception:
+            logger.exception(
+                "Project {} database state was deleted but file cleanup is pending",
+                project_id,
+            )
+            return "pending"
+
+        try:
+            await self._project_deletion_writer.complete_file_cleanup(
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+        except Exception:
+            logger.exception(
+                "Project {} files were removed but cleanup completion is pending",
+                project_id,
+            )
+            return "pending"
+        return "complete"
 
     async def create_project(
         self,
@@ -290,7 +340,9 @@ class ProjectManager:
                     PROJECT_FILE_PATH,
                 )
             except Exception:
-                logger.exception("Could not roll back PROJECT.md after project creation failed")
+                logger.exception(
+                    "Could not roll back PROJECT.md after project creation failed"
+                )
             raise
 
         logger.info(f"Created project {project_id} ('{name}')")
@@ -338,44 +390,6 @@ class ProjectManager:
         meta["allowed_projects"] = meta["allowed_projects"] or []
         meta.pop("domain_config", None)
         return meta
-
-    async def get_episode_window_size(self, project_id: str) -> int:
-        """Return the one project-owned episode window setting."""
-
-        row = await self.pg.fetch_one(
-            """
-            SELECT episode_window_size
-            FROM public.projects
-            WHERE user_name = %s AND project_id = %s
-            """,
-            (self.user_name, project_id),
-        )
-        if row is None:
-            raise ValueError("Episode settings require an existing project")
-        return int(row["episode_window_size"])
-
-    async def update_episode_window_size(
-        self, project_id: str, episode_window_size: int
-    ) -> int:
-        """Persist and immediately apply a project's episode window size."""
-
-        if not 8 <= episode_window_size <= 72:
-            raise ValueError("episode_window_size must be between 8 and 72")
-        row = await self.pg.fetch_one(
-            """
-            UPDATE public.projects
-            SET episode_window_size = %s, updated_at = now()
-            WHERE user_name = %s AND project_id = %s
-            RETURNING episode_window_size
-            """,
-            (episode_window_size, self.user_name, project_id),
-        )
-        if row is None:
-            raise ValueError("Episode settings require an existing project")
-        active = self.active_projects.get(project_id)
-        if active is not None and active.episode_job is not None:
-            active.episode_job.update_episode_window_size(episode_window_size)
-        return int(row["episode_window_size"])
 
     def validate_domain_config(self, candidate: DomainCandidate) -> DomainValidation:
         """Validate a complete candidate without touching project state."""
@@ -493,13 +507,13 @@ class ProjectManager:
         )
         return [row["session_id"] for row in rows]
 
-    async def get_episode_sources(self, project_id: str) -> List[dict]:
-        """List the sessions currently allowed to feed future episode windows."""
+    async def list_session_semantic_participation(self, project_id: str) -> List[dict]:
+        """List each open session's boundary for future semantic work."""
 
         rows = await self.pg.fetch_all(
             """
-            SELECT session_id, episode_participation_enabled,
-                   episode_participation_after_message_id
+            SELECT session_id, semantic_participation_enabled,
+                   semantic_participation_after_message_id
             FROM public.sessions
             WHERE user_name = %(user_name)s
               AND project_id = %(project_id)s
@@ -511,16 +525,20 @@ class ProjectManager:
         return [
             {
                 "session_id": str(row["session_id"]),
-                "enabled": bool(row["episode_participation_enabled"]),
-                "after_message_id": int(row["episode_participation_after_message_id"]),
+                "semantic_participation_enabled": bool(
+                    row["semantic_participation_enabled"]
+                ),
+                "semantic_participation_after_message_id": int(
+                    row["semantic_participation_after_message_id"]
+                ),
             }
             for row in rows
         ]
 
-    async def set_episode_sources(
+    async def set_session_semantic_participation(
         self, project_id: str, session_ids: List[str]
     ) -> List[dict]:
-        """Select exactly which project sessions feed future episode windows.
+        """Select exactly which project sessions feed future semantic work.
 
         A state transition records the current message frontier.  Therefore a
         session enabled later contributes only messages made after that choice,
@@ -531,11 +549,12 @@ class ProjectManager:
         async with self.pg.transaction() as cur:
             await cur.execute(
                 """
-                SELECT session_id, episode_participation_enabled
+                SELECT session_id, semantic_participation_enabled
                 FROM public.sessions
                 WHERE user_name = %s
                   AND project_id = %s
                   AND status <> 'deleted'
+                ORDER BY session_id
                 FOR UPDATE
                 """,
                 (self.user_name, project_id),
@@ -545,19 +564,19 @@ class ProjectManager:
             unknown = selected.difference(available)
             if unknown:
                 raise ValueError(
-                    "Episode participation includes sessions outside this project: "
+                    "Semantic participation includes unavailable project sessions: "
                     + ", ".join(sorted(unknown))
                 )
             for row in rows:
                 session_id = str(row["session_id"])
                 enabled = session_id in selected
-                if enabled == bool(row["episode_participation_enabled"]):
+                if enabled == bool(row["semantic_participation_enabled"]):
                     continue
                 await cur.execute(
                     """
                     UPDATE public.sessions
-                    SET episode_participation_enabled = %s,
-                        episode_participation_after_message_id = COALESCE(
+                    SET semantic_participation_enabled = %s,
+                        semantic_participation_after_message_id = COALESCE(
                             (
                                 SELECT MAX(message_id)
                                 FROM public.messages
@@ -582,7 +601,7 @@ class ProjectManager:
                     ),
                 )
 
-        return await self.get_episode_sources(project_id)
+        return await self.list_session_semantic_participation(project_id)
 
     async def _validate_allowed_project_ids(
         self, project_id: str, allowed_projects: List[str]
@@ -743,11 +762,22 @@ class ProjectManager:
         return await self.get_project(project_id)
 
     async def delete_project(self, project_id: str) -> Optional[dict]:
-        """Hard delete every durable PostgreSQL and AGE record owned by a project."""
+        """Hard delete one project and retry any pending owned-file cleanup."""
         async with self.maintenance_service.lock:
             meta = await self.get_project(project_id)
             if not meta:
-                return None
+                if not await self._project_deletion_writer.has_pending_file_cleanup(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                ):
+                    return None
+                return {
+                    "id": project_id,
+                    "status": ProjectStatus.DELETED.value,
+                    "file_cleanup_status": await self._finish_project_file_cleanup(
+                        project_id
+                    ),
+                }
 
             active_state = self.active_projects.get(project_id)
             if self._project_leases.get(project_id):
@@ -768,10 +798,19 @@ class ProjectManager:
                     f"Project '{project_id}' disappeared during deletion"
                 )
 
+            cache_invalidations = self._invalidate_entity_caches(deleted)
+            file_cleanup_status = await self._finish_project_file_cleanup(project_id)
+
             logger.info(
-                f"Hard deleted project {project_id} and all owned state: {deleted}"
+                "Hard deleted project {} database state: {}; file cleanup: {}; "
+                "invalidated resolver caches: {}",
+                project_id,
+                deleted,
+                file_cleanup_status,
+                cache_invalidations,
             )
             meta["status"] = ProjectStatus.DELETED.value
+            meta["file_cleanup_status"] = file_cleanup_status
             return meta
 
     async def acquire_project_for_session(

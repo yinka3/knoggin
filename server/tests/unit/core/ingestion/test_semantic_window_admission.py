@@ -40,7 +40,6 @@ def _row(
     assistant_id=None,
     user_state="closed",
     lifecycle="sealed",
-    status="open",
     claimed=False,
 ):
     if timestamp_ms is None:
@@ -60,7 +59,6 @@ def _row(
         "assistant_content": assistant_content,
         "assistant_timestamp_ms": timestamp_ms + 1,
         "assistant_lifecycle_state": "sealed" if assistant_id else None,
-        "session_status": status,
         "already_claimed": claimed,
     }
 
@@ -71,6 +69,14 @@ def _admission(rows, *, target=128_000, now_ms=1_000):
         IngestionSettings(semantic_window_tokens=target),
         token_counter=lambda text: text.count("x"),
         now_ms=lambda: now_ms,
+    )
+
+
+def _policy(domain):
+    return IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
     )
 
 
@@ -102,10 +108,46 @@ async def test_target_crossing_keeps_the_complete_exchange_and_stops_after_it():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_selection_reuses_the_last_exact_prefix_token_count():
+    counted_values: list[int] = []
+
+    def count_tokens(text: str) -> int:
+        # Separators contribute non-additively, so independent exchange counts
+        # cannot replace the exact rendered-prefix count.
+        count = len(text) + (7 * text.count("\n\n"))
+        counted_values.append(count)
+        return count
+
+    admission = SemanticWindowAdmission(
+        RecordingStore(
+            [
+                _row(1, user_content="x", assistant_content="x"),
+                _row(2, user_content="x", assistant_content="x"),
+            ]
+        ),
+        IngestionSettings(semantic_window_tokens=50),
+        token_counter=count_tokens,
+    )
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert selected.close_reason == "target_crossed"
+    assert len(counted_values) == 2
+    assert selected.window.source_token_count == counted_values[-1]
+    assert selected.window.overfill_tokens == selected.window.source_token_count - 50
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_admission_persists_the_exact_context_entity_policy():
     compiled_domain = make_domain_config().compile()
     frozen_policy = IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42, llm_ner=False),
+        text_processor=TextProcessorSettings(gliner_threshold=0.42),
         entity_resolution=EntityResolutionSettings(resolution_threshold=0.71),
         compiled_domain=compiled_domain,
     )
@@ -119,9 +161,29 @@ async def test_admission_persists_the_exact_context_entity_policy():
     )
 
     assert selected is not None
-    assert IngestionPolicy.from_semantic_window_snapshot(
-        selected.window.policy_snapshot["ingestion_policy"]
-    ) == frozen_policy
+    ingestion_snapshot = selected.window.policy_snapshot["ingestion_policy"]
+    assert IngestionPolicy.from_semantic_window_snapshot(ingestion_snapshot) == frozen_policy
+    assert set(ingestion_snapshot) == {
+        "gliner_threshold",
+        "candidate_fuzzy_threshold",
+        "resolution_threshold",
+        "common_word_frequency_threshold",
+        "sparse_context_verbs",
+        "compiled_domain",
+    }
+    assert set(selected.window.policy_snapshot["episode_generation_policy"]) == {
+        "version",
+        "enabled",
+        "max_episode_source_messages",
+        "max_episode_source_tokens",
+        "max_narrative_chars",
+    }
+    assert "episode_window_size" not in selected.window.policy_snapshot
+
+    with pytest.raises(ValueError, match="shape"):
+        IngestionPolicy.from_semantic_window_snapshot(
+            ingestion_snapshot | {"llm_ner": False}
+        )
 
 
 @pytest.mark.unit
@@ -295,8 +357,8 @@ async def test_project_semantic_job_records_zero_result_for_one_claimed_window()
     )
     domain = make_domain_config().compile()
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return _policy(domain)
 
     selected = await admission.select(
         user_name="ada",
@@ -311,7 +373,7 @@ async def test_project_semantic_job_records_zero_result_for_one_claimed_window()
         store,
         generator,
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
     )
     job.enabled = True
     context = JobContext(user_name="ada", project_id="project-1")
@@ -350,15 +412,15 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
     generator = _FailThenZeroEpisodeGenerator()
     now = [1_000]
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return _policy(domain)
 
     job = ProjectSemanticJob(
         admission,
         store,
         generator,
         settings=settings,
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
         now_ms=lambda: now[0],
     )
     job.enabled = True
@@ -372,6 +434,13 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
     assert store.window.stage.value == "claimed"
     assert store.window.next_retry_at_ms == 31_000
     assert await job.should_run(context) is False
+
+    cadence_attempt = await job.execute(context)
+
+    assert cadence_attempt.success is True
+    assert cadence_attempt.summary == "No semantic window stage is due"
+    assert len(generator.calls) == 1
+    assert admission_store.claims == []
 
     now[0] = 31_000
     retry = await job.execute(context)
@@ -411,15 +480,15 @@ async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
     store = _SemanticEpisodeStore(selected.window)
     generator = _FailThenZeroEpisodeGenerator()
 
-    async def capture_domain():
-        return domain
+    async def capture_semantic_policy():
+        return _policy(domain)
 
     job = ProjectSemanticJob(
         admission,
         store,
         generator,
         settings=settings,
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
     )
     context = JobContext(user_name="ada", project_id="project-1")
 
@@ -429,6 +498,13 @@ async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
     assert store.window.attempt_count == 1
     assert store.window.next_retry_at_ms is None
     assert await job.should_run(context) is False
+
+    cadence_attempt = await job.execute(context)
+
+    assert cadence_attempt.success is True
+    assert cadence_attempt.summary == "No semantic window stage is due"
+    assert len(generator.calls) == 1
+    assert admission_store.claims == []
 
     retried = await store.retry_project_semantic_window(
         window_id=str(selected.window.window_id),

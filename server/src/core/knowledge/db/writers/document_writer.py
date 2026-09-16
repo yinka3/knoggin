@@ -288,13 +288,14 @@ class DocumentWriter:
         embeddings: List[List[float]],
         extracted_text: str,
         indexed_at: str,
-        expected_content_hash: Optional[str] = None,
+        read_content_hash: str,
     ) -> Optional[Dict]:
         """
-        Within a single transaction: lock the document row FOR UPDATE, skip if
-        already indexed, replace existing chunks, insert new chunks, and mark
-        the document as indexed.  Returns the updated document row, or None if
-        the document was not found.
+        Within a single transaction: lock the document row FOR UPDATE, verify
+        that the catalog hash matches the exact source bytes used for
+        extraction, replace existing chunks, and mark the document as indexed.
+        Returns the updated document row, or None when the claimed source is no
+        longer the current indexable catalog version.
         """
         self._validate_chunk_embeddings(
             chunks,
@@ -332,10 +333,7 @@ class DocumentWriter:
             locked = await cur.fetchone()
             if locked is None:
                 return None
-            if (
-                expected_content_hash is not None
-                and locked["content_hash"] != expected_content_hash
-            ):
+            if locked["content_hash"] != read_content_hash:
                 return None
             if locked["status"] == "indexed":
                 return dict(locked)
@@ -377,7 +375,7 @@ class DocumentWriter:
                     extracted_text = EXCLUDED.extracted_text,
                     extracted_content_hash = EXCLUDED.extracted_content_hash
                 """,
-                (document_id, extracted_text, locked["content_hash"]),
+                (document_id, extracted_text, read_content_hash),
             )
 
             await cur.execute(

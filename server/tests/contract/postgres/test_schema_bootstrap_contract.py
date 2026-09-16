@@ -118,6 +118,7 @@ async def test_schema_bootstraps_a_fresh_database_with_age_and_vector():
             "aac_timeline",
             "entity_global_merge_audits",
             "entity_global_merge_mutations",
+            "maintenance_review_resolutions",
             "project_entity_contexts",
         } <= table_names
         assert {

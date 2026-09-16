@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
@@ -10,7 +11,7 @@ from common.schema.context import (
     ContextRevisionRecord,
     ContextSnapshot,
 )
-from common.schema.episode.models import Episode, EpisodeCard
+from common.schema.episode.models import Episode, EpisodeCard, EpisodeNarrative
 from common.schema.evidence import EvidenceBundle, EvidenceTraversalLimits
 from common.schema.semantic_window import (
     SemanticWindowClaimResult,
@@ -65,6 +66,7 @@ from core.knowledge.db.writers.semantic_commit_writer import (
 )
 from core.knowledge.db.writers.semantic_window_writer import SemanticWindowWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.knowledge.episodes.embedding import build_episode_embedding_text_from_fields
 from core.knowledge.evidence_service import EvidenceService
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
@@ -123,6 +125,7 @@ class KnowledgeStore:
             self._postgres_client,
             embedding_service,
         )
+        self._embedding_service = embedding_service
         logger.info("KnowledgeStore initialized with internal Postgres/AGE backend")
 
     async def get_relationship_observation_evidence(
@@ -139,6 +142,23 @@ class KnowledgeStore:
             observation_id,
             user_name=user_name,
             project_id=project_id,
+            limits=limits,
+        )
+
+    async def get_visible_relationship_observation_evidence(
+        self,
+        observation_id: int,
+        *,
+        user_name: str,
+        visible_project_ids: list[str],
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Return bounded provenance for one observation in the read scope."""
+
+        return await self._evidence_service.for_visible_relationship_observation(
+            observation_id,
+            user_name=user_name,
+            visible_project_ids=visible_project_ids,
             limits=limits,
         )
 
@@ -243,6 +263,21 @@ class KnowledgeStore:
     ) -> frozenset:
         return await self._project_context_reader.get_revision_impact_block_ids(
             revision_id,
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_project_semantic_window_committed_entity_ids(
+        self,
+        window_id: str,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> tuple[int, ...]:
+        """Return durable Context entity effects for a knowledge-committed window."""
+
+        return await self._project_context_reader.get_committed_window_affected_entity_ids(
+            window_id,
             user_name=user_name,
             project_id=project_id,
         )
@@ -449,7 +484,7 @@ class KnowledgeStore:
         user_name: str,
         project_id: str,
     ) -> list[dict]:
-        """Load whole canonical exchanges for project-level semantic admission."""
+        """Load participation-eligible canonical exchanges for semantic admission."""
 
         return await self._semantic_window_reader.get_unclaimed_project_exchange_rows(
             user_name=user_name,
@@ -839,16 +874,82 @@ class KnowledgeStore:
         new_developments: List[str],
         updates: List[str],
         unresolved: List[str],
-    ) -> None:
-        await self._episode_writer.edit_episode(
+        expected_updated_at: datetime,
+    ) -> datetime:
+        """Generate a replacement vector, then atomically persist one edit."""
+
+        narrative = self._normalize_episode_edit_narrative(
+            summary,
+            new_developments,
+            updates,
+            unresolved,
+        )
+        if not isinstance(expected_updated_at, datetime):
+            raise TypeError("expected_updated_at must be a datetime")
+        if (
+            expected_updated_at.tzinfo is None
+            or expected_updated_at.utcoffset() is None
+        ):
+            raise ValueError("expected_updated_at must be timezone-aware")
+        embedding = await self._encode_episode_edit_narrative(narrative)
+        return await self._episode_writer.edit_episode(
             episode_id=episode_id,
             user_name=user_name,
             project_id=project_id,
-            summary=summary,
-            new_developments=new_developments,
-            updates=updates,
-            unresolved=unresolved,
+            summary=narrative.summary or "",
+            new_developments=narrative.new_developments,
+            updates=narrative.updates,
+            unresolved=narrative.unresolved,
+            embedding=embedding,
+            expected_updated_at=expected_updated_at,
         )
+
+    @staticmethod
+    def _normalize_episode_edit_narrative(
+        summary: str,
+        new_developments: List[str],
+        updates: List[str],
+        unresolved: List[str],
+    ) -> EpisodeNarrative:
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("Episode summary must not be blank")
+
+        def normalize(values: List[str], field: str) -> List[str]:
+            if not isinstance(values, list) or not all(
+                isinstance(value, str) for value in values
+            ):
+                raise TypeError(f"{field} must be a list of strings")
+            return [value.strip() for value in values if value.strip()]
+
+        return EpisodeNarrative(
+            summary=summary.strip(),
+            new_developments=normalize(new_developments, "new_developments"),
+            updates=normalize(updates, "updates"),
+            unresolved=normalize(unresolved, "unresolved"),
+        )
+
+    async def _encode_episode_edit_narrative(
+        self, narrative: EpisodeNarrative
+    ) -> List[float]:
+        embedding_text = build_episode_embedding_text_from_fields(
+            narrative.summary or "",
+            narrative.new_developments,
+            narrative.updates,
+            narrative.unresolved,
+        )
+        embeddings = await self._embedding_service.encode([embedding_text])
+        if not isinstance(embeddings, list) or len(embeddings) != 1:
+            raise RuntimeError("Episode edit embedding result must contain one vector")
+        try:
+            embedding = list(embeddings[0])
+            validated = Episode.validate_embedding(embedding)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Episode edit embedding must be a finite 1024-dimensional vector"
+            ) from exc
+        if validated is None:
+            raise RuntimeError("Episode edit embedding result is missing")
+        return validated
 
     async def get_project_episode(
         self,
@@ -878,25 +979,6 @@ class KnowledgeStore:
             project_id=project_id,
             limit=limit,
             visible_project_ids=visible_project_ids,
-        )
-
-    async def get_nearby_project_episodes(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_ids: List[str],
-        before_message_id: int,
-        before_timestamp_ms: int | None,
-        limit: int,
-    ) -> List[Episode]:
-        return await self._episode_reader.get_nearby_project_episodes(
-            user_name=user_name,
-            project_id=project_id,
-            session_ids=session_ids,
-            before_message_id=before_message_id,
-            before_timestamp_ms=before_timestamp_ms,
-            limit=limit,
         )
 
     async def search_project_episodes(
@@ -1102,12 +1184,6 @@ class KnowledgeStore:
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
 
-    async def update_entity_embedding(
-        self, entity_id: int, embedding: List[float], *, project_id: str
-    ):
-        return await self._graph_writer.update_entity_embedding(
-            entity_id, embedding, project_id=project_id
-        )
 
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], *, project_id: str
@@ -1228,13 +1304,6 @@ class KnowledgeStore:
             user_name,
         )
 
-    async def get_entity_embedding(
-        self, entity_id: int, *, visible_project_ids: List[str]
-    ) -> List[float]:
-        return await self._entity_reader.get_entity_embedding(
-            entity_id,
-            visible_project_ids=visible_project_ids,
-        )
 
     async def get_message_text(
         self,
@@ -1317,20 +1386,15 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def search_entities_by_embedding(
+    async def get_visible_entities_for_resolution(
         self,
-        embedding: List[float],
         *,
         visible_project_ids: List[str],
-        limit: int = 10,
-        score_threshold: float = 0.8,
-    ) -> List[Tuple[int, float]]:
-        return await self._entity_reader.search_entities_by_embedding(
-            embedding,
+    ) -> List[Dict]:
+        return await self._entity_reader.get_visible_entities_for_resolution(
             visible_project_ids=visible_project_ids,
-            limit=limit,
-            score_threshold=score_threshold,
         )
+
 
     async def list_entities(
         self,

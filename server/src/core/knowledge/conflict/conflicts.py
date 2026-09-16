@@ -73,7 +73,6 @@ class ConflictDiscoveryPackage:
     next_observation_id: int
     prompt: str
     estimated_tokens: int
-    compacted: bool = False
     evidence_bundles: tuple[EvidenceBundle, ...] = ()
 
 

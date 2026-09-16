@@ -20,7 +20,13 @@ NotebookAudience = Literal["system", "agent"]
 
 
 _KNOWLEDGE_SECTIONS = ("entities", "relationships", "episodes", "paths")
-_EVIDENCE_SECTIONS = ("messages", "documents", "web_discoveries", "web_reads")
+_EVIDENCE_SECTIONS = (
+    "messages",
+    "documents",
+    "observation_supports",
+    "web_discoveries",
+    "web_reads",
+)
 _ALL_SECTIONS = _KNOWLEDGE_SECTIONS + _EVIDENCE_SECTIONS
 _ACTION_TOOLS = frozenset(
     {
@@ -57,6 +63,7 @@ class NotebookCapacity:
     max_paths: int = 8
     max_messages: int = 30
     max_documents: int = 30
+    max_observation_supports: int = 8
     max_web_discoveries: int = 12
     max_web_reads: int = 12
     max_actions: int = 12
@@ -75,14 +82,17 @@ class NotebookCapacity:
             max_paths=_positive_limit(limits, "max_accumulated_paths", 8),
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
             max_documents=_positive_limit(limits, "max_accumulated_documents", 30),
+            max_observation_supports=_positive_limit(
+                limits,
+                "max_accumulated_observation_supports",
+                _positive_limit(limits, "max_accumulated_paths", 8),
+            ),
             max_web_discoveries=_positive_limit(
                 limits, "max_accumulated_web_discoveries", 12
             ),
             max_web_reads=_positive_limit(limits, "max_accumulated_web_reads", 12),
             max_actions=_positive_limit(limits, "max_accumulated_actions", 12),
-            max_next_steps=_positive_limit(
-                limits, "max_accumulated_next_steps", 12
-            ),
+            max_next_steps=_positive_limit(limits, "max_accumulated_next_steps", 12),
             max_summary_chars=_positive_limit(
                 limits, "max_accumulated_summary_chars", 4000
             ),
@@ -205,9 +215,7 @@ class RunNotebook:
         self._token_counter = token_counter
 
     def _counts(self) -> dict[str, int]:
-        return {
-            section: len(self._orders[section]) for section in _ALL_SECTIONS
-        } | {
+        return {section: len(self._orders[section]) for section in _ALL_SECTIONS} | {
             "actions": len(self._actions),
             "possible_next_steps": len(self.possible_next_steps),
         }
@@ -222,6 +230,7 @@ class RunNotebook:
             "paths": self.capacity.max_paths,
             "messages": self.capacity.max_messages,
             "documents": self.capacity.max_documents,
+            "observation_supports": self.capacity.max_observation_supports,
             "web_discoveries": self.capacity.max_web_discoveries,
             "web_reads": self.capacity.max_web_reads,
             "actions": self.capacity.max_actions,
@@ -237,10 +246,7 @@ class RunNotebook:
     def _fits_capacity(self) -> bool:
         counts = self._counts()
         return (
-            all(
-                counts[key] <= limit
-                for key, limit in self._capacity_limits().items()
-            )
+            all(counts[key] <= limit for key, limit in self._capacity_limits().items())
             and len(self.summary.text or "") <= self.capacity.max_summary_chars
             and self._render_token_count() <= self.capacity.max_render_tokens
         )
@@ -252,12 +258,23 @@ class RunNotebook:
             "render_tokens": self.capacity.max_render_tokens,
         }
         token_count = self._render_token_count()
-        pressured = any(
-            counts[key] >= max(1, int(limit * 0.8))
-            for key, limit in limits.items()
-            if key in counts
-        ) or len(self.summary.text or "") >= int(self.capacity.max_summary_chars * 0.8) or token_count >= int(self.capacity.max_render_tokens * 0.8)
-        status = "FULL" if not self._fits_capacity() else "PRESSURED" if pressured else "OPEN"
+        pressured = (
+            any(
+                counts[key] >= max(1, int(limit * 0.8))
+                for key, limit in limits.items()
+                if key in counts
+            )
+            or len(self.summary.text or "")
+            >= int(self.capacity.max_summary_chars * 0.8)
+            or token_count >= int(self.capacity.max_render_tokens * 0.8)
+        )
+        status = (
+            "FULL"
+            if not self._fits_capacity()
+            else "PRESSURED"
+            if pressured
+            else "OPEN"
+        )
         return {
             "status": status,
             "generation": self.generation,
@@ -278,12 +295,18 @@ class RunNotebook:
         return self._reference_for_section(section, item)
 
     def is_last_applied(self, section: str, item: dict[str, Any]) -> bool:
-        return self._reference_for_section(section, item) in self._last_applied_references
+        return (
+            self._reference_for_section(section, item) in self._last_applied_references
+        )
 
     def _reference_for_section(self, section: str, item: dict[str, Any]) -> str:
         if section == "entities":
             identifier = item.get("entity_id", item.get("id"))
-            return f"entity:{identifier}" if identifier is not None else self._hash_ref(section, item)
+            return (
+                f"entity:{identifier}"
+                if identifier is not None
+                else self._hash_ref(section, item)
+            )
         if section == "relationships":
             identifier = item.get("relationship_id")
             if identifier is not None:
@@ -305,7 +328,11 @@ class RunNotebook:
             )
         if section == "episodes":
             identifier = item.get("episode_id", item.get("id"))
-            return f"episode:{identifier}" if identifier is not None else self._hash_ref(section, item)
+            return (
+                f"episode:{identifier}"
+                if identifier is not None
+                else self._hash_ref(section, item)
+            )
         if section == "paths":
             identifier = item.get("path_id")
             if identifier is not None:
@@ -335,6 +362,17 @@ class RunNotebook:
             document_id = item.get("document_id", item.get("id", "document"))
             chunk = item.get("chunk_index", 0)
             return f"document:{document_id}:{chunk}"
+        if section == "observation_supports":
+            subject = item.get("subject")
+            if isinstance(subject, dict):
+                identifier = subject.get("identifier")
+                if (
+                    subject.get("kind") == "relationship_observation"
+                    and isinstance(identifier, str)
+                    and identifier.isdecimal()
+                    and int(identifier) > 0
+                ):
+                    return f"observation_support:{identifier}"
         if section in {"web_discoveries", "web_reads"}:
             return self._hash_ref(section, self._source_identity(item))
         return self._hash_ref(section, item)
@@ -485,7 +523,17 @@ class RunNotebook:
                     value[key] = group[key]
         self._admit_evidence(value)
         ref = self._upsert("episodes", value)
-        for entity in value.get("entities", []) if isinstance(value.get("entities"), list) else []:
+        episode_id = value.get("episode_id", value.get("id"))
+        if isinstance(episode_id, (str, int)) and str(episode_id).strip():
+            self._add_system_hint(
+                "read_episode",
+                {"episode_id": episode_id},
+                "when message-level detail is needed",
+                [ref],
+            )
+        for entity in (
+            value.get("entities", []) if isinstance(value.get("entities"), list) else []
+        ):
             if not isinstance(entity, dict):
                 continue
             entity_ref = self._link_entity(entity.get("entity_id", entity.get("id")))
@@ -495,10 +543,68 @@ class RunNotebook:
                     page["episode_refs"].append(ref)
         return ref
 
+    @staticmethod
+    def _observation_id_from_bundle(value: object) -> int | None:
+        if not isinstance(value, dict):
+            return None
+        subject = value.get("subject")
+        if not isinstance(subject, dict):
+            return None
+        identifier = subject.get("identifier")
+        if (
+            subject.get("kind") != "relationship_observation"
+            or not isinstance(identifier, str)
+            or not identifier.isdecimal()
+        ):
+            return None
+        observation_id = int(identifier)
+        return observation_id if observation_id > 0 else None
+
+    def _add_observation_support(self, bundle: dict[str, Any]) -> str:
+        observation_id = self._observation_id_from_bundle(bundle)
+        if observation_id is None:
+            raise ValueError("observation evidence must identify one observation")
+        return self._upsert("observation_supports", bundle)
+
     def _add_path(self, item: dict[str, Any]) -> str:
         value = deepcopy(item)
+        raw_evidence = value.get("evidence")
+        observation_ids: list[int] = []
+        if isinstance(raw_evidence, list):
+            retained_evidence = []
+            for evidence in raw_evidence:
+                observation_id = self._observation_id_from_bundle(evidence)
+                if observation_id is None:
+                    retained_evidence.append(evidence)
+                elif observation_id not in observation_ids:
+                    observation_ids.append(observation_id)
+            value["evidence"] = retained_evidence
+        observation_refs = []
+        for observation_id in observation_ids:
+            observation_refs.append(
+                self._add_observation_support(
+                    {
+                        "subject": {
+                            "kind": "relationship_observation",
+                            "identifier": str(observation_id),
+                        },
+                        "nodes": [],
+                        "edges": [],
+                    }
+                )
+            )
+        if observation_refs:
+            value["observation_refs"] = observation_refs
         self._admit_evidence(value)
-        return self._upsert("paths", value)
+        ref = self._upsert("paths", value)
+        for observation_id, observation_ref in zip(observation_ids, observation_refs):
+            self._add_system_hint(
+                "read_observation_evidence",
+                {"observation_id": observation_id},
+                "when this path's durable support needs inspection",
+                [ref, observation_ref],
+            )
+        return ref
 
     @staticmethod
     def _valid_url(value: object) -> bool:
@@ -573,7 +679,9 @@ class RunNotebook:
             raise ValueError("notebook next-step guidance exceeds capacity")
         return hint
 
-    def set_summary(self, text: str | None, references: list[str] | tuple[str, ...] = ()) -> None:
+    def set_summary(
+        self, text: str | None, references: list[str] | tuple[str, ...] = ()
+    ) -> None:
         if text is not None and (not isinstance(text, str) or not text.strip()):
             raise ValueError("notebook summary must be non-blank when provided")
         previous_summary = self.summary
@@ -661,7 +769,9 @@ class RunNotebook:
                     "context": [
                         {
                             "role": "document",
-                            "timestamp": document.get("document_name", "uploaded document"),
+                            "timestamp": document.get(
+                                "document_name", "uploaded document"
+                            ),
                             "content": content,
                             "is_hit": True,
                         }
@@ -689,7 +799,9 @@ class RunNotebook:
             "summary": self.summary.as_dict(),
         }
 
-    def _apply_unchecked(self, tool_name: str, result: dict[str, Any]) -> NotebookApplyResult:
+    def _apply_unchecked(
+        self, tool_name: str, result: dict[str, Any]
+    ) -> NotebookApplyResult:
         """Normalize one result without evaluating capacity.
 
         Callers should use :meth:`apply`; this unchecked form exists so an
@@ -742,6 +854,8 @@ class RunNotebook:
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_path(item))
+        elif tool_name == "read_observation_evidence" and isinstance(data, dict):
+            references.append(self._add_observation_support(data))
         elif tool_name in {"episode_check", "read_recent_episodes"}:
             groups = data.get("results", []) if isinstance(data, dict) else []
             resolution = data.get("resolution") if isinstance(data, dict) else None
@@ -939,6 +1053,7 @@ class RunNotebook:
             "path": "paths",
             "message": "messages",
             "document": "documents",
+            "observation_support": "observation_supports",
             "web_discovery": "web_discoveries",
             "web_read": "web_reads",
         }.get(prefix, prefix)
@@ -961,6 +1076,10 @@ class RunNotebook:
         for reference in item.get("evidence_refs", []):
             if isinstance(reference, str):
                 dependencies.add(reference)
+        if section == "paths":
+            for reference in item.get("observation_refs", []):
+                if isinstance(reference, str):
+                    dependencies.add(reference)
         if section == "relationships":
             identifiers = (
                 item.get("source_entity_id"),
@@ -980,7 +1099,9 @@ class RunNotebook:
         else:
             identifiers = ()
         dependencies.update(
-            f"entity:{identifier}" for identifier in identifiers if identifier is not None
+            f"entity:{identifier}"
+            for identifier in identifiers
+            if identifier is not None
         )
         return dependencies
 
@@ -993,13 +1114,13 @@ class RunNotebook:
             ref for ref in (active_references or ()) if self._known_reference(ref)
         ]
         roots.extend(
-            ref
-            for ref in self._last_applied_references
-            if self._known_reference(ref)
+            ref for ref in self._last_applied_references if self._known_reference(ref)
         )
         for _, references in self._contribution_history[-recent_contributions:]:
             roots.extend(references)
-        roots.extend(ref for ref in self.summary.references if self._known_reference(ref))
+        roots.extend(
+            ref for ref in self.summary.references if self._known_reference(ref)
+        )
 
         retained = {ref for ref in roots if self._known_reference(ref)}
         for hint in self.possible_next_steps:
@@ -1021,7 +1142,10 @@ class RunNotebook:
                     if not item:
                         continue
                     for dependency in self._dependency_references(section, item):
-                        if self._known_reference(dependency) and dependency not in retained:
+                        if (
+                            self._known_reference(dependency)
+                            and dependency not in retained
+                        ):
                             retained.add(dependency)
                             changed = True
         return retained
@@ -1033,14 +1157,10 @@ class RunNotebook:
             limit = limits[section]
             ordered = [ref for ref in self._orders[section] if ref in retained]
             bounded.update(ordered[-limit:])
-        page_entities = [
-            ref for ref in self._entity_pages if ref in retained
-        ]
+        page_entities = [ref for ref in self._entity_pages if ref in retained]
         bounded.update(page_entities[-self.capacity.max_entities :])
         bounded.update(
-            ref
-            for ref in list(retained)
-            if self._ref_section(ref) == "action"
+            ref for ref in list(retained) if self._ref_section(ref) == "action"
         )
         actions = [ref for ref in self._actions if ref in bounded]
         bounded.difference_update(
@@ -1099,14 +1219,27 @@ class RunNotebook:
             for reference in self._orders[section]:
                 item = self._records[section][reference]
                 for entity_ref in self._dependency_references(section, item):
-                    if entity_ref.startswith("entity:") and entity_ref in self._entity_pages:
+                    if (
+                        entity_ref.startswith("entity:")
+                        and entity_ref in self._entity_pages
+                    ):
                         page = self._entity_pages[entity_ref]
-                        key = "relationship_refs" if section == "relationships" else "episode_refs"
+                        key = (
+                            "relationship_refs"
+                            if section == "relationships"
+                            else "episode_refs"
+                        )
                         page[key].append(reference)
                 for evidence_ref in item.get("evidence_refs", []):
-                    if isinstance(evidence_ref, str) and evidence_ref in self._records["messages"]:
+                    if (
+                        isinstance(evidence_ref, str)
+                        and evidence_ref in self._records["messages"]
+                    ):
                         for page in self._entity_pages.values():
-                            if reference in page["relationship_refs"] + page["episode_refs"]:
+                            if (
+                                reference
+                                in page["relationship_refs"] + page["episode_refs"]
+                            ):
                                 if evidence_ref not in page["evidence_refs"]:
                                     page["evidence_refs"].append(evidence_ref)
 
@@ -1124,9 +1257,7 @@ class RunNotebook:
         )
         if summary is not None and not summary_references:
             summary_references = tuple(
-                ref
-                for section in _ALL_SECTIONS
-                for ref in self._orders[section]
+                ref for section in _ALL_SECTIONS for ref in self._orders[section]
             )[: self.capacity.max_next_steps]
         if summary is None:
             summary = (
@@ -1137,25 +1268,24 @@ class RunNotebook:
                 f"{sum(len(self._orders[name]) for name in _EVIDENCE_SECTIONS)} evidence objects."
             )
             summary_references = tuple(
-                ref
-                for section in _ALL_SECTIONS
-                for ref in self._orders[section]
+                ref for section in _ALL_SECTIONS for ref in self._orders[section]
             )[: self.capacity.max_next_steps]
         self.generation += 1
         normalized_summary = " ".join(summary.split()) if summary else None
-        if normalized_summary and len(normalized_summary) > self.capacity.max_summary_chars:
-            normalized_summary = normalized_summary[: self.capacity.max_summary_chars - 1] + "…"
+        if (
+            normalized_summary
+            and len(normalized_summary) > self.capacity.max_summary_chars
+        ):
+            normalized_summary = (
+                normalized_summary[: self.capacity.max_summary_chars - 1] + "…"
+            )
         self.set_summary(normalized_summary, summary_references)
         self._contribution_history = [("rollover", tuple(retained))]
         self._last_applied_references = ()
         self._last_apply_result = NotebookApplyResult(False)
         return NotebookRolloverResult(
             self.generation,
-            tuple(
-                ref
-                for section in _ALL_SECTIONS
-                for ref in self._orders[section]
-            ),
+            tuple(ref for section in _ALL_SECTIONS for ref in self._orders[section]),
             tuple(self.summary.references),
         )
 
@@ -1204,8 +1334,22 @@ class RunNotebook:
             or self.summary.text
         )
 
+    def has_admitted_evidence(self) -> bool:
+        """Whether retained notebook evidence can ground an investigation.
+
+        Action records and summary prose alone are model-visible context, but do
+        not establish that an investigation produced evidence.
+        """
+
+        return bool(
+            any(self._orders[section] for section in _ALL_SECTIONS)
+            or self.summary.references
+        )
+
     def fingerprint(self) -> str:
-        return json.dumps(self.as_dict(), sort_keys=True, default=str, separators=(",", ":"))
+        return json.dumps(
+            self.as_dict(), sort_keys=True, default=str, separators=(",", ":")
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1225,6 +1369,10 @@ class RunNotebook:
                 "documents": {
                     reference: deepcopy(self._records["documents"][reference])
                     for reference in self._orders["documents"]
+                },
+                "observation_supports": {
+                    reference: deepcopy(self._records["observation_supports"][reference])
+                    for reference in self._orders["observation_supports"]
                 },
                 "web": {
                     "discoveries": {

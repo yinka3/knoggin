@@ -50,7 +50,6 @@ class _Exchange:
     session_id: str
     source_timestamp_ms: int | None
     closed_at_ms: int
-    session_closed: bool
     messages: tuple[dict, ...]
 
 
@@ -66,7 +65,6 @@ class SemanticWindowAdmission:
     TOKEN_ESTIMATOR = "llm.count_tokens"
     TOKEN_ESTIMATOR_VERSION = "runtime-v1"
     POLICY_VERSION = 1
-    EPISODE_POLICY_REFERENCE_WINDOW_SIZE = 24
 
     def __init__(
         self,
@@ -124,11 +122,11 @@ class SemanticWindowAdmission:
         selected: list[_Exchange] = []
         target = self._settings.semantic_window_tokens
         close_reason: str | None = None
+        selected_token_count = 0
         for exchange in exchanges:
-            prospective = [*selected, exchange]
-            prospective_tokens = self._count_tokens(prospective)
             selected.append(exchange)
-            if prospective_tokens >= target:
+            selected_token_count = self._count_tokens(selected)
+            if selected_token_count >= target:
                 close_reason = (
                     "oversized_exchange" if len(selected) == 1 else "target_crossed"
                 )
@@ -138,14 +136,14 @@ class SemanticWindowAdmission:
             latest_close = max(exchange.closed_at_ms for exchange in selected)
             if force_flush:
                 close_reason = "explicit_flush"
-            elif any(exchange.session_closed for exchange in selected):
-                close_reason = "session_closed"
             elif self._now_ms() >= latest_close + (self.IDLE_FLUSH_SECONDS * 1000):
                 close_reason = "idle_flush"
             else:
                 return None
 
-        source_token_count = self._count_tokens(selected)
+        # The last exact prefix count is the rendered membership selected above.
+        # Reuse it rather than rendering and tokenizing the same window again.
+        source_token_count = selected_token_count
         overfill = max(0, source_token_count - target)
         # A flattened comprehension cannot retain one monotonic ordinal across
         # exchange bundles without obscuring the invariant; keep it explicit.
@@ -172,7 +170,6 @@ class SemanticWindowAdmission:
             },
             "episode_generation_policy": EpisodeGenerationPolicy.capture(
                 settings=self._episode_settings,
-                episode_window_size=self.EPISODE_POLICY_REFERENCE_WINDOW_SIZE,
             ).semantic_window_snapshot(),
             "compiled_domain": domain.to_dict(),
         }
@@ -302,7 +299,6 @@ class SemanticWindowAdmission:
                 else int(row["user_timestamp_ms"])
             ),
             closed_at_ms=int(row["exchange_closed_at_ms"]),
-            session_closed=row.get("session_status") != "open",
             messages=tuple(messages),
         )
 

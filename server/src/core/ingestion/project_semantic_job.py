@@ -31,7 +31,7 @@ from infrastructure.job.base import BaseJob, JobContext, JobResult
 
 
 class SemanticEpisodeStore(Protocol):
-    """Durable operations owned by the Episode and Context semantic stages."""
+    """Durable operations owned by project semantic stages."""
 
     async def get_active_project_semantic_window(
         self, *, user_name: str, project_id: str
@@ -105,6 +105,10 @@ class SemanticEpisodeStore(Protocol):
 
     async def commit_project_semantic_knowledge(self, build: SemanticWindowBuild): ...
 
+    async def get_project_semantic_window_committed_entity_ids(
+        self, window_id: str, *, user_name: str, project_id: str
+    ) -> tuple[int, ...]: ...
+
     async def enrich_project_semantic_window_episodes(
         self, *, window_id: str, user_name: str, project_id: str
     ) -> dict[str, int]: ...
@@ -142,18 +146,21 @@ class ProjectSemanticJob(BaseJob):
         episode_generator: EpisodeGenerator,
         *,
         settings: IngestionSettings,
-        capture_domain: Callable[[], Awaitable[CompiledDomain]],
-        capture_ingestion_policy: Callable[[], IngestionPolicy] | None = None,
+        capture_semantic_policy: Callable[[], Awaitable[IngestionPolicy]],
         context_updater: ContextUpdater | None = None,
         context_projection: ContextProjection | None = None,
         context_entity_builder: ContextEntityBuildService | None = None,
         context_relationship_extractor: ContextRelationshipExtractor | None = None,
+        publish_committed_entity_ids: Callable[[tuple[int, ...]], Awaitable[None]]
+        | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
-        if not callable(capture_domain):
-            raise TypeError("ProjectSemanticJob requires a domain snapshot callback")
-        if capture_ingestion_policy is not None and not callable(capture_ingestion_policy):
-            raise TypeError("capture_ingestion_policy must be callable")
+        if not callable(capture_semantic_policy):
+            raise TypeError("ProjectSemanticJob requires a semantic policy callback")
+        if publish_committed_entity_ids is not None and not callable(
+            publish_committed_entity_ids
+        ):
+            raise TypeError("publish_committed_entity_ids must be callable")
         if not isinstance(settings, IngestionSettings):
             raise TypeError("ProjectSemanticJob requires IngestionSettings")
         self.admission = admission
@@ -163,8 +170,8 @@ class ProjectSemanticJob(BaseJob):
         self._context_projection = context_projection
         self._context_entity_builder = context_entity_builder
         self._context_relationship_extractor = context_relationship_extractor
-        self._capture_domain = capture_domain
-        self._capture_ingestion_policy = capture_ingestion_policy
+        self._publish_committed_entity_ids = publish_committed_entity_ids
+        self._capture_semantic_policy = capture_semantic_policy
         self._now_ms = now_ms or (lambda: int(time() * 1000))
         self.update_settings(settings)
 
@@ -193,15 +200,10 @@ class ProjectSemanticJob(BaseJob):
                 or self._knowledge_is_due(active)
                 or self._finalization_is_due(active)
             )
-        domain = await self._capture_domain()
-        return (
-            await self.admission.select(
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-                domain=domain,
-            )
-            is not None
-        )
+        # New conversation windows use this job's existing immediate/30-second
+        # cadence. Selecting here would build and tokenize an unclaimed proposal
+        # only for execute() to select it again before the durable claim.
+        return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
         window = await self.knowledge_store.get_active_project_semantic_window(
@@ -217,17 +219,12 @@ class ProjectSemanticJob(BaseJob):
         elif window.stage is not SemanticWindowStage.CLAIMED:
             await self.synchronize_context_file(ctx, allow_user_edit=False)
         if window is None:
-            domain = await self._capture_domain()
-            ingestion_policy = (
-                None
-                if self._capture_ingestion_policy is None
-                else self._capture_ingestion_policy()
-            )
+            policy = await self._capture_semantic_policy()
             claimed = await self.admission.claim_next(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
-                domain=domain,
-                ingestion_policy=ingestion_policy,
+                domain=policy.domain,
+                ingestion_policy=policy,
             )
             if claimed is None:
                 return JobResult(success=True, summary="No semantic window is due")
@@ -253,10 +250,11 @@ class ProjectSemanticJob(BaseJob):
         if self._context_projection is None:
             return None
         try:
+            policy = await self._capture_semantic_policy()
             return await self._context_projection.synchronize(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
-                domain=await self._capture_domain(),
+                ingestion_policy=policy,
                 allow_user_edit=allow_user_edit,
             )
         except Exception as exc:
@@ -508,23 +506,35 @@ class ProjectSemanticJob(BaseJob):
             )
             if context is None:
                 raise RuntimeError("Context checkpoint was not materialized")
+            # The revision-owned window is the only window allowed to replay
+            # its persisted impact.  A later no-op window checkpoints the
+            # same immutable revision with an empty effective impact; the
+            # writer rechecks that durable ownership before advancing it.
             impact_block_ids = (
                 await self.knowledge_store.get_project_context_revision_impact_block_ids(
                     str(context.revision_id),
                     user_name=ctx.user_name,
                     project_id=ctx.project_id,
                 )
+                if context.window_id == window.window_id
+                else frozenset()
             )
-            supports = await self.knowledge_store.get_project_context_block_supports(
-                [str(block.block_id) for block in context.blocks],
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
-            messages = await self.knowledge_store.get_project_semantic_window_evidence_messages(
-                str(window.window_id),
-                user_name=ctx.user_name,
-                project_id=ctx.project_id,
-            )
+            if impact_block_ids:
+                supports = await self.knowledge_store.get_project_context_block_supports(
+                    [str(block.block_id) for block in context.blocks],
+                    user_name=ctx.user_name,
+                    project_id=ctx.project_id,
+                )
+                messages = (
+                    await self.knowledge_store.get_project_semantic_window_evidence_messages(
+                        str(window.window_id),
+                        user_name=ctx.user_name,
+                        project_id=ctx.project_id,
+                    )
+                )
+            else:
+                supports = {}
+                messages = []
             build = SemanticWindowBuild.from_committed_window(
                 window=window,
                 context=context,
@@ -535,8 +545,11 @@ class ProjectSemanticJob(BaseJob):
                     for message in messages
                 },
             )
-            await self._context_entity_builder.build(build)
-            await self._context_relationship_extractor.extract(build)
+            if build.impact_block_ids:
+                await self._context_entity_builder.build(build)
+                await self._context_relationship_extractor.extract(build)
+            else:
+                build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)
             return JobResult(
                 success=True,
@@ -560,7 +573,31 @@ class ProjectSemanticJob(BaseJob):
     async def _execute_finalization_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
     ) -> JobResult:
-        """Enrich Episodes only after atomic Knowledge commit, then complete."""
+        """Publish committed resolver state, enrich Episodes, then complete."""
+
+        if self._publish_committed_entity_ids is not None:
+            try:
+                entity_ids = (
+                    await self.knowledge_store.get_project_semantic_window_committed_entity_ids(
+                        str(window.window_id),
+                        user_name=ctx.user_name,
+                        project_id=ctx.project_id,
+                    )
+                )
+                if entity_ids:
+                    await self._publish_committed_entity_ids(entity_ids)
+            except Exception as exc:
+                logger.exception("Semantic resolver publication stage failed: {}", exc)
+                await self._record_failure(
+                    window,
+                    ctx,
+                    exc,
+                    failure_stage="resolver_publication",
+                )
+                return JobResult(
+                    success=False,
+                    summary="Semantic resolver publication stage failed",
+                )
 
         try:
             enriched = await self.knowledge_store.enrich_project_semantic_window_episodes(

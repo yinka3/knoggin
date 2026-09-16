@@ -1,251 +1,159 @@
-"""Quiescent rebuilds of canonical entity and episode embeddings."""
+"""Quiescent rebuilds of episode and document retrieval embeddings."""
 
 from __future__ import annotations
 
 import json
-from typing import Dict, List
+import math
 
-from loguru import logger
-
-from common.scoping import IDENTITY_ENTITY_ID
-from core.knowledge.entity.embedding import build_entity_embedding_text
+from core.knowledge.documents.storage import DocumentChunk, embedding_text
 from core.knowledge.episodes.embedding import build_episode_embedding_text_from_fields
 from core.knowledge.services.embedding_service import EmbeddingService
 from infrastructure.postgres_client import PostgresClient
 
 
 class EmbeddingRebuilder:
-    """Regenerate durable embeddings while project runtimes are quiescent."""
+    """Replace derived vectors while the local engine is stopped or quiescent."""
 
     def __init__(
-        self,
-        postgres_client: PostgresClient,
-        embedding_service: EmbeddingService,
-    ) -> None:
+        self, postgres_client: PostgresClient, embedding_service: EmbeddingService
+    ):
         self.client = postgres_client
         self.embedding_service = embedding_service
 
-    @staticmethod
-    def _validate_scope(project_id: str, user_name: str) -> None:
-        if not project_id:
-            raise ValueError("rebuild_project_embeddings requires project_id scope")
-        if not user_name:
-            raise ValueError("rebuild_project_embeddings requires user_name scope")
+    async def ensure_configuration(self) -> None:
+        """Refuse to compare vectors from an unknown or different configuration."""
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                "LOCK TABLE public.embedding_configuration IN EXCLUSIVE MODE"
+            )
+            await cur.execute(
+                "SELECT fingerprint FROM public.embedding_configuration WHERE singleton = TRUE"
+            )
+            existing = await cur.fetchone()
+            fingerprint = self.embedding_service.configuration_fingerprint
+            if existing is not None and existing["fingerprint"] == fingerprint:
+                return
+            await cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM public.episodes WHERE embedding IS NOT NULL) "
+                "OR EXISTS (SELECT 1 FROM public.document_chunks) AS has_vectors"
+            )
+            if (await cur.fetchone())["has_vectors"]:
+                raise RuntimeError(
+                    "Stored embedding configuration is unknown or changed. Stop the engine "
+                    "and run scripts/rebuild_embeddings.py to rebuild all episode and document vectors."
+                )
+            await self._record_configuration(cur, fingerprint)
 
     @staticmethod
     def _validate_embeddings(
-        embeddings: List[List[float]] | None,
-        expected_count: int,
-        label: str,
-    ) -> List[List[float]]:
-        if embeddings is None:
-            raise RuntimeError(f"{label} embedding result is missing")
-        if len(embeddings) != expected_count:
+        embeddings, expected_count: int, label: str
+    ) -> list[list[float]]:
+        if embeddings is None or len(embeddings) != expected_count:
             raise RuntimeError(
-                f"{label} embedding count mismatch: "
-                f"expected {expected_count}, got {len(embeddings)}"
+                f"{label} embedding count mismatch: expected {expected_count}"
             )
-        normalized: list[list[float]] = []
-        for index, embedding in enumerate(embeddings):
+        normalized = []
+        for embedding in embeddings:
             vector = list(embedding) if embedding is not None else []
-            if len(vector) != 1024:
-                raise RuntimeError(
-                    f"{label} embedding {index} has dimension {len(vector)}; "
-                    "expected 1024"
-                )
+            if len(vector) != 1024 or any(not math.isfinite(value) for value in vector):
+                raise RuntimeError(f"{label} embeddings require 1024 finite values")
             normalized.append(vector)
         return normalized
 
     async def rebuild_project_embeddings(
-        self,
-        project_id: str,
-        user_name: str,
-    ) -> Dict[str, int]:
-        """Read canonical rows, encode them, then atomically replace vectors.
+        self, project_id: str, user_name: str
+    ) -> dict[str, int]:
+        if not project_id or not user_name:
+            raise ValueError(
+                "rebuild_project_embeddings requires project_id and user_name scope"
+            )
+        # A project-only rebuild cannot migrate an engine-wide model change.
+        await self.ensure_configuration()
+        return await self._rebuild(project_id=project_id, user_name=user_name)
 
-        Project maintenance already excludes active runtimes.  The rebuild does
-        not therefore publish conditionally or maintain a second revision
-        subsystem solely to race concurrent canonical writes.
-        """
+    async def rebuild_all_embeddings(self) -> dict[str, int]:
+        """Offline model migration: replace every corpus and fingerprint atomically."""
+        return await self._rebuild()
 
-        self._validate_scope(project_id, user_name)
+    async def _rebuild(
+        self, *, project_id: str | None = None, user_name: str | None = None
+    ) -> dict[str, int]:
         if self.embedding_service.embedding_dim != 1024:
-            raise RuntimeError(
-                "Embeddings require 1024-dimensional vectors; configured model reports "
-                f"{self.embedding_service.embedding_dim}"
-            )
-
-        entities, episodes, identity = await self._snapshot(project_id, user_name)
-        if not identity:
-            raise RuntimeError("Canonical identity entity is missing")
-
-        # An entity embedding describes its user-global identity.  Project
-        # classification belongs to project_entity_contexts and must not cause
-        # the same identity to receive different vectors in different projects.
-        entity_inputs = [
-            build_entity_embedding_text(entity["canonical_name"], None)
-            for entity in entities
-        ]
-        identity_input = build_entity_embedding_text(identity["canonical_name"], None)
-        entity_vectors = self._validate_embeddings(
-            await self.embedding_service.encode(entity_inputs + [identity_input]),
-            len(entity_inputs) + 1,
-            "entity",
-        )
-        identity_vector = entity_vectors.pop()
-
-        episode_inputs = [
-            build_episode_embedding_text_from_fields(
-                str(episode["summary"]),
-                self._json_list(episode.get("new_developments")),
-                self._json_list(episode.get("updates")),
-                self._json_list(episode.get("unresolved")),
-            )
-            for episode in episodes
-        ]
-        episode_vectors: list[list[float]] = []
-        if episode_inputs:
-            episode_vectors = self._validate_embeddings(
-                await self.embedding_service.encode(episode_inputs),
-                len(episode_inputs),
-                "episode",
-            )
-
-        await self._replace_embeddings(
-            project_id,
-            user_name,
-            entities,
-            identity,
-            episodes,
-            entity_vectors,
-            identity_vector,
-            episode_vectors,
-        )
-        summary = {"entities": len(entities), "identity": 1, "episodes": len(episodes)}
-        logger.info("Rebuilt embeddings for project {}: {}", project_id, summary)
-        return summary
-
-    async def _snapshot(
-        self,
-        project_id: str,
-        user_name: str,
-    ) -> tuple[List[Dict], List[Dict], Dict]:
+            raise RuntimeError("Embeddings require 1024-dimensional vectors")
+        # The caller excludes runtime writes. All encoding finishes before any
+        # mutation; failure leaves both the old corpus and fingerprint intact.
         async with self.client.transaction() as cur:
             await cur.execute("SET TRANSACTION READ ONLY")
-            entities = await self._fetch_entities(cur, project_id, user_name)
-            episodes = await self._fetch_episodes(cur, project_id, user_name)
-            identity = await self._fetch_identity(cur, user_name)
-        return entities, episodes, identity
-
-    async def _replace_embeddings(
-        self,
-        project_id: str,
-        user_name: str,
-        entities: List[Dict],
-        identity: Dict,
-        episodes: List[Dict],
-        entity_vectors: List[List[float]],
-        identity_vector: List[float],
-        episode_vectors: List[List[float]],
-    ) -> None:
-        async with self.client.transaction() as cur:
-            for entity, embedding in zip(entities, entity_vectors):
-                await cur.execute(
-                    """
-                    UPDATE entities
-                    SET embedding = %s::vector
-                    WHERE entity_id = %s
-                      AND user_name = %s
-                    """,
-                    (
-                        json.dumps(embedding),
-                        entity["entity_id"],
-                        entity["user_name"],
-                    ),
-                )
+            scope = "WHERE p.project_id = %s AND p.user_name = %s" if project_id else ""
+            params = (project_id, user_name) if project_id else ()
             await cur.execute(
-                """
-                UPDATE entities
-                SET embedding = %s::vector
-                WHERE entity_id = %s
-                  AND user_name = %s
-                """,
-                (
-                    json.dumps(identity_vector),
-                    identity["entity_id"],
-                    identity["user_name"],
+                "SELECT e.episode_id, e.summary, e.new_developments, e.updates, e.unresolved "
+                "FROM public.episodes e JOIN public.projects p ON p.project_id = e.project_id "
+                + scope,
+                params,
+            )
+            episodes = list(await cur.fetchall())
+            await cur.execute(
+                "SELECT c.chunk_id, c.content, c.relative_path, c.language, c.symbol_name "
+                "FROM public.document_chunks c "
+                "JOIN public.project_documents d ON d.document_id = c.document_id "
+                "JOIN public.projects p ON p.project_id = d.project_id " + scope,
+                params,
+            )
+            chunks = list(await cur.fetchall())
+        episode_inputs = [
+            build_episode_embedding_text_from_fields(
+                row["summary"],
+                self._json_list(row["new_developments"]),
+                self._json_list(row["updates"]),
+                self._json_list(row["unresolved"]),
+            )
+            for row in episodes
+        ]
+        chunk_inputs = [
+            embedding_text(
+                DocumentChunk(
+                    content=row["content"],
+                    language=row["language"],
+                    symbol_name=row["symbol_name"],
                 ),
+                row["relative_path"],
             )
-            await cur.execute(
-                """
-                UPDATE episodes
-                SET embedding = NULL
-                WHERE project_id = %s
-                """,
-                (project_id,),
-            )
-            for episode, embedding in zip(episodes, episode_vectors):
+            for row in chunks
+        ]
+        inputs = episode_inputs + chunk_inputs
+        vectors = self._validate_embeddings(
+            await self.embedding_service.encode(inputs) if inputs else [],
+            len(inputs),
+            "corpus",
+        )
+        async with self.client.transaction() as cur:
+            for row, vector in zip(episodes, vectors[: len(episodes)]):
                 await cur.execute(
-                    """
-                    UPDATE episodes
-                    SET embedding = %s::vector
-                    WHERE episode_id = %s
-                      AND project_id = %s
-                    """,
-                    (json.dumps(embedding), episode["episode_id"], project_id),
+                    "UPDATE public.episodes SET embedding = %s::vector WHERE episode_id = %s",
+                    (json.dumps(vector), row["episode_id"]),
                 )
+            for row, vector in zip(chunks, vectors[len(episodes) :]):
+                await cur.execute(
+                    "UPDATE public.document_chunks SET embedding = %s::vector WHERE chunk_id = %s",
+                    (json.dumps(vector), row["chunk_id"]),
+                )
+            if project_id is None:
+                await self._record_configuration(
+                    cur, self.embedding_service.configuration_fingerprint
+                )
+        return {"episodes": len(episodes), "document_chunks": len(chunks)}
 
     @staticmethod
-    async def _fetch_entities(cur, project_id: str, user_name: str) -> List[Dict]:
+    async def _record_configuration(cur, fingerprint: str) -> None:
         await cur.execute(
-            """
-            SELECT e.entity_id, e.canonical_name, e.user_name
-            FROM entities e
-            JOIN project_entity_contexts context
-              ON context.entity_id = e.entity_id
-            WHERE context.project_id = %s
-              AND e.user_name = %s
-            ORDER BY e.entity_id
-            """,
-            (project_id, user_name),
+            "INSERT INTO public.embedding_configuration (singleton, fingerprint) VALUES (TRUE, %s) "
+            "ON CONFLICT (singleton) DO UPDATE SET fingerprint = EXCLUDED.fingerprint",
+            (fingerprint,),
         )
-        return list(await cur.fetchall())
 
     @staticmethod
-    async def _fetch_episodes(cur, project_id: str, user_name: str) -> List[Dict]:
-        await cur.execute(
-            """
-            SELECT
-                episode.episode_id,
-                episode.summary,
-                episode.new_developments,
-                episode.updates,
-                episode.unresolved
-            FROM episodes episode
-            JOIN projects project ON project.project_id = episode.project_id
-            WHERE episode.project_id = %s
-              AND project.user_name = %s
-            ORDER BY episode.episode_id
-            """,
-            (project_id, user_name),
-        )
-        return list(await cur.fetchall())
-
-    @staticmethod
-    async def _fetch_identity(cur, user_name: str) -> Dict:
-        await cur.execute(
-            """
-            SELECT entity_id, canonical_name, user_name
-            FROM entities
-            WHERE entity_id = %s
-              AND user_name = %s
-            """,
-            (IDENTITY_ENTITY_ID, user_name),
-        )
-        return await cur.fetchone() or {}
-
-    @staticmethod
-    def _json_list(value) -> List[str]:
+    def _json_list(value) -> list[str]:
         if isinstance(value, str):
             value = json.loads(value)
         return [str(item) for item in value or []]

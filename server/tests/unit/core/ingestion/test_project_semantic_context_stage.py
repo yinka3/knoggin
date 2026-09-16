@@ -17,7 +17,12 @@ from common.schema.semantic_window import (
     SemanticWindowRecord,
     SemanticWindowStage,
 )
-from common.schema.settings import IngestionSettings
+from common.schema.settings import (
+    EntityResolutionSettings,
+    IngestionSettings,
+    TextProcessorSettings,
+)
+from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_job import ProjectSemanticJob
 from core.knowledge.context.models import ContextRevisionConflictError
 from core.knowledge.context.projection import ContextProjectionResult
@@ -29,6 +34,14 @@ from infrastructure.job.scheduler import Scheduler
 
 def _domain():
     return DomainConfig(version=1, topics=(), entity_types=()).compile()
+
+
+def _policy():
+    return IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=_domain(),
+    )
 
 
 def _window():
@@ -59,11 +72,12 @@ def _block(markdown: str) -> ContextBlockRecord:
     )
 
 
-def _snapshot(*blocks: ContextBlockRecord) -> ContextSnapshot:
+def _snapshot(*blocks: ContextBlockRecord, window_id=None) -> ContextSnapshot:
     return ContextSnapshot(
         revision_id=uuid4(),
         project_id="project-1",
         revision_number=1,
+        window_id=window_id,
         origin=ContextRevisionOrigin.CONVERSATION,
         domain_version=1,
         content_hash="a" * 64,
@@ -131,7 +145,7 @@ class _ContextStore:
             project_id="project-1",
             revision_number=1 if parent is None else parent.revision_number + 1,
             parent_revision_id=None if parent is None else parent.revision_id,
-            window_id=uuid4(),
+            window_id=kwargs["window_id"],
             origin=ContextRevisionOrigin.CONVERSATION,
             domain_version=1,
             edit_summary=kwargs["edit_summary"],
@@ -221,9 +235,6 @@ class _IdleAdmission:
     def update_settings(self, _settings):
         pass
 
-    async def select(self, **_kwargs):
-        return None
-
     async def claim_next(self, **_kwargs):
         return None
 
@@ -237,23 +248,25 @@ class _RecordingProjection:
     def __init__(self):
         self.called = asyncio.Event()
         self.allow_user_edit = None
+        self.ingestion_policy = None
 
     async def synchronize(self, **kwargs):
         self.allow_user_edit = kwargs["allow_user_edit"]
+        self.ingestion_policy = kwargs["ingestion_policy"]
         self.called.set()
         return ContextProjectionResult(snapshot=None, changed=False)
 
 
 def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
-    async def capture_domain():
-        return _domain()
+    async def capture_semantic_policy():
+        return _policy()
 
     return ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
         context_updater=updater,
         context_projection=projection,
         now_ms=now_ms,
@@ -284,16 +297,17 @@ async def test_context_stage_commits_then_checkpoints_even_if_file_projection_ne
 @pytest.mark.no_network
 async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
     projection = _RecordingProjection()
+    policy = _policy()
 
-    async def capture_domain():
-        return _domain()
+    async def capture_semantic_policy():
+        return policy
 
     job = ProjectSemanticJob(
         _IdleAdmission(),
         _IdleStore(),
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=capture_semantic_policy,
         context_projection=projection,
     )
     scheduler = Scheduler("ada", "project-1")
@@ -306,13 +320,60 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
         await scheduler.stop()
 
     assert projection.allow_user_edit is True
+    assert projection.ingestion_policy is policy
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
+    policy = _policy()
+    policy_captures = 0
+
+    class ClaimingAdmission:
+        def update_settings(self, _settings):
+            pass
+
+        async def claim_next(self, **kwargs):
+            self.kwargs = kwargs
+            return None
+
+    class NoActiveWindowStore:
+        async def get_active_project_semantic_window(self, **_kwargs):
+            return None
+
+    async def capture_semantic_policy():
+        nonlocal policy_captures
+        policy_captures += 1
+        return policy
+
+    admission = ClaimingAdmission()
+    job = ProjectSemanticJob(
+        admission,
+        NoActiveWindowStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_semantic_policy,
+    )
+
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    assert await job.should_run(context) is False
+    assert policy_captures == 0
+
+    result = await job.execute(context)
+
+    assert result.success
+    assert policy_captures == 1
+    assert admission.kwargs["ingestion_policy"] is policy
+    assert admission.kwargs["domain"] is policy.domain
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_context_stage_resumes_a_durable_revision_without_recalling_the_llm():
-    committed = _snapshot(_block("Already durable."))
-    store = _ContextStore(_window(), current_snapshot=committed, committed_snapshot=committed)
+    window = _window()
+    committed = _snapshot(_block("Already durable."), window_id=window.window_id)
+    store = _ContextStore(window, current_snapshot=committed, committed_snapshot=committed)
     updater = _Updater()
     job = _job(store, updater)
 
@@ -328,7 +389,9 @@ async def test_context_stage_resumes_a_durable_revision_without_recalling_the_ll
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_context_noop_records_the_current_revision_without_creating_a_child():
-    current = _snapshot(_block("Current Context is already sufficient."))
+    current = _snapshot(
+        _block("Current Context is already sufficient."), window_id=uuid4()
+    )
     store = _ContextStore(_window(), current_snapshot=current)
     updater = _NoopUpdater()
     job = _job(store, updater)

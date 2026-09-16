@@ -7,11 +7,14 @@ storage; callers never persist model-generated SQL or arbitrary JSON patches.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
+from core.knowledge.conflict.conflicts import ConflictResolutionKind
+from core.knowledge.relationship_advisories import AdvisoryAction
 
 ReviewScope = Literal["project", "user-global"]
 ReviewStatus = Literal["open", "applied", "dismissed", "stale"]
@@ -100,6 +103,7 @@ class EntityMergePlan(BaseModel):
     context_choices: list["EntityContextMergeChoice"] = Field(default_factory=list)
     frontier_tokens: dict[str, str] = Field(default_factory=dict)
     definition_versions: dict[str, int] = Field(default_factory=dict)
+    context_block_association_counts: dict[str, int] = Field(default_factory=dict)
     expected_state_hash: str | None = Field(default=None, min_length=1)
 
     @field_validator("retired_entity_id")
@@ -143,9 +147,23 @@ class ConflictResolutionPlan(BaseModel):
     ] = "user_created"
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     discovery_packet_tokens: int | None = Field(default=None, ge=0)
-    packet_compacted: bool = False
-    resolution: str | None = Field(default=None, max_length=80)
-    note: str | None = Field(default=None, max_length=2_000)
+    supersedes_review_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ConflictResolutionInput(BaseModel):
+    """The typed user classification accepted when closing a conflict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution_kind: ConflictResolutionKind
+    resolution_note: str | None = Field(default=None, max_length=2_000)
+    resolved_by: str = Field(min_length=1, max_length=200)
+
+
+class ConflictResolutionRecord(ConflictResolutionInput):
+    """A durable user classification kept separate from the original proposal."""
+
+    resolved_at: datetime
 
 
 class RelationshipAdvisoryPlan(BaseModel):
@@ -157,7 +175,7 @@ class RelationshipAdvisoryPlan(BaseModel):
     pattern_key: str = Field(min_length=1, max_length=500)
     observed_label: str | None = None
     proposed_relationship_type: str | None = None
-    action: str | None = None
+    action: AdvisoryAction | None = None
     note: str | None = None
 
 

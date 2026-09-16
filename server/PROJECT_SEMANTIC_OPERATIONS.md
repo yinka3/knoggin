@@ -71,6 +71,27 @@ Only source-grounded, user-asserted, and human-asserted Context blocks enter
 Knowledge. Agent-derived blocks still render in Project Context but are not
 entity or relationship input.
 
+After the atomic Knowledge commit, finalization reloads affected entity IDs
+from that committed Context revision and publishes authoritative scoped rows to
+the live resolver. A publication failure leaves the window at
+`knowledge_committed` with a `resolver_publication` failure; retry hydrates the
+resolver and finalizes without replaying the SQL/AGE mutation. Resolver lookup
+treats scoped durable exact names and aliases as direct evidence, while a
+shared fuzzy alias cannot invalidate a unique direct exact match. A reused
+visible identity receives an explicit target-project classification before its
+Context associations and relationships are committed.
+
+When a later conversation window checkpoints a Context revision already
+published by its owning window, it has empty effective Knowledge impact: it
+advances the normal Knowledge and finalization checkpoints without extraction,
+observation writes, retirement, or projection rebuilds. Current Knowledge
+reads expose only active observations. Reconciliation retains observations
+retired because their Context support was replaced or deleted for explicit
+historical evidence traversal, while deriving entity activity and relationship
+observation times from persisted eligible/cited Context source time rather than
+processing time; entity recency only advances, and an untimed newly authored
+human block receives one accepted time when committed.
+
 ## Settings and trace evidence
 
 `developer_settings.ingestion.semantic_window_tokens` defaults to 128,000 and
@@ -79,6 +100,16 @@ is configurable. Admission keeps an entire crossing exchange, records
 and a frozen admission policy. Overfill is acceptable only when it is the
 unavoidable remainder of one whole exchange; an exchange larger than the target
 forms a single `oversized_exchange` window rather than being split.
+
+Conversation admission first removes Sessions that are deleted, have disabled
+semantic participation, or have exchanges at or before their recorded
+participation frontier. Per-Session FIFO therefore applies only to eligible
+exchanges. Claim rechecks the same durable boundary: a participation change
+that commits first rejects the stale proposal without partial membership, while
+a later change cannot rewrite an already claimed window. The semantic job
+captures its compiled domain and ingestion settings as one lock-protected
+policy, then uses that same snapshot through selection, claim, and Context
+work.
 
 Each durable window records `window_id`, origin, stage, domain version, frozen
 policy, failure stage/code/summary, retry time, and attempt count. Context

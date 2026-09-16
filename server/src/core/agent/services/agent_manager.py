@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 from typing import List, Mapping, Optional, Union
@@ -15,6 +16,20 @@ from common.utils.time_utils import parse_iso_time
 from core.agent.tools.registry import get_registered_tool_names
 
 _UNSET = object()
+
+
+class AgentBrainRevisionConflictError(RuntimeError):
+    """Raised when a full Brain replacement uses a stale revision."""
+
+    def __init__(
+        self,
+        *,
+        expected_revision: int,
+        current_revision: int,
+    ) -> None:
+        super().__init__("Agent Brain changed before the update could be committed")
+        self.expected_revision = expected_revision
+        self.current_revision = current_revision
 
 
 def agent_from_row(row: Mapping[str, object]) -> AgentConfig:
@@ -53,6 +68,7 @@ class AgentManager:
         self.resources = resources
         self.user_name = user_name
         self.pg = resources.postgres
+        self._lifecycle_lock = asyncio.Lock()
 
     @staticmethod
     def _validate_enabled_tools(enabled_tools: Optional[List[str]]) -> None:
@@ -61,6 +77,15 @@ class AgentManager:
         unknown = sorted(set(enabled_tools) - get_registered_tool_names())
         if unknown:
             raise ValueError("Unknown agent tools: " + ", ".join(unknown))
+
+    @staticmethod
+    def _require_expected_brain_revision(value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(
+                "Full Brain replacement requires expected_brain_revision "
+                "as an integer >= 1"
+            )
+        return value
 
     async def list_agents(self) -> List[AgentConfig]:
         """List all agents for the user."""
@@ -114,39 +139,40 @@ class AgentManager:
 
     async def ensure_default_agent(self) -> str:
         """Create or repair the durable default-agent invariant at startup."""
-        query = (
-            "SELECT agent_id FROM public.agents "
-            "WHERE user_name = %(user_name)s AND is_default = true LIMIT 1"
-        )
-        rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
-        if rows:
-            return rows[0]["agent_id"]
-
-        existing = await self.pg.fetch_all(
-            """
-            SELECT agent_id
-            FROM public.agents
-            WHERE user_name = %(user_name)s
-            ORDER BY created_at ASC, agent_id ASC
-            LIMIT 1
-            """,
-            {"user_name": self.user_name},
-        )
-        if existing:
-            agent_id = existing[0]["agent_id"]
-            await self.pg.execute(
-                """
-                UPDATE public.agents
-                SET is_default = true, updated_at = now()
-                WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
-                """,
-                {"user_name": self.user_name, "agent_id": agent_id},
+        async with self._lifecycle_lock:
+            query = (
+                "SELECT agent_id FROM public.agents "
+                "WHERE user_name = %(user_name)s AND is_default = true LIMIT 1"
             )
-            return agent_id
+            rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
+            if rows:
+                return rows[0]["agent_id"]
 
-        await self._seed_default_agents()
-        rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
-        return rows[0]["agent_id"]
+            existing = await self.pg.fetch_all(
+                """
+                SELECT agent_id
+                FROM public.agents
+                WHERE user_name = %(user_name)s
+                ORDER BY created_at ASC, agent_id ASC
+                LIMIT 1
+                """,
+                {"user_name": self.user_name},
+            )
+            if existing:
+                agent_id = existing[0]["agent_id"]
+                await self.pg.execute(
+                    """
+                    UPDATE public.agents
+                    SET is_default = true, updated_at = now()
+                    WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+                    """,
+                    {"user_name": self.user_name, "agent_id": agent_id},
+                )
+                return agent_id
+
+            await self._seed_default_agents()
+            rows = await self.pg.fetch_all(query, {"user_name": self.user_name})
+            return rows[0]["agent_id"]
 
     async def get_default_agent_id(self) -> str:
         """Read the startup-initialized default agent without mutating state."""
@@ -320,6 +346,7 @@ class AgentManager:
         agent_id: str,
         name: str | object = _UNSET,
         brain: Optional[str] | object = _UNSET,
+        expected_brain_revision: int | object = _UNSET,
         model: Optional[str] | object = _UNSET,
         temperature: Optional[float] | object = _UNSET,
         enabled_tools: Optional[List[str]] | object = _UNSET,
@@ -357,11 +384,15 @@ class AgentManager:
 
         updates = []
         params = {"user_name": self.user_name, "agent_id": agent_id}
+        expected_revision: int | None = None
 
         if name is not _UNSET:
             updates.append("name = %(name)s")
             params["name"] = candidate.name
         if brain is not _UNSET:
+            expected_revision = self._require_expected_brain_revision(
+                expected_brain_revision
+            )
             new_revision = int(config.brain_revision or 1) + 1
             normalized_brain = (
                 normalize_agent_brain(brain, config.persona_markdown)
@@ -371,6 +402,7 @@ class AgentManager:
             updates.append("brain = %(brain)s")
             updates.append("brain_revision = brain_revision + 1")
             params["brain"] = normalized_brain
+            params["expected_brain_revision"] = expected_revision
         if model is not _UNSET:
             updates.append("model = %(model)s")
             params["model"] = model
@@ -386,6 +418,12 @@ class AgentManager:
 
         updates.append("updated_at = now()")
         set_clause = ", ".join(updates)
+        where_clause = """
+                WHERE user_name = %(user_name)s
+                  AND agent_id = %(agent_id)s
+        """
+        if brain is not _UNSET:
+            where_clause += " AND brain_revision = %(expected_brain_revision)s"
 
         if brain is not _UNSET and should_snapshot_brain_revision(new_revision):
             params["change_summary"] = build_brain_snapshot_summary(
@@ -395,8 +433,7 @@ class AgentManager:
                 WITH updated AS (
                     UPDATE public.agents
                     SET {set_clause}
-                    WHERE user_name = %(user_name)s
-                      AND agent_id = %(agent_id)s
+                    {where_clause}
                     RETURNING agent_id, user_name, brain_revision, brain
                 )
                 INSERT INTO public.agent_brain_snapshots (
@@ -422,9 +459,20 @@ class AgentManager:
             query = f'''
                 UPDATE public.agents
                 SET {set_clause}
-                WHERE user_name = %(user_name)s AND agent_id = %(agent_id)s
+                {where_clause}
             '''
-        await self.pg.execute(query, params)
+        updated = await self.pg.execute(query, params)
+        if brain is not _UNSET and updated != 1:
+            latest = await self.get_agent(agent_id)
+            if latest is None:
+                return None
+            assert expected_revision is not None
+            raise AgentBrainRevisionConflictError(
+                expected_revision=expected_revision,
+                current_revision=latest.brain_revision,
+            )
+        if updated != 1:
+            return None
         logger.info(f"Updated agent: {candidate.name} ({agent_id})")
         return await self.get_agent(agent_id)
 
@@ -495,50 +543,63 @@ class AgentManager:
 
     async def delete_agent(self, agent_id: str) -> bool:
         """Delete an agent. Returns False if not found or is default."""
-        config = await self.get_agent(agent_id)
-        if not config or config.is_default:
-            return False
+        async with self._lifecycle_lock:
+            config = await self.get_agent(agent_id)
+            if not config or config.is_default:
+                return False
 
-        query = (
-            "DELETE FROM public.agents WHERE user_name = %(user_name)s "
-            "AND agent_id = %(agent_id)s"
-        )
-        await self.pg.execute(
-            query,
-            {"user_name": self.user_name, "agent_id": agent_id},
-        )
-        logger.info(f"Deleted agent: {agent_id}")
-        return True
-
-    async def set_default_agent(self, agent_id: str) -> bool:
-        """Set an agent as default. Returns False if not found."""
-        config = await self.get_agent(agent_id)
-        if not config:
-            return False
-
-        async with self.pg.transaction() as cur:
-            await cur.execute(
+            deleted = await self.pg.execute(
                 """
-                UPDATE public.agents
-                SET is_default = false,
-                    updated_at = now()
-                WHERE user_name = %(user_name)s AND is_default = true
-                """,
-                {"user_name": self.user_name},
-            )
-            await cur.execute(
-                """
-                UPDATE public.agents
-                SET is_default = true,
-                    updated_at = now()
+                DELETE FROM public.agents
                 WHERE user_name = %(user_name)s
                   AND agent_id = %(agent_id)s
+                  AND is_default = false
                 """,
                 {"user_name": self.user_name, "agent_id": agent_id},
             )
+            if deleted != 1:
+                return False
+            logger.info(f"Deleted agent: {agent_id}")
+            return True
 
-        logger.info(f"Set default agent: {agent_id}")
-        return True
+    async def set_default_agent(self, agent_id: str) -> bool:
+        """Set an agent as default. Returns False if not found."""
+        async with self._lifecycle_lock:
+            async with self.pg.transaction() as cur:
+                await cur.execute(
+                    """
+                    SELECT agent_id
+                    FROM public.agents
+                    WHERE user_name = %(user_name)s
+                      AND agent_id = %(agent_id)s
+                    FOR UPDATE
+                    """,
+                    {"user_name": self.user_name, "agent_id": agent_id},
+                )
+                if await cur.fetchone() is None:
+                    return False
+                await cur.execute(
+                    """
+                    UPDATE public.agents
+                    SET is_default = false,
+                        updated_at = now()
+                    WHERE user_name = %(user_name)s AND is_default = true
+                    """,
+                    {"user_name": self.user_name},
+                )
+                await cur.execute(
+                    """
+                    UPDATE public.agents
+                    SET is_default = true,
+                        updated_at = now()
+                    WHERE user_name = %(user_name)s
+                      AND agent_id = %(agent_id)s
+                    """,
+                    {"user_name": self.user_name, "agent_id": agent_id},
+                )
+
+            logger.info(f"Set default agent: {agent_id}")
+            return True
 
     async def _seed_default_agents(self):
         """Seed DB with default agents from Markdown config."""

@@ -26,6 +26,9 @@ class _DeterministicEmbeddingService:
     async def encode_single(self, _text):
         return [0.25] * 1024
 
+    async def encode_query(self, text):
+        return await self.encode_single(text)
+
 
 class _DeterministicDocumentAgentLLM:
     agent_model = "architect"
@@ -254,7 +257,6 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
 
     resolver = EntityResolver(
         store,
-        embedding,
         scope["project_id"],
         [scope["project_id"]],
     )

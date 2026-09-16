@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from common.schema.episode.generation import LLMEpisodeDecision
 from common.schema.ingestion.extraction import (
+    ContextRelationshipExtraction,
     EntityExtraction,
     RelationshipExtraction,
 )
@@ -72,13 +73,52 @@ def test_connection_output_strips_required_text_and_rejects_blank_evidence():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_context_connection_output_requires_local_entity_handles():
+    output = ContextRelationshipExtraction.model_validate(
+        {
+            "connections": [
+                {
+                    "block_ids": ["b1"],
+                    "entity_a": " e1 ",
+                    "entity_b": "e999",
+                    "relationship": " owns ",
+                }
+            ]
+        }
+    )
+
+    connection = output.connections[0]
+    assert connection.entity_a == "e1"
+    assert connection.entity_b == "e999"
+    assert connection.relationship == "owns"
+
+    for endpoint in ("Alice", "10", "e0", "e01", "e-1", "e"):
+        with pytest.raises(ValidationError, match="local eN entity handle"):
+            ContextRelationshipExtraction.model_validate(
+                {
+                    "connections": [
+                        {
+                            "block_ids": ["b999"],
+                            "entity_a": endpoint,
+                            "entity_b": "e2",
+                            "relationship": "owns",
+                        }
+                    ]
+                }
+            )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_episode_llm_output_rejects_schema_drift_and_blank_narrative_values():
     valid = {
-        "action": "create",
         "summary": "A durable decision was made.",
         "message_influences": ["message:1"],
     }
     assert LLMEpisodeDecision.model_validate(valid).summary == valid["summary"]
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        LLMEpisodeDecision.model_validate({**valid, "action": "consolidate"})
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         LLMEpisodeDecision.model_validate({**valid, "unexpected": "value"})

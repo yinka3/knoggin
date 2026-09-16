@@ -33,6 +33,7 @@ from core.agent.formatters import (
     format_document_focus_context,
     format_documents_context,
 )
+from core.agent.notebook import NotebookApplyResult
 from core.agent.prompt_context import (
     build_evidence_context,
     build_user_message,
@@ -51,18 +52,58 @@ from core.agent.tools.registry import (
     get_tool_definition,
     install_tool_runtime,
 )
-from core.knowledge.context.render import canonical_context_markdown
+from core.knowledge.context.render import render_context_model_input
 from infrastructure.llm_client import LLMService
 
 MAX_TOKEN_CHUNK_SIZE = 10000
 MAX_PROJECT_CONTEXT_CHARS = 24_000
-PUBLIC_AGENT_FAILURE_MESSAGE = "The agent couldn't complete this request. Please try again."
+PUBLIC_AGENT_FAILURE_MESSAGE = (
+    "The agent couldn't complete this request. Please try again."
+)
 
 
 class _AgentPhase(StrEnum):
     PLAN = "PLAN"
     EXECUTE = "EXECUTE"
     SYNTHESIZE = "SYNTHESIZE"
+
+
+def _notebook_rejection_feedback(
+    admission: NotebookApplyResult,
+) -> tuple[str, Dict]:
+    """Build the bounded model result for evidence the notebook rejected."""
+
+    reason = admission.reason or "not_admitted"
+    if reason == "capacity":
+        message = (
+            "Result was not added to the run notebook because it exceeds the "
+            "evidence capacity. Try a narrower query or read a smaller document "
+            "or web range."
+        )
+    else:
+        message = (
+            "Result was not added to the run notebook. Narrow the request before "
+            "trying again."
+        )
+    return message, {
+        "data": [],
+        "notebook_admission": {
+            "accepted": False,
+            "changed": admission.changed,
+            "reason": reason,
+            "message": message,
+        },
+    }
+
+
+def _result_has_notebook_rejection(result: Dict) -> bool:
+    """Whether an executor result requires an immediate evidence replan."""
+
+    model_result = result.get("result")
+    if not isinstance(model_result, dict):
+        return False
+    admission = model_result.get("notebook_admission")
+    return isinstance(admission, dict) and admission.get("accepted") is False
 
 
 @dataclass
@@ -154,33 +195,32 @@ class AgentExecutor:
         tz = ZoneInfo(user_timezone) if user_timezone else ZoneInfo("UTC")
         current_time = get_now().astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
-        documents_context = ""
-        if self.tools.document_service:
-            manifest = await self.tools.get_document_manifest()
-            if manifest:
-                documents_context = format_documents_context(manifest)
         document_focus_context = format_document_focus_context(
             getattr(self.tools, "document_focus", None),
             getattr(self.ctx, "document_selection_context", None),
         )
-        project_brief = await self._load_project_brief()
-        project_context = await self._load_project_context()
+        project_brief = ""
+        project_context = ""
+        documents_context = ""
 
         last_result = None
 
         # The executor, not the model, owns phase transitions.
         needs_replan = False
         needs_final_synthesis = False
+        needs_deep_research_gap_review = self.ctx.needs_deep_research_gap_review()
 
         while (
             self.ctx.attempt_count < self.ctx.limits.max_attempts
             or needs_final_synthesis
+            or needs_deep_research_gap_review
         ):
             if self.ctx.consecutive_errors >= self.ctx.limits.max_consecutive_errors:
                 yield self._terminal_error()
                 return
 
             is_final_synthesis = needs_final_synthesis
+            is_deep_research_gap_review = False
             if is_final_synthesis:
                 if not self.ctx.begin_final_synthesis_attempt():
                     break
@@ -188,6 +228,14 @@ class AgentExecutor:
                 current_model = self.ctx.model or self.llm.agent_model
                 current_reasoning = "high"
                 logger.info("AgentExecutor: synthesizing the final response.")
+            elif needs_deep_research_gap_review:
+                if not self.ctx.begin_deep_research_gap_review():
+                    break
+                phase = _AgentPhase.PLAN
+                current_model = self.ctx.model or self.llm.agent_model
+                current_reasoning = "high"
+                is_deep_research_gap_review = True
+                logger.info("AgentExecutor: reviewing deep-research evidence gaps.")
             elif not self.ctx.begin_attempt():
                 break
             elif self.ctx.attempt_count == 1 or needs_replan:
@@ -204,6 +252,13 @@ class AgentExecutor:
             # Reset flags so a successful retrieval defaults back to execution.
             needs_replan = False
             needs_final_synthesis = False
+            needs_deep_research_gap_review = False
+
+            (
+                project_brief,
+                project_context,
+                documents_context,
+            ) = await self._ensure_project_briefing()
 
             # Monitoring/Emits
             await self._emit_llm_call(current_model, current_reasoning)
@@ -223,6 +278,7 @@ class AgentExecutor:
                 last_result,
                 project_brief=project_brief,
                 project_context=project_context,
+                gap_review=is_deep_research_gap_review,
             ):
                 event_type = event["event"]
                 data = event["data"]
@@ -259,6 +315,15 @@ class AgentExecutor:
                         step_failed = True
                         break
 
+                    batch_error = self._validate_tool_call_batch(
+                        pending_tool_calls,
+                        phase,
+                    )
+                    if batch_error is not None:
+                        self._record_step_error(batch_error, "formatting")
+                        step_failed = True
+                        break
+
                     submit = next(
                         (
                             call
@@ -276,13 +341,22 @@ class AgentExecutor:
                             )
                             step_failed = True
                             break
+                        if (
+                            self.ctx.research_profile.mode != "normal"
+                            and not self.ctx.has_grounded_investigation_evidence()
+                        ):
+                            self._record_step_error(
+                                "Research mode requires grounded investigation "
+                                "evidence before submit_answer.",
+                                "research",
+                            )
+                            step_failed = True
+                            break
                         artifact = None
                         raw_artifact = submit.args.get("artifact")
                         if raw_artifact is not None:
                             try:
-                                artifact = ArtifactDraft.model_validate(
-                                    raw_artifact
-                                )
+                                artifact = ArtifactDraft.model_validate(raw_artifact)
                             except Exception as exc:
                                 self._record_step_error(
                                     f"Invalid submit_answer artifact: {exc}",
@@ -291,9 +365,9 @@ class AgentExecutor:
                                 step_failed = True
                                 break
 
-                        if (
-                            phase is not _AgentPhase.SYNTHESIZE
-                            and self.ctx.new_evidence_gathered
+                        if phase is not _AgentPhase.SYNTHESIZE and (
+                            self.ctx.new_evidence_gathered
+                            or self.ctx.has_completed_deep_research_gap_review()
                         ):
                             logger.info(
                                 "AgentExecutor: evidence is ready; scheduling synthesis."
@@ -338,6 +412,12 @@ class AgentExecutor:
                         }
                         return
 
+                    if self.ctx.request_project_briefing_transition():
+                        logger.info(
+                            "AgentExecutor: loading Project briefing after a "
+                            "fast-path tool transition."
+                        )
+
                     async for tool_event in self._execute_tools(
                         pending_tool_calls,
                         current_results,
@@ -346,6 +426,9 @@ class AgentExecutor:
 
                     last_result = current_results
                     await self._manage_context_size()
+
+                    if self.ctx.needs_deep_research_gap_review():
+                        needs_deep_research_gap_review = True
 
                     all_empty = (
                         all(
@@ -357,7 +440,17 @@ class AgentExecutor:
                         else True
                     )
 
-                    if all_empty:
+                    if any(
+                        _result_has_notebook_rejection(result)
+                        for result in current_results
+                    ):
+                        logger.info(
+                            "AgentExecutor: replanning after notebook admission "
+                            "rejected evidence."
+                        )
+                        needs_replan = True
+                        self.ctx.clear_empty_results()
+                    elif all_empty:
                         if self.ctx.record_empty_result():
                             logger.info(
                                 f"AgentExecutor: "
@@ -402,11 +495,35 @@ class AgentExecutor:
         return [
             schema
             for schema in self.ctx.tool_runtime.schemas
-            if (
-                definition := get_tool_definition(schema["function"]["name"])
-            ) is not None
+            if (definition := get_tool_definition(schema["function"]["name"]))
+            is not None
             and definition.executor_protocol
         ]
+
+    def _validate_tool_call_batch(
+        self,
+        tool_calls: List[_ToolCall],
+        phase: _AgentPhase,
+    ) -> str | None:
+        """Reject provider calls outside this phase before any dispatch state changes."""
+
+        allowed_names = {
+            schema["function"]["name"] for schema in self._tool_schemas_for_phase(phase)
+        }
+        has_terminal_protocol = False
+        for call in tool_calls:
+            definition = get_tool_definition(call.name)
+            if definition is None or call.name not in allowed_names:
+                return f"Returned tool is not allowed during {phase.value}."
+            if call.args.get("_parse_error"):
+                return "Returned tool call contains invalid arguments."
+            has_terminal_protocol = (
+                has_terminal_protocol or definition.executor_protocol
+            )
+
+        if has_terminal_protocol and len(tool_calls) != 1:
+            return "Terminal protocol tools must be called alone."
+        return None
 
     async def _step(
         self,
@@ -419,6 +536,7 @@ class AgentExecutor:
         last_result: Optional[List[Dict]],
         project_brief: str = "",
         project_context: str = "",
+        gap_review: bool = False,
     ) -> AsyncGenerator[InternalAgentStreamEvent, None]:
         """A single LLM reasoning step."""
         tool_schemas = self._tool_schemas_for_phase(phase)
@@ -442,6 +560,7 @@ class AgentExecutor:
             participants=self.ctx.current_participants,
             phase=phase,
             research_profile=self.ctx.research_profile,
+            gap_review=gap_review,
         )
 
         user_message = build_user_message(self.ctx, last_result)
@@ -485,6 +604,47 @@ class AgentExecutor:
                 },
             }
 
+    async def _ensure_project_briefing(self) -> tuple[str, str, str]:
+        """Return run-cached persistent Project prompt material."""
+
+        briefing = self.ctx.project_briefing
+        if not briefing.needs_load:
+            return briefing.brief, briefing.context, briefing.documents_context
+
+        brief, context, documents_context = await asyncio.gather(
+            self._load_project_brief(),
+            self._load_project_context(),
+            self._load_documents_context(),
+        )
+        self.ctx.record_project_briefing_loaded(
+            brief=brief,
+            context=context,
+            documents_context=documents_context,
+            content_token_count=self._count_project_briefing_tokens(
+                brief,
+                context,
+                documents_context,
+            ),
+        )
+        logger.info(
+            "AgentExecutor: loaded Project briefing ({}, {} content tokens).",
+            briefing.requested_reason,
+            self.ctx.project_briefing.content_token_count,
+        )
+        return brief, context, documents_context
+
+    def _count_project_briefing_tokens(self, *parts: str) -> int:
+        """Measure the optional Project payload without requiring provider usage data."""
+
+        counter = getattr(self.llm, "count_tokens", None)
+        if not callable(counter):
+            return 0
+        try:
+            count = counter("\n".join(part for part in parts if part))
+        except Exception:
+            return 0
+        return count if isinstance(count, int) and count >= 0 else 0
+
     async def _load_project_brief(self) -> str:
         """Load the user-owned PROJECT.md brief without making a run block."""
         document_service = getattr(self.tools, "document_service", None)
@@ -504,6 +664,26 @@ class AgentExecutor:
         if not isinstance(content, str):
             return ""
         return content
+
+    async def _load_documents_context(self) -> str:
+        """Load the indexed-document manifest only with persistent Project context."""
+
+        if not getattr(self.tools, "document_service", None):
+            return ""
+        loader = getattr(self.tools, "get_document_manifest", None)
+        if not callable(loader):
+            return ""
+        try:
+            manifest = await loader()
+        except Exception as exc:
+            logger.warning(
+                "AgentExecutor: document manifest unavailable ({})",
+                type(exc).__name__,
+            )
+            return ""
+        if not isinstance(manifest, list) or not manifest:
+            return ""
+        return format_documents_context(manifest)
 
     async def _load_project_context(self) -> str:
         """Render bounded current Context from canonical storage only."""
@@ -526,7 +706,16 @@ class AgentExecutor:
             )
             if snapshot is None or not snapshot.blocks:
                 return ""
-            rendered = canonical_context_markdown(snapshot.blocks, domain)
+            supports_by_block = await reader.get_block_supports(
+                [block.block_id for block in snapshot.blocks],
+                user_name=self.ctx.user_name,
+                project_id=self.ctx.project_id,
+            )
+            rendered = render_context_model_input(
+                snapshot,
+                domain,
+                supports_by_block=supports_by_block,
+            )
         except Exception as exc:
             logger.warning(
                 "AgentExecutor: canonical Project Context unavailable ({})",
@@ -585,8 +774,8 @@ class AgentExecutor:
         if isinstance(parsed_clean, dict):
             return parsed_clean
 
-        logger.warning(f"Failed to parse tool arguments: {json_str[:200]}")
-        return {"_parse_error": True, "_raw": json_str[:500]}
+        logger.warning("Failed to parse tool arguments")
+        return {"_parse_error": True}
 
     async def _execute_tools(
         self, tool_calls: List[_ToolCall], results_out: List[Dict]
@@ -684,14 +873,28 @@ class AgentExecutor:
                         call.args,
                     )
 
-                self.ctx.record_sources(
-                    capture_tool_source_candidates(self.ctx, call, result)
-                )
-
                 # Keep the untouched backend result in the canonical notebook.
                 # Localization is a model-facing projection and must happen only
                 # after accumulation so compact handles cannot erase references.
-                self.ctx.accumulate_tool_result(call.name, result)
+                admission = self.ctx.accumulate_tool_result(call.name, result)
+                if not admission.accepted:
+                    feedback, model_result = _notebook_rejection_feedback(admission)
+                    self.ctx.note_nonfatal_error(feedback)
+                    results_out.append({"tool": call.name, "result": model_result})
+                    yield {
+                        "event": "tool_end",
+                        "data": {
+                            "tool": call.name,
+                            "result": feedback,
+                            "call_id": call.call_id,
+                        },
+                    }
+                    continue
+
+                if admission.changed:
+                    self.ctx.record_sources(
+                        capture_tool_source_candidates(self.ctx, call, result)
+                    )
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
                 self.ctx.record_tool_success()
@@ -903,9 +1106,7 @@ class AgentExecutor:
 
             # Recalculate against the actual bounded state retained by the run.
             post_compaction = build_evidence_context(self.ctx)
-            self.ctx.set_evidence_token_count(
-                self.llm.count_tokens(post_compaction)
-            )
+            self.ctx.set_evidence_token_count(self.llm.count_tokens(post_compaction))
 
     async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
         """Call LLM to condense existing evidence into a core summary."""
@@ -933,6 +1134,7 @@ class AgentExecutor:
             return None
 
     async def _emit_llm_call(self, model: Optional[str], reasoning: str):
+        briefing = self.ctx.project_briefing
         await emit(
             self.ctx.session_id,
             "agent",
@@ -944,6 +1146,14 @@ class AgentExecutor:
                 "turn": self.ctx.attempt_count,
                 "evidence_state": {
                     **self.ctx.notebook.capacity_report(),
+                },
+                "project_briefing": {
+                    "mode": briefing.mode,
+                    "reason": briefing.requested_reason,
+                    "loaded": briefing.loaded,
+                    "load_count": briefing.load_count,
+                    "transition_count": briefing.transition_count,
+                    "content_token_count": briefing.content_token_count,
                 },
             },
             verbose_only=True,

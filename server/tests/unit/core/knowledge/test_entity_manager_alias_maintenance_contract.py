@@ -10,7 +10,6 @@ def seed_entity(
     entity_type="person",
     topic="Identity",
     project_id="project-1",
-    embedding=None,
 ):
     entities._populate_cache(
         {
@@ -20,42 +19,24 @@ def seed_entity(
             "type": entity_type,
             "topic": topic,
             "project_id": project_id,
-            "embedding": embedding,
         }
     )
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-def test_validate_existing_confirms_existing_and_rejects_missing_or_removed(
+def test_alias_staging_keeps_the_already_selected_homonym_id(
     entity_manager_harness,
 ):
     entities, _, _ = entity_manager_harness
-    seed_entity(entities, 101, "Robert Chen", aliases=["Bob"])
+    seed_entity(entities, 101, "Alex Kim", aliases=["Alex"])
+    seed_entity(entities, 202, "Alex Kim", aliases=["A. Kim"])
 
-    assert entities.validate_existing("Robert Chen", ["Robert Chen"]) == (
-        101,
-        False,
-        [],
-    )
-    assert entities.validate_existing("Robert Chen", ["Bobby", "Bob"]) == (
-        101,
-        True,
-        ["Bobby"],
-    )
-    assert entities.validate_existing("Missing Person", ["Alias"]) == (
-        None,
-        False,
-        [],
-    )
+    aliases = entities._new_aliases_for_selected_entity(202, ["Alexandra"])
+    entities.commit_new_aliases(202, aliases)
 
-    entities.remove_entities([101])
-
-    assert entities.validate_existing("Robert Chen", ["Bobby"]) == (
-        None,
-        False,
-        [],
-    )
+    assert aliases == ["Alexandra"]
+    assert entities.get_entity_ids_for_name("Alexandra") == {202}
 
 
 @pytest.mark.storage

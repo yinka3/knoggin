@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from common.scoping import require_scope_value
-from core.knowledge.maintenance_reviews import review_from_row
+from core.knowledge.maintenance.maintenance_reviews import (
+    ConflictResolutionRecord,
+    review_from_row,
+)
 
 
 class ConflictReader:
@@ -21,12 +24,18 @@ class ConflictReader:
     ) -> dict | None:
         row = await self.client.fetch_one(
             """
-            SELECT review_id, user_name, scope, project_id, kind, dedupe_key,
-                   evidence_refs, evidence_snapshot, reasoning, proposed_plan,
-                   expected_state, status, created_at, resolved_at
-            FROM public.maintenance_reviews
-            WHERE review_id = %s AND user_name = %s AND project_id = %s
-              AND kind = 'relationship_conflict'
+            SELECT review.review_id, review.user_name, review.scope,
+                   review.project_id, review.kind, review.dedupe_key,
+                   review.evidence_refs, review.evidence_snapshot, review.reasoning,
+                   review.proposed_plan, review.expected_state, review.status,
+                   review.created_at, review.resolved_at,
+                   resolution.resolution_kind, resolution.resolution_note,
+                   resolution.resolved_by, resolution.resolved_at AS resolution_resolved_at
+            FROM public.maintenance_reviews AS review
+            LEFT JOIN public.maintenance_review_resolutions AS resolution
+              ON resolution.review_id = review.review_id
+            WHERE review.review_id = %s AND review.user_name = %s
+              AND review.project_id = %s AND review.kind = 'relationship_conflict'
             """,
             (
                 require_scope_value(conflict_id, "conflict_id", "get_conflict"),
@@ -36,5 +45,20 @@ class ConflictReader:
         )
         if row is None:
             return None
-        review = review_from_row(dict(row))
-        return review.model_dump(mode="json")
+        payload = dict(row)
+        resolution_payload = {
+            "resolution_kind": payload.pop("resolution_kind", None),
+            "resolution_note": payload.pop("resolution_note", None),
+            "resolved_by": payload.pop("resolved_by", None),
+            "resolved_at": payload.pop("resolution_resolved_at", None),
+        }
+        review = review_from_row(payload)
+        detail = review.model_dump(mode="json")
+        detail["resolution"] = (
+            ConflictResolutionRecord.model_validate(resolution_payload).model_dump(
+                mode="json"
+            )
+            if resolution_payload["resolution_kind"] is not None
+            else None
+        )
+        return detail

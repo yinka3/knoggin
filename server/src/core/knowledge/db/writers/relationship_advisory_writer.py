@@ -7,7 +7,7 @@ from common.scoping import require_scope_value
 from core.knowledge.db.writers.maintenance_review_writer import (
     MaintenanceReviewWriter,
 )
-from core.knowledge.maintenance_reviews import RelationshipAdvisoryPlan
+from core.knowledge.maintenance.maintenance_reviews import RelationshipAdvisoryPlan
 from core.knowledge.relationship_advisories import (
     RelationshipAdvisory,
     RelationshipAdvisoryDecision,
@@ -111,7 +111,6 @@ class RelationshipAdvisoryWriter:
             action=action,
             relationship_type=relationship_type,
             note=note,
-            decided_by=decided_by,
         )
         status = "open" if decision.disposition == "pending" else (
             "dismissed" if decision.disposition in {"dismissed", "suppressed"} else "applied"

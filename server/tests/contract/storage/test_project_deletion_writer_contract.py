@@ -1,8 +1,11 @@
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
+from core.knowledge.documents.filesystem import ProjectFilesystemFactory
+from core.project.project_manager import ProjectManager, ProjectStatus
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -22,18 +25,65 @@ class RecordingCursor:
             raise RuntimeError("injected project delete failure")
         if normalized.startswith("SELECT project_id FROM public.projects"):
             self._result = {"project_id": "project-1"} if self.project_exists else None
+            self._results = []
             self.rowcount = 1 if self.project_exists else 0
+        elif normalized.startswith("SELECT entity.entity_id FROM public.entities"):
+            self._result = None
+            self._results = [{"entity_id": 42}]
+            self.rowcount = 1
+        elif normalized.startswith("SELECT DISTINCT context.project_id"):
+            self._result = None
+            self._results = []
+            self.rowcount = 0
+        elif normalized.startswith("SELECT project_id FROM public.project_read_scopes"):
+            self._result = None
+            self._results = []
+            self.rowcount = 0
+        elif normalized.startswith("SELECT merge_id FROM public.entity_global_merge_audits"):
+            self._result = None
+            self._results = []
+            self.rowcount = 0
         elif normalized.startswith("DELETE FROM public.projects"):
             self._result = {"project_id": "project-1"}
+            self._results = []
             self.rowcount = 1
-        elif normalized.startswith("SELECT entity_id FROM public.project_entity_contexts"):
+        elif normalized.startswith(
+            "SELECT entity_id, user_name, canonical_name FROM public.entities"
+        ):
+            self._result = {
+                "entity_id": 42,
+                "user_name": "ada",
+                "canonical_name": "Delete Me",
+            }
+            self._results = []
+            self.rowcount = 1
+        elif normalized.startswith("SELECT alias FROM public.entity_aliases"):
+            self._result = None
+            self._results = []
+            self.rowcount = 0
+        elif normalized.startswith(
+            "SELECT project_id FROM public.project_entity_contexts"
+        ):
+            self._result = None
+            self._results = []
+            self.rowcount = 0
+        elif normalized.startswith(
+            "SELECT name, project_id, source_kind, source_key FROM public.entity_name_supports"
+        ):
+            self._result = None
+            self._results = []
+            self.rowcount = 0
+        elif normalized.startswith("WITH RECURSIVE redirect_targets"):
+            self._result = None
             self._results = [{"entity_id": 42}]
             self.rowcount = 1
         elif normalized.startswith("DELETE FROM public.entities"):
             self._results = [{"entity_id": 42}]
+            self._result = None
             self.rowcount = 1
         else:
             self._result = None
+            self._results = []
             self.rowcount = 1
 
     async def fetchone(self):
@@ -70,7 +120,9 @@ async def test_project_deletion_uses_one_project_cascade_root_atomically():
     deleted = await writer.delete_project(user_name="ada", project_id="project-1")
 
     assert deleted is not None
-    assert set(deleted) == {"entities", "projects"}
+    assert deleted["entities"] == 1
+    assert deleted["projects"] == 1
+    assert deleted["affected_entity_ids"] == [42]
     assert client.transaction_exits == ["commit"]
 
     queries = [query for query, _ in client.cursor.calls]
@@ -80,6 +132,17 @@ async def test_project_deletion_uses_one_project_cascade_root_atomically():
     assert any("DELETE FROM public.entities" in query for query in queries)
     assert not any("DELETE FROM public.messages" in query for query in queries)
     assert not any("DELETE FROM public.project_documents" in query for query in queries)
+    cleanup_insert = next(
+        index
+        for index, query in enumerate(queries)
+        if query.startswith("INSERT INTO public.project_file_cleanup_tasks")
+    )
+    project_delete = next(
+        index
+        for index, query in enumerate(queries)
+        if query.startswith("DELETE FROM public.projects")
+    )
+    assert cleanup_insert < project_delete
     assert any(query.startswith("DELETE FROM public.projects") for query in queries)
 
 
@@ -179,6 +242,78 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
     assert await real_postgres_client.fetch_one(
         "SELECT count(*) AS count FROM public.projects WHERE project_id = 'project-2'"
     ) == {"count": 1}
+    assert await writer.list_pending_file_cleanup_project_ids(user_name="ada") == [
+        "project-1"
+    ]
+
+    await writer.complete_file_cleanup(user_name="ada", project_id="project-1")
+
+    assert await writer.list_pending_file_cleanup_project_ids(user_name="ada") == []
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_project_manager_retries_file_cleanup_after_committed_deletion(
+    real_postgres_client,
+    tmp_path,
+    monkeypatch,
+):
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = filesystem_factory.for_project("project-1")
+    filesystem.write_bytes("PROJECT.md", b"# Research\n")
+    filesystem.write_bytes("documents/source.md", b"owned source")
+    manager = ProjectManager(
+        resources=SimpleNamespace(postgres=real_postgres_client),
+        user_name="ada",
+        filesystem_factory=filesystem_factory,
+    )
+    remove_project_directory = filesystem_factory.remove_project_directory
+
+    def fail_cleanup(project_id):
+        raise OSError(f"interrupted cleanup for {project_id}")
+
+    monkeypatch.setattr(filesystem_factory, "remove_project_directory", fail_cleanup)
+    deleted = await manager.delete_project("project-1")
+
+    assert deleted["status"] == ProjectStatus.DELETED.value
+    assert deleted["file_cleanup_status"] == "pending"
+    assert filesystem.root.exists()
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.projects WHERE project_id = 'project-1'"
+    ) == {"count": 0}
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT count(*) AS count
+        FROM public.project_file_cleanup_tasks
+        WHERE user_name = 'ada' AND project_id = 'project-1'
+        """
+    ) == {"count": 1}
+
+    monkeypatch.setattr(
+        filesystem_factory,
+        "remove_project_directory",
+        remove_project_directory,
+    )
+    restarted_manager = ProjectManager(
+        resources=SimpleNamespace(postgres=real_postgres_client),
+        user_name="ada",
+        filesystem_factory=filesystem_factory,
+    )
+    scheduler_starts = []
+
+    async def start_scheduler():
+        scheduler_starts.append(True)
+
+    restarted_manager.maintenance_scheduler = SimpleNamespace(start=start_scheduler)
+    await restarted_manager.start()
+
+    assert scheduler_starts == [True]
+    assert not filesystem.root.exists()
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.project_file_cleanup_tasks"
+    ) == {"count": 0}
 
 
 @pytest.mark.storage
@@ -233,6 +368,15 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             """
             INSERT INTO entity_aliases (entity_id, alias)
             VALUES (42, 'P1'), (52, 'P2'), (60, 'Shared')
+            """
+        )
+        await cur.execute(
+            """
+            INSERT INTO entity_name_supports (
+                entity_id, name, project_id, source_kind, source_key
+            ) VALUES
+                (60, 'Shared identity', 'project-2', 'project', 'project-2'),
+                (60, 'Shared', 'project-2', 'project', 'project-2')
             """
         )
         await cur.execute(

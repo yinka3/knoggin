@@ -69,6 +69,7 @@ def test_reclassification_maps_old_labels_to_canonical_type_and_topic():
         "new_type": "Project",
         "new_topic": "Software Development",
     }
+    assert "embedding_rebuild_required" not in plan.to_dict()
 
 
 @pytest.mark.unit

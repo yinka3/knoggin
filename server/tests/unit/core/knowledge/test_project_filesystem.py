@@ -99,3 +99,55 @@ def test_project_filesystem_factory_creates_isolated_project_roots(tmp_path):
     assert not second.root.exists()
     with pytest.raises(ValueError, match="path component"):
         factory.for_project("../outside")
+
+
+def test_project_filesystem_factory_removes_only_the_owned_project_tree(tmp_path):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    filesystem = factory.for_project("project-1")
+    filesystem.write_bytes("workspace/notes.md", b"owned workspace file")
+    filesystem.write_bytes("documents/source.md", b"owned document")
+
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("keep me")
+    outside_directory = tmp_path / "outside-directory"
+    outside_directory.mkdir()
+    outside_child = outside_directory / "keep.md"
+    outside_child.write_text("keep me too")
+    os.symlink(outside_file, filesystem.root / "outside-link.txt")
+    os.symlink(outside_directory, filesystem.root / "outside-link-dir")
+
+    assert factory.remove_project_directory("project-1") is True
+    assert not os.path.lexists(filesystem.root)
+    assert outside_file.read_text() == "keep me"
+    assert outside_child.read_text() == "keep me too"
+    assert factory.remove_project_directory("project-1") is False
+
+    linked_project = factory.library_root / "linked-project"
+    os.symlink(outside_directory, linked_project)
+
+    assert factory.remove_project_directory("linked-project") is True
+    assert not os.path.lexists(linked_project)
+    assert outside_child.read_text() == "keep me too"
+
+
+@pytest.mark.parametrize("project_id", [".", ".."])
+def test_project_removal_rejects_dot_paths_and_preserves_siblings(tmp_path, project_id):
+    factory = ProjectFilesystemFactory(tmp_path / "projects")
+    sibling = factory.for_project("other-project")
+    sibling.write_bytes("keep.txt", b"preserve")
+
+    with pytest.raises(ValueError, match="path component"):
+        factory.remove_project_directory(project_id)
+
+    assert sibling.read_bytes("keep.txt") == b"preserve"
+
+
+def test_project_filesystem_factory_rejects_a_symlinked_library_root(tmp_path):
+    outside_directory = tmp_path / "outside-directory"
+    outside_directory.mkdir()
+    linked_root = tmp_path / "projects"
+    os.symlink(outside_directory, linked_root)
+    factory = ProjectFilesystemFactory(linked_root)
+
+    with pytest.raises(ValueError, match="library root"):
+        factory.remove_project_directory("project-1")

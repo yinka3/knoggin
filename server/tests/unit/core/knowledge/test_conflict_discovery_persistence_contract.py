@@ -1,12 +1,21 @@
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from core.knowledge.conflicts import (
+from common.schema.evidence import (
+    EvidenceBundle,
+    EvidenceNode,
+    EvidencePointer,
+    EvidenceSubject,
+)
+from core.knowledge.conflict.conflicts import (
     ConflictDiscoveryCursor,
     ConflictDiscoveryPackage,
     LLMConflictCandidate,
 )
+from core.knowledge.evidence_service import EvidenceService
 from core.project.maintenance_service import ProjectMaintenanceService
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -28,10 +37,36 @@ def _observation(observation_id: int) -> dict:
     }
 
 
+def _bundle(observation_id: int, token: str) -> EvidenceBundle:
+    pointer = EvidencePointer.for_observation(observation_id)
+    return EvidenceBundle(
+        subject=EvidenceSubject(
+            kind="relationship_observation", identifier=str(observation_id)
+        ),
+        nodes=(EvidenceNode(pointer=pointer, status="active"),),
+        edges=(),
+        total_nodes=1,
+        total_edges=0,
+        state_token=token * 64,
+    )
+
+
+class EvidenceStore:
+    def __init__(self, bundles: dict[int, EvidenceBundle]) -> None:
+        self.bundles = bundles
+        self.calls = []
+
+    async def get_relationship_observations_evidence(self, observation_ids, **_kwargs):
+        self.calls.append(tuple(observation_ids))
+        return tuple(self.bundles[observation_id] for observation_id in observation_ids)
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_transaction():
-    evidence = [_observation(10), _observation(11)]
+    evidence = [_observation(10), _observation(11), _observation(12)]
+    bundles = (_bundle(10, "a"), _bundle(11, "b"), _bundle(12, "c"))
+    expected_snapshot = EvidenceService.snapshot(bundles[:2])
     review = {
         "review_id": "review-1",
         "user_name": "ada",
@@ -40,9 +75,10 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         "kind": "relationship_conflict",
         "dedupe_key": "unused",
         "evidence_refs": [
-            {"kind": "relationship_observation", "identifier": "10"}
+            {"kind": "relationship_observation", "identifier": "10"},
+            {"kind": "relationship_observation", "identifier": "11"},
         ],
-        "evidence_snapshot": {},
+        "evidence_snapshot": expected_snapshot.model_dump(mode="json"),
         "reasoning": "The evidence may describe incompatible states.",
         "proposed_plan": {
             "kind": "conflict_resolution",
@@ -52,11 +88,13 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         "status": "open",
     }
     client = RecordingPostgresClient(
-        fetch_all_results=[evidence],
         fetch_one_results=[None, review],
     )
+    store = EvidenceStore({10: bundles[0], 11: bundles[1], 12: bundles[2]})
     service = ProjectMaintenanceService(
-        resources=type("Resources", (), {"postgres": client, "knowledge_store": None})(),
+        resources=type(
+            "Resources", (), {"postgres": client, "knowledge_store": store}
+        )(),
         user_name="ada",
         project_lookup=lambda _project_id: None,
         active_projects={},
@@ -69,6 +107,7 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         next_observation_id=11,
         prompt="RELATIONSHIP EVIDENCE",
         estimated_tokens=12,
+        evidence_bundles=bundles,
     )
     candidate = LLMConflictCandidate(
         evidence_ids=[10, 11],
@@ -81,7 +120,16 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
 
     assert written == 1
     assert client.transaction_enters == 1
-    assert any("INSERT INTO public.maintenance_reviews" in call[1] for call in client.calls)
+    assert any(
+        "INSERT INTO public.maintenance_reviews" in call[1] for call in client.calls
+    )
+    review_insert = next(
+        call
+        for call in client.calls
+        if "INSERT INTO public.maintenance_reviews" in call[1]
+    )
+    assert json.loads(review_insert[2][7]) == expected_snapshot.model_dump(mode="json")
+    assert store.calls == [(10, 11)]
     cursor_call = next(
         call
         for call in client.calls
@@ -89,3 +137,41 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
     )
     assert cursor_call[2] == (11, "ada", "project-1")
     service._conflict_service.notify_detection.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_direct_conflict_report_captures_only_its_cited_evidence():
+    bundles = (_bundle(10, "a"), _bundle(11, "b"), _bundle(12, "c"))
+    store = EvidenceStore({10: bundles[0], 11: bundles[1], 12: bundles[2]})
+
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(postgres=object(), knowledge_store=store),
+        user_name="ada",
+        project_lookup=project_lookup,
+        active_projects={},
+        project_leases={},
+    )
+    recorded = []
+
+    class ConflictService:
+        async def record_detection(self, **kwargs):
+            recorded.append(kwargs)
+            return SimpleNamespace()
+
+    service._conflict_service = ConflictService()
+
+    await service.record_conflict_detection(
+        "project-1",
+        origin="user_created",
+        kind="possible_contradiction",
+        rationale="These observations disagree.",
+        confidence=0.7,
+        evidence_ids=[11, 10],
+    )
+
+    assert recorded[0]["evidence_snapshot"] == EvidenceService.snapshot(bundles[:2])
+    assert store.calls == [(10, 11)]

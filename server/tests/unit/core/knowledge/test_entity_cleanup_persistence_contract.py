@@ -23,6 +23,7 @@ async def test_entity_cleanup_preview_is_project_scoped_and_includes_evidence_co
     assert "message_reference_count" in query
     assert "relationship_count" in query
     assert "episode_reference_count" in query
+    assert "context_block_association_count" in query
     assert params == ("ada", "project-1", 1, 25)
 
 
@@ -47,7 +48,15 @@ async def test_selected_entity_cleanup_validates_ownership_before_deleting():
     assert "DELETE FROM project_entity_contexts" in "\n".join(
         call[1] for call in client.calls
     )
+    assert "DELETE FROM context_block_entities" in "\n".join(
+        call[1] for call in client.calls
+    )
     assert "DELETE FROM entities" in "\n".join(call[1] for call in client.calls)
+    assert any(
+        "MATCH (e:Entity)-[r:RELATED_TO]-(target:Entity)" in call[1]
+        and '"project_id": "project-1"' in call[2][0]
+        for call in client.calls
+    )
 
 
 @pytest.mark.unit

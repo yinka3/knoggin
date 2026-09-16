@@ -205,6 +205,10 @@ class SessionRuntime:
         """Execute one already-persisted, exclusively admitted run."""
 
         exchange_outcome = "failed"
+        # Source candidates are authorized while the Agent run is admitted.
+        # Keep that scope through finalization retries instead of consulting a
+        # mutable runtime list after the response has been produced.
+        captured_readable_project_ids = list(self.project.readable_project_ids)
         task = asyncio.current_task()
         if task is None:
             await self._release_agent_run(None)
@@ -253,6 +257,7 @@ class SessionRuntime:
                         user_msg_id=accepted.id,
                         source_candidates=self._response_source_candidates(response),
                         artifact=self._response_artifact(response),
+                        readable_project_ids=captured_readable_project_ids,
                     )
                     response = dict(response)
                     response["assistant_message_id"] = commit["message_id"]
@@ -405,6 +410,7 @@ class SessionRuntime:
         user_msg_id: Optional[int] = None,
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
         artifact: ArtifactDraft | None = None,
+        readable_project_ids: Optional[List[str]] = None,
     ) -> dict[str, Any]:
         """Add assistant turn to conversation log."""
         if metadata is None:
@@ -422,6 +428,7 @@ class SessionRuntime:
             user_msg_id=user_msg_id,
             source_candidates=source_candidates,
             artifact=artifact,
+            readable_project_ids=readable_project_ids,
         )
         self._signal_exchange_closed()
         return {
@@ -438,9 +445,17 @@ class SessionRuntime:
         user_msg_id: Optional[int] = None,
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
         artifact: ArtifactDraft | None = None,
+        readable_project_ids: Optional[List[str]] = None,
     ) -> tuple[int, list[str]]:
         """Atomically persist an assistant response and close its user exchange."""
         max_retries = 3
+        if self.project is None:
+            raise RuntimeError("Session project runtime is unavailable")
+        captured_readable_project_ids = list(
+            readable_project_ids
+            if readable_project_ids is not None
+            else self.project.readable_project_ids
+        )
 
         for attempt in range(max_retries):
             try:
@@ -460,13 +475,11 @@ class SessionRuntime:
             }
                 ]
 
-                if self.project is None:
-                    raise RuntimeError("Session project runtime is unavailable")
                 persisted_id, source_ref_ids, _created = (
                     await self.knowledge_store.finalize_assistant_exchange(
                         agent_msg_batch[0],
                         source_candidates or [],
-                        readable_project_ids=self.project.readable_project_ids,
+                        readable_project_ids=captured_readable_project_ids,
                         artifact=artifact,
                     )
                 )

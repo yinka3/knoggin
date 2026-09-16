@@ -9,6 +9,7 @@ ImpactKind = Literal[
     "relationship_observation",
     "relationship",
     "project_entity_context",
+    "context_block_entity",
     "episode_entity_link",
     "merge_mutation",
     "domain_config",

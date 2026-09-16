@@ -125,16 +125,19 @@ class GraphWriter:
                     "Entity ID 1 is occupied by a non-identity entity; "
                     "reset the development database before startup"
                 )
+            stored_canonical_name = (
+                str(existing["canonical_name"]) if existing else user_name
+            )
+            identity["canonical_name"] = stored_canonical_name
 
             await cur.execute(
                 """
                 INSERT INTO entities (
                     entity_id,
                     user_name,
-                    canonical_name,
-                    embedding
+                    canonical_name
                 )
-                VALUES (%s, %s, %s, NULL)
+                VALUES (%s, %s, %s)
                 ON CONFLICT (entity_id) DO NOTHING
                 """,
                 (
@@ -147,6 +150,23 @@ class GraphWriter:
                 "DELETE FROM entity_aliases WHERE entity_id = %s",
                 (IDENTITY_ENTITY_ID,),
             )
+            current_names = [stored_canonical_name, *clean_aliases]
+            await cur.execute(
+                """
+                DELETE FROM public.entity_name_supports
+                WHERE entity_id = %s
+                  AND source_kind = 'user'
+                """,
+                (IDENTITY_ENTITY_ID,),
+            )
+            await cur.execute(
+                """
+                DELETE FROM public.entity_name_supports
+                WHERE entity_id = %s
+                  AND name <> ALL(%s)
+                """,
+                (IDENTITY_ENTITY_ID, current_names),
+            )
             for alias in clean_aliases:
                 await cur.execute(
                     """
@@ -156,32 +176,21 @@ class GraphWriter:
                     """,
                     (IDENTITY_ENTITY_ID, alias),
                 )
+            for name in current_names:
+                await cur.execute(
+                    """
+                    INSERT INTO public.entity_name_supports (
+                        entity_id, name, project_id, source_kind, source_key
+                    ) VALUES (%s, %s, NULL, 'user', %s)
+                    ON CONFLICT (entity_id, name, source_kind, source_key)
+                    DO NOTHING
+                    """,
+                    (IDENTITY_ENTITY_ID, name, user_name),
+                )
             await self.projection.project_identity(cur, identity)
 
         return identity
 
-    @_storage_write("update_entity_embedding")
-    async def update_entity_embedding(
-        self, entity_id: int, embedding: List[float], *, project_id: str
-    ) -> None:
-        project_id = self._require_project_id(project_id, "update_entity_embedding")
-        async with self.client.transaction() as cur:
-            await cur.execute(
-                """
-                UPDATE entities
-                SET embedding = %s::vector
-                WHERE entity_id = %s
-                  AND (
-                      entity_id = %s
-                      OR EXISTS (
-                          SELECT 1 FROM project_entity_contexts context
-                          WHERE context.entity_id = entities.entity_id
-                            AND context.project_id = %s
-                      )
-                  )
-                """,
-                (json.dumps(embedding), entity_id, IDENTITY_ENTITY_ID, project_id),
-            )
     @_storage_write("update_entity_aliases")
     async def update_entity_aliases(
         self, alias_updates: Dict[int, List[str]], *, project_id: str, cur=None
@@ -222,6 +231,41 @@ class GraphWriter:
                         """,
                         (
                             item["id"],
+                            alias,
+                            item["id"],
+                            IDENTITY_ENTITY_ID,
+                            project_id,
+                        ),
+                    )
+                    await cur.execute(
+                        """
+                        INSERT INTO public.entity_name_supports (
+                            entity_id, name, project_id, source_kind, source_key
+                        )
+                        SELECT %s, %s, %s, 'project', %s
+                        WHERE btrim(%s) <> ''
+                          AND EXISTS (
+                              SELECT 1
+                              FROM entities entity
+                              WHERE entity.entity_id = %s
+                                AND (
+                                    entity.entity_id = %s
+                                    OR EXISTS (
+                                        SELECT 1
+                                        FROM project_entity_contexts context
+                                        WHERE context.entity_id = entity.entity_id
+                                          AND context.project_id = %s
+                                    )
+                                )
+                          )
+                        ON CONFLICT (entity_id, name, source_kind, source_key)
+                        DO NOTHING
+                        """,
+                        (
+                            item["id"],
+                            alias,
+                            project_id,
+                            project_id,
                             alias,
                             item["id"],
                             IDENTITY_ENTITY_ID,
@@ -309,6 +353,12 @@ class GraphWriter:
             """,
             (project_id, entity_ids, entity_ids),
         )
+        await self.projection.replace_relationships_for_entities(
+            cur,
+            project_id,
+            entity_ids,
+            [],
+        )
         await cur.execute(
             """
             DELETE FROM message_entity_refs ref
@@ -322,6 +372,13 @@ class GraphWriter:
         await cur.execute(
             """
             DELETE FROM episode_entities
+            WHERE project_id = %s AND entity_id = ANY(%s)
+            """,
+            (project_id, entity_ids),
+        )
+        await cur.execute(
+            """
+            DELETE FROM context_block_entities
             WHERE project_id = %s AND entity_id = ANY(%s)
             """,
             (project_id, entity_ids),

@@ -4,8 +4,9 @@ import asyncio
 import re
 import threading
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from cachetools import LRUCache, cached
 from loguru import logger
@@ -16,19 +17,23 @@ from common.schema.ingestion.contracts import (
     ContextBlockEntityAssociation,
     ContextBlockMention,
     EntityWrite,
+    ProjectEntityClassification,
     ResolvedContextBlockMention,
-    ValidationIssue,
 )
 from common.schema.settings import EntityResolutionSettings
-from common.scoping import require_scope_value, require_visible_project_ids
+from common.scoping import (
+    IDENTITY_ENTITY_ID,
+    require_scope_value,
+    require_visible_project_ids,
+)
 from common.utils.events import emit_sync
 from core.ingestion.policy import IngestionPolicy
-from core.knowledge.entity.embedding import (
-    build_entity_embedding_text,
+from core.knowledge.entity.candidates import (
+    EntityCandidateSnapshot,
+    entity_record_for_project,
 )
 from core.knowledge.entity.index import EntityIndex
 from core.knowledge.entity.profile import EntityProfile
-from core.knowledge.services.embedding_service import EmbeddingService
 
 if TYPE_CHECKING:
     from core.knowledge.store import KnowledgeStore
@@ -41,7 +46,6 @@ class EntityCandidate:
     signals: set[str] = field(default_factory=set)
     exact_score: Optional[float] = None
     fuzzy_score: Optional[float] = None
-    vector_score: Optional[float] = None
 
     def __iter__(self):
         yield self.entity_id
@@ -60,7 +64,6 @@ class EntityCandidate:
                 and self.signals == other.signals
                 and self.exact_score == other.exact_score
                 and self.fuzzy_score == other.fuzzy_score
-                and self.vector_score == other.vector_score
             )
         return False
 
@@ -71,8 +74,6 @@ class EntityCandidate:
             self.exact_score = max(self.exact_score or 0.0, score)
         elif signal == "fuzzy":
             self.fuzzy_score = max(self.fuzzy_score or 0.0, score)
-        elif signal == "vector":
-            self.vector_score = max(self.vector_score or 0.0, score)
 
     @property
     def has_direct_name_evidence(self) -> bool:
@@ -83,14 +84,12 @@ class EntityResolver:
     def __init__(
         self,
         knowledge_store: "KnowledgeStore",
-        embedding_service: EmbeddingService,
         project_id: str,
         readable_project_ids: List[str],
         fuzzy_substring_threshold: int = 75,
         fuzzy_non_substring_threshold: int = 91,
         generic_token_freq: int = 10,
         candidate_fuzzy_threshold: int = 85,
-        candidate_vector_threshold: float = 0.85,
     ):
 
         self.knowledge_store = knowledge_store
@@ -103,14 +102,12 @@ class EntityResolver:
             readable_project_ids,
             "EntityResolver",
         )
-        self.embedding_service = embedding_service
         self._index = EntityIndex()
         self._alias_version = 0
         self._lock = threading.RLock()
         self._resolution_lock = asyncio.Lock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
-        self.candidate_vector_threshold = candidate_vector_threshold
         self.fuzzy_substring_threshold = fuzzy_substring_threshold
         self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
         self.generic_token_freq = generic_token_freq
@@ -132,7 +129,6 @@ class EntityResolver:
         self.fuzzy_non_substring_threshold = config.fuzzy_non_substring_threshold
         self.generic_token_freq = config.generic_token_freq
         self.candidate_fuzzy_threshold = config.candidate_fuzzy_threshold
-        self.candidate_vector_threshold = config.candidate_vector_threshold
 
         logger.info(
             "EntityResolver settings updated: "
@@ -141,190 +137,11 @@ class EntityResolver:
             f"freq={self.generic_token_freq}"
         )
 
-    def mention_dedupe_key(
-        self,
-        name: str,
-        mention_type: str,
-        topic: str,
-        policy: IngestionPolicy,
-    ) -> str:
-        """Return the conservative in-batch identity key for one mention."""
+    @staticmethod
+    def _candidate_search_key(name: str) -> str:
+        """Normalize a surface for reusable durable/cached candidate searches."""
 
-        del mention_type, topic, policy
         return name.strip().casefold()
-
-    async def candidate_entries_for_mentions(
-        self,
-        mentions: List[Tuple[int, str, str, str]],
-        *,
-        policy: IngestionPolicy,
-        parent_work_record=None,
-    ) -> List[Optional[Tuple[str, Any]]]:
-        """Build reusable candidate searches under one batch policy snapshot."""
-
-        unique_names = list({name for _, name, _, _ in mentions if name})
-        embedding_map = {}
-        if unique_names:
-            if getattr(
-                self.embedding_service,
-                "supports_model_work_records",
-                False,
-            ):
-                embeddings = await self.embedding_service.encode(
-                    unique_names,
-                    parent_work_record=parent_work_record,
-                )
-            else:
-                embeddings = await self.embedding_service.encode(unique_names)
-            embedding_map = dict(zip(unique_names, embeddings))
-
-        entries: List[Optional[Tuple[str, object]]] = []
-        seen_by_dedupe_key: Dict[Tuple[str, str, str], Tuple[str, object]] = {}
-        for _, name, mention_type, topic in mentions:
-            if not name:
-                entries.append(None)
-                continue
-            dedupe_key = self.mention_dedupe_key(name, mention_type, topic, policy)
-            if dedupe_key not in seen_by_dedupe_key:
-                candidates = await self.get_candidate_ids(
-                    name,
-                    precomputed_embedding=embedding_map.get(name),
-                    candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
-                    candidate_vector_threshold=policy.candidate_vector_threshold,
-                    strict=True,
-                )
-                seen_by_dedupe_key[dedupe_key] = (
-                    ("candidates", candidates) if candidates else ("new", None)
-                )
-            entries.append(seen_by_dedupe_key[dedupe_key])
-        return entries
-
-    async def resolve_mentions(
-        self,
-        mentions: List[Tuple[int, str, str, str]],
-        *,
-        messages: Iterable[Any],
-        policy: IngestionPolicy,
-        parent_work_record=None,
-        allocate_entity_id,
-        issues: Optional[List[ValidationIssue]] = None,
-    ) -> Dict[str, Any]:
-        """Resolve mentions and prepare the durable entity changes for a batch.
-
-        The resolver owns the identity decision: candidate acceptance, in-batch
-        deduplication, alias staging, and pending entity allocation.  The caller
-        only applies the returned aggregate state after this decision completes.
-        """
-
-        async with self.resolution_lock:
-            msg_text_map = {
-                message["id"]: message["message"] for message in messages
-            }
-            entity_ids: List[int] = []
-            new_ids: set[int] = set()
-            alias_ids: set[int] = set()
-            entity_msg_map: Dict[int, List[int]] = {}
-            created_in_batch: Dict[Tuple[str, str, str], int] = {}
-            alias_updates: Dict[int, List[str]] = {}
-            pending_entity_writes: Dict[int, EntityWrite] = {}
-
-            mention_candidates = await self.candidate_entries_for_mentions(
-                mentions,
-                policy=policy,
-                parent_work_record=parent_work_record,
-            )
-
-            for index, (msg_id, name, mention_type, topic) in enumerate(mentions):
-                if not name:
-                    continue
-
-                entry = mention_candidates[index]
-                if entry is None:
-                    continue
-
-                dedupe_key = self.mention_dedupe_key(
-                    name, mention_type, topic, policy
-                )
-                entity_id = None
-
-                if entry[0] == "candidates":
-                    message_text = msg_text_map.get(msg_id, "")
-                    for candidate in entry[1]:
-                        candidate_id = candidate.entity_id
-                        profile = await self.get_profile(candidate_id)
-                        compatibility = (
-                            self.schema_compatibility(
-                                mention_type,
-                                topic,
-                                profile,
-                                policy,
-                            )
-                            if profile
-                            else "missing_profile"
-                        )
-                        if (
-                            candidate.score < policy.resolution_threshold
-                            or profile is None
-                            or not self.is_profile_visible(profile)
-                        ):
-                            continue
-
-                        if self.should_accept_candidate(
-                            name,
-                            mention_type,
-                            topic,
-                            message_text,
-                            profile,
-                            candidate_id,
-                            policy=policy,
-                            compatibility=compatibility,
-                            candidate=candidate,
-                        ):
-                            entity_id = candidate_id
-                            existing_id, aliases_added, new_aliases = (
-                                self.validate_existing(
-                                    profile.canonical_name,
-                                    [name.strip()],
-                                )
-                            )
-                            if existing_id and aliases_added:
-                                alias_ids.add(existing_id)
-                                alias_updates.setdefault(existing_id, []).extend(
-                                    new_aliases
-                                )
-                            break
-
-                if entity_id is None:
-                    if dedupe_key in created_in_batch:
-                        entity_id = created_in_batch[dedupe_key]
-                    else:
-                        entity_id = await allocate_entity_id()
-                        pending_entity_writes[
-                            entity_id
-                        ] = await self.prepare_pending_entity(
-                            entity_id,
-                            name.strip(),
-                            [name.strip()],
-                            mention_type,
-                            topic,
-                        )
-                        new_ids.add(entity_id)
-                        created_in_batch[dedupe_key] = entity_id
-
-                if entity_id is not None:
-                    if entity_id not in entity_msg_map:
-                        entity_msg_map[entity_id] = []
-                        entity_ids.append(entity_id)
-                    entity_msg_map[entity_id].append(msg_id)
-
-            return {
-                "entity_ids": entity_ids,
-                "new_entity_ids": new_ids,
-                "alias_updated_ids": alias_ids,
-                "entity_message_map": entity_msg_map,
-                "alias_updates": alias_updates,
-                "pending_entity_writes": pending_entity_writes,
-            }
 
     async def resolve_context_block_mentions(
         self,
@@ -332,9 +149,7 @@ class EntityResolver:
         *,
         block_text_by_id: dict[object, str],
         policy: IngestionPolicy,
-        parent_work_record=None,
         allocate_entity_id,
-        issues: Optional[List[ValidationIssue]] = None,
     ) -> Dict[str, Any]:
         """Resolve typed Context-block mentions without manufacturing message refs.
 
@@ -344,7 +159,9 @@ class EntityResolver:
         """
 
         if any(not isinstance(mention, ContextBlockMention) for mention in mentions):
-            raise TypeError("Context entity resolution requires ContextBlockMention values")
+            raise TypeError(
+                "Context entity resolution requires ContextBlockMention values"
+            )
         if not isinstance(block_text_by_id, dict) or any(
             not isinstance(text, str) for text in block_text_by_id.values()
         ):
@@ -354,37 +171,41 @@ class EntityResolver:
             entity_ids: List[int] = []
             new_ids: set[int] = set()
             alias_ids: set[int] = set()
-            created_in_build: Dict[Tuple[str, str, str], int] = {}
             alias_updates: Dict[int, List[str]] = {}
             pending_entity_writes: Dict[int, EntityWrite] = {}
+            pending_ids_by_surface: Dict[str, List[int]] = {}
+            pending_support_by_id: Dict[int, str] = {}
+            project_classifications: Dict[int, ProjectEntityClassification] = {}
             resolved_mentions: list[ResolvedContextBlockMention] = []
             associations: list[ContextBlockEntityAssociation] = []
 
-            candidate_entries = await self.candidate_entries_for_context_block_mentions(
-                mentions,
-                policy=policy,
-                parent_work_record=parent_work_record,
-            )
+            candidate_snapshot: EntityCandidateSnapshot | None = None
+            candidate_entries: list[Optional[Tuple[str, Any]]] = []
+            if mentions:
+                candidate_snapshot = await self._load_candidate_snapshot()
+                candidate_entries = self._candidate_entries_for_context_block_mentions(
+                    mentions,
+                    policy=policy,
+                    snapshot=candidate_snapshot,
+                )
 
             for index, mention in enumerate(mentions):
                 entry = candidate_entries[index]
                 if entry is None:
                     continue
-                dedupe_key = self.mention_dedupe_key(
-                    mention.name,
-                    mention.entity_type,
-                    mention.topic,
-                    policy,
-                )
+                surface_key = self._candidate_search_key(mention.name)
                 entity_id: int | None = None
+                selected_profile: EntityProfile | None = None
                 support_text = "\n".join(
                     block_text_by_id.get(block_id, "") for block_id in mention.block_ids
                 )
 
                 if entry[0] == "candidates":
+                    if candidate_snapshot is None:
+                        raise RuntimeError("Context candidate snapshot is unavailable")
                     for candidate in entry[1]:
                         candidate_id = candidate.entity_id
-                        profile = await self.get_profile(candidate_id)
+                        profile = candidate_snapshot.get_profile(candidate_id)
                         compatibility = (
                             self.schema_compatibility(
                                 mention.entity_type,
@@ -411,27 +232,49 @@ class EntityResolver:
                             policy=policy,
                             compatibility=compatibility,
                             candidate=candidate,
+                            candidate_snapshot=candidate_snapshot,
                         ):
-                            entity_id = candidate_id
-                            existing_id, aliases_added, new_aliases = (
-                                self.validate_existing(
-                                    profile.canonical_name,
-                                    [mention.name.strip()],
-                                )
+                            classification = self._classification_for_resolution(
+                                candidate_id,
+                                mention,
+                                profile,
                             )
-                            if existing_id and aliases_added:
-                                alias_ids.add(existing_id)
-                                alias_updates.setdefault(existing_id, []).extend(
+                            if self._classification_conflicts(
+                                project_classifications,
+                                classification,
+                            ):
+                                continue
+                            entity_id = candidate_id
+                            selected_profile = profile
+                            new_aliases = self._new_aliases_for_selected_entity(
+                                candidate_id,
+                                [mention.name.strip()],
+                                candidate_snapshot=candidate_snapshot,
+                            )
+                            if new_aliases:
+                                alias_ids.add(candidate_id)
+                                alias_updates.setdefault(candidate_id, []).extend(
                                     new_aliases
                                 )
                             break
 
                 if entity_id is None:
-                    if dedupe_key in created_in_build:
-                        entity_id = created_in_build[dedupe_key]
-                    else:
+                    for pending_id in pending_ids_by_surface.get(surface_key, []):
+                        pending_write = pending_entity_writes[pending_id]
+                        if self._should_reuse_pending_entity(
+                            mention,
+                            support_text,
+                            pending_write,
+                            pending_support_by_id[pending_id],
+                            policy,
+                        ):
+                            entity_id = pending_id
+                            break
+                    if entity_id is None:
                         entity_id = await allocate_entity_id()
-                        pending_entity_writes[entity_id] = await self.prepare_pending_entity(
+                        pending_entity_writes[
+                            entity_id
+                        ] = await self.prepare_pending_entity(
                             entity_id,
                             mention.name.strip(),
                             [mention.name.strip()],
@@ -439,7 +282,25 @@ class EntityResolver:
                             mention.topic,
                         )
                         new_ids.add(entity_id)
-                        created_in_build[dedupe_key] = entity_id
+                        pending_ids_by_surface.setdefault(surface_key, []).append(
+                            entity_id
+                        )
+                        pending_support_by_id[entity_id] = support_text
+
+                classification = self._classification_for_resolution(
+                    entity_id,
+                    mention,
+                    selected_profile,
+                )
+                if self._classification_conflicts(
+                    project_classifications,
+                    classification,
+                ):
+                    raise ValueError(
+                        "Context entity resolution produced conflicting project classifications"
+                    )
+                if classification is not None:
+                    project_classifications[entity_id] = classification
 
                 if entity_id not in entity_ids:
                     entity_ids.append(entity_id)
@@ -457,7 +318,11 @@ class EntityResolver:
 
             unique_associations = tuple(
                 {
-                    (association.block_id, association.entity_id, association.mention_text.casefold()): association
+                    (
+                        association.block_id,
+                        association.entity_id,
+                        association.mention_text.casefold(),
+                    ): association
                     for association in associations
                 }.values()
             )
@@ -470,53 +335,116 @@ class EntityResolver:
                     for entity_id, aliases in alias_updates.items()
                 },
                 "pending_entity_writes": pending_entity_writes,
+                "project_classifications": project_classifications,
                 "resolved_mentions": tuple(resolved_mentions),
                 "block_entity_associations": unique_associations,
             }
 
-    async def candidate_entries_for_context_block_mentions(
+    def _classification_for_resolution(
+        self,
+        entity_id: int,
+        mention: ContextBlockMention,
+        profile: EntityProfile | None,
+    ) -> ProjectEntityClassification | None:
+        """Stage the type storage must use in this resolver's target project."""
+
+        if entity_id == IDENTITY_ENTITY_ID:
+            return None
+        if profile is not None and profile.is_classified_in(self.project_id):
+            return ProjectEntityClassification(
+                entity_id=entity_id,
+                entity_type=profile.entity_type,
+                topic=profile.topic,
+                membership="existing",
+            )
+        return ProjectEntityClassification(
+            entity_id=entity_id,
+            entity_type=mention.entity_type,
+            topic=mention.topic,
+            membership="missing",
+        )
+
+    @staticmethod
+    def _classification_conflicts(
+        staged: Dict[int, ProjectEntityClassification],
+        classification: ProjectEntityClassification | None,
+    ) -> bool:
+        if classification is None:
+            return False
+        previous = staged.get(classification.entity_id)
+        return previous is not None and previous != classification
+
+    async def _load_candidate_snapshot(self) -> EntityCandidateSnapshot:
+        entities = await self.knowledge_store.get_visible_entities_for_resolution(
+            visible_project_ids=self.readable_project_ids,
+        )
+        return EntityCandidateSnapshot.from_entity_records(
+            entities,
+            project_id=self.project_id,
+        )
+
+    def _candidate_entries_for_context_block_mentions(
         self,
         mentions: list[ContextBlockMention],
         *,
         policy: IngestionPolicy,
-        parent_work_record=None,
+        snapshot: EntityCandidateSnapshot,
     ) -> list[Optional[Tuple[str, Any]]]:
         """Build candidate searches for Context-block mention identity decisions."""
 
-        unique_names = list({mention.name for mention in mentions if mention.name})
-        embedding_map = {}
-        if unique_names:
-            if getattr(self.embedding_service, "supports_model_work_records", False):
-                embeddings = await self.embedding_service.encode(
-                    unique_names,
-                    parent_work_record=parent_work_record,
-                )
-            else:
-                embeddings = await self.embedding_service.encode(unique_names)
-            embedding_map = dict(zip(unique_names, embeddings))
-
         entries: list[Optional[Tuple[str, Any]]] = []
-        seen: Dict[Tuple[str, str, str], Tuple[str, Any]] = {}
+        seen: Dict[str, Tuple[str, Any]] = {}
         for mention in mentions:
-            dedupe_key = self.mention_dedupe_key(
-                mention.name,
-                mention.entity_type,
-                mention.topic,
-                policy,
-            )
-            if dedupe_key not in seen:
-                candidates = await self.get_candidate_ids(
+            search_key = self._candidate_search_key(mention.name)
+            if search_key not in seen:
+                candidates = self._get_candidate_ids_from_snapshot(
                     mention.name,
-                    precomputed_embedding=embedding_map.get(mention.name),
                     candidate_fuzzy_threshold=policy.candidate_fuzzy_threshold,
-                    candidate_vector_threshold=policy.candidate_vector_threshold,
-                    strict=True,
+                    snapshot=snapshot,
                 )
-                seen[dedupe_key] = (
+                seen[search_key] = (
                     ("candidates", candidates) if candidates else ("new", None)
                 )
-            entries.append(seen[dedupe_key])
+            entries.append(seen[search_key])
         return entries
+
+    def _should_reuse_pending_entity(
+        self,
+        mention: ContextBlockMention,
+        support_text: str,
+        pending_write: EntityWrite,
+        pending_support_text: str,
+        policy: IngestionPolicy,
+    ) -> bool:
+        """Reuse a private pending ID only when the frozen evidence is clear."""
+
+        if self._candidate_search_key(mention.name) != self._candidate_search_key(
+            pending_write.canonical_name
+        ):
+            return False
+        profile = EntityProfile.registered(
+            canonical_name=pending_write.canonical_name,
+            entity_type=pending_write.entity_type,
+            topic=pending_write.topic,
+            project_id=self.project_id,
+        )
+        if (
+            self.schema_compatibility(
+                mention.entity_type,
+                mention.topic,
+                profile,
+                policy,
+            )
+            != "compatible"
+        ):
+            return False
+
+        normalized_support = " ".join(support_text.split()).casefold()
+        pending_normalized_support = " ".join(pending_support_text.split()).casefold()
+        return (
+            bool(normalized_support)
+            and normalized_support == pending_normalized_support
+        )
 
     def is_profile_visible(self, profile: EntityProfile) -> bool:
         return profile.project_id in set(self.readable_project_ids)
@@ -533,6 +461,7 @@ class EntityResolver:
         policy: IngestionPolicy,
         compatibility: Optional[str] = None,
         candidate: EntityCandidate | None = None,
+        candidate_snapshot: EntityCandidateSnapshot,
     ) -> bool:
         """Apply all conservative reuse policy for one existing entity candidate."""
 
@@ -553,6 +482,7 @@ class EntityResolver:
             policy=policy,
             compatibility=compatibility,
             candidate=candidate,
+            candidate_snapshot=candidate_snapshot,
         )
         if evidence == "strong":
             return True
@@ -561,7 +491,13 @@ class EntityResolver:
                 name, mention_type, message_text, profile, compatibility, policy
             )
         return compatibility == "compatible" and self._has_contextual_support(
-            name, message_text, profile, compatibility, candidate_id, policy
+            name,
+            message_text,
+            profile,
+            compatibility,
+            candidate_id,
+            policy,
+            candidate_snapshot=candidate_snapshot,
         )
 
     def schema_compatibility(
@@ -571,27 +507,26 @@ class EntityResolver:
         profile: EntityProfile,
         policy: IngestionPolicy,
     ) -> str:
+        if not profile.is_classified_in(self.project_id):
+            # A visible foreign project establishes that an identity exists, but
+            # its vocabulary cannot classify this project's occurrence.
+            return "neutral"
+        mention_configured_type = policy.domain.canonical_entity_type(
+            mention_type
+        ) or policy.domain.resolve_entity_type(mention_type)
+        profile_configured_type = policy.domain.canonical_entity_type(
+            profile.entity_type or ""
+        ) or policy.domain.resolve_entity_type(profile.entity_type or "")
         mention_type_lower = (
-            (
-                policy.domain.canonical_entity_type(mention_type)
-                or policy.domain.resolve_entity_type(mention_type)
-                or mention_type
-            )
-            .strip()
-            .lower()
+            (mention_configured_type or mention_type or "").strip().lower()
         )
         profile_type_lower = (
-            (
-                policy.domain.canonical_entity_type(profile.entity_type or "")
-                or policy.domain.resolve_entity_type(profile.entity_type or "")
-                or profile.entity_type
-                or ""
-            )
-            .strip()
-            .lower()
+            (profile_configured_type or profile.entity_type or "").strip().lower()
         )
         if mention_type_lower and mention_type_lower == profile_type_lower:
             return "compatible"
+        if mention_configured_type and profile_configured_type:
+            return "incompatible"
 
         mention_topic_normalized = self._normalize_resolution_topic(
             mention_topic, policy
@@ -628,13 +563,14 @@ class EntityResolver:
         policy: IngestionPolicy,
         compatibility: str,
         candidate: EntityCandidate | None,
+        candidate_snapshot: EntityCandidateSnapshot,
     ) -> str:
         mention = name.strip().casefold()
         if not mention:
             return "none"
         if candidate is not None and "ambiguous_alias" in candidate.signals:
             return "weak"
-        owners = self.get_entity_ids_for_name(mention)
+        owners = candidate_snapshot.get_entity_ids_for_name(mention)
         if owners and candidate_id not in owners:
             return "none"
         if len(owners) > 1:
@@ -642,7 +578,7 @@ class EntityResolver:
 
         aliases = {
             alias.strip().casefold()
-            for alias in self.get_mentions_for_id(candidate_id)
+            for alias in candidate_snapshot.get_mentions(candidate_id)
             if alias and alias.strip()
         }
         exact_name = mention == (profile.canonical_name or "").strip().casefold() or (
@@ -660,7 +596,7 @@ class EntityResolver:
             return "weak"
         if (
             candidate is not None
-            and len(candidate.signals & {"exact", "fuzzy", "vector"}) > 1
+            and len(candidate.signals & {"exact", "fuzzy"}) > 1
         ):
             return "strong"
         if len(self._word_tokens(name)) > 1:
@@ -712,9 +648,13 @@ class EntityResolver:
         compatibility: str,
         candidate_id: int,
         policy: IngestionPolicy,
+        *,
+        candidate_snapshot: EntityCandidateSnapshot,
     ) -> bool:
         if self._is_acronym_alias(
-            name, profile.canonical_name or "", self.get_mentions_for_id(candidate_id)
+            name,
+            profile.canonical_name or "",
+            list(candidate_snapshot.get_mentions(candidate_id)),
         ):
             return True
         return compatibility == "compatible" and self._has_rich_context(
@@ -762,29 +702,86 @@ class EntityResolver:
                 return True
         return False
 
+    def _cache_record_for_project(self, entity: dict) -> dict:
+        """Select this resolver's local classification from a durable entity row."""
+
+        return entity_record_for_project(entity, project_id=self.project_id)
+
     def _populate_cache(self, entity: dict) -> EntityProfile:
         """Hydrate internal indexes from a KnowledgeStore entity record."""
-        contexts = entity.get("contexts")
-        if contexts:
-            context = next(
-                (
-                    item
-                    for item in contexts
-                    if item.get("project_id") == self.project_id
-                ),
-                contexts[0],
-            )
-            entity = {
-                **entity,
-                "project_id": context.get("project_id"),
-                "type": context.get("entity_type"),
-                "topic": context.get("topic"),
-            }
+
+        entity = self._cache_record_for_project(entity)
         with self._lock:
             profile, aliases_changed = self._index.populate(entity)
             if aliases_changed:
                 self._bump_alias_version()
         return profile
+
+    async def publish_committed_entity_ids(
+        self, affected_entity_ids: Iterable[int]
+    ) -> None:
+        """Refresh this resolver from the rows durably committed for one window.
+
+        The caller supplies only IDs read from the committed Context revision.
+        This deliberately never accepts a pending semantic build: the commit
+        writer may resume at its checkpoint without validating such a rebuild.
+        """
+
+        normalized_ids = set()
+        for entity_id in affected_entity_ids:
+            if (
+                not isinstance(entity_id, int)
+                or isinstance(entity_id, bool)
+                or entity_id <= 0
+            ):
+                raise ValueError(
+                    "Committed entity publication requires positive integer IDs"
+                )
+            normalized_ids.add(entity_id)
+        entity_ids = tuple(sorted(normalized_ids))
+        if not entity_ids:
+            return
+
+        durable_rows = await self.knowledge_store.get_entities_by_ids(
+            list(entity_ids),
+            visible_project_ids=self.readable_project_ids,
+        )
+        rows_by_id = {
+            int(entity["id"]): entity
+            for entity in durable_rows
+            if int(entity["id"]) in set(entity_ids)
+        }
+
+        names = {
+            str(name).strip()
+            for entity in rows_by_id.values()
+            for name in [entity.get("canonical_name"), *(entity.get("aliases") or [])]
+            if name and str(name).strip()
+        }
+        colliding_rows = (
+            await self.knowledge_store.get_entities_by_names(
+                sorted(names), visible_project_ids=self.readable_project_ids
+            )
+            if names
+            else []
+        )
+        for entity in colliding_rows:
+            rows_by_id[int(entity["id"])] = entity
+
+        requested_ids = set(entity_ids)
+        with self._lock:
+            aliases_changed = False
+            _, removed_aliases = self._index.remove(
+                sorted(requested_ids - set(rows_by_id))
+            )
+            aliases_changed = aliases_changed or removed_aliases
+            for entity_id in sorted(rows_by_id):
+                _, refreshed_aliases = self._index.refresh(
+                    self._cache_record_for_project(rows_by_id[entity_id])
+                )
+                aliases_changed = aliases_changed or refreshed_aliases
+            if aliases_changed:
+                self._bump_alias_version()
 
     async def get_id(self, name: str) -> Optional[int]:
         if not name:
@@ -852,26 +849,6 @@ class EntityResolver:
         with self._lock:
             return self._index.get_entity_ids_for_name(name)
 
-    async def get_embedding_for_id(self, entity_id: int) -> List[float]:
-        """Retrieve embedding from graph by ID."""
-        with self._lock:
-            profile = self._index.get_profile(entity_id)
-            if profile and profile.embedding:
-                return profile.embedding
-        return await self.knowledge_store.get_entity_embedding(
-            entity_id,
-            visible_project_ids=self.readable_project_ids,
-        )
-
-    async def compute_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """
-        Compute embeddings for a batch of texts (used by Processor).
-        """
-        if not texts:
-            return []
-
-        return await self.embedding_service.encode(texts)
-
     async def get_neighbor_ids_batch(
         self, candidate_ids: List[int]
     ) -> Dict[int, set[int]]:
@@ -881,32 +858,36 @@ class EntityResolver:
             visible_project_ids=self.readable_project_ids,
         )
 
-    def validate_existing(
-        self, canonical_name: str, mentions: List[str]
-    ) -> Tuple[Optional[int], bool, List[str]]:
-        """
-        Check if canonical_name exists. If yes, register mention aliases and return ID.
-        If no, return None (caller handles demotion).
+    def _new_aliases_for_selected_entity(
+        self,
+        entity_id: int,
+        mentions: List[str],
+        *,
+        candidate_snapshot: EntityCandidateSnapshot | None = None,
+    ) -> List[str]:
+        """Return collision-free aliases for the candidate ID already selected."""
 
-        Returns:
-            Tuple of (entity_id, aliases_added, new_aliases_list)
-        """
-        if not canonical_name:
-            return None, False, []
+        if candidate_snapshot is not None:
+            if candidate_snapshot.get_profile(entity_id) is None:
+                return []
+            return [
+                mention
+                for mention in mentions
+                if mention
+                and mention.strip()
+                and not candidate_snapshot.get_entity_ids_for_name(mention)
+            ]
 
         with self._lock:
-            entity_id = self._index.get_entity_id_for_name(canonical_name)
-            logger.debug(f"validate_existing: '{canonical_name}' -> id={entity_id}")
-            if entity_id is None:
-                return None, False, []
-
-            new_aliases = []
-            for mention in mentions:
-                owners = self._index.get_entity_ids_for_name(mention)
-                if not owners:
-                    new_aliases.append(mention)
-
-            return entity_id, len(new_aliases) > 0, new_aliases
+            if not self._index.has_entity(entity_id):
+                return []
+            return [
+                mention
+                for mention in mentions
+                if mention
+                and mention.strip()
+                and not self._index.get_entity_ids_for_name(mention)
+            ]
 
     def commit_new_aliases(self, entity_id: int, aliases: List[str]):
         """Explicitly commit aliases after Graph validation."""
@@ -959,186 +940,76 @@ class EntityResolver:
     async def get_candidate_ids(
         self,
         mention: str,
-        precomputed_embedding: List[float] = None,
         *,
         candidate_fuzzy_threshold: int | None = None,
-        candidate_vector_threshold: float | None = None,
-        strict: bool = False,
     ) -> List[EntityCandidate]:
+        """Resolve one mention from a fresh authoritative candidate snapshot."""
 
-        if not mention:
+        mention_lower = self._candidate_search_key(mention) if mention else ""
+        if not mention_lower:
+            return []
+        snapshot = await self._load_candidate_snapshot()
+        return self._get_candidate_ids_from_snapshot(
+            mention,
+            candidate_fuzzy_threshold=candidate_fuzzy_threshold,
+            snapshot=snapshot,
+        )
+
+    def _get_candidate_ids_from_snapshot(
+        self,
+        mention: str,
+        *,
+        candidate_fuzzy_threshold: int | None,
+        snapshot: EntityCandidateSnapshot,
+    ) -> List[EntityCandidate]:
+        mention_lower = self._candidate_search_key(mention) if mention else ""
+        if not mention_lower:
             return []
 
         candidates: Dict[int, EntityCandidate] = {}
-        mention_lower = mention.strip().casefold()
         fuzzy_threshold = (
             self.candidate_fuzzy_threshold
             if candidate_fuzzy_threshold is None
             else candidate_fuzzy_threshold
         )
-        vector_threshold = (
-            self.candidate_vector_threshold
-            if candidate_vector_threshold is None
-            else candidate_vector_threshold
+        exact_ids = snapshot.get_entity_ids_for_name(mention_lower)
+        exact_is_ambiguous = len(exact_ids) > 1
+        for entity_id in exact_ids:
+            candidate = candidates.setdefault(entity_id, EntityCandidate(entity_id))
+            candidate.add_signal("exact", 1.0)
+            if exact_is_ambiguous:
+                candidate.add_signal("ambiguous_alias", 1.0)
+
+        scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
+        results = process.extract(
+            mention_lower,
+            snapshot.iter_names(),
+            limit=50,
+            score_cutoff=fuzzy_threshold,
+            scorer=scorer,
         )
 
-        with self._lock:
-            exact_ids = self._index.get_entity_ids_for_name(mention_lower)
-            exact_is_ambiguous = len(exact_ids) > 1
-            for exact_id in exact_ids:
-                candidate = candidates.setdefault(exact_id, EntityCandidate(exact_id))
-                candidate.add_signal("exact", 1.0)
-                if exact_is_ambiguous:
-                    candidate.add_signal("ambiguous_alias", 1.0)
-
-            choices = self._index.iter_aliases()
-            scorer = fuzz.ratio if len(mention_lower) < 4 else fuzz.WRatio
-            results = process.extract(
-                mention_lower,
-                choices,
-                limit=50,
-                score_cutoff=fuzzy_threshold,
-                scorer=scorer,
-            )
-
-            for alias, fuzz_score, _ in results:
-                owner_ids = self._index.get_entity_ids_for_name(alias)
-                if owner_ids:
-                    normalized = fuzz_score / 100.0
-                    alias_is_ambiguous = len(owner_ids) > 1
-                    for eid in owner_ids:
-                        candidate = candidates.get(eid)
-                        if (
-                            normalized == 1.0
-                            and candidate
-                            and "exact" in candidate.signals
-                        ):
-                            continue
-                        candidate = candidates.setdefault(eid, EntityCandidate(eid))
-                        candidate.add_signal("fuzzy", normalized)
-                        if alias_is_ambiguous:
-                            candidate.add_signal("ambiguous_alias", normalized)
-
-        vector = precomputed_embedding
-        if vector is None:
-            try:
-                vector = await self.embedding_service.encode_single(mention)
-            except Exception as e:
-                if strict:
-                    raise
-                logger.warning(f"Encoding failed: {e}")
-                vector = None
-
-        vector_results = []
-        if vector:
-            try:
-                vector_results = (
-                    await self.knowledge_store.search_entities_by_embedding(
-                        vector,
-                        limit=5,
-                        score_threshold=vector_threshold,
-                        visible_project_ids=self.readable_project_ids,
-                    )
+        for alias, fuzz_score, _ in results:
+            if alias == mention_lower:
+                continue
+            owner_ids = snapshot.get_entity_ids_for_name(alias)
+            normalized = fuzz_score / 100.0
+            alias_is_ambiguous = len(owner_ids) > 1
+            for entity_id in sorted(owner_ids):
+                candidate = candidates.setdefault(
+                    entity_id,
+                    EntityCandidate(entity_id),
                 )
-            except Exception as e:
-                if strict:
-                    raise
-                logger.warning(f"Vector search failed, using fuzzy only: {e}")
-                vector_results = []
-        for eid, vec_score in vector_results:
-            if eid:
-                candidates.setdefault(eid, EntityCandidate(eid)).add_signal(
-                    "vector", vec_score
-                )
+                candidate.add_signal("fuzzy", normalized)
+                # A unique exact owner remains direct evidence even if a
+                # different shared alias is a fuzzy neighbor of that name.
+                if alias_is_ambiguous and entity_id not in exact_ids:
+                    candidate.add_signal("ambiguous_alias", normalized)
 
-        # The durable vector index can contain a visible identity that has not
-        # yet been loaded into this process. Hydrate those rows before applying
-        # the cache membership filter; otherwise vector-only matches disappear.
-        with self._lock:
-            missing_ids = [
-                entity_id
-                for entity_id in candidates
-                if not self._index.has_entity(entity_id)
-            ]
-        if missing_ids:
-            try:
-                hydrated = await self.knowledge_store.get_entities_by_ids(
-                    missing_ids,
-                    visible_project_ids=self.readable_project_ids,
-                )
-                for entity in hydrated:
-                    self._populate_cache(entity)
-            except Exception as exc:
-                if strict:
-                    raise
-                logger.warning("Candidate hydration failed: {}", exc)
-
-        with self._lock:
-            valid_candidates = [
-                candidate
-                for eid, candidate in candidates.items()
-                if self._index.has_entity(eid)
-            ]
         return sorted(
-            valid_candidates,
-            key=lambda candidate: candidate.score,
-            reverse=True,
+            candidates.values(),
+            key=lambda candidate: (-candidate.score, candidate.entity_id),
         )
-
-    async def register_entity(
-        self,
-        entity_id: int,
-        canonical_name: str,
-        mentions: List[str],
-        entity_type: str,
-        topic: str,
-        session_id: str = None,
-        project_id: str = None,
-    ) -> List[float]:
-        """
-        Register new entity: update all indexes and return embedding.
-        """
-
-        project_id = project_id or self.project_id
-        # Identity vectors are shared across every project context.  A context
-        # type must not alter the vector persisted for the same identity.
-        text_to_embed = build_entity_embedding_text(canonical_name, None)
-        embedding = await self.embedding_service.encode_single(text_to_embed)
-
-        with self._lock:
-            logger.info(
-                f"Adding entity {entity_id}-{canonical_name} to entities indexes."
-            )
-
-            profile = EntityProfile.registered(
-                canonical_name=canonical_name,
-                entity_type=entity_type,
-                topic=topic,
-                project_id=project_id,
-                embedding=embedding,
-            )
-
-            safe_mentions = []
-            for mention in mentions:
-                owners = self._index.get_entity_ids_for_name(mention)
-                if owners and owners != {entity_id}:
-                    logger.warning(
-                        f"Alias collision: '{mention}' belongs to {sorted(owners)}, "
-                        f"skipping for {entity_id}"
-                    )
-                    continue
-                safe_mentions.append(mention)
-
-            aliases_changed = self._index.register(
-                entity_id,
-                profile,
-                canonical_name,
-                safe_mentions,
-            )
-            if aliases_changed:
-                self._bump_alias_version()
-
-        return embedding
 
     async def prepare_pending_entity(
         self,
@@ -1150,80 +1021,14 @@ class EntityResolver:
     ) -> EntityWrite:
         """Build a new entity write without exposing it through shared indexes."""
 
-        embedding = await self.embedding_service.encode_single(
-            build_entity_embedding_text(canonical_name, entity_type)
-        )
         return EntityWrite(
             entity_id=entity_id,
             is_new=True,
             canonical_name=canonical_name,
             entity_type=entity_type,
             topic=topic,
-            embedding=tuple(embedding) if embedding is not None else None,
             aliases=tuple(alias for alias in aliases if alias and alias.strip()),
         )
-
-    def apply_committed_entity_writes(
-        self, entity_writes: List[EntityWrite] | tuple[EntityWrite, ...]
-    ) -> None:
-        """Expose newly durable entity rows to the local resolver cache.
-
-        Callers must invoke this only after the encompassing database transaction
-        succeeds. Pending entities deliberately remain invisible to other batches.
-        """
-
-        with self._lock:
-            aliases_changed = False
-            for write in entity_writes:
-                if not write.is_new:
-                    continue
-                profile = EntityProfile.registered(
-                    canonical_name=write.canonical_name,
-                    entity_type=write.entity_type,
-                    topic=write.topic,
-                    project_id=self.project_id,
-                    embedding=list(write.embedding) if write.embedding else None,
-                )
-                aliases_changed = (
-                    self._index.register(
-                        write.entity_id,
-                        profile,
-                        write.canonical_name,
-                        list(write.aliases),
-                    )
-                    or aliases_changed
-                )
-            if aliases_changed:
-                self._bump_alias_version()
-
-    async def compute_embedding(
-        self,
-        entity_id: int,
-        resolution_text: str,
-        precomputed: Optional[List[float]] = None,
-    ) -> List[float]:
-        with self._lock:
-            profile = self._index.get_profile(entity_id)
-            if not profile:
-                logger.warning(f"Cannot update profile for unknown entity {entity_id}")
-                return []
-
-        embedding = precomputed
-        if embedding is None:
-            embedding = await self.embedding_service.encode_single(resolution_text)
-
-        with self._lock:
-            profile = self._index.get_profile(entity_id)
-            if not profile:
-                logger.warning(f"Cannot update profile for unknown entity {entity_id}")
-                return []
-
-            logger.info(
-                f"Updating embedding for entity {entity_id}-{profile.canonical_name}"
-            )
-            self._index.update_embedding(entity_id, embedding)
-
-        return embedding
 
     def remove_entities(self, entity_ids: List[int]) -> int:
         """Remove entities from entities indexes. Call after KnowledgeStore deletion."""

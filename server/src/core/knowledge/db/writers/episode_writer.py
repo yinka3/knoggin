@@ -119,17 +119,17 @@ class EpisodeWriter:
             if window["origin"] == "human_edit" and (expected_membership or episodes):
                 raise ValueError("Human-edit semantic windows have no episode result")
 
-            window_message_ids = {message_id for message_id, _ in expected_membership}
+            window_sources = set(expected_membership)
             for ordinal, episode in enumerate(episodes):
-                source_message_ids = {message.message_id for message in episode.messages}
-                if not source_message_ids.intersection(window_message_ids):
+                episode_sources = {
+                    (message.message_id, message.session_id)
+                    for message in episode.messages
+                }
+                if not episode_sources:
                     raise ValueError("Episode result must include semantic-window evidence")
-                action = episode.generator_metadata.get("decision_action")
-                if action != "consolidate" and not source_message_ids.issubset(
-                    window_message_ids
-                ):
+                if not episode_sources.issubset(window_sources):
                     raise ValueError(
-                        "New episode source evidence must come from the semantic window"
+                        "Episode source evidence must come from the semantic window"
                     )
                 await self._write_semantic_episode(
                     cur,
@@ -322,11 +322,38 @@ class EpisodeWriter:
         new_developments: List[str],
         updates: List[str],
         unresolved: List[str],
-    ) -> None:
-        """Apply a user-owned narrative edit without changing source evidence."""
+        embedding: List[float],
+        expected_updated_at: datetime,
+    ) -> datetime:
+        """Atomically apply a user-owned narrative and vector edit."""
 
-        if not summary.strip():
+        episode_id = require_scope_value(episode_id, "episode_id", "edit_episode")
+        user_name = require_scope_value(user_name, "user_name", "edit_episode")
+        project_id = require_scope_value(project_id, "project_id", "edit_episode")
+        if not isinstance(summary, str) or not summary.strip():
             raise ValueError("Episode summary must not be blank")
+        if not isinstance(expected_updated_at, datetime):
+            raise TypeError("expected_updated_at must be a datetime")
+        if (
+            expected_updated_at.tzinfo is None
+            or expected_updated_at.utcoffset() is None
+        ):
+            raise ValueError("expected_updated_at must be timezone-aware")
+        narrative_lists = (new_developments, updates, unresolved)
+        if not all(isinstance(values, list) for values in narrative_lists) or not all(
+            isinstance(value, str) for values in narrative_lists for value in values
+        ):
+            raise TypeError("Episode narrative lists must contain only strings")
+        validated_embedding = Episode.validate_embedding(embedding)
+        if validated_embedding is None:
+            raise ValueError("Episode edit requires an embedding")
+
+        normalized_summary = summary.strip()
+        normalized_new_developments = [
+            value.strip() for value in new_developments if value.strip()
+        ]
+        normalized_updates = [value.strip() for value in updates if value.strip()]
+        normalized_unresolved = [value.strip() for value in unresolved if value.strip()]
         async with self.client.transaction() as cur:
             await cur.execute(
                 """
@@ -335,45 +362,51 @@ class EpisodeWriter:
                     new_developments = %s::jsonb,
                     updates = %s::jsonb,
                     unresolved = %s::jsonb,
+                    embedding = %s::vector,
                     user_modified = TRUE,
                     updated_at = NOW()
                 WHERE episode.episode_id = %s
                   AND episode.project_id = %s
+                  AND episode.updated_at = %s
                   AND EXISTS (
                       SELECT 1
                       FROM projects AS project
                       WHERE project.project_id = episode.project_id
                         AND project.user_name = %s
                   )
-                RETURNING episode_id
+                RETURNING episode.updated_at
                 """,
                 (
-                    summary.strip(),
-                    json.dumps(new_developments),
-                    json.dumps(updates),
-                    json.dumps(unresolved),
+                    normalized_summary,
+                    json.dumps(normalized_new_developments),
+                    json.dumps(normalized_updates),
+                    json.dumps(normalized_unresolved),
+                    json.dumps(validated_embedding),
                     episode_id,
                     project_id,
+                    expected_updated_at,
                     user_name,
                 ),
             )
-            if await cur.fetchone() is None:
-                raise ValueError("Episode is unavailable for editing")
-        return None
+            edited = await cur.fetchone()
+            if edited is None:
+                raise ValueError(
+                    "Episode is unavailable or has changed since it was read"
+                )
+            updated_at = edited.get("updated_at")
+            if not isinstance(updated_at, datetime):
+                raise RuntimeError("Episode edit did not return its revision timestamp")
+        return updated_at
 
     async def _write_semantic_episode(self, cur, episode: Episode, *, user_name: str) -> None:
         """Persist narrative and canonical sources only; Knowledge owns graph links."""
 
         await cur.execute(
-            """
-            SELECT user_modified FROM episodes
-            WHERE episode_id = %s AND project_id = %s FOR UPDATE
-            """,
-            (episode.episode_id, episode.project_id),
+            "SELECT episode_id FROM episodes WHERE episode_id = %s FOR UPDATE",
+            (episode.episode_id,),
         )
-        existing = await cur.fetchone()
-        if existing is not None and bool(existing["user_modified"]):
-            raise ValueError("User-modified episodes cannot be regenerated automatically")
+        if await cur.fetchone() is not None:
+            raise ValueError("Finalized episode identities cannot be reused")
         source_ids = [item.message_id for item in episode.messages]
         expected_sessions = {item.message_id: item.session_id for item in episode.messages}
         await cur.execute(
@@ -391,13 +424,8 @@ class EpisodeWriter:
         ):
             raise ValueError("Episode source messages must exist in their recorded sessions")
         timestamps = {int(row["message_id"]): row.get("timestamp_ms") for row in rows}
-        await self._upsert_episode(cur, episode, timestamps)
-        for table in ("episode_messages", "episode_entities", "episode_relationships"):
-            await cur.execute(
-                f"DELETE FROM {table} WHERE episode_id = %s AND project_id = %s",
-                (episode.episode_id, episode.project_id),
-            )
-        await self._upsert_messages(cur, episode)
+        await self._insert_semantic_episode(cur, episode, timestamps)
+        await self._insert_messages(cur, episode)
 
     @staticmethod
     def _validate_ranked_context(
@@ -421,7 +449,7 @@ class EpisodeWriter:
             )
 
     @staticmethod
-    async def _upsert_episode(
+    async def _insert_semantic_episode(
         cur,
         episode: Episode,
         source_message_timestamps: Dict[int, int | None],
@@ -463,18 +491,7 @@ class EpisodeWriter:
                 %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
                 %s, %s, %s, %s::vector, %s::jsonb, %s, %s, %s
             )
-            ON CONFLICT (episode_id) DO UPDATE
-            SET summary = EXCLUDED.summary,
-                new_developments = EXCLUDED.new_developments,
-                updates = EXCLUDED.updates,
-                unresolved = EXCLUDED.unresolved,
-                source_message_count = EXCLUDED.source_message_count,
-                first_message_at = EXCLUDED.first_message_at,
-                last_message_at = EXCLUDED.last_message_at,
-                embedding = EXCLUDED.embedding,
-                generator_metadata = EXCLUDED.generator_metadata,
-                updated_at = EXCLUDED.updated_at
-            WHERE episodes.project_id = EXCLUDED.project_id
+            ON CONFLICT (episode_id) DO NOTHING
             RETURNING episode_id
             """,
             (
@@ -499,10 +516,10 @@ class EpisodeWriter:
             ),
         )
         if await cur.fetchone() is None:
-            raise ValueError("Episode ID belongs to a different episode scope")
+            raise ValueError("Finalized episode identities cannot be reused")
 
     @staticmethod
-    async def _upsert_messages(cur, episode: Episode) -> None:
+    async def _insert_messages(cur, episode: Episode) -> None:
         for message in episode.messages:
             await cur.execute(
                 """
@@ -514,8 +531,6 @@ class EpisodeWriter:
                     message_position
                 )
                 VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (episode_id, message_id) DO UPDATE
-                SET message_position = EXCLUDED.message_position
                 """,
                 (
                     episode.episode_id,

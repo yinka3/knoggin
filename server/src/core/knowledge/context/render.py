@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from common.conf.domain_config import CompiledDomain
 from common.schema.context import (
     ContextAdd,
     ContextBlockRecord,
+    ContextBlockSupportRecord,
     ContextDelete,
     ContextEditBase,
     ContextReplace,
@@ -145,8 +146,19 @@ def render_context_markdown(snapshot: ContextSnapshot, domain: CompiledDomain) -
     return canonical_context_markdown(snapshot.blocks, domain, include_markers=True)
 
 
-def render_context_model_input(snapshot: ContextSnapshot, domain: CompiledDomain) -> str:
-    """Render a model/debug-only Context view with revision-local ``C1`` handles."""
+def render_context_model_input(
+    snapshot: ContextSnapshot,
+    domain: CompiledDomain,
+    *,
+    supports_by_block: Mapping[object, Sequence[ContextBlockSupportRecord]] | None = None,
+) -> str:
+    """Render a qualified model-only Context view with local evidence handles.
+
+    The user-editable ``CONTEXT.md`` projection intentionally remains plain
+    Markdown. This renderer is the separate model-facing view: it preserves
+    each block's assertion kind and names only compact, run-local support
+    handles, never durable message or source-reference identifiers.
+    """
 
     _validate_snapshot(snapshot, domain)
     ordered = _ordered_blocks(snapshot.blocks, domain)
@@ -155,11 +167,66 @@ def render_context_model_input(snapshot: ContextSnapshot, domain: CompiledDomain
     }
     for index, block in enumerate(ordered, start=1):
         by_section[block.section_key].append((index, block))
-    lines: list[str] = []
+    support_handles: dict[tuple[str, str], str] = {}
+    support_labels: dict[str, str] = {}
+    support_counters = {"M": 0, "S": 0}
+
+    def handles_for(block: ContextBlockRecord) -> list[str]:
+        if not supports_by_block:
+            return []
+        values = supports_by_block.get(block.block_id, ())
+        handles: list[str] = []
+        for support in sorted(
+            (
+                item
+                for item in values
+                if isinstance(item, ContextBlockSupportRecord)
+            ),
+            key=lambda item: (
+                item.support_kind.value,
+                item.message_id,
+                str(item.source_ref_id or ""),
+            ),
+        )[:3]:
+            prefix = "S" if support.source_ref_id is not None else "M"
+            identifier = (
+                str(support.source_ref_id)
+                if support.source_ref_id is not None
+                else f"{support.session_id}:{support.message_id}"
+            )
+            key = (prefix, identifier)
+            handle = support_handles.get(key)
+            if handle is None:
+                support_counters[prefix] += 1
+                handle = f"{prefix}{support_counters[prefix]}"
+                support_handles[key] = handle
+                support_labels[handle] = (
+                    "assistant source" if prefix == "S" else support.support_kind.value
+                )
+            handles.append(handle)
+        return handles
+
+    lines: list[str] = ["# Project Context"]
     for section in domain.context_sections:
-        lines.append(f"## {section.title}")
+        lines.extend(("", f"## {section.title}"))
         for index, block in by_section[section.key]:
-            lines.extend((f"C{index}", normalize_block_markdown(block.markdown), ""))
+            handles = handles_for(block)
+            qualification = block.assertion_kind.value
+            if handles:
+                qualification += "; support: " + ", ".join(handles)
+            lines.extend(
+                (
+                    f"C{index} [{qualification}]",
+                    normalize_block_markdown(block.markdown),
+                    "",
+                )
+            )
+    if support_labels:
+        lines.extend(("Support handles:",))
+        lines.extend(
+            f"- {handle}: {label}"
+            for handle, label in support_labels.items()
+        )
     return "\n".join(lines).rstrip() + "\n"
 
 

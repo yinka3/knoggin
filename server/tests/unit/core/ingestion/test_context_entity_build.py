@@ -14,7 +14,11 @@ from common.schema.context import (
     ContextRevisionOrigin,
     ContextSnapshot,
 )
-from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.ingestion.contracts import (
+    ContextBlockMention,
+    ContextEntityResult,
+    ProjectEntityClassification,
+)
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
@@ -96,14 +100,63 @@ class FakeEmbedding:
 
 
 class FakeKnowledgeStore:
+    def __init__(self, entities=()):
+        self.entities = {int(entity["id"]): entity for entity in entities}
+        self.catalog_lookups = []
+        self.name_lookups = []
+        self.profile_lookups = []
+        self.fail_catalog_lookup = False
+
     async def get_entity_by_id(self, *_args, **_kwargs):
-        return None
+        entity_id = _args[0]
+        self.profile_lookups.append(entity_id)
+        return self.entities.get(entity_id)
 
-    async def get_entities_by_names(self, *_args, **_kwargs):
-        return []
+    async def get_entities_by_names(self, names, *, visible_project_ids):
+        self.name_lookups.append(list(names))
+        normalized_names = {name.strip().casefold() for name in names if name.strip()}
+        return [
+            entity
+            for entity in self.entities.values()
+            if entity.get("status", "active") == "active"
+            and any(
+                context.get("project_id") in visible_project_ids
+                for context in entity.get("contexts", ())
+            )
+            and (
+                str(entity.get("canonical_name", "")).casefold() in normalized_names
+                or any(
+                    str(alias).casefold() in normalized_names
+                    for alias in entity.get("aliases", ())
+                )
+            )
+        ]
 
-    async def search_entities_by_embedding(self, *_args, **_kwargs):
-        return []
+    async def get_entities_by_ids(self, entity_ids, *, visible_project_ids):
+        return [
+            entity
+            for entity_id in entity_ids
+            if (entity := self.entities.get(entity_id)) is not None
+            and entity.get("status", "active") == "active"
+            and any(
+                context.get("project_id") in visible_project_ids
+                for context in entity.get("contexts", ())
+            )
+        ]
+
+    async def get_visible_entities_for_resolution(self, *, visible_project_ids):
+        if self.fail_catalog_lookup:
+            raise RuntimeError("candidate catalog lookup failed")
+        self.catalog_lookups.append(list(visible_project_ids))
+        return [
+            entity
+            for entity in self.entities.values()
+            if entity.get("status", "active") == "active"
+            and any(
+                context.get("project_id") in visible_project_ids
+                for context in entity.get("contexts", ())
+            )
+        ]
 
 
 def domain(*, language="en"):
@@ -123,9 +176,30 @@ def domain(*, language="en"):
     ).compile()
 
 
+def identity_domain():
+    return DomainConfig.from_mapping(
+        {
+            "version": 4,
+            "topics": {"Work": {"active": True}},
+            "entity_types": {
+                "Person": {
+                    "topic": "Work",
+                    "labels": ["person"],
+                    "description": "A person involved in this project.",
+                },
+                "Company": {
+                    "topic": "Work",
+                    "labels": ["company"],
+                    "description": "A company involved in this project.",
+                },
+            },
+        }
+    ).compile()
+
+
 def policy(compiled_domain):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42, llm_ner=False),
+        text_processor=TextProcessorSettings(gliner_threshold=0.42),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=compiled_domain,
     )
@@ -175,19 +249,18 @@ def processor(vp01):
         get_profile=no_profile,
         vp01=vp01,
         spacy=EmptyNLP(),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
     result._build_phrase_matcher = lambda: (lambda _doc: [], {})
     return result
 
 
-def resolver():
+def resolver(*, knowledge_store=None, readable_project_ids=None):
     return EntityResolver(
-        knowledge_store=FakeKnowledgeStore(),
-        embedding_service=FakeEmbedding(),
+        knowledge_store=knowledge_store or FakeKnowledgeStore(),
         project_id="project-1",
-        readable_project_ids=["project-1"],
+        readable_project_ids=readable_project_ids or ["project-1"],
     )
 
 
@@ -336,7 +409,7 @@ async def test_context_known_aliases_run_before_the_gliner25_pass():
         get_profile=get_profile,
         vp01=RecordingVP01(),
         spacy=AliasNLP(),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
     text_processor._build_phrase_matcher = lambda: (
@@ -348,6 +421,88 @@ async def test_context_known_aliases_run_before_the_gliner25_pass():
 
     assert [(item.name, item.origin) for item in mentions] == [("Acme", "known_alias")]
     assert events == ["profile", "vp01"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_foreign_alias_defers_type_authority_to_vp01():
+    compiled_domain = domain()
+    current = block("Acme is selected.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+
+    async def get_profile(entity_id):
+        assert entity_id == 701
+        return EntityProfile(
+            canonical_name="Acme",
+            entity_type="Vendor",
+            topic="Archive",
+            project_id="project-2",
+        )
+
+    text_processor = TextProcessor(
+        get_known_aliases=lambda: {"Acme": 701},
+        get_alias_version=lambda: 1,
+        get_profile=get_profile,
+        vp01=FakeVP01(
+            [VP01EntitySpan(text="Acme", label="company", start=0, end=4)]
+        ),
+        spacy=AliasNLP(),
+        settings=TextProcessorSettings(),
+        model_work=InlineModelWork(),
+    )
+    text_processor._build_phrase_matcher = lambda: (
+        lambda _doc: [(0, 0, 1)],
+        {"acme": 701},
+    )
+
+    mentions = await text_processor.extract_context_mentions(semantic_build)
+
+    assert [
+        (item.name, item.entity_type, item.origin, item.source_start, item.source_end)
+        for item in mentions
+    ] == [("Acme", "Company", "vp01", 0, 4)]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_mentions_preserve_incompatible_types_at_one_source_span():
+    compiled_domain = identity_domain()
+    current = block("Alex sponsors the project.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    vp01 = FakeVP01(
+        [
+            VP01EntitySpan(text="Alex", label="person", start=0, end=4),
+            VP01EntitySpan(text="Alex", label="company", start=0, end=4),
+            VP01EntitySpan(text="Alex", label="person", start=0, end=4),
+        ]
+    )
+
+    mentions = await processor(vp01).extract_context_mentions(semantic_build)
+
+    assert [
+        (item.entity_type, item.source_start, item.source_end) for item in mentions
+    ] == [("Person", 0, 4), ("Company", 0, 4)]
+    assert semantic_build.trace.gliner_accepted_mentions == 2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_mentions_preserve_distinct_same_type_occurrences():
+    compiled_domain = identity_domain()
+    current = block("Alex met Alex.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    vp01 = FakeVP01(
+        [
+            VP01EntitySpan(text="Alex", label="person", start=0, end=4),
+            VP01EntitySpan(text="Alex", label="person", start=9, end=13),
+        ]
+    )
+
+    mentions = await processor(vp01).extract_context_mentions(semantic_build)
+
+    assert [
+        (item.entity_type, item.source_start, item.source_end) for item in mentions
+    ] == [("Person", 0, 4), ("Person", 9, 13)]
 
 
 @pytest.mark.unit
@@ -372,7 +527,7 @@ async def test_blank_spacy_preserves_casefolded_alias_matching():
         get_profile=get_profile,
         vp01=FakeVP01(),
         spacy=spacy.blank("en"),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
 
@@ -401,7 +556,7 @@ async def test_blank_spacy_keeps_common_word_false_positives_out_of_context_ment
         get_profile=lambda _entity_id: _async_value(None),
         vp01=vp01,
         spacy=spacy.blank("en"),
-        settings=TextProcessorSettings(llm_ner=False),
+        settings=TextProcessorSettings(),
         model_work=InlineModelWork(),
     )
 
@@ -514,8 +669,10 @@ async def test_context_alias_only_mode_is_valid_without_a_model_candidate():
         origin="known_alias",
     )
     semantic_build.set_mentions((known,))
+    store = FakeKnowledgeStore()
+    entity_resolver = resolver(knowledge_store=store)
 
-    resolution = await resolver().resolve_context_block_mentions(
+    resolution = await entity_resolver.resolve_context_block_mentions(
         [known],
         block_text_by_id={current.block_id: current.markdown},
         policy=semantic_build.policy,
@@ -524,6 +681,416 @@ async def test_context_alias_only_mode_is_valid_without_a_model_candidate():
 
     assert resolution["entity_ids"] == (701,)
     assert resolution["block_entity_associations"][0].block_id == current.block_id
+    assert store.catalog_lookups == [["project-1"]]
+    assert entity_resolver.has_cached_entity(701) is False
+    assert entity_resolver.get_alias_version() == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_empty_context_resolution_does_not_load_a_candidate_catalog():
+    store = FakeKnowledgeStore()
+
+    resolution = await resolver(knowledge_store=store).resolve_context_block_mentions(
+        [],
+        block_text_by_id={},
+        policy=policy(domain()),
+        allocate_entity_id=lambda: _async_value(701),
+    )
+
+    assert resolution["entity_ids"] == ()
+    assert store.catalog_lookups == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_resolution_propagates_a_candidate_catalog_failure():
+    store = FakeKnowledgeStore()
+    store.fail_catalog_lookup = True
+
+    with pytest.raises(RuntimeError, match="candidate catalog lookup failed"):
+        await resolver(knowledge_store=store).resolve_context_block_mentions(
+            [
+                ContextBlockMention(
+                    block_ids=(block("Acme is selected.").block_id,),
+                    name="Acme",
+                    entity_type="Company",
+                    topic="Work",
+                    origin="vp01",
+                )
+            ],
+            block_text_by_id={},
+            policy=policy(domain()),
+            allocate_entity_id=lambda: _async_value(701),
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_foreign_visible_identity_gets_a_target_project_classification():
+    compiled_domain = identity_domain()
+    current = block("Acme Labs sponsors the project.")
+    mention = ContextBlockMention(
+        block_ids=(current.block_id,),
+        name="Acme Labs",
+        entity_type="Company",
+        topic="Work",
+        origin="vp01",
+    )
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Acme Labs",
+                "aliases": ["Acme Labs"],
+                "contexts": [
+                    {
+                        "project_id": "project-2",
+                        "entity_type": "Vendor",
+                        "topic": "Archive",
+                    }
+                ],
+            }
+        ]
+    )
+
+    resolution = await resolver(
+        knowledge_store=store,
+        readable_project_ids=["project-1", "project-2"],
+    ).resolve_context_block_mentions(
+        [mention],
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(702),
+    )
+
+    assert resolution["entity_ids"] == (701,)
+    assert resolution["new_entity_ids"] == frozenset()
+    classification = resolution["project_classifications"][701]
+    assert (
+        classification.entity_type,
+        classification.topic,
+        classification.membership,
+    ) == ("Company", "Work", "missing")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_standalone_and_batch_candidate_matching_agree():
+    compiled_domain = identity_domain()
+    current = block("Acme Labs sponsors the project.")
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Acme Labs",
+                "aliases": ["Acme"],
+                "contexts": [
+                    {
+                        "project_id": "project-1",
+                        "entity_type": "Company",
+                        "topic": "Work",
+                    }
+                ],
+            }
+        ]
+    )
+    entity_resolver = resolver(knowledge_store=store)
+    mention = ContextBlockMention(
+        block_ids=(current.block_id,),
+        name="Acme Labs",
+        entity_type="Company",
+        topic="Work",
+        origin="vp01",
+    )
+
+    standalone_candidates = await entity_resolver.get_candidate_ids("Acme Labs")
+    resolution = await entity_resolver.resolve_context_block_mentions(
+        [mention],
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(702),
+    )
+
+    assert standalone_candidates == [(701, 1.0)]
+    assert resolution["entity_ids"] == (701,)
+    assert store.catalog_lookups == [["project-1"], ["project-1"]]
+    assert entity_resolver.has_cached_entity(701) is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_resolution_uses_one_catalog_for_distinct_names():
+    compiled_domain = identity_domain()
+    current = block("Acme Labs and Beta Corp sponsor the project.")
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Acme Labs",
+                "aliases": [],
+                "contexts": [
+                    {
+                        "project_id": "project-1",
+                        "entity_type": "Company",
+                        "topic": "Work",
+                    }
+                ],
+            },
+            {
+                "id": 702,
+                "user_name": "ada",
+                "canonical_name": "Beta Corp",
+                "aliases": [],
+                "contexts": [
+                    {
+                        "project_id": "project-1",
+                        "entity_type": "Company",
+                        "topic": "Work",
+                    }
+                ],
+            },
+        ]
+    )
+    entity_resolver = resolver(knowledge_store=store)
+    mentions = [
+        ContextBlockMention(
+            block_ids=(current.block_id,),
+            name="Acme Labs",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(current.block_id,),
+            name="Beta Corp",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+
+    resolution = await entity_resolver.resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(703),
+    )
+
+    assert resolution["entity_ids"] == (701, 702)
+    assert store.catalog_lookups == [["project-1"]]
+    assert store.name_lookups == []
+    assert store.profile_lookups == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_foreign_identity_does_not_overwrite_a_conflicting_target_type():
+    compiled_domain = identity_domain()
+    current = block("Acme Labs sponsors the project.")
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Acme Labs",
+                "aliases": ["Acme Labs"],
+                "contexts": [
+                    {
+                        "project_id": "project-2",
+                        "entity_type": "Vendor",
+                        "topic": "Archive",
+                    }
+                ],
+            }
+        ]
+    )
+    mentions = [
+        ContextBlockMention(
+            block_ids=(current.block_id,),
+            name="Acme Labs",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(current.block_id,),
+            name="Acme Labs",
+            entity_type="Person",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+
+    entity_resolver = resolver(
+        knowledge_store=store,
+        readable_project_ids=["project-1", "project-2"],
+    )
+    resolution = await entity_resolver.resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(702),
+    )
+
+    assert resolution["entity_ids"] == (701, 702)
+    assert {
+        entity_id: (classification.entity_type, classification.membership)
+        for entity_id, classification in resolution["project_classifications"].items()
+    } == {701: ("Company", "missing"), 702: ("Person", "missing")}
+    assert store.catalog_lookups == [["project-1", "project-2"]]
+    assert store.name_lookups == []
+    assert store.profile_lookups == []
+    assert entity_resolver.has_cached_entity(701) is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_pending_same_name_incompatible_types_do_not_collapse_by_topic():
+    compiled_domain = identity_domain()
+    first = block("Alex is the project sponsor.")
+    second = block("Alex is the project sponsor.")
+    mentions = [
+        ContextBlockMention(
+            block_ids=(first.block_id,),
+            name="Alex",
+            entity_type="Person",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(second.block_id,),
+            name="Alex",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+    next_ids = iter((701, 702))
+
+    async def allocate():
+        return next(next_ids)
+
+    resolution = await resolver().resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={
+            first.block_id: first.markdown,
+            second.block_id: second.markdown,
+        },
+        policy=policy(compiled_domain),
+        allocate_entity_id=allocate,
+    )
+
+    assert resolution["entity_ids"] == (701, 702)
+    assert {
+        entity_id: write.entity_type
+        for entity_id, write in resolution["pending_entity_writes"].items()
+    } == {701: "Person", 702: "Company"}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_pending_compatible_repetition_reuses_one_identity_with_same_context():
+    compiled_domain = identity_domain()
+    first = block("Acme Labs sponsors the project.")
+    second = block("Acme Labs sponsors the project.")
+    mentions = [
+        ContextBlockMention(
+            block_ids=(first.block_id,),
+            name="Acme Labs",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(second.block_id,),
+            name="Acme Labs",
+            entity_type="Company",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+
+    resolution = await resolver().resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={
+            first.block_id: first.markdown,
+            second.block_id: second.markdown,
+        },
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(701),
+    )
+
+    assert resolution["entity_ids"] == (701,)
+    assert set(resolution["new_entity_ids"]) == {701}
+    assert [item.entity_id for item in resolution["resolved_mentions"]] == [701, 701]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_pending_same_type_homonyms_without_shared_context_stay_separate():
+    compiled_domain = identity_domain()
+    first = block("Alex manages the design review for the mobile application.")
+    second = block("Alex approves the payroll budget for the finance team.")
+    mentions = [
+        ContextBlockMention(
+            block_ids=(first.block_id,),
+            name="Alex",
+            entity_type="Person",
+            topic="Work",
+            origin="vp01",
+        ),
+        ContextBlockMention(
+            block_ids=(second.block_id,),
+            name="Alex",
+            entity_type="Person",
+            topic="Work",
+            origin="vp01",
+        ),
+    ]
+    next_ids = iter((701, 702))
+
+    async def allocate():
+        return next(next_ids)
+
+    resolution = await resolver().resolve_context_block_mentions(
+        mentions,
+        block_text_by_id={
+            first.block_id: first.markdown,
+            second.block_id: second.markdown,
+        },
+        policy=policy(compiled_domain),
+        allocate_entity_id=allocate,
+    )
+
+    assert resolution["entity_ids"] == (701, 702)
+    assert set(resolution["new_entity_ids"]) == {701, 702}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_entity_result_requires_durable_block_coverage_for_each_entity():
+    with pytest.raises(ValueError, match="cover every resolved entity"):
+        ContextEntityResult(
+            entity_ids=(10,),
+            new_entity_ids=frozenset(),
+            alias_updated_ids=frozenset(),
+            alias_updates={},
+            pending_entity_writes={},
+            project_classifications={
+                10: ProjectEntityClassification(
+                    entity_id=10,
+                    entity_type="Person",
+                    topic="Work",
+                    membership="existing",
+                )
+            },
+            block_entity_associations=(),
+            message_entity_refs=(),
+        )
 
 
 async def _async_value(value):

@@ -98,43 +98,10 @@ class EntityReader:
             details={"error_type": type(exc).__name__},
         ) from exc
 
-    async def _fetch_embeddings(
-        self,
-        entity_ids: List[int],
-        visible_project_ids: List[str],
-    ) -> Dict[int, List[float]]:
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "_fetch_embeddings",
-        )
-        if not entity_ids:
-            return {}
-        emb_query = """
-        SELECT e.entity_id, e.embedding
-        FROM entities e
-        WHERE e.entity_id = ANY(%s)
-          AND (
-              e.entity_id = %s
-              OR EXISTS (
-                  SELECT 1 FROM project_entity_contexts context
-                  WHERE context.entity_id = e.entity_id
-                    AND context.project_id = ANY(%s)
-              )
-          )
-        """
-        emb_res = await self.client.fetch_all(
-            emb_query,
-            (entity_ids, IDENTITY_ENTITY_ID, visible_project_ids),
-        )
-        return {
-            int(row["entity_id"]): self._parse_vector(row["embedding"])
-            for row in emb_res
-        }
 
     def _hydrate_entity_row(
         self,
         row: Dict,
-        embedding: List[float] = None,
         contexts: List[Dict] | None = None,
     ) -> Dict:
         entity = {
@@ -142,10 +109,31 @@ class EntityReader:
             "canonical_name": self._clean_string(row["canonical_name"]),
             "aliases": self._parse_aliases(row.get("aliases")),
             "user_name": self._clean_string(row.get("user_name")),
-            "embedding": embedding or [],
             "contexts": contexts or [],
         }
         return entity
+
+    def _parse_contexts(self, value) -> List[Dict]:
+        contexts = self._parse_agtype(value) or []
+        if isinstance(contexts, dict):
+            contexts = [contexts]
+        if not isinstance(contexts, (list, tuple)):
+            return []
+
+        parsed_contexts = []
+        for context in contexts:
+            context = self._parse_agtype(context)
+            if not isinstance(context, dict):
+                continue
+            parsed_contexts.append(
+                {
+                    "project_id": self._clean_string(context.get("project_id")),
+                    "entity_type": self._clean_string(context.get("entity_type")),
+                    "topic": self._clean_string(context.get("topic")),
+                    "last_mentioned_ms": context.get("last_mentioned_ms"),
+                }
+            )
+        return parsed_contexts
 
     async def _fetch_contexts(
         self, entity_ids: List[int], visible_project_ids: List[str]
@@ -173,53 +161,7 @@ class EntityReader:
             )
         return contexts
 
-    def _parse_vector(self, val) -> List[float]:
-        """Normalize pgvector values across adapter and text-returning drivers."""
-        if val is None:
-            return []
-        if hasattr(val, "tolist"):
-            return [float(x) for x in val.tolist()]
-        if isinstance(val, str):
-            raw = val.strip()
-            if not raw:
-                return []
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                parsed = raw.strip("[]").split(",")
-            return [float(x) for x in parsed if str(x).strip()]
-        return [float(x) for x in val]
 
-    async def get_entity_embedding(
-        self,
-        entity_id: int,
-        *,
-        visible_project_ids: List[str],
-    ) -> List[float]:
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "get_entity_embedding",
-        )
-        query = """
-        SELECT e.embedding
-        FROM entities e
-        WHERE e.entity_id = %s
-          AND (e.entity_id = %s OR EXISTS (
-              SELECT 1 FROM project_entity_contexts context
-              WHERE context.entity_id = e.entity_id
-                AND context.project_id = ANY(%s)
-          ))
-        """
-        try:
-            row = await self.client.fetch_one(
-                query,
-                (entity_id, IDENTITY_ENTITY_ID, visible_project_ids),
-            )
-            if row and row["embedding"]:
-                return self._parse_vector(row["embedding"])
-            return []
-        except Exception as e:
-            self._raise_storage_read("get_entity_embedding", e)
 
     async def list_entities(
         self,
@@ -346,6 +288,7 @@ class EntityReader:
         FROM entities e
         LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
         WHERE e.entity_id = ANY(%s)
+          AND e.status = 'active'
           AND (e.entity_id = %s OR EXISTS (
               SELECT 1 FROM project_entity_contexts context
               WHERE context.entity_id = e.entity_id
@@ -360,10 +303,6 @@ class EntityReader:
                 query,
                 (entity_ids, IDENTITY_ENTITY_ID, visible_project_ids),
             )
-            embeddings_map = await self._fetch_embeddings(
-                entity_ids,
-                visible_project_ids,
-            )
             contexts_map = await self._fetch_contexts(entity_ids, visible_project_ids)
 
             entities = []
@@ -372,7 +311,6 @@ class EntityReader:
                 entities.append(
                     self._hydrate_entity_row(
                         row,
-                        embedding=embeddings_map.get(eid, []),
                         contexts=contexts_map.get(eid, []),
                     )
                 )
@@ -453,7 +391,11 @@ class EntityReader:
         if not names:
             return []
 
-        lower_names = [n.lower() for n in names]
+        lower_names = list(
+            dict.fromkeys(name.strip().lower() for name in names if name.strip())
+        )
+        if not lower_names:
+            return []
         params = [lower_names, lower_names, IDENTITY_ENTITY_ID, visible_project_ids]
 
         query = """
@@ -461,14 +403,15 @@ class EntityReader:
             e.entity_id AS id
         FROM entities e
         WHERE (
-            lower(e.canonical_name) = ANY(%s)
+            lower(btrim(e.canonical_name)) = ANY(%s)
             OR EXISTS (
                 SELECT 1
                 FROM entity_aliases ea
                 WHERE ea.entity_id = e.entity_id
-                  AND lower(ea.alias) = ANY(%s)
+                  AND lower(btrim(ea.alias)) = ANY(%s)
             )
         )
+        AND e.status = 'active'
         AND (e.entity_id = %s OR EXISTS (
             SELECT 1 FROM project_entity_contexts context
             WHERE context.entity_id = e.entity_id
@@ -486,6 +429,70 @@ class EntityReader:
             )
         except Exception as e:
             self._raise_storage_read("get_entities_by_names", e)
+
+    async def get_visible_entities_for_resolution(
+        self,
+        *,
+        visible_project_ids: List[str],
+    ) -> List[Dict]:
+        """Load the complete scoped identity catalog used for fuzzy matching."""
+
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_visible_entities_for_resolution",
+        )
+        try:
+            rows = await self.client.fetch_all(
+                """
+                SELECT
+                    entity.entity_id AS id,
+                    entity.user_name,
+                    entity.canonical_name,
+                    COALESCE(aliases.aliases, '{}'::text[]) AS aliases,
+                    COALESCE(contexts.contexts, '[]'::jsonb) AS contexts
+                FROM public.entities AS entity
+                LEFT JOIN LATERAL (
+                    SELECT array_agg(alias.alias ORDER BY alias.alias) AS aliases
+                    FROM public.entity_aliases AS alias
+                    WHERE alias.entity_id = entity.entity_id
+                ) AS aliases ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'project_id', context.project_id,
+                            'entity_type', context.entity_type,
+                            'topic', context.topic,
+                            'last_mentioned_ms', context.last_mentioned_ms
+                        )
+                        ORDER BY context.project_id
+                    ) AS contexts
+                    FROM public.project_entity_contexts AS context
+                    WHERE context.entity_id = entity.entity_id
+                      AND context.project_id = ANY(%s)
+                ) AS contexts ON TRUE
+                WHERE entity.status = 'active'
+                  AND (
+                      entity.entity_id = %s
+                      OR EXISTS (
+                          SELECT 1
+                          FROM public.project_entity_contexts AS context
+                          WHERE context.entity_id = entity.entity_id
+                            AND context.project_id = ANY(%s)
+                      )
+                  )
+                ORDER BY entity.entity_id
+                """,
+                (visible_project_ids, IDENTITY_ENTITY_ID, visible_project_ids),
+            )
+            return [
+                self._hydrate_entity_row(
+                    row,
+                    contexts=self._parse_contexts(row.get("contexts")),
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            self._raise_storage_read("get_visible_entities_for_resolution", exc)
 
     async def search_by_name(
         self,
@@ -556,47 +563,6 @@ class EntityReader:
         except Exception as exc:
             self._raise_storage_read("search_by_name", exc)
 
-    async def search_entities_by_embedding(
-        self,
-        embedding: List[float],
-        *,
-        visible_project_ids: List[str],
-        limit: int = 10,
-        score_threshold: float = 0.8,
-    ) -> List[Tuple[int, float]]:
-        limit = self._validate_query_limit(
-            limit,
-            "search_entities_by_embedding",
-        )
-        visible_project_ids = require_visible_project_ids(
-            visible_project_ids,
-            "search_entities_by_embedding",
-        )
-        params = [
-            embedding,
-            embedding,
-            score_threshold,
-            IDENTITY_ENTITY_ID,
-            visible_project_ids,
-        ]
-        query = """
-        SELECT entity_id, 1 - (embedding <=> %s::vector) AS similarity
-        FROM entities
-        WHERE 1 - (embedding <=> %s::vector) >= %s
-          AND (entity_id = %s OR EXISTS (
-              SELECT 1 FROM project_entity_contexts context
-              WHERE context.entity_id = entities.entity_id
-                AND context.project_id = ANY(%s)
-          ))
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-        """
-        try:
-            params.extend([embedding, limit])
-            res = await self.client.fetch_all(query, tuple(params))
-            return [(r["entity_id"], r["similarity"]) for r in res]
-        except Exception as e:
-            self._raise_storage_read("search_entities_by_embedding", e)
 
     async def validate_existing_ids(
         self,
@@ -614,6 +580,7 @@ class EntityReader:
         SELECT entity_id AS id
         FROM entities
         WHERE entity_id = ANY(%s)
+          AND status = 'active'
           AND (entity_id = %s OR EXISTS (
               SELECT 1 FROM project_entity_contexts context
               WHERE context.entity_id = entities.entity_id
@@ -657,7 +624,8 @@ class EntityReader:
             context.last_mentioned_ms,
             COUNT(DISTINCT mer.message_id) AS message_reference_count,
             COUNT(DISTINCT relationship.relationship_id) AS relationship_count,
-            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count
+            COUNT(DISTINCT episode_entity.episode_id) AS episode_reference_count,
+            COUNT(DISTINCT block_entity.block_id) AS context_block_association_count
         FROM public.entities e
         JOIN public.project_entity_contexts context
             ON context.entity_id = e.entity_id
@@ -674,6 +642,9 @@ class EntityReader:
         LEFT JOIN public.episode_entities episode_entity
             ON episode_entity.project_id = context.project_id
            AND episode_entity.entity_id = e.entity_id
+        LEFT JOIN public.context_block_entities block_entity
+            ON block_entity.project_id = context.project_id
+           AND block_entity.entity_id = e.entity_id
         WHERE e.user_name = %s
           AND context.project_id = %s
           AND e.entity_id <> %s
@@ -867,6 +838,7 @@ class EntityReader:
         LEFT JOIN relationship_observations observation
           ON observation.relationship_id = relationship.relationship_id
          AND observation.project_id = relationship.project_id
+         AND observation.retired_at IS NULL
         LEFT JOIN relationship_observation_blocks observation_block
           ON observation_block.observation_id = observation.observation_id
          AND observation_block.project_id = observation.project_id

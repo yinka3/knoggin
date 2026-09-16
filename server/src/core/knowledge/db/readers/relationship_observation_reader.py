@@ -7,7 +7,7 @@ from typing import Any
 
 from common.scoping import require_scope_value
 from core.knowledge.db.writers.maintenance_review_writer import MaintenanceReviewWriter
-from core.knowledge.maintenance_reviews import RelationshipAdvisoryPlan
+from core.knowledge.maintenance.maintenance_reviews import RelationshipAdvisoryPlan
 from core.knowledge.relationship_advisories import (
     AdvisoryThresholds,
     RelationshipAdvisory,

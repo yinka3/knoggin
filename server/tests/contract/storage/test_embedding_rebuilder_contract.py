@@ -1,4 +1,4 @@
-"""Contracts for quiescent canonical embedding rebuilds."""
+"""Contracts for episode/document embedding configuration and rebuilds."""
 
 import json
 
@@ -10,46 +10,43 @@ from tests.fixtures.fakes import RecordingPostgresClient
 
 class RecordingEmbeddingService:
     embedding_dim = 1024
+    configuration_fingerprint = "fingerprint-v2"
 
-    def __init__(self, fail=False):
+    def __init__(self, *, fail: bool = False):
         self.fail = fail
         self.calls = []
 
+    @staticmethod
+    def vector_for(text: str):
+        return [float(sum(ord(character) for character in text))] * 1024
+
     async def encode(self, texts):
-        self.calls.append(list(texts))
+        values = list(texts)
+        self.calls.append(values)
         if self.fail:
             raise RuntimeError("embedding failed")
-        return [[float(index + 1)] * 1024 for index, _ in enumerate(texts)]
+        return [self.vector_for(text) for text in values]
 
 
-def make_client():
+def rebuild_client():
     return RecordingPostgresClient(
-        fetch_one_results=[
-            {
-                "entity_id": 1,
-                "canonical_name": "ada",
-                "type": "person",
-                "user_name": "ada",
-                "project_id": "__identity__",
-            }
-        ],
         fetch_all_results=[
             [
                 {
-                    "entity_id": 2,
-                    "canonical_name": "Widget",
-                    "type": "concept",
-                    "user_name": "ada",
-                    "project_id": "project-1",
+                    "episode_id": "episode-1",
+                    "summary": "Widget storage uses durable evidence.",
+                    "new_developments": ["Hybrid retrieval is enabled."],
+                    "updates": [],
+                    "unresolved": [],
                 }
             ],
             [
                 {
-                    "episode_id": "episode-1",
-                    "summary": "Widget storage will use direct evidence.",
-                    "new_developments": ["Episode vectors are enabled."],
-                    "updates": [],
-                    "unresolved": [],
+                    "chunk_id": "00000000-0000-0000-0000-000000000001",
+                    "content": "def durable_write(): pass",
+                    "relative_path": "src/store.py",
+                    "language": "python",
+                    "symbol_name": "durable_write",
                 }
             ],
         ]
@@ -58,229 +55,152 @@ def make_client():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_embedding_rebuilder_replaces_canonical_embeddings():
-    client = make_client()
+async def test_full_rebuild_replaces_episode_and_document_vectors_and_fingerprint():
+    client = rebuild_client()
     embedding = RecordingEmbeddingService()
-    rebuilder = EmbeddingRebuilder(client, embedding)
 
-    summary = await rebuilder.rebuild_project_embeddings(
-        "project-1",
-        "ada",
-    )
+    summary = await EmbeddingRebuilder(client, embedding).rebuild_all_embeddings()
 
-    assert summary == {
-        "entities": 1,
-        "identity": 1,
-        "episodes": 1,
-    }
+    assert summary == {"episodes": 1, "document_chunks": 1}
     assert embedding.calls == [
         [
-            "Widget (unknown)",
-            "ada (unknown)",
-        ],
-        [
-            "Summary:\nWidget storage will use direct evidence.\n\n"
-            "New developments:\n- Episode vectors are enabled."
-        ],
+            "Summary:\nWidget storage uses durable evidence.\n\n"
+            "New developments:\n- Hybrid retrieval is enabled.",
+            "File: src/store.py\nLanguage: python\nSymbol: durable_write\n\n"
+            "def durable_write(): pass",
+        ]
     ]
-    entity_updates = [
+    updates = [
         call
         for call in client.calls
-        if call[0] == "execute" and "UPDATE entities" in call[1]
-        and "SET embedding = %s::vector" in call[1]
+        if call[0] == "execute" and "UPDATE public." in call[1]
     ]
-    assert len(entity_updates) == 2
-    assert len(json.loads(entity_updates[0][2][0])) == 1024
-    episode_update = next(
-        call
+    assert len(updates) == 2
+    assert len(json.loads(updates[0][2][0])) == 1024
+    assert any(
+        call[0] == "execute"
+        and "INSERT INTO public.embedding_configuration" in call[1]
+        and call[2] == ("fingerprint-v2",)
         for call in client.calls
-        if call[0] == "execute" and "UPDATE episodes" in call[1]
-        and "SET embedding = %s::vector" in call[1]
     )
-    assert episode_update[2][1:] == ("episode-1", "project-1")
-    assert len(json.loads(episode_update[2][0])) == 1024
+    assert client.transaction_enters == 2
+    assert client.transaction_exits == 2
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_embedding_rebuilder_failure_preserves_existing_rows():
-    client = make_client()
-    rebuilder = EmbeddingRebuilder(
-        client,
-        RecordingEmbeddingService(fail=True),
-    )
+async def test_encoding_failure_occurs_before_any_vector_write():
+    client = rebuild_client()
 
     with pytest.raises(RuntimeError, match="embedding failed"):
-        await rebuilder.rebuild_project_embeddings(
-            "project-1",
-            "ada",
-        )
+        await EmbeddingRebuilder(
+            client, RecordingEmbeddingService(fail=True)
+        ).rebuild_all_embeddings()
 
     assert not any(
-        call[0] == "execute" and "DELETE FROM" in call[1]
-        for call in client.calls
+        call[0] == "execute" and "UPDATE public." in call[1] for call in client.calls
     )
+    assert client.transaction_enters == 1
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_embedding_rebuilder_rejects_wrong_embedding_dimension():
-    client = make_client()
+async def test_rebuild_rejects_wrong_dimension_before_reading_storage():
+    client = RecordingPostgresClient()
     embedding = RecordingEmbeddingService()
     embedding.embedding_dim = 3
-    rebuilder = EmbeddingRebuilder(client, embedding)
 
     with pytest.raises(RuntimeError, match="1024-dimensional"):
-        await rebuilder.rebuild_project_embeddings(
-            "project-1",
-            "ada",
-        )
+        await EmbeddingRebuilder(client, embedding).rebuild_all_embeddings()
 
     assert client.calls == []
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-@pytest.mark.parametrize(
-    ("result", "match"),
-    [
-        (None, "result is missing"),
-        ([], "count mismatch"),
-        ([[0.0] * 3, [0.0] * 3], "dimension 3"),
-    ],
-)
-async def test_embedding_rebuilder_rejects_malformed_embedding_results(
-    result,
-    match,
-):
-    class MalformedEmbeddingService:
-        embedding_dim = 1024
+async def test_matching_configuration_requires_no_corpus_scan():
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"fingerprint": "fingerprint-v2"}]
+    )
 
-        async def encode(self, texts):
-            return result
-
-    client = make_client()
-    rebuilder = EmbeddingRebuilder(client, MalformedEmbeddingService())
-
-    with pytest.raises(RuntimeError, match=match):
-        await rebuilder.rebuild_project_embeddings(
-            "project-1",
-            "ada",
-        )
+    await EmbeddingRebuilder(client, RecordingEmbeddingService()).ensure_configuration()
 
     assert not any(
-        call[0] == "execute" and "DELETE FROM" in call[1]
+        call[0] == "execute" and "EXISTS" in call[1] for call in client.calls
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_unknown_configuration_with_existing_vectors_requires_offline_rebuild():
+    client = RecordingPostgresClient(fetch_one_results=[None, {"has_vectors": True}])
+
+    with pytest.raises(RuntimeError, match="rebuild all episode and document vectors"):
+        await EmbeddingRebuilder(
+            client, RecordingEmbeddingService()
+        ).ensure_configuration()
+
+    assert not any(
+        call[0] == "execute" and "INSERT INTO public.embedding_configuration" in call[1]
         for call in client.calls
     )
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_embedding_rebuilder_database_failure_exits_transaction():
-    client = make_client()
-    client.cursor_execute_exceptions = [
-        *([None] * 4),
-        RuntimeError("message insert failed"),
+async def test_empty_corpus_adopts_current_configuration():
+    client = RecordingPostgresClient(fetch_one_results=[None, {"has_vectors": False}])
+
+    await EmbeddingRebuilder(client, RecordingEmbeddingService()).ensure_configuration()
+
+    assert any(
+        call[0] == "execute"
+        and "INSERT INTO public.embedding_configuration" in call[1]
+        and call[2] == ("fingerprint-v2",)
+        for call in client.calls
+    )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_rebuild_is_scoped_and_does_not_change_global_fingerprint():
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"fingerprint": "fingerprint-v2"}],
+        fetch_all_results=[[], []],
+    )
+
+    summary = await EmbeddingRebuilder(
+        client, RecordingEmbeddingService()
+    ).rebuild_project_embeddings("project-1", "ada")
+
+    assert summary == {"episodes": 0, "document_chunks": 0}
+    reads = [
+        call
+        for call in client.calls
+        if call[0] == "execute" and "SELECT e.episode_id" in call[1]
     ]
-    rebuilder = EmbeddingRebuilder(client, RecordingEmbeddingService())
-
-    with pytest.raises(RuntimeError, match="message insert failed"):
-        await rebuilder.rebuild_project_embeddings(
-            "project-1",
-            "ada",
-        )
-
-    assert client.transaction_enters == 2
-    assert client.transaction_exits == 2
+    assert reads[0][2] == ("project-1", "ada")
+    assert not any(
+        call[0] == "execute" and "INSERT INTO public.embedding_configuration" in call[1]
+        for call in client.calls
+    )
 
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
-@pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_embedding_rebuild_is_idempotent_and_preserves_sibling_project(
+async def test_configuration_fingerprint_round_trips_in_fresh_schema(
     real_postgres_client,
 ):
-    await real_postgres_client.execute(
-        """
-        INSERT INTO sessions (session_id, user_name, project_id)
-        VALUES ('session-1', 'ada', 'project-1'), ('session-2', 'ada', 'project-2')
-        """
+    rebuilder = EmbeddingRebuilder(
+        real_postgres_client,
+        RecordingEmbeddingService(),
     )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO messages (
-            user_name, session_id, message_id, project_id, role, content
-        ) VALUES
-            ('ada', 'session-1', 101, 'project-1', 'user', 'Fresh project one content'),
-            ('ada', 'session-2', 201, 'project-2', 'user', 'Keep project two content')
-        """
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO entities (entity_id, user_name, canonical_name) VALUES
-            (1, 'ada', 'ada'),
-            (2, 'ada', 'Project One'),
-            (3, 'ada', 'Project Two');
-        INSERT INTO project_entity_contexts (
-            project_id, entity_id, user_name, entity_type, topic
-        ) VALUES
-            ('project-1', 2, 'ada', 'concept', 'General'),
-            ('project-2', 3, 'ada', 'concept', 'General')
-        """
-    )
-    await real_postgres_client.execute(
-        """
-        INSERT INTO episodes (
-            episode_id, project_id, summary, source_message_count,
-            first_message_at, last_message_at
-        ) VALUES (
-            'episode-1', 'project-1', 'Project one episode', 1,
-            TIMESTAMPTZ '2026-01-01 00:00:01+00', TIMESTAMPTZ '2026-01-01 00:00:01+00'
-        )
-        """
-    )
-    embedding = RecordingEmbeddingService()
-    rebuilder = EmbeddingRebuilder(real_postgres_client, embedding)
 
-    expected_summary = {
-        "entities": 1,
-        "identity": 1,
-        "episodes": 1,
-    }
-    assert await rebuilder.rebuild_project_embeddings("project-1", "ada") == expected_summary
-    assert await rebuilder.rebuild_project_embeddings("project-1", "ada") == expected_summary
+    await rebuilder.ensure_configuration()
+    await rebuilder.ensure_configuration()
 
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM messages WHERE project_id = 'project-1'"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM project_entity_contexts WHERE project_id = 'project-1'"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM entities WHERE entity_id = 2 AND embedding IS NOT NULL"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM entities WHERE entity_id = 1 AND embedding IS NOT NULL"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM episodes WHERE project_id = 'project-1' AND embedding IS NOT NULL"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        """
-        SELECT search_tsvector @@ plainto_tsquery('english', %s) AS matches
-        FROM messages
-        WHERE message_id = 101
-        """,
-        ("fresh",),
-    ) == {"matches": True}
-    assert await real_postgres_client.fetch_one(
-        "SELECT canonical_name FROM entities WHERE entity_id = 2"
-    ) == {"canonical_name": "Project One"}
-
-    assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM messages WHERE project_id = 'project-2'"
-    ) == {"count": 1}
-    assert await real_postgres_client.fetch_one(
-        "SELECT canonical_name FROM entities WHERE entity_id = 3"
-    ) == {"canonical_name": "Project Two"}
+    row = await real_postgres_client.fetch_one(
+        "SELECT fingerprint FROM public.embedding_configuration WHERE singleton = TRUE"
+    )
+    assert row == {"fingerprint": "fingerprint-v2"}

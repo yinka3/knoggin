@@ -114,6 +114,9 @@ TOOL_DEFINITIONS = {
     ),
     "get_connections": _definition("get_connections", default_limit=8),
     "find_path": _definition("find_path", default_limit=8),
+    "read_observation_evidence": _definition(
+        "read_observation_evidence", default_limit=4
+    ),
     "search_messages": _definition("search_messages", default_limit=6),
     "get_recent_activity": _definition("get_recent_activity", default_limit=8),
     "request_clarification": _definition(
@@ -470,7 +473,7 @@ class Tools(
         self.postgres = postgres
         self.entities = entities
         self.user_name = user_name
-        self.embedding_service = entities.embedding_service
+        self.embedding_service = getattr(knowledge_retrieval, "embedding_service", None)
         self.project_id = entities.project_id
         self.readable_project_ids = entities.readable_project_ids
         self.compiled_domain = compiled_domain
@@ -533,6 +536,11 @@ class Tools(
     async def find_path(self, entity_a_id: int, entity_b_id: int):
         return await self.knowledge_retrieval.find_path(
             entity_a_id, entity_b_id, session_id=self.session_id
+        )
+
+    async def read_observation_evidence(self, observation_id: int):
+        return await self.knowledge_retrieval.read_observation_evidence(
+            observation_id
         )
 
     async def get_hot_topic_context(self, hot_topics):

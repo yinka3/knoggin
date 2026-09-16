@@ -145,9 +145,7 @@ class RuntimeHealthService:
             }
         return {
             "available": True,
-            "pending_count": self._nonnegative_int_or_none(
-                value.get("pending_count")
-            )
+            "pending_count": self._nonnegative_int_or_none(value.get("pending_count"))
             or 0,
             "truncated": value.get("truncated") is True,
         }
@@ -292,7 +290,9 @@ class RuntimeHealthService:
         if failed_count:
             warnings.append("semantic windows have recorded failures")
         if exhausted_count:
-            warnings.append("semantic windows exhausted automatic retries; manual retry required")
+            warnings.append(
+                "semantic windows exhausted automatic retries; manual retry required"
+            )
         if consecutive_failures:
             warnings.append("semantic scheduler has recent failures")
         if projection_failed:
@@ -398,6 +398,16 @@ class RuntimeHealthService:
             "snapshot_for_health",
             warnings,
         )
+        conflict_discovery_job = getattr(project, "conflict_discovery_job", None)
+        conflict_discovery_snapshot = (
+            self._component_snapshot(
+                conflict_discovery_job,
+                "snapshot_for_health",
+                warnings,
+            )
+            if conflict_discovery_job is not None
+            else {}
+        )
         background_snapshot = self._component_snapshot(
             getattr(self.resources, "background_work", None),
             "snapshot_for_health",
@@ -494,6 +504,7 @@ class RuntimeHealthService:
             summary=summary,
             details={
                 "scheduler": scheduler_snapshot,
+                "conflict_discovery": conflict_discovery_snapshot,
                 "background_work": background_snapshot,
                 "document_indexing": {
                     **indexing_snapshot,

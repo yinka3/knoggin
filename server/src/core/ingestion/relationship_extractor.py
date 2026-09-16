@@ -15,6 +15,7 @@ from common.schema.ingestion.extraction import ContextRelationshipExtraction
 from common.scoping import IDENTITY_ENTITY_ID
 from common.utils.core_utils import format_context_vp02_input
 from common.utils.events import emit
+from common.utils.local_references import build_local_id_maps
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.prompts import get_context_connection_reasoning_prompt
 from core.knowledge.entity.resolver import EntityResolver
@@ -38,10 +39,6 @@ class ContextRelationshipExtractor:
         self.user_name = user_name
         self.llm = llm
         self.entities = entities
-
-    @staticmethod
-    def _name_key(value: str) -> str:
-        return value.strip().casefold()
 
     @staticmethod
     def _record_issue(
@@ -74,10 +71,21 @@ class ContextRelationshipExtractor:
                 association.block_id
             )
 
-        candidates: list[Dict] = []
-        names: Dict[str, tuple[int, str]] = {}
-        for entity_id in build.entity_result.entity_ids:
+        identity_type = build.policy.domain.canonical_entity_type("Identity") or "Identity"
+        candidate_details: Dict[int, Dict] = {
+            IDENTITY_ENTITY_ID: {
+                "canonical_name": self.user_name,
+                "type": identity_type,
+                "mentions": (),
+                "source_blocks": (),
+                "is_identity": True,
+            }
+        }
+        for entity_id in sorted(set(build.entity_result.entity_ids)):
+            if entity_id == IDENTITY_ENTITY_ID:
+                continue
             pending = build.entity_result.pending_entity_writes.get(entity_id)
+            classification = build.entity_result.project_classifications.get(entity_id)
             profile = None if pending is not None else await self.entities.get_profile(entity_id)
             if pending is None and profile is None:
                 self._record_issue(
@@ -88,38 +96,41 @@ class ContextRelationshipExtractor:
                 )
                 continue
             canonical_name = pending.canonical_name if pending is not None else profile.canonical_name
-            entity_type = pending.entity_type if pending is not None else profile.entity_type
+            if classification is None:
+                raise ValueError(
+                    "Context VP-02 candidate lacks a project classification"
+                )
+            else:
+                entity_type = classification.entity_type
             aliases = list(pending.aliases) if pending is not None else self.entities.get_mentions_for_id(entity_id)
-            key = self._name_key(canonical_name)
-            if key in names and names[key][0] != entity_id:
-                raise ValueError("Context VP-02 candidates cannot share canonical names")
-            names[key] = (entity_id, entity_type)
-            candidates.append(
-                {
-                    "canonical_name": canonical_name,
-                    "type": entity_type,
-                    "mentions": aliases,
-                    "source_blocks": sorted(
-                        block_local_ids[block_id]
-                        for block_id in source_blocks_by_entity.get(entity_id, set())
-                        if block_id in block_local_ids
-                    ),
-                }
-            )
+            candidate_details[entity_id] = {
+                "canonical_name": canonical_name,
+                "type": entity_type,
+                "mentions": aliases,
+                "source_blocks": sorted(
+                    block_local_ids[block_id]
+                    for block_id in source_blocks_by_entity.get(entity_id, set())
+                    if block_id in block_local_ids
+                ),
+                "is_identity": False,
+            }
 
-        identity_key = self._name_key(self.user_name)
-        if identity_key not in names:
-            identity_type = build.policy.domain.canonical_entity_type("Identity") or "Identity"
-            names[identity_key] = (IDENTITY_ENTITY_ID, identity_type)
-            candidates.append(
-                {
-                    "canonical_name": self.user_name,
-                    "type": identity_type,
-                    "mentions": (),
-                    "source_blocks": (),
-                }
-            )
-        return candidates, names
+        entity_to_handle, handle_to_entity = build_local_id_maps(
+            candidate_details,
+            "e",
+        )
+        candidates = [
+            {
+                "handle": entity_to_handle[entity_id],
+                **candidate_details[entity_id],
+            }
+            for entity_id in sorted(candidate_details)
+        ]
+        handles = {
+            handle: (int(entity_id), candidate_details[int(entity_id)]["type"])
+            for handle, entity_id in handle_to_entity.items()
+        }
+        return candidates, handles
 
     async def extract(
         self, build: SemanticWindowBuild
@@ -138,7 +149,7 @@ class ContextRelationshipExtractor:
             return ()
         block_local_ids = {block.block_id: f"b{index}" for index, block in enumerate(blocks, 1)}
         local_blocks = {local_id: block_id for block_id, local_id in block_local_ids.items()}
-        candidates, valid_names = await self._candidates(build, block_local_ids)
+        candidates, valid_handles = await self._candidates(build, block_local_ids)
         if len(candidates) < 2:
             build.set_relationship_writes(())
             return ()
@@ -179,15 +190,19 @@ class ContextRelationshipExtractor:
         build.trace.relationships_seen = len(result.connections)
         writes_by_identity: Dict[tuple[int, int, str], ContextRelationshipWrite] = {}
         for mention in result.connections:
-            endpoint_a = valid_names.get(self._name_key(mention.entity_a))
-            endpoint_b = valid_names.get(self._name_key(mention.entity_b))
+            endpoint_a = valid_handles.get(mention.entity_a)
+            endpoint_b = valid_handles.get(mention.entity_b)
             if endpoint_a is None or endpoint_b is None:
                 build.trace.relationships_rejected += 1
                 self._record_issue(
                     build,
                     code="invalid_context_connection_entity",
-                    message="Context VP-02 returned an unknown canonical entity",
+                    message="Context VP-02 returned an unknown local entity handle",
                     item_ref=f"{mention.entity_a}->{mention.entity_b}",
+                    metadata={
+                        "entity_a": mention.entity_a,
+                        "entity_b": mention.entity_b,
+                    },
                 )
                 continue
             if endpoint_a[0] == endpoint_b[0]:

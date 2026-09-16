@@ -70,6 +70,33 @@ class EvidenceService:
             limits=active_limits,
         )
 
+    async def for_visible_relationship_observation(
+        self,
+        observation_id: int,
+        *,
+        user_name: str,
+        visible_project_ids: list[str],
+        limits: EvidenceTraversalLimits | None = None,
+    ) -> EvidenceBundle:
+        """Explain one observation when it belongs to an allowed project."""
+
+        pointer = EvidencePointer.for_observation(observation_id)
+        active_limits = limits or EvidenceTraversalLimits()
+        rows = await self.reader.get_visible_relationship_rows(
+            [observation_id],
+            user_name=user_name,
+            visible_project_ids=visible_project_ids,
+            row_limit=active_limits.max_edges + 1,
+        )
+        return self._bundle(
+            EvidenceSubject(
+                kind="relationship_observation",
+                identifier=pointer.identifier,
+            ),
+            rows,
+            limits=active_limits,
+        )
+
     async def for_relationship_observations(
         self,
         observation_ids: list[int],

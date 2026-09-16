@@ -315,10 +315,10 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     calls = []
 
     async def fail_once_then_save(message, candidates, *, readable_project_ids, artifact=None):
-        del readable_project_ids
         del artifact
-        calls.append((message, candidates))
+        calls.append((message, candidates, list(readable_project_ids)))
         if len(calls) == 1:
+            ctx.project.readable_project_ids.append("project-added-after-run")
             raise ConnectionError("temporary transaction failure")
         return message["id"], [], True
 
@@ -340,6 +340,7 @@ async def test_context_retries_atomic_source_handoff_with_the_same_candidates(
     assert len(calls) == 2
     assert calls[0][0]["id"] == calls[1][0]["id"] == 1
     assert calls[0][1] == calls[1][1] == [candidate]
+    assert calls[0][2] == calls[1][2] == ["project-1"]
 
 
 @pytest.mark.runtime
@@ -478,6 +479,39 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     }
     assert candidates[0].source_message_id == 1
     assert readable_project_ids == ["project-1"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_agent_stream_finalizes_sources_with_the_admitted_read_scope(context):
+    ctx, resources = context
+    captured_scopes = []
+
+    async def response_after_scope_changes(_kwargs):
+        ctx.project.readable_project_ids.append("project-added-during-run")
+        yield _response_event(
+            "Durable final answer",
+            sources_consulted=[_pasted_source_candidate().model_dump(mode="json")],
+        )
+
+    async def persist_assistant(
+        _message, _candidates, *, readable_project_ids, artifact=None
+    ):
+        del artifact
+        captured_scopes.append(list(readable_project_ids))
+        return 2, [], True
+
+    resources.knowledge_store.finalize_assistant_exchange = persist_assistant
+    events = await _collect_turn(
+        ctx,
+        Message(content="Use the source."),
+        _FakeTurnOrchestrator(response_after_scope_changes),
+    )
+
+    assert events[-1]["event"] == "response"
+    assert captured_scopes == [["project-1"]]
+
+
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_run_agent_stream_persists_artifact_with_assistant_completion(context):

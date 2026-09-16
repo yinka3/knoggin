@@ -15,8 +15,8 @@ from common.schema.public import (
     StartRunRequest,
     validate_public_stream,
 )
-from core.knowledge.maintenance_impact import MaintenanceImpactPlanner
-from core.knowledge.maintenance_reviews import (
+from core.knowledge.maintenance.maintenance_impact import MaintenanceImpactPlanner
+from core.knowledge.maintenance.maintenance_reviews import (
     EntityMergePlan,
     MaintenanceReview,
     MaintenanceReviewDetail,

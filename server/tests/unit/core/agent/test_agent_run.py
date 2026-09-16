@@ -12,6 +12,7 @@ from core.agent.run import (
     AgentRun,
     AgentRunLimits,
 )
+from core.agent.sources.pasted_text import build_pasted_text_candidates
 
 
 def make_agent_config() -> AgentConfig:
@@ -83,6 +84,97 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
 
 
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    "user_query",
+    [
+        "Hey",
+        "nice",
+        "Nice, go to the next one",
+        "go to the next one",
+    ],
+)
+def test_adaptive_briefing_uses_a_narrow_conversational_fast_path(user_query):
+    run = make_run(user_query=user_query)
+
+    assert run.project_briefing.mode == "adaptive"
+    assert run.project_briefing.initial_reason is None
+    assert run.project_briefing.needs_load is False
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("overrides", "expected_reason"),
+    [
+        (
+            {"user_query": "What did we decide about the ingestion project?"},
+            "explicit_project_memory_intent",
+        ),
+        (
+            {"user_query": "Explain this architecture."},
+            "conservative_default",
+        ),
+        (
+            {"research_profile": resolve_research_profile("research")},
+            "research_mode",
+        ),
+        (
+            {"document_selection_context": {"excerpt": "selected passage"}},
+            "document_selection",
+        ),
+        ({"hot_topics": ["ingestion"]}, "hot_topic_preload"),
+        (
+            {"limits": AgentRunLimits(project_briefing_mode="always")},
+            "always",
+        ),
+    ],
+)
+def test_agent_run_freezes_observable_briefing_signals(
+    overrides,
+    expected_reason,
+):
+    run = make_run(**overrides)
+
+    assert run.project_briefing.initial_reason == expected_reason
+    assert run.project_briefing.requested_reason == expected_reason
+    assert run.project_briefing.needs_load is True
+
+
+@pytest.mark.no_network
+def test_adaptive_briefing_allows_one_deferred_transition_and_caches_content():
+    run = make_run(user_query="hey")
+
+    assert run.request_project_briefing_transition() is True
+    assert run.request_project_briefing_transition() is False
+    assert run.project_briefing.transition_count == 1
+    assert run.project_briefing.requested_reason == "tool_followup"
+
+    run.record_project_briefing_loaded(
+        brief="Project Brief",
+        context="Project Context",
+        documents_context="- project-notes.md (2KB, 3 chunks)",
+        content_token_count=9,
+    )
+    run.record_project_briefing_loaded(
+        brief="later brief",
+        context="later context",
+        content_token_count=8,
+    )
+
+    assert run.project_briefing.loaded is True
+    assert run.project_briefing.load_count == 1
+    assert run.project_briefing.brief == "Project Brief"
+    assert run.project_briefing.context == "Project Context"
+    assert run.project_briefing.documents_context == "- project-notes.md (2KB, 3 chunks)"
+    assert run.project_briefing.content_token_count == 9
+
+    run.release()
+
+    assert run.project_briefing.brief == ""
+    assert run.project_briefing.context == ""
+    assert run.project_briefing.documents_context == ""
+
+
+@pytest.mark.no_network
 def test_agent_run_rejects_unregistered_additional_tool_schema():
     with pytest.raises(ValueError, match="no registered implementation"):
         make_run(
@@ -138,6 +230,57 @@ def test_agent_run_enforces_attempt_and_tool_call_invariants():
     assert not run.can_call_tool("search_messages", {"query": "Ada"})
     with pytest.raises(ValueError, match="not permitted"):
         run.record_tool_call("search_messages", {"query": "Ada"})
+
+
+@pytest.mark.no_network
+def test_agent_run_distinguishes_grounded_evidence_from_actions_and_validates_input():
+    run = make_run()
+
+    run.notebook.apply("edit_brain", {"data": {"success": True}})
+
+    assert run.has_any() is True
+    assert run.has_grounded_investigation_evidence() is False
+
+    run.notebook.apply(
+        "search_messages",
+        {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
+    )
+
+    assert run.has_grounded_investigation_evidence() is True
+
+    pasted_candidates = build_pasted_text_candidates(
+        project_id="project-1",
+        session_id="session-1",
+        source_message_id=1,
+        message_content="Use this:\n```text\nSource-backed detail.\n```",
+        agent_run_id="run-2",
+    )
+    sourced_run = make_run(
+        run_id="run-2",
+        initial_source_candidates=pasted_candidates,
+    )
+
+    assert sourced_run.has_grounded_investigation_evidence() is True
+    with pytest.raises(TypeError, match="validated source references"):
+        make_run(initial_source_candidates=[object()])
+
+
+@pytest.mark.no_network
+def test_deep_research_gap_review_is_due_once_after_grounded_evidence():
+    run = make_run(research_profile=resolve_research_profile("deep_research"))
+
+    assert run.needs_deep_research_gap_review() is False
+    run.notebook.apply(
+        "search_messages",
+        {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
+    )
+
+    assert run.needs_deep_research_gap_review() is True
+    assert run.begin_deep_research_gap_review() is True
+    assert run.has_completed_deep_research_gap_review() is True
+    assert run.deep_research_gap_review_count == 1
+    assert run.needs_deep_research_gap_review() is False
+    assert run.begin_deep_research_gap_review() is False
 
 
 @pytest.mark.no_network
@@ -297,6 +440,13 @@ async def test_research_profile_supplies_default_report_artifact_at_synthesis():
     run = make_run(
         limits=AgentRunLimits(max_calls=6, max_attempts=6),
         research_profile=profile,
+        initial_source_candidates=build_pasted_text_candidates(
+            project_id="project-1",
+            session_id="session-1",
+            source_message_id=1,
+            message_content="Use this:\n```text\nGrounded evidence.\n```",
+            agent_run_id="run-1",
+        ),
     )
     executor = AgentExecutor(
         run,
@@ -310,6 +460,7 @@ async def test_research_profile_supplies_default_report_artifact_at_synthesis():
     assert response["data"]["research_mode"] == "deep_research"
     assert response["data"]["artifact"]["kind"] == "research_report"
     assert response["data"]["artifact"]["title"] == "Research report"
+    assert run.deep_research_gap_review_count == 1
 
 
 @pytest.mark.no_network

@@ -31,8 +31,10 @@ from core.knowledge.documents import (
 )
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.episodes.generator import EpisodeGenerator
+from core.knowledge.jobs.conflict_discovery_job import ConflictDiscoveryJob
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.project.domain_config_store import DomainConfigStore
+from core.project.maintenance_service import ProjectMaintenanceService
 from infrastructure.job.base import JobContext
 from infrastructure.job.scheduler import Scheduler
 from runtime.project_runtime import ProjectRuntime
@@ -47,9 +49,11 @@ class ProjectRuntimeFactory:
         *,
         resources: RuntimeResources,
         user_name: str,
+        maintenance_service: ProjectMaintenanceService | None = None,
     ) -> None:
         self.resources = resources
         self.user_name = user_name
+        self._maintenance_service = maintenance_service
 
     @property
     def dev_settings(self):
@@ -75,12 +79,10 @@ class ProjectRuntimeFactory:
             project_id=project_id,
             readable_project_ids=readable_project_ids,
             knowledge_store=resources.knowledge_store,
-            embedding_service=resources.embedding,
             fuzzy_substring_threshold=entity_settings.fuzzy_substring_threshold,
             fuzzy_non_substring_threshold=entity_settings.fuzzy_non_substring_threshold,
             generic_token_freq=entity_settings.generic_token_freq,
             candidate_fuzzy_threshold=entity_settings.candidate_fuzzy_threshold,
-            candidate_vector_threshold=entity_settings.candidate_vector_threshold,
         )
         await self._verify_user_entity(entities)
 
@@ -137,8 +139,14 @@ class ProjectRuntimeFactory:
             background_work=resources.background_work,
             get_vp01=resources.get_vp01,
         )
-        project_semantic_job = self._create_project_semantic_job(runtime, resources=resources)
+        project_semantic_job = self._create_project_semantic_job(
+            runtime, resources=resources
+        )
         runtime.project_semantic_job = project_semantic_job
+        conflict_discovery_job = self._create_conflict_discovery_job(
+            resources=resources
+        )
+        runtime.conflict_discovery_job = conflict_discovery_job
 
         try:
             await project_semantic_job.synchronize_context_file(
@@ -151,6 +159,7 @@ class ProjectRuntimeFactory:
                 entities=entities,
                 processor=text_processor,
                 project_semantic_job=project_semantic_job,
+                conflict_discovery_job=conflict_discovery_job,
                 resources=resources,
             )
             await scheduler.start()
@@ -225,7 +234,9 @@ class ProjectRuntimeFactory:
         resources = resources or cast(ReadyRuntimeResources, self.resources)
         token_counter = getattr(resources.llm_service, "count_tokens", None)
         if not callable(token_counter):
-            raise RuntimeError("LLM service must provide count_tokens for semantic windows")
+            raise RuntimeError(
+                "LLM service must provide count_tokens for semantic windows"
+            )
         admission = SemanticWindowAdmission(
             resources.knowledge_store,
             self.dev_settings.ingestion,
@@ -233,7 +244,6 @@ class ProjectRuntimeFactory:
             episode_settings=self.dev_settings.jobs.episode,
         )
         episode_generator = EpisodeGenerator(
-            resources.knowledge_store,
             llm=resources.llm_service,
             embedding_service=resources.embedding,
         )
@@ -244,15 +254,13 @@ class ProjectRuntimeFactory:
             reader=ProjectContextReader(resources.postgres),
             writer=ProjectContextWriter(resources.postgres),
             filesystem=context_filesystem,
-            capture_ingestion_policy=runtime.capture_ingestion_policy,
         )
         return ProjectSemanticJob(
             admission,
             resources.knowledge_store,
             episode_generator,
             settings=self.dev_settings.ingestion,
-            capture_domain=runtime.capture_domain,
-            capture_ingestion_policy=runtime.capture_ingestion_policy,
+            capture_semantic_policy=runtime.capture_semantic_policy,
             context_updater=ContextUpdater(llm=resources.llm_service),
             context_projection=context_projection,
             context_entity_builder=ContextEntityBuildService(
@@ -265,6 +273,21 @@ class ProjectRuntimeFactory:
                 llm=resources.llm_service,
                 entities=runtime.entities,
             ),
+            publish_committed_entity_ids=runtime.entities.publish_committed_entity_ids,
+        )
+
+    def _create_conflict_discovery_job(
+        self,
+        *,
+        resources: ReadyRuntimeResources | None = None,
+    ) -> ConflictDiscoveryJob | None:
+        if self._maintenance_service is None:
+            return None
+        resources = resources or cast(ReadyRuntimeResources, self.resources)
+        return ConflictDiscoveryJob(
+            self._maintenance_service,
+            self.dev_settings.jobs.conflict_discovery,
+            llm=resources.llm_service,
         )
 
     def _register_background_jobs(
@@ -274,6 +297,7 @@ class ProjectRuntimeFactory:
         entities: EntityResolver,
         processor: TextProcessor,
         project_semantic_job: ProjectSemanticJob | None = None,
+        conflict_discovery_job: ConflictDiscoveryJob | None = None,
         resources: ReadyRuntimeResources | None = None,
     ) -> None:
         scheduler = runtime.scheduler
@@ -306,5 +330,13 @@ class ProjectRuntimeFactory:
                 config_manager.subscribe(
                     project_semantic_job.update_episode_settings,
                     "developer_settings.jobs.episode",
+                )
+            )
+        if conflict_discovery_job is not None:
+            scheduler.register(conflict_discovery_job)
+            runtime.add_config_unsubscriber(
+                config_manager.subscribe(
+                    conflict_discovery_job.update_settings,
+                    "developer_settings.jobs.conflict_discovery",
                 )
             )

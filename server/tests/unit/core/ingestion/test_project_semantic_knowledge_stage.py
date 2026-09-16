@@ -41,10 +41,14 @@ def _domain():
 
 def _policy():
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(llm_ner=False),
+        text_processor=TextProcessorSettings(),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=_domain(),
     )
+
+
+async def _capture_semantic_policy():
+    return _policy()
 
 
 class _Admission:
@@ -61,6 +65,7 @@ class _Builder:
                 alias_updated_ids=frozenset(),
                 alias_updates={},
                 pending_entity_writes={},
+                project_classifications={},
                 block_entity_associations=(),
                 message_entity_refs=(),
             )
@@ -74,9 +79,28 @@ class _Relationships:
         return ()
 
 
+class _UnexpectedBuilder:
+    def __init__(self):
+        self.calls = 0
+
+    async def build(self, _build):
+        self.calls += 1
+        raise AssertionError("no-op Context reuse must not invoke entity extraction")
+
+
+class _UnexpectedRelationships:
+    def __init__(self):
+        self.calls = 0
+
+    async def extract(self, _build):
+        self.calls += 1
+        raise AssertionError("no-op Context reuse must not invoke relationship extraction")
+
+
 class _Store:
     def __init__(self):
         domain = _domain()
+        window_id = uuid4()
         self.block = ContextBlockRecord(
             block_id=uuid4(),
             project_id="project-1",
@@ -89,13 +113,14 @@ class _Store:
             revision_id=uuid4(),
             project_id="project-1",
             revision_number=1,
+            window_id=window_id,
             origin=ContextRevisionOrigin.CONVERSATION,
             domain_version=domain.version,
             content_hash="b" * 64,
             blocks=[self.block],
         )
         self.window = SemanticWindowRecord(
-            window_id=uuid4(),
+            window_id=window_id,
             user_name="ada",
             project_id="project-1",
             origin=SemanticWindowOrigin.CONVERSATION,
@@ -109,10 +134,17 @@ class _Store:
             context_revision_id=self.snapshot.revision_id,
         )
         self.commit_calls = []
+        self.impact_reads = 0
+        self.support_reads = 0
+        self.evidence_message_reads = 0
+        self.impact_block_ids = frozenset({self.block.block_id})
+        self.committed_entity_ids = (101, 202)
+        self.committed_entity_id_reads = 0
         self.enrich_calls = 0
         self.fail_commit = False
         self.fail_enrichment = False
         self.failures = []
+        self.events = []
 
     async def get_active_project_semantic_window(self, **_kwargs):
         return None if self.window.stage is SemanticWindowStage.COMPLETED else self.window
@@ -121,9 +153,13 @@ class _Store:
         return self.snapshot
 
     async def get_project_context_revision_impact_block_ids(self, _revision_id, **_kwargs):
-        return frozenset({self.block.block_id})
+        self.impact_reads += 1
+        return self.impact_block_ids
 
-    async def get_project_context_block_supports(self, _block_ids, **_kwargs):
+    async def get_project_context_block_supports(self, block_ids, **_kwargs):
+        self.support_reads += 1
+        if str(self.block.block_id) not in set(block_ids):
+            return {}
         return {
             self.block.block_id: (
                 ContextBlockSupportRecord(
@@ -137,6 +173,7 @@ class _Store:
         }
 
     async def get_project_semantic_window_evidence_messages(self, _window_id, **_kwargs):
+        self.evidence_message_reads += 1
         return [{"message_id": 101, "content": "The active Context is grounded."}]
 
     async def commit_project_semantic_knowledge(self, build):
@@ -144,20 +181,30 @@ class _Store:
         if self.fail_commit:
             raise OSError("Knowledge commit unavailable")
         self.commit_calls.append(build)
+        self.events.append("commit")
         self.window = self.window.model_validate(
             self.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
         )
         return SimpleNamespace(resumed=False, relationships_written=0)
 
+    async def get_project_semantic_window_committed_entity_ids(self, _window_id, **_kwargs):
+        self.committed_entity_id_reads += 1
+        self.events.append("committed_entity_ids")
+        if self.snapshot.window_id != self.window.window_id:
+            return ()
+        return self.committed_entity_ids
+
     async def enrich_project_semantic_window_episodes(self, **_kwargs):
         if self.fail_enrichment:
             raise OSError("Episode enrichment unavailable")
         self.enrich_calls += 1
+        self.events.append("enrich")
         return {"entities": 0, "relationships": 0}
 
     async def advance_project_semantic_window_stage(self, **kwargs):
         assert kwargs["expected_stage"] is SemanticWindowStage.KNOWLEDGE_COMMITTED
         assert kwargs["next_stage"] is SemanticWindowStage.COMPLETED
+        self.events.append("complete")
         self.window = self.window.model_validate(
             self.window.model_dump() | {"stage": SemanticWindowStage.COMPLETED}
         )
@@ -189,22 +236,34 @@ class _FailingRelationships:
         raise OSError("Relationship extraction unavailable")
 
 
+class _Publisher:
+    def __init__(self, events, *, fail=False):
+        self.events = events
+        self.fail = fail
+        self.calls = []
+
+    async def __call__(self, entity_ids):
+        self.events.append("publish")
+        self.calls.append(tuple(entity_ids))
+        if self.fail:
+            raise OSError("Resolver publication unavailable")
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_knowledge_commit_precedes_episode_enrichment_and_completes_terminally():
     store = _Store()
-
-    async def capture_domain():
-        return _domain()
+    publisher = _Publisher(store.events)
 
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=_Builder(),
         context_relationship_extractor=_Relationships(),
+        publish_committed_entity_ids=publisher,
     )
     ctx = JobContext(user_name="ada", project_id="project-1")
 
@@ -214,7 +273,15 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_completes_termin
     assert knowledge.success
     assert completed.success
     assert len(store.commit_calls) == 1
+    assert publisher.calls == [(101, 202)]
     assert store.enrich_calls == 1
+    assert store.events == [
+        "commit",
+        "committed_entity_ids",
+        "publish",
+        "enrich",
+        "complete",
+    ]
     assert store.window.stage is SemanticWindowStage.COMPLETED
 
 
@@ -234,15 +301,12 @@ async def test_knowledge_failures_keep_the_context_checkpoint_for_restart(
     store = _Store()
     store.fail_commit = fail_commit
 
-    async def capture_domain():
-        return _domain()
-
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=builder,
         context_relationship_extractor=relationships,
         now_ms=lambda: 1_000,
@@ -265,18 +329,17 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
         store.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
     )
     store.fail_enrichment = True
-
-    async def capture_domain():
-        return _domain()
+    publisher = _Publisher(store.events)
 
     job = ProjectSemanticJob(
         _Admission(),
         store,
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
-        capture_domain=capture_domain,
+        capture_semantic_policy=_capture_semantic_policy,
         context_entity_builder=_Builder(),
         context_relationship_extractor=_Relationships(),
+        publish_committed_entity_ids=publisher,
         now_ms=lambda: 1_000,
     )
 
@@ -285,3 +348,168 @@ async def test_episode_enrichment_failure_keeps_the_knowledge_checkpoint_for_res
     assert result.success is False
     assert store.window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
     assert store.failures[0]["failure_stage"] == "episode_enrichment"
+    assert publisher.calls == [(101, 202)]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_publication_failure_retries_only_durable_entity_ids_after_restart():
+    store = _Store()
+    store.window = store.window.model_validate(
+        store.window.model_dump() | {"stage": SemanticWindowStage.KNOWLEDGE_COMMITTED}
+    )
+    now = [1_000]
+    failing_publisher = _Publisher(store.events, fail=True)
+
+    failed_job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=_capture_semantic_policy,
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=failing_publisher,
+        now_ms=lambda: now[0],
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    failed = await failed_job.execute(context)
+
+    assert failed.success is False
+    assert store.window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
+    assert store.failures[-1]["failure_stage"] == "resolver_publication"
+    assert failing_publisher.calls == [(101, 202)]
+    assert store.enrich_calls == 0
+    assert store.commit_calls == []
+
+    now[0] = 31_001
+    recovered_publisher = _Publisher(store.events)
+    restarted = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=_capture_semantic_policy,
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=recovered_publisher,
+        now_ms=lambda: now[0],
+    )
+
+    recovered = await restarted.execute(context)
+
+    assert recovered.success
+    assert recovered_publisher.calls == [(101, 202)]
+    assert store.committed_entity_id_reads == 2
+    assert store.enrich_calls == 1
+    assert store.commit_calls == []
+    assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_reused_context_checkpoint_skips_extraction_after_knowledge_restart():
+    store = _Store()
+    owner_window_id = store.window.window_id
+    store.window = store.window.model_copy(
+        update={"window_id": uuid4()}
+    )
+    store.fail_commit = True
+    now = [1_000]
+    builder = _UnexpectedBuilder()
+    relationships = _UnexpectedRelationships()
+    publisher = _Publisher(store.events)
+
+    job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=_capture_semantic_policy,
+        context_entity_builder=builder,
+        context_relationship_extractor=relationships,
+        publish_committed_entity_ids=publisher,
+        now_ms=lambda: now[0],
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    failed = await job.execute(context)
+
+    assert failed.success is False
+    assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
+    assert store.snapshot.window_id == owner_window_id
+    assert store.snapshot.window_id != store.window.window_id
+    assert store.impact_reads == 0
+    assert store.support_reads == 0
+    assert store.evidence_message_reads == 0
+    assert builder.calls == 0
+    assert relationships.calls == 0
+
+    now[0] = 31_001
+    store.fail_commit = False
+    restarted = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=_capture_semantic_policy,
+        context_entity_builder=builder,
+        context_relationship_extractor=relationships,
+        publish_committed_entity_ids=publisher,
+        now_ms=lambda: now[0],
+    )
+    committed = await restarted.execute(context)
+    completed = await restarted.execute(context)
+
+    assert committed.success
+    assert completed.success
+    assert len(store.commit_calls) == 1
+    build = store.commit_calls[0]
+    assert build.impact_block_ids == frozenset()
+    assert build.entity_result is not None
+    assert build.entity_result.entity_ids == ()
+    assert build.relationship_writes == ()
+    assert store.impact_reads == 0
+    assert store.support_reads == 0
+    assert store.evidence_message_reads == 0
+    assert builder.calls == 0
+    assert relationships.calls == 0
+    assert publisher.calls == []
+    assert store.committed_entity_id_reads == 1
+    assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_owned_empty_context_checkpoint_completes_without_extraction():
+    store = _Store()
+    store.snapshot = store.snapshot.model_copy(update={"blocks": []})
+    store.impact_block_ids = frozenset()
+    builder = _UnexpectedBuilder()
+    relationships = _UnexpectedRelationships()
+
+    job = ProjectSemanticJob(
+        _Admission(),
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=_capture_semantic_policy,
+        context_entity_builder=builder,
+        context_relationship_extractor=relationships,
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    knowledge = await job.execute(context)
+    completed = await job.execute(context)
+
+    assert knowledge.success
+    assert completed.success
+    assert store.impact_reads == 1
+    assert store.support_reads == 0
+    assert store.evidence_message_reads == 0
+    assert len(store.commit_calls) == 1
+    assert store.commit_calls[0].impact_block_ids == frozenset()
+    assert builder.calls == 0
+    assert relationships.calls == 0
+    assert store.window.stage is SemanticWindowStage.COMPLETED

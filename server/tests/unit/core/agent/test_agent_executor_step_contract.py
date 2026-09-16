@@ -10,10 +10,13 @@ from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.context import (
     AssertionKind,
     ContextBlockRecord,
+    ContextBlockSupportRecord,
     ContextRevisionOrigin,
     ContextSnapshot,
+    ContextSupportKind,
 )
-from core.agent.executor import AgentExecutor
+from core.agent.executor import AgentExecutor, _AgentPhase
+from core.agent.executor import _ToolCall as ToolCall
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 
 
@@ -65,9 +68,7 @@ async def test_executor_loads_missing_or_unreadable_project_brief_non_fatally():
     async def fail_reader():
         raise RuntimeError("workspace unavailable")
 
-    executor.tools.document_service = SimpleNamespace(
-        read_project_brief=fail_reader
-    )
+    executor.tools.document_service = SimpleNamespace(read_project_brief=fail_reader)
     assert await executor._load_project_brief() == ""
 
 
@@ -78,9 +79,7 @@ async def test_executor_loads_user_owned_project_brief_directly():
     async def read_context():
         return "# Project\nUse the repository conventions."
 
-    executor.tools.document_service = SimpleNamespace(
-        read_project_brief=read_context
-    )
+    executor.tools.document_service = SimpleNamespace(read_project_brief=read_context)
     assert await executor._load_project_brief() == (
         "# Project\nUse the repository conventions."
     )
@@ -118,6 +117,21 @@ async def test_executor_renders_current_context_from_the_canonical_reader_only()
             assert kwargs == {"user_name": "ada", "project_id": "project-1"}
             return snapshot
 
+        async def get_block_supports(self, block_ids, **kwargs):
+            assert block_ids == [block.block_id]
+            assert kwargs == {"user_name": "ada", "project_id": "project-1"}
+            return {
+                block.block_id: (
+                    ContextBlockSupportRecord(
+                        block_id=block.block_id,
+                        project_id="project-1",
+                        message_id=17,
+                        session_id="session-1",
+                        support_kind=ContextSupportKind.USER_MESSAGE,
+                    ),
+                )
+            }
+
     async def projection_is_not_an_authoritative_read():
         raise AssertionError("CONTEXT.md projection must not be read by the agent")
 
@@ -131,6 +145,7 @@ async def test_executor_renders_current_context_from_the_canonical_reader_only()
 
     assert "# Project Context" in rendered
     assert "The semantic owner is project-scoped." in rendered
+    assert "C1 [user_asserted; support: M1]" in rendered
 
 
 @pytest.mark.no_network
@@ -295,7 +310,7 @@ async def test_step_forwards_selected_research_profile_to_prompt(monkeypatch):
 
 
 @pytest.mark.no_network
-async def test_step_marks_invalid_arguments_for_later_tool_error():
+async def test_step_marks_invalid_arguments_without_retaining_raw_input():
     executor = make_executor(StreamingLLM())
     tool_call = executor._parse_tool_calls(
         [
@@ -309,7 +324,75 @@ async def test_step_marks_invalid_arguments_for_later_tool_error():
     )[0]
 
     assert tool_call.args["_parse_error"] is True
-    assert tool_call.args["_raw"] == "{not json"
+    assert tool_call.args == {"_parse_error": True}
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("phase", "tool_call", "expected_error"),
+    [
+        (
+            _AgentPhase.PLAN,
+            ToolCall("search_messages", {"query": "profile"}),
+            None,
+        ),
+        (
+            _AgentPhase.SYNTHESIZE,
+            ToolCall("submit_answer", {"content": "Final answer."}),
+            None,
+        ),
+        (
+            _AgentPhase.SYNTHESIZE,
+            ToolCall("search_messages", {"query": "profile"}),
+            "Returned tool is not allowed during SYNTHESIZE.",
+        ),
+        (
+            _AgentPhase.PLAN,
+            ToolCall("not_a_tool", {}),
+            "Returned tool is not allowed during PLAN.",
+        ),
+        (
+            _AgentPhase.PLAN,
+            ToolCall("search_messages", {"_parse_error": True}),
+            "Returned tool call contains invalid arguments.",
+        ),
+    ],
+)
+def test_executor_validates_returned_calls_against_current_phase(
+    phase,
+    tool_call,
+    expected_error,
+):
+    executor = make_executor(StreamingLLM())
+
+    assert executor._validate_tool_call_batch([tool_call], phase) == expected_error
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [
+            ToolCall("submit_answer", {"content": "Final answer."}),
+            ToolCall("search_messages", {"query": "profile"}),
+        ],
+        [
+            ToolCall("submit_answer", {"content": "Final answer."}),
+            ToolCall("request_clarification", {"question": "Which profile?"}),
+        ],
+        [
+            ToolCall("submit_answer", {"content": "Final answer."}),
+            ToolCall("submit_answer", {"content": "Another answer."}),
+        ],
+    ],
+)
+def test_executor_requires_terminal_protocol_calls_to_be_exclusive(tool_calls):
+    executor = make_executor(StreamingLLM())
+
+    assert (
+        executor._validate_tool_call_batch(tool_calls, _AgentPhase.PLAN)
+        == "Terminal protocol tools must be called alone."
+    )
 
 
 @pytest.mark.no_network

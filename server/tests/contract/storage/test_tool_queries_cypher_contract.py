@@ -76,7 +76,14 @@ async def test_path_preserves_traversal_and_stored_relationship_direction():
             [
                 {
                     "relationship_id": relationship_id,
-                    "evidence_refs": [{"project_id": "project-1", "message_id": 101}],
+                    "evidence_refs": [
+                        {
+                            "project_id": "project-1",
+                            "user_name": "ada",
+                            "semantic_window_id": "window-1",
+                            "observation_id": 101,
+                        }
+                    ],
                 }
             ],
             [
@@ -116,9 +123,23 @@ async def test_path_preserves_traversal_and_stored_relationship_direction():
             "relationship_type": "works_at",
             "symmetric": False,
             "relationship_semantics": "observed_evidence",
-            "evidence_refs": [{"project_id": "project-1", "message_id": 101}],
+            "evidence_refs": [
+                {
+                    "kind": "relationship_observation",
+                    "project_id": "project-1",
+                    "user_name": "ada",
+                    "observation_id": 101,
+                }
+            ],
         }
     ]
+    assert "observation.retired_at IS NULL" in client.calls[1][1]
+    assert "ROW_NUMBER() OVER" in client.calls[1][1]
+    assert client.calls[1][2] == (
+        [relationship_id],
+        ["project-1"],
+        32,
+    )
 
 
 @pytest.mark.storage
@@ -157,6 +178,7 @@ async def test_activity_uses_entity_message_refs_before_relationship_observation
     query = client.calls[0][1]
     assert "FROM message_entity_refs mention" in query
     assert "LEFT JOIN relationship_observations observation" in query
+    assert "observation.retired_at IS NULL" in query
     assert "WHERE mention.entity_id = %s" in query
 
 
@@ -286,5 +308,6 @@ async def test_related_entities_exposes_observed_evidence_metadata():
     ]
     query = client.calls[0][1]
     assert "relationship_observations" in query
+    assert "observation.retired_at IS NULL" in query
     assert "observation_refs" in query
     assert "relationship_observations" in query

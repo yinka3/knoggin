@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from common.schema.evidence import EvidenceTraversalLimits
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
 
@@ -83,9 +84,7 @@ class KnowledgeRetrieval:
         ]
         contexts = await asyncio.gather(
             *[
-                self._get_surrounding_context(
-                    hit["id"], session_id=hit["session_id"]
-                )
+                self._get_surrounding_context(hit["id"], session_id=hit["session_id"])
                 for hit in hits
             ]
         )
@@ -132,9 +131,7 @@ class KnowledgeRetrieval:
         )
         return results or []
 
-    async def get_connections(
-        self, entity_id: int, *, session_id: str
-    ) -> List[Dict]:
+    async def get_connections(self, entity_id: int, *, session_id: str) -> List[Dict]:
         if await self.entities.get_profile(entity_id) is None:
             return [{"error": f"Entity not found: '{entity_id}'"}]
 
@@ -206,59 +203,77 @@ class KnowledgeRetrieval:
                 ],
             }
 
-        if self.embedding_service is not None:
-            embedding = await self.embedding_service.encode_single(query)
-            semantic_matches = await self.knowledge_store.search_project_episodes_by_embedding(
-                embedding,
-                user_name=self.user_name,
-                project_id=self.project_id,
-                limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
-                visible_project_ids=self.readable_project_ids,
-            )
-            if semantic_matches:
-                episodes, similarities = zip(*semantic_matches)
-                metrics: Dict[str, int | float] = {}
-                serialized = await self._serialize_episodes(
-                    episodes,
-                    similarity_by_episode={
-                        episode.episode_id: similarity
-                        for episode, similarity in zip(episodes, similarities)
-                    },
-                    metrics=metrics,
-                )
-                await self._emit_episode_retrieval(
-                    session_id=session_id,
-                    strategy="semantic",
-                    started_at=started_at,
-                    episode_count=len(episodes),
-                    matched_entity_episode_count=0,
-                    metrics=metrics,
-                )
-                return {
-                    "resolution": "semantic",
-                    "results": [{"query": query, "episodes": serialized}],
-                }
-
-        episodes = await self.knowledge_store.search_project_episodes(
+        # Both channels contribute: a weak semantic hit must not suppress an
+        # exact keyword match. Retrieve a bounded pool before rank fusion.
+        candidate_limit = DEFAULT_EPISODE_RETRIEVAL_LIMIT * 3
+        lexical = await self.knowledge_store.search_project_episodes(
             query,
             user_name=self.user_name,
             project_id=self.project_id,
-            limit=DEFAULT_EPISODE_RETRIEVAL_LIMIT,
+            limit=candidate_limit,
             visible_project_ids=self.readable_project_ids,
         )
+        semantic_matches = []
+        if self.embedding_service is not None:
+            try:
+                embedding = await self.embedding_service.encode_query(query)
+                semantic_matches = (
+                    await self.knowledge_store.search_project_episodes_by_embedding(
+                        embedding,
+                        user_name=self.user_name,
+                        project_id=self.project_id,
+                        limit=candidate_limit,
+                        visible_project_ids=self.readable_project_ids,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Episode semantic search unavailable; using lexical results: {}",
+                    exc,
+                )
+
+        scores = {}
+        by_id = {}
+        for channel in (lexical, [episode for episode, _ in semantic_matches]):
+            seen = set()
+            for rank, episode in enumerate(channel, start=1):
+                key = episode.episode_id
+                if key in seen:
+                    continue
+                seen.add(key)
+                by_id[key] = episode
+                scores[key] = scores.get(key, 0.0) + 1.0 / (60 + rank)
+        # Stable ties preserve lexical candidates first, without imposing a
+        # blanket recency penalty on legitimate historical questions.
+        episodes = [by_id[key] for key in sorted(scores, key=lambda key: -scores[key])][
+            :DEFAULT_EPISODE_RETRIEVAL_LIMIT
+        ]
         if episodes:
             metrics: Dict[str, int | float] = {}
-            serialized = await self._serialize_episodes(episodes, metrics=metrics)
+            serialized = await self._serialize_episodes(
+                episodes,
+                similarity_by_episode={
+                    episode.episode_id: score for episode, score in semantic_matches
+                },
+                metrics=metrics,
+            )
+            strategy = (
+                "hybrid"
+                if lexical and semantic_matches
+                else "lexical"
+                if lexical
+                else "semantic"
+            )
             await self._emit_episode_retrieval(
                 session_id=session_id,
-                strategy="lexical",
+                strategy=strategy,
                 started_at=started_at,
                 episode_count=len(episodes),
                 matched_entity_episode_count=0,
                 metrics=metrics,
             )
             return {
-                "resolution": "question",
+                "resolution": strategy,
                 "results": [{"query": query, "episodes": serialized}],
             }
 
@@ -342,7 +357,9 @@ class KnowledgeRetrieval:
         entity_a = await self.entities.get_profile(entity_a_id)
         entity_b = await self.entities.get_profile(entity_b_id)
         if entity_a is None and entity_b is None:
-            return [{"error": f"Neither entity found: '{entity_a_id}' and '{entity_b_id}'"}]
+            return [
+                {"error": f"Neither entity found: '{entity_a_id}' and '{entity_b_id}'"}
+            ]
         if entity_a is None:
             return [{"error": f"Entity not found: '{entity_a_id}'"}]
         if entity_b is None:
@@ -356,6 +373,32 @@ class KnowledgeRetrieval:
         )
         return await self._hydrate_result_evidence(path, session_id=session_id)
 
+    async def read_observation_evidence(self, observation_id: int) -> Dict:
+        """Expand one path observation through the scoped evidence traversal."""
+
+        if (
+            not isinstance(observation_id, int)
+            or isinstance(observation_id, bool)
+            or observation_id <= 0
+        ):
+            raise ValueError("observation_id must be a positive integer")
+        bundle = await self.knowledge_store.get_visible_relationship_observation_evidence(
+            observation_id,
+            user_name=self.user_name,
+            visible_project_ids=self.readable_project_ids,
+            limits=EvidenceTraversalLimits(
+                max_observations=1,
+                max_context_blocks=4,
+                max_leaf_evidence=8,
+                max_edges=16,
+            ),
+        )
+        return (
+            bundle.model_dump(mode="json")
+            if hasattr(bundle, "model_dump")
+            else dict(bundle)
+        )
+
     async def get_hot_topic_context(
         self, hot_topics: List[str], *, session_id: str
     ) -> Dict[str, Dict]:
@@ -368,9 +411,7 @@ class KnowledgeRetrieval:
         )
         for data in raw.values():
             refs = data.get("message_refs", data.get("message_ids", []))
-            data["messages"] = await self._hydrate_evidence(
-                refs, session_id=session_id
-            )
+            data["messages"] = await self._hydrate_evidence(refs, session_id=session_id)
             data.pop("message_refs", None)
             data.pop("message_ids", None)
         return raw
@@ -430,7 +471,9 @@ class KnowledgeRetrieval:
                 return [
                     (message_key, float(score), result_session_id)
                     for (result_session_id, message_key), score in sorted(
-                        zip(candidate_keys, scores), key=lambda item: item[1], reverse=True
+                        zip(candidate_keys, scores),
+                        key=lambda item: item[1],
+                        reverse=True,
                     )[:k]
                 ]
         except Exception as exc:
@@ -505,19 +548,108 @@ class KnowledgeRetrieval:
         *,
         session_id: str,
     ) -> List[Dict]:
-        """Replace stored evidence references with scoped durable messages."""
+        """Hydrate message and observation support without changing its meaning."""
 
+        message_refs_by_result: list[list] = []
+        observation_refs_by_result: list[list[dict]] = []
         for result in results:
             refs = result.pop("evidence_refs", None)
             if refs is None:
                 refs = result.pop("evidence_ids", [])
             else:
                 result.pop("evidence_ids", None)
-            result["evidence"] = await self._hydrate_evidence(
-                refs,
+            message_refs, observation_refs = self._split_evidence_refs(refs)
+            message_refs_by_result.append(message_refs)
+            observation_refs_by_result.append(observation_refs)
+
+        observation_bundles = await self._hydrate_observation_evidence(
+            observation_refs_by_result
+        )
+        for result, message_refs, bundles in zip(
+            results,
+            message_refs_by_result,
+            observation_bundles,
+        ):
+            messages = await self._hydrate_evidence(
+                message_refs,
                 session_id=session_id,
             )
+            result["evidence"] = [*messages, *bundles]
         return results
+
+    def _split_evidence_refs(self, refs: Any) -> tuple[list, list[dict]]:
+        if not isinstance(refs, list):
+            return [], []
+        message_refs: list = []
+        observation_refs: list[dict] = []
+        for ref in refs:
+            if isinstance(ref, dict) and ref.get("kind") == "relationship_observation":
+                observation_refs.append(self._normalize_observation_ref(ref))
+            else:
+                message_refs.append(ref)
+        return message_refs, observation_refs
+
+    def _normalize_observation_ref(self, ref: Dict) -> dict:
+        observation_id = ref.get("observation_id")
+        project_id = ref.get("project_id")
+        user_name = ref.get("user_name")
+        if (
+            not isinstance(observation_id, int)
+            or isinstance(observation_id, bool)
+            or observation_id <= 0
+            or not isinstance(project_id, str)
+            or project_id not in self.readable_project_ids
+            or user_name != self.user_name
+        ):
+            raise ValueError("relationship observation evidence is outside read scope")
+        return {"observation_id": observation_id, "project_id": project_id}
+
+    async def _hydrate_observation_evidence(
+        self,
+        refs_by_result: list[list[dict]],
+    ) -> list[list[dict]]:
+        requested_by_project: dict[str, set[int]] = {}
+        for refs in refs_by_result:
+            for ref in refs:
+                requested_by_project.setdefault(ref["project_id"], set()).add(
+                    ref["observation_id"]
+                )
+
+        bundles_by_observation: dict[tuple[str, int], dict] = {}
+        for project_id, observation_ids in requested_by_project.items():
+            bundles = await self.knowledge_store.get_relationship_observations_evidence(
+                sorted(observation_ids),
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+            for bundle in bundles:
+                serialized = (
+                    bundle.model_dump(mode="json")
+                    if hasattr(bundle, "model_dump")
+                    else dict(bundle)
+                )
+                subject = serialized.get("subject", {})
+                if subject.get("kind") != "relationship_observation":
+                    raise ValueError("observation evidence returned an invalid subject")
+                try:
+                    observation_id = int(subject["identifier"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "observation evidence returned an invalid identifier"
+                    ) from exc
+                bundles_by_observation[(project_id, observation_id)] = serialized
+
+        hydrated: list[list[dict]] = []
+        for refs in refs_by_result:
+            result_bundles = []
+            for ref in refs:
+                key = (ref["project_id"], ref["observation_id"])
+                bundle = bundles_by_observation.get(key)
+                if bundle is None:
+                    raise ValueError("relationship observation evidence is unavailable")
+                result_bundles.append(bundle)
+            hydrated.append(result_bundles)
+        return hydrated
 
     async def _get_visible_session_ids(self) -> List[str]:
         rows = await self.postgres.fetch_all(
@@ -559,7 +691,9 @@ class KnowledgeRetrieval:
             {
                 "role": message["role"],
                 "timestamp": (
-                    datetime.fromtimestamp(message["timestamp"] / 1000.0, timezone.utc).isoformat()
+                    datetime.fromtimestamp(
+                        message["timestamp"] / 1000.0, timezone.utc
+                    ).isoformat()
                     if isinstance(message.get("timestamp"), (int, float))
                     else ""
                 ),
@@ -601,10 +735,12 @@ class KnowledgeRetrieval:
     ) -> List[Dict]:
         serialized = []
         for episode in episodes or []:
-            sources_consulted = await self.knowledge_store.get_project_episode_source_refs(
-                episode.episode_id,
-                user_name=self.user_name,
-                project_id=episode.project_id,
+            sources_consulted = (
+                await self.knowledge_store.get_project_episode_source_refs(
+                    episode.episode_id,
+                    user_name=self.user_name,
+                    project_id=episode.project_id,
+                )
             )
             item = {
                 "episode_id": episode.episode_id,
@@ -614,17 +750,25 @@ class KnowledgeRetrieval:
                 "unresolved": episode.unresolved,
                 "source_message_count": episode.source_message_count,
                 "first_message_at": (
-                    episode.first_message_at.isoformat() if episode.first_message_at else None
+                    episode.first_message_at.isoformat()
+                    if episode.first_message_at
+                    else None
                 ),
                 "last_message_at": (
-                    episode.last_message_at.isoformat() if episode.last_message_at else None
+                    episode.last_message_at.isoformat()
+                    if episode.last_message_at
+                    else None
                 ),
                 "entities": [
                     {
                         "entity_id": entity.entity_id,
                         "source_message_count": entity.source_message_count,
-                        "first_seen_at": entity.first_seen_at.isoformat() if entity.first_seen_at else None,
-                        "last_seen_at": entity.last_seen_at.isoformat() if entity.last_seen_at else None,
+                        "first_seen_at": entity.first_seen_at.isoformat()
+                        if entity.first_seen_at
+                        else None,
+                        "last_seen_at": entity.last_seen_at.isoformat()
+                        if entity.last_seen_at
+                        else None,
                     }
                     for entity in episode.entities
                 ],
@@ -639,7 +783,9 @@ class KnowledgeRetrieval:
                 # read_episode is the explicit hydration follow-up.
                 "evidence": [],
                 "sources_consulted": [
-                    source.model_dump(mode="json") if hasattr(source, "model_dump") else source
+                    source.model_dump(mode="json")
+                    if hasattr(source, "model_dump")
+                    else source
                     for source in sources_consulted
                 ],
             }
@@ -672,7 +818,7 @@ class KnowledgeRetrieval:
                 "strategy": strategy,
                 "episode_count": episode_count,
                 "matched_entity_episode_count": matched_entity_episode_count,
-                "entity_retrieval": strategy in {"exact_entity", "vector_entity"},
+                "entity_retrieval": strategy == "exact_entity",
                 "retrieval_latency_ms": round((perf_counter() - started_at) * 1000, 3),
                 **metrics,
             },
@@ -709,7 +855,8 @@ class KnowledgeRetrieval:
             "timestamp_ms": source.get("timestamp_ms"),
             "attached_at": (
                 source["attached_at"].isoformat()
-                if source.get("attached_at") and hasattr(source["attached_at"], "isoformat")
+                if source.get("attached_at")
+                and hasattr(source["attached_at"], "isoformat")
                 else source.get("attached_at")
             ),
             "score": 1.0,

@@ -25,7 +25,7 @@ class SessionDeletionWriter:
                     agent_id = NULL,
                     enabled_tools = NULL,
                     document_focus = NULL,
-                    episode_participation_enabled = FALSE
+                    semantic_participation_enabled = FALSE
                 WHERE user_name = %(user_name)s
                   AND session_id = %(session_id)s
                   AND status <> 'deleted'

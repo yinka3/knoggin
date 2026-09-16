@@ -1,11 +1,13 @@
 """Validated limits owned by the agent runtime."""
 
 from collections.abc import Mapping
-from typing import Dict
+from typing import Dict, Literal
 
 from pydantic import Field, FiniteFloat, StrictInt, field_validator
 
 from common.schema.config import ConfigModel
+
+ProjectBriefingMode = Literal["always", "adaptive"]
 
 
 class AgentLimitSettings(ConfigModel):
@@ -30,6 +32,10 @@ class AgentLimitSettings(ConfigModel):
     max_notebook_render_tokens: StrictInt = Field(10000, ge=1)
     conversation_context_turns: StrictInt = Field(10, ge=1)
     max_conversation_history: StrictInt = Field(10000, ge=1)
+    # ``adaptive`` only skips persistent Project material for a deliberately
+    # narrow conversational fast path. All uncertain or substantive prompts
+    # retain the Brief/Context before the first model step.
+    project_briefing_mode: ProjectBriefingMode = Field("adaptive")
     # The registry owns defaults. Configuration may only alter selected values.
     tool_limit_overrides: Dict[str, StrictInt] = Field(default_factory=dict)
 

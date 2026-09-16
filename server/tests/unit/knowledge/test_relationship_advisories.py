@@ -149,7 +149,6 @@ def test_advisory_decisions_follow_explicit_lifecycle_without_domain_mutation():
         pattern_key=pattern_key,
         action="edit",
         relationship_type="DEPLOYS_TO",
-        decided_by="ada",
     )
     accepted = apply_advisory_action(
         edited,
@@ -204,5 +203,17 @@ def test_advisory_decision_rejects_invalid_transition_and_missing_type():
             accepted,
             pattern_key=pattern_key,
             action="accept",
+            relationship_type="DEPLOYS_TO",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_advisory_decision_rejects_the_retired_merge_action():
+    with pytest.raises(RelationshipAdvisoryDecisionError, match="Unknown advisory action"):
+        apply_advisory_action(
+            None,
+            pattern_key="deploys to|project|technology",
+            action="merge",
             relationship_type="DEPLOYS_TO",
         )

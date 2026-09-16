@@ -32,6 +32,44 @@ _WINDOW_COLUMNS = """
 """
 
 
+_ELIGIBLE_CONVERSATION_EXCHANGES_CTE = """
+    eligible_conversation_exchanges AS (
+        SELECT
+            user_message.message_id AS user_message_id,
+            user_message.session_id,
+            user_message.project_id,
+            user_message.content AS user_content,
+            user_message.timestamp_ms AS user_timestamp_ms,
+            user_message.lifecycle_state AS user_lifecycle_state,
+            user_message.exchange_state AS user_exchange_state,
+            user_message.exchange_outcome AS user_exchange_outcome,
+            user_message.exchange_closed_at_ms,
+            assistant_message.message_id AS assistant_message_id,
+            assistant_message.content AS assistant_content,
+            assistant_message.timestamp_ms AS assistant_timestamp_ms,
+            assistant_message.lifecycle_state AS assistant_lifecycle_state
+        FROM public.messages AS user_message
+        JOIN public.sessions AS session
+          ON session.session_id = user_message.session_id
+         AND session.project_id = user_message.project_id
+         AND session.user_name = user_message.user_name
+        LEFT JOIN public.messages AS assistant_message
+          ON assistant_message.user_name = user_message.user_name
+         AND assistant_message.project_id = user_message.project_id
+         AND assistant_message.session_id = user_message.session_id
+         AND assistant_message.user_msg_id = user_message.message_id
+         AND assistant_message.role = 'assistant'
+        WHERE user_message.user_name = %s
+          AND user_message.project_id = %s
+          AND user_message.role = 'user'
+          AND user_message.lifecycle_state <> 'superseded'
+          AND session.status = 'open'
+          AND session.semantic_participation_enabled
+          AND user_message.message_id > session.semantic_participation_after_message_id
+    )
+"""
+
+
 class SemanticWindowReader:
     """Read frozen window identity/order only through owned project scope."""
 
@@ -241,63 +279,132 @@ class SemanticWindowReader:
         user_name: str,
         project_id: str,
     ) -> list[dict]:
-        """Return the complete exchange stream needed for FIFO admission.
+        """Return participation-eligible exchanges needed for FIFO admission.
 
-        The caller intentionally receives blocked exchanges as well as eligible
-        ones.  That is what prevents a later closed turn from overtaking an
-        earlier open or editable turn in the same session while leaving other
-        sessions independent.
+        Excluded sessions and pre-frontier exchanges must be absent before
+        per-session FIFO is evaluated. Within an eligible session, incomplete
+        exchanges remain in the stream so they still block later exchanges
+        from overtaking them.
         """
 
         user_name, project_id = self._scope(
             user_name, project_id, "get_unclaimed_project_exchange_rows"
         )
         return await self.client.fetch_all(
-            """
+            f"""
+            WITH {_ELIGIBLE_CONVERSATION_EXCHANGES_CTE}
             SELECT
-                user_message.message_id AS user_message_id,
-                user_message.session_id,
-                user_message.content AS user_content,
-                user_message.timestamp_ms AS user_timestamp_ms,
-                user_message.lifecycle_state AS user_lifecycle_state,
-                user_message.exchange_state AS user_exchange_state,
-                user_message.exchange_outcome AS user_exchange_outcome,
-                user_message.exchange_closed_at_ms,
-                assistant_message.message_id AS assistant_message_id,
-                assistant_message.content AS assistant_content,
-                assistant_message.timestamp_ms AS assistant_timestamp_ms,
-                assistant_message.lifecycle_state AS assistant_lifecycle_state,
-                session.status AS session_status,
+                eligible.user_message_id,
+                eligible.session_id,
+                eligible.user_content,
+                eligible.user_timestamp_ms,
+                eligible.user_lifecycle_state,
+                eligible.user_exchange_state,
+                eligible.user_exchange_outcome,
+                eligible.exchange_closed_at_ms,
+                eligible.assistant_message_id,
+                eligible.assistant_content,
+                eligible.assistant_timestamp_ms,
+                eligible.assistant_lifecycle_state,
                 EXISTS (
                     SELECT 1
                     FROM public.project_semantic_window_messages AS membership
-                    WHERE membership.project_id = user_message.project_id
+                    WHERE membership.project_id = eligible.project_id
                       AND membership.message_id IN (
-                          user_message.message_id,
-                          COALESCE(assistant_message.message_id, -1)
+                          eligible.user_message_id,
+                          COALESCE(eligible.assistant_message_id, -1)
                       )
                 ) AS already_claimed
-            FROM public.messages AS user_message
-            JOIN public.sessions AS session
-              ON session.session_id = user_message.session_id
-             AND session.project_id = user_message.project_id
-             AND session.user_name = user_message.user_name
-            LEFT JOIN public.messages AS assistant_message
-              ON assistant_message.user_name = user_message.user_name
-             AND assistant_message.project_id = user_message.project_id
-             AND assistant_message.session_id = user_message.session_id
-             AND assistant_message.user_msg_id = user_message.message_id
-             AND assistant_message.role = 'assistant'
-            WHERE user_message.user_name = %s
-              AND user_message.project_id = %s
-              AND user_message.role = 'user'
-              AND user_message.lifecycle_state <> 'superseded'
-            ORDER BY user_message.session_id,
-                     user_message.timestamp_ms ASC NULLS LAST,
-                     user_message.message_id
+            FROM eligible_conversation_exchanges AS eligible
+            ORDER BY eligible.session_id,
+                     eligible.user_timestamp_ms ASC NULLS LAST,
+                     eligible.user_message_id
             """,
             (user_name, project_id),
         )
+
+    async def get_maintenance_quiescence(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        cur=None,
+    ) -> dict:
+        """Read one Project's semantic quiescence and completed-window boundary.
+
+        The conversation CTE is shared with admission so maintenance uses the
+        same Session status, participation flag, and participation frontier.
+        A claimed conversation is not pending independently, while every
+        non-completed window remains an all-origin maintenance barrier.
+        """
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "get_maintenance_quiescence"
+        )
+        query = f"""
+            WITH {_ELIGIBLE_CONVERSATION_EXCHANGES_CTE},
+            pending_exchanges AS (
+                SELECT count(*) AS pending_exchange_count
+                FROM eligible_conversation_exchanges AS eligible
+                WHERE eligible.user_exchange_state = 'closed'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM public.project_semantic_window_messages AS membership
+                      WHERE membership.project_id = eligible.project_id
+                        AND membership.exchange_user_message_id = eligible.user_message_id
+                  )
+            ),
+            eligible_frontier AS (
+                SELECT
+                    COALESCE(max(eligible.user_message_id) FILTER (
+                        WHERE eligible.user_exchange_state = 'closed'
+                    ), 0) AS frontier_message_id,
+                    max(eligible.user_timestamp_ms) FILTER (
+                        WHERE eligible.user_exchange_state = 'closed'
+                    ) AS frontier_timestamp_ms
+                FROM eligible_conversation_exchanges AS eligible
+            ),
+            semantic_windows AS (
+                SELECT
+                    count(*) FILTER (
+                        WHERE semantic_window.stage <> 'completed'
+                    ) AS active_window_count,
+                    COALESCE(
+                        string_agg(
+                            concat_ws(
+                                ':',
+                                semantic_window.window_id::text,
+                                semantic_window.origin,
+                                COALESCE(
+                                    semantic_window.context_revision_id::text,
+                                    ''
+                                )
+                            ),
+                            '|' ORDER BY semantic_window.window_id
+                        ) FILTER (WHERE semantic_window.stage = 'completed'),
+                        ''
+                    ) AS completed_window_boundary
+                FROM public.project_semantic_windows AS semantic_window
+                WHERE semantic_window.user_name = %s
+                  AND semantic_window.project_id = %s
+            )
+            SELECT
+                pending_exchanges.pending_exchange_count,
+                semantic_windows.active_window_count,
+                eligible_frontier.frontier_message_id,
+                eligible_frontier.frontier_timestamp_ms,
+                semantic_windows.completed_window_boundary
+            FROM pending_exchanges
+            CROSS JOIN eligible_frontier
+            CROSS JOIN semantic_windows
+        """
+        params = (user_name, project_id, user_name, project_id)
+        if cur is None:
+            row = await self.client.fetch_one(query, params)
+        else:
+            await cur.execute(query, params)
+            row = await cur.fetchone()
+        return {} if row is None else dict(row)
 
     @staticmethod
     def _scope(user_name: str, project_id: str, operation: str) -> tuple[str, str]:

@@ -7,7 +7,7 @@ from typing import Any
 from loguru import logger
 
 from common.schema.settings import ConflictDiscoverySettings
-from core.knowledge.conflicts import LLMConflictDiscoveryResult
+from core.knowledge.conflict.conflicts import LLMConflictDiscoveryResult
 from core.project.maintenance_service import ProjectMaintenanceService
 from infrastructure.job.base import BaseJob, JobContext, JobResult
 
@@ -36,6 +36,8 @@ class ConflictDiscoveryJob(BaseJob):
     ) -> None:
         self.maintenance_service = maintenance_service
         self.llm = llm
+        self._mode = settings.mode
+        self._last_run: dict[str, int] | None = None
         self.update_settings(settings)
 
     @property
@@ -47,8 +49,9 @@ class ConflictDiscoveryJob(BaseJob):
         return self._interval_seconds
 
     async def should_run(self, ctx: JobContext) -> bool:
-        # The scheduler's normal cadence drives this bounded maintenance pass.
-        # Failures leave the durable cursor unchanged for the next scheduled run.
+        # This job is cadence-driven. Returning True here would bypass the
+        # scheduler's interval and invoke model work on every scheduler check.
+        # Manual callers may still invoke execute() explicitly.
         return False
 
     async def execute(self, ctx: JobContext) -> JobResult:
@@ -65,15 +68,31 @@ class ConflictDiscoveryJob(BaseJob):
             token_counter=getattr(self.llm, "count_tokens", None),
         )
         if package is None:
-            return JobResult(success=True, summary="No relationship evidence to review")
+            self._last_run = {
+                "reviewed_observation_count": 0,
+                "opened_review_count": 0,
+                "ignored_candidate_count": 0,
+            }
+            return JobResult(
+                success=True,
+                summary=f"[{self._mode}] No relationship evidence to review",
+            )
         if not package.observations:
             await self.maintenance_service.complete_conflict_discovery(
                 package,
                 candidates=(),
             )
+            self._last_run = {
+                "reviewed_observation_count": 0,
+                "opened_review_count": 0,
+                "ignored_candidate_count": 0,
+            }
             return JobResult(
                 success=True,
-                summary="Advanced past Context-owned relationship evidence",
+                summary=(
+                    f"[{self._mode}] Advanced conflict discovery cursor "
+                    "without evidence"
+                ),
             )
 
         result = await self.llm.generate_structured(
@@ -83,8 +102,7 @@ class ConflictDiscoveryJob(BaseJob):
             temperature=0.0,
         )
         available_ids = {
-            int(observation["observation_id"])
-            for observation in package.observations
+            int(observation["observation_id"]) for observation in package.observations
         }
         candidates = []
         skipped = 0
@@ -103,17 +121,37 @@ class ConflictDiscoveryJob(BaseJob):
             package,
             candidates=candidates,
         )
+        self._last_run = {
+            "reviewed_observation_count": len(package.observations),
+            "opened_review_count": written,
+            "ignored_candidate_count": skipped,
+        }
         return JobResult(
             success=True,
             summary=(
-                f"Reviewed {len(package.observations)} relationship observations; "
+                f"[{self._mode}] Reviewed {len(package.observations)} "
+                "relationship observations; "
                 f"opened or updated {written} conflict groups"
                 + (f"; ignored {skipped} invalid candidates" if skipped else "")
             ),
         )
 
     def update_settings(self, settings: ConflictDiscoverySettings) -> None:
-        self.enabled = settings.enabled
+        self._mode = settings.mode
+        self.enabled = (
+            settings.enabled and self._mode == "assisted" and self.llm is not None
+        )
         self._interval_seconds = settings.interval_hours * 3600
         self.max_seed_span_days = settings.max_seed_span_days
         self.max_package_tokens = settings.max_package_tokens
+
+    def snapshot_for_health(self) -> dict[str, object]:
+        """Expose bounded policy and outcome counts without evidence payloads."""
+
+        return {
+            "mode": self._mode,
+            "scheduler_enabled": self.enabled,
+            "interval_hours": self._interval_seconds // 3600,
+            "llm_available": self.llm is not None,
+            "last_run": dict(self._last_run) if self._last_run is not None else None,
+        }

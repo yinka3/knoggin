@@ -337,15 +337,14 @@ class SourceReferenceReader:
         document_status_resolved: bool = False,
     ) -> SourceConsulted:
         if reference.source_kind in {"pdf_document", "text_document"}:
-            source_status = (
-                "unavailable"
-                if document_status_resolved
-                and (
-                    document_status in {None, "deleted"}
-                    or document_content_hash != reference.content_hash
-                )
-                else "available"
-            )
+            if not document_status_resolved:
+                source_status = "available"
+            elif document_status in {None, "deleted"}:
+                source_status = "unavailable"
+            elif document_content_hash != reference.content_hash:
+                source_status = "historical"
+            else:
+                source_status = "available"
         elif reference.source_kind in {"user_pasted_text", "web_page", "web_pdf"}:
             source_status = "available"
         else:
