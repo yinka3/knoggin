@@ -50,6 +50,9 @@ _REFERENCE_PREFIXES = {
     "action": "A",
 }
 
+_SHORT_TEXT_LIMIT = 320
+_PASSAGE_TEXT_LIMIT = 1_200
+
 NOTEBOOK_TEMPLATE = """RUN NOTEBOOK
 {% if summary.text %}Summary: {{ summary.text }}{% if summary.references %} ({{ summary.references|join(', ') }}){% endif %}
 {% endif %}{% if entity_pages %}
@@ -86,7 +89,9 @@ Messages:
 {% for item in messages %}- {{ item.reference }}{% if item.content %}: {{ item.content }}{% endif %}{{ '\n' }}{% endfor %}
 {% endif %}{% if documents %}
 Documents:
-{% for item in documents %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.content %}: {{ item.content }}{% endif %}
+{% for item in documents %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.content %}: {{ item.content }}{% endif %}{% if item.handle %} [document: {{ item.handle }}]{% endif %}{% if item.locator %} [{{ item.locator }}]{% endif %}
+{% if item.continuation %}  continuation: {{ item.continuation }}
+{% endif %}
 {{ '\n' }}{% endfor %}{% endif %}{% if observation_supports %}Observation support (expanded on demand):
 {% for item in observation_supports %}- {{ item.reference }} observation {{ item.observation_id }}{% if item.status %} ({{ item.status }}){% endif %}
 {% if item.context_blocks %}  context blocks: {{ item.context_blocks|join('; ') }}
@@ -97,7 +102,9 @@ Web discoveries (not read):
 {% for item in web_discoveries %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.snippet %} — discovery snippet: {{ item.snippet }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if web_reads %}
 Web reads:
-{% for item in web_reads %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.content %} — read passage: {{ item.content }}{% endif %}{{ '\n' }}
+{% for item in web_reads %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.content %} — read passage: {{ item.content }}{% endif %}{% if item.locator %} [{{ item.locator }}]{% endif %}
+{% if item.continuation %}  continuation: {{ item.continuation }}
+{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if actions %}
 Actions:
 {% for item in actions %}- {{ item.reference }} {{ item.tool }}{% if item.result %}: {{ item.result }}{% endif %}{{ '\n' }}
@@ -201,11 +208,20 @@ class _ReferenceLocalizer:
         return self._handles.get(value)
 
 
-def _safe_text(value: object, *, limit: int = 320) -> str:
+def _safe_text(value: object, *, limit: int = _SHORT_TEXT_LIMIT) -> str:
     if value is None:
         return ""
     text = str(value).strip()
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _passage_text(value: object) -> tuple[str, bool]:
+    """Render a useful but bounded evidence passage and report display clipping."""
+
+    if value is None:
+        return "", False
+    text = str(value).strip()
+    return _safe_text(text, limit=_PASSAGE_TEXT_LIMIT), len(text) > _PASSAGE_TEXT_LIMIT
 
 
 def _bounded_text_items(
@@ -282,6 +298,64 @@ def _format_locator(value: object) -> str:
     if kind == "search_result" and isinstance(value.get("rank"), int):
         return f"search result {value['rank']}"
     return _safe_text(kind or "", limit=48).replace("_", " ")
+
+
+def _result_locator(item: Mapping[str, Any]) -> str:
+    """Return the compact source position already available in a tool result."""
+
+    locator = item.get("locator")
+    if not isinstance(locator, Mapping):
+        source_context = item.get("source_context")
+        if isinstance(source_context, Mapping):
+            locator = source_context.get("locator")
+    if isinstance(locator, Mapping):
+        return _format_locator(dict(locator))
+
+    start_line = item.get("start_line")
+    end_line = item.get("end_line")
+    if type(start_line) is int and type(end_line) is int:
+        return f"lines {start_line}-{end_line}"
+    page_number = item.get("page_number")
+    if type(page_number) is int:
+        return f"page {page_number}"
+    return ""
+
+
+def _document_handle(item: Mapping[str, Any]) -> str:
+    """Expose only the model-safe document handle accepted by read tools."""
+
+    document_id = item.get("document_id")
+    return document_id if isinstance(document_id, str) and document_id.startswith("doc_") else ""
+
+
+def _source_continuation(
+    item: Mapping[str, Any],
+    *,
+    display_clipped: bool,
+) -> str:
+    """Tell the model when a bounded view should be expanded through a tool."""
+
+    next_start_line = item.get("next_start_line")
+    if type(next_start_line) is not int:
+        end_line = item.get("end_line")
+        total_lines = item.get("total_lines")
+        if (
+            item.get("truncated") is True
+            and type(end_line) is int
+            and type(total_lines) is int
+            and end_line < total_lines
+        ):
+            next_start_line = end_line + 1
+    if type(next_start_line) is int:
+        return (
+            f"more source text is available from line {next_start_line}; reread a "
+            "narrower range or use a targeted query."
+        )
+    if item.get("has_more") is True or item.get("truncated") is True:
+        return "more source text is available; reread a narrower range or use a targeted query."
+    if display_clipped:
+        return "the displayed passage is clipped; reread a narrower range or use a targeted query."
+    return ""
 
 
 def _observation_support(item: dict[str, Any]) -> dict[str, Any]:
@@ -442,15 +516,32 @@ def _record_list(
                     for context in item["context"]
                     if isinstance(context, dict) and context.get("content")
                 )
-            item["content"] = _safe_text(content)
+            item["content"], display_clipped = _passage_text(content)
             item["name"] = _safe_text(
                 item.get("document_name") or item.get("original_name") or ""
             )
+            if section == "documents":
+                item["handle"] = _document_handle(item)
+                item["locator"] = _result_locator(item)
+                item["continuation"] = _source_continuation(
+                    item,
+                    display_clipped=display_clipped,
+                )
         elif section in {"web_discoveries", "web_reads"}:
             item["title"] = _safe_text(item.get("title") or "")
             item["url"] = _safe_text(item.get("url") or "")
             item["snippet"] = _safe_text(item.get("snippet") or "")
-            item["content"] = _safe_text(item.get("content") or "")
+            if section == "web_reads":
+                item["content"], display_clipped = _passage_text(
+                    item.get("content") or ""
+                )
+                item["locator"] = _result_locator(item)
+                item["continuation"] = _source_continuation(
+                    item,
+                    display_clipped=display_clipped,
+                )
+            else:
+                item["content"] = _safe_text(item.get("content") or "")
         values.append(item)
     return values
 
