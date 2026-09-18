@@ -1062,6 +1062,169 @@ async def test_research_modes_reject_ungrounded_terminal_answers(mode):
     )
 
 
+@pytest.mark.no_network
+async def test_research_requires_read_content_after_document_listing(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event("list_documents", "{}", "list-documents"),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "The listing is enough."}',
+                    "submit-metadata",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "read_document",
+                    '{"document_id": "document-1"}',
+                    "read-document",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft from the read passage."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final answer from the read passage."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=4, max_calls=2),
+        research_profile=resolve_research_profile("research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    dispatched = []
+
+    async def document_results(_tools, name, args):
+        dispatched.append((name, args))
+        if name == "list_documents":
+            return {
+                "data": [
+                    {
+                        "document_id": "document-1",
+                        "document_name": "brief.md",
+                    }
+                ]
+            }
+        if name == "read_document":
+            return {
+                "data": [
+                    {
+                        "document_id": "document-1",
+                        "document_name": "brief.md",
+                        "content": "The read document contains the answer.",
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected tool: {name}")
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", document_results)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["content"] == "Final answer from the read passage."
+    assert events[-1]["data"]["artifact"]["kind"] == "research_brief"
+    assert dispatched == [
+        ("list_documents", {}),
+        ("read_document", {"document_id": "document-1"}),
+    ]
+    assert len(llm.calls) == 5
+    assert (
+        "Research mode requires grounded investigation evidence before submit_answer."
+        in llm.calls[2]["user"]
+    )
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("mode", ["research", "deep_research"])
+async def test_research_fallback_requires_grounded_investigation_evidence(mode):
+    llm = ScriptedLLM([])
+    summary_calls = []
+
+    async def generate_summary(**kwargs):
+        summary_calls.append(kwargs)
+        return "This should not become a research answer."
+
+    llm.generate_text = generate_summary
+    run = make_run(research_profile=resolve_research_profile(mode))
+    run.notebook.apply("edit_brain", {"data": {"success": True}})
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    event = await executor._fallback()
+
+    assert event == {
+        "event": "clarification",
+        "data": {
+            "question": (
+                "I couldn't complete the research because I didn't gather usable "
+                "evidence. Which source or detail should I investigate?"
+            ),
+            "usage": run.usage,
+            "fallback": True,
+        },
+    }
+    assert summary_calls == []
+    assert run.final_content is None
+    assert run.sealed is True
+
+
+@pytest.mark.no_network
+async def test_research_fallback_summarizes_grounded_evidence(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "release"}',
+                    "search-release",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def grounded_result(*_args):
+        return {
+            "data": [
+                {
+                    "id": "message-1",
+                    "message": "The release notes describe the change.",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", grounded_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["fallback"] is True
+    assert events[-1]["data"]["artifact"]["kind"] == "research_brief"
+    assert run.final_content == "A concise evidence summary."
+
+
 def _validated_initial_source_candidates(kind):
     if kind == "pasted_text":
         return build_pasted_text_candidates(

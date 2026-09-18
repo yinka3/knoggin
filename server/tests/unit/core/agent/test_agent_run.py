@@ -266,6 +266,53 @@ def test_agent_run_distinguishes_grounded_evidence_from_actions_and_validates_in
 
 
 @pytest.mark.no_network
+def test_agent_run_requires_read_content_after_document_or_web_discovery():
+    run = make_run()
+
+    run.notebook.apply(
+        "list_documents",
+        {
+            "data": [
+                {
+                    "document_id": "document-1",
+                    "document_name": "brief.md",
+                }
+            ]
+        },
+    )
+    run.notebook.apply(
+        "web_search",
+        {
+            "data": [
+                {
+                    "title": "Release notes",
+                    "url": "https://example.test/release-notes",
+                    "snippet": "A promising discovery snippet.",
+                }
+            ]
+        },
+    )
+
+    assert run.has_any() is True
+    assert run.has_grounded_investigation_evidence() is False
+
+    run.notebook.apply(
+        "read_document",
+        {
+            "data": [
+                {
+                    "document_id": "document-1",
+                    "document_name": "brief.md",
+                    "content": "The read passage supports the answer.",
+                }
+            ]
+        },
+    )
+
+    assert run.has_grounded_investigation_evidence() is True
+
+
+@pytest.mark.no_network
 def test_deep_research_gap_review_is_due_once_after_grounded_evidence():
     run = make_run(research_profile=resolve_research_profile("deep_research"))
 

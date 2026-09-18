@@ -28,6 +28,7 @@ _EVIDENCE_SECTIONS = (
     "web_reads",
 )
 _ALL_SECTIONS = _KNOWLEDGE_SECTIONS + _EVIDENCE_SECTIONS
+_GROUNDED_KNOWLEDGE_SECTIONS = ("relationships", "episodes", "paths")
 _ACTION_TOOLS = frozenset(
     {
         "edit_brain",
@@ -1337,13 +1338,49 @@ class RunNotebook:
     def has_admitted_evidence(self) -> bool:
         """Whether retained notebook evidence can ground an investigation.
 
-        Action records and summary prose alone are model-visible context, but do
-        not establish that an investigation produced evidence.
+        Structured Knowledge retrieval remains usable evidence. Entity profiles,
+        document metadata, unread web discoveries, action records, and summary
+        prose are model-visible context, but do not establish that an
+        investigation observed useful evidence.
         """
 
-        return bool(
-            any(self._orders[section] for section in _ALL_SECTIONS)
-            or self.summary.references
+        return any(
+            self._orders[section] for section in _GROUNDED_KNOWLEDGE_SECTIONS
+        ) or any(
+            self._record_has_text(item)
+            for section in ("messages", "documents", "web_reads")
+            for item in self._section_values(section)
+        ) or any(
+            self._observation_support_has_text(item)
+            for item in self._section_values("observation_supports")
+        )
+
+    @staticmethod
+    def _record_has_text(item: dict[str, Any]) -> bool:
+        """Return whether one direct result contains model-visible content."""
+
+        for key in ("message", "content", "excerpt"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+        context = item.get("context")
+        return isinstance(context, list) and any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("content"), str)
+            and entry["content"].strip()
+            for entry in context
+        )
+
+    @staticmethod
+    def _observation_support_has_text(bundle: dict[str, Any]) -> bool:
+        """Require expanded observation evidence rather than a path placeholder."""
+
+        nodes = bundle.get("nodes")
+        return isinstance(nodes, list) and any(
+            isinstance(node, dict)
+            and isinstance(node.get("excerpt"), str)
+            and node["excerpt"].strip()
+            for node in nodes
         )
 
     def fingerprint(self) -> str:

@@ -1034,6 +1034,22 @@ class AgentExecutor:
             f"{self.ctx.call_count} tool calls. "
             f"Evidence: {self.ctx.has_any()}"
         )
+        if (
+            self.ctx.research_profile.mode != "normal"
+            and not self.ctx.has_grounded_investigation_evidence()
+        ):
+            self.ctx.finish_without_response()
+            return {
+                "event": "clarification",
+                "data": {
+                    "question": (
+                        "I couldn't complete the research because I didn't gather "
+                        "usable evidence. Which source or detail should I investigate?"
+                    ),
+                    "usage": self.ctx.usage,
+                    "fallback": True,
+                },
+            }
         if self.ctx.has_any():
             summary = await self._generate_fallback_summary()
             content = summary or "I found information but couldn't summarize it."
