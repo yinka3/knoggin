@@ -16,8 +16,8 @@ from common.schema.ingestion.contracts import (
     ContextRelationshipWrite,
 )
 from common.schema.semantic_window import SemanticWindowStage
-from core.knowledge.conflict_discovery import ConflictPacketBuilder
-from core.knowledge.conflicts import (
+from core.knowledge.conflict.conflict_discovery import ConflictPacketBuilder
+from core.knowledge.conflict.conflicts import (
     ConflictDiscoveryCursor,
     ConflictDiscoveryPackage,
     LLMConflictCandidate,
@@ -152,7 +152,16 @@ async def test_current_ingestion_evidence_is_skipped_by_discovery(real_postgres_
     cursor = ConflictDiscoveryCursor("ada", "project-1", 0)
     seeds = await reader.get_seed_observations(cursor, max_span_days=60)
     assert {row["evidence_origin"] for row in seeds} == {"context"}
-    package = await ConflictPacketBuilder(reader).build(
+    store = knowledge(real_postgres_client)
+
+    async def load_evidence(observation_ids):
+        return await store.get_relationship_observations_evidence(
+            observation_ids,
+            user_name="ada",
+            project_id="project-1",
+        )
+
+    package = await ConflictPacketBuilder(reader, evidence_loader=load_evidence).build(
         cursor, max_span_days=60, max_tokens=5000
     )
     assert package.observations == ()

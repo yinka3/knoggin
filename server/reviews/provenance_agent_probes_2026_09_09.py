@@ -1,9 +1,8 @@
-"""Review reproductions: passing asserts describe defects at acc0cac, not desired behavior.
+"""Historical provenance and agent review probes.
 
-Explicitly invoke this file with pytest; it is outside normal test discovery.
-PA1 and PA2 are skipped historical records after Stage 6 Chunk A, and PA3 and
-PA4 after Stage 4, because normal regressions now assert their desired
-behavior.
+Each assertion describes a defect observed at acc0cac. The file remains
+outside normal test discovery; PA1–PA7 are skipped historical records because
+normal regressions now assert their desired behavior.
 """
 
 from dataclasses import replace
@@ -107,6 +106,12 @@ async def test_earlier_fact_disappears_from_final_synthesis_prompt(monkeypatch):
 
 
 @pytest.mark.no_network
+@pytest.mark.skip(
+    reason=(
+        "Historical PA5 reproduction resolved by Stage 6; desired behavior is "
+        "covered by the executor capacity-admission and source-candidate regressions"
+    ),
+)
 async def test_capacity_rejection_is_reported_as_success_and_keeps_sources(monkeypatch):
     run = make_run()
     run.notebook.capacity = replace(run.notebook.capacity, max_documents=1)
@@ -150,6 +155,12 @@ async def test_capacity_rejection_is_reported_as_success_and_keeps_sources(monke
 
 
 @pytest.mark.no_network
+@pytest.mark.skip(
+    reason=(
+        "Historical PA6 reproduction resolved by Stage 6; desired behavior is "
+        "covered by SYNTHESIZE tool-allowlist and executor-reset regressions"
+    ),
+)
 async def test_synthesis_dispatches_hidden_investigative_tool(monkeypatch):
     run = make_run()
     llm = ScriptedLLM(
@@ -177,6 +188,12 @@ async def test_synthesis_dispatches_hidden_investigative_tool(monkeypatch):
 
 
 @pytest.mark.no_network
+@pytest.mark.skip(
+    reason=(
+        "Historical PA7 reproduction resolved by the research-grounding contract; "
+        "desired behavior is covered by research readiness and fallback regressions"
+    ),
+)
 async def test_deep_research_can_finish_without_investigation():
     run = make_run()
     run.research_profile = DEFAULT_RESEARCH_PROFILES["deep_research"]

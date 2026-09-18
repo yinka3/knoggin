@@ -1,7 +1,7 @@
 # Core Stage 3 — Semantic Participation and Admission Policy
 
-Status: In progress 2026-09-11. Chunks A–E are complete; combined validation
-and review closeout remain.
+Status: Complete 2026-09-11. Chunks A–E, combined validation, and review
+closeout are complete.
 
 Baseline inspected: `aadedewe/refactor`, `bcb354e`, after completed Core Stages
 1 and 2. Recheck HEAD and the working tree before implementation. Preserve
