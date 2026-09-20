@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 
 from common.conf.domain_config import DomainConfig
-from common.exceptions import LLMProviderError
+from common.exceptions import LLMProviderError, StorageReadError
 from common.schema.agent.research import resolve_research_profile
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.context import (
@@ -86,7 +86,7 @@ async def test_executor_loads_user_owned_project_brief_directly():
 
 
 @pytest.mark.no_network
-async def test_executor_renders_current_context_from_the_canonical_reader_only():
+async def test_executor_renders_current_context_through_the_knowledge_store():
     executor = make_executor(StreamingLLM())
     revision_id = uuid4()
     block = ContextBlockRecord(
@@ -108,16 +108,16 @@ async def test_executor_renders_current_context_from_the_canonical_reader_only()
     )
 
     class Reader:
-        async def get_current_revision(self, **kwargs):
+        async def get_current_project_context_revision(self, **kwargs):
             assert kwargs == {"user_name": "ada", "project_id": "project-1"}
             return SimpleNamespace(revision_id=revision_id)
 
-        async def get_snapshot(self, value, **kwargs):
+        async def get_project_context_snapshot(self, value, **kwargs):
             assert value == revision_id
             assert kwargs == {"user_name": "ada", "project_id": "project-1"}
             return snapshot
 
-        async def get_block_supports(self, block_ids, **kwargs):
+        async def get_project_context_block_supports(self, block_ids, **kwargs):
             assert block_ids == [block.block_id]
             assert kwargs == {"user_name": "ada", "project_id": "project-1"}
             return {
@@ -135,7 +135,7 @@ async def test_executor_renders_current_context_from_the_canonical_reader_only()
     async def projection_is_not_an_authoritative_read():
         raise AssertionError("CONTEXT.md projection must not be read by the agent")
 
-    executor.tools.project_context_reader = Reader()
+    executor.tools.knowledge_store = Reader()
     executor.tools.compiled_domain = DomainConfig.from_mapping({"version": 1}).compile()
     executor.tools.document_service = SimpleNamespace(
         read_project_brief=projection_is_not_an_authoritative_read
@@ -146,6 +146,21 @@ async def test_executor_renders_current_context_from_the_canonical_reader_only()
     assert "# Project Context" in rendered
     assert "The semantic owner is project-scoped." in rendered
     assert "C1 [user_asserted; support: M1]" in rendered
+
+
+@pytest.mark.no_network
+async def test_executor_propagates_canonical_context_storage_failure():
+    executor = make_executor(StreamingLLM())
+    executor.tools.compiled_domain = DomainConfig.from_mapping({"version": 1}).compile()
+
+    class Store:
+        async def get_current_project_context_revision(self, **_kwargs):
+            raise StorageReadError("get_current_revision")
+
+    executor.tools.knowledge_store = Store()
+
+    with pytest.raises(StorageReadError):
+        await executor._load_project_context()
 
 
 @pytest.mark.no_network

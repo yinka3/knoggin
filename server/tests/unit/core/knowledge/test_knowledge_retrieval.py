@@ -3,18 +3,21 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
-from core.agent.tools.registry import Tools
+from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
+from core.agent.tools.registry import Tools, install_tool_runtime
 from core.knowledge.retrieval import KnowledgeRetrieval
-
-
-class _Postgres:
-    async def fetch_all(self, _query, _params):
-        return [{"session_id": "session-1"}, {"session_id": "session-2"}]
 
 
 @pytest.mark.no_network
 async def test_message_context_uses_durable_storage():
     class Store:
+        async def get_visible_session_ids(self, **kwargs):
+            assert kwargs == {
+                "user_name": "ada",
+                "visible_project_ids": ["project-1", "project-2"],
+            }
+            return ["session-1", "session-2"]
+
         async def search_messages_fts(self, *_args, **_kwargs):
             return [(7, 1.0, "session-2")]
 
@@ -38,7 +41,6 @@ async def test_message_context_uses_durable_storage():
         entities=SimpleNamespace(),
         embedding_service=SimpleNamespace(),
         knowledge_store=Store(),
-        postgres=_Postgres(),
         search_config={"fts_limit": 10},
     )
 
@@ -79,7 +81,6 @@ async def test_entity_search_returns_stable_identity_and_project_contexts():
         entities=SimpleNamespace(),
         embedding_service=SimpleNamespace(),
         knowledge_store=Store(),
-        postgres=_Postgres(),
     )
 
     results = await retrieval.search_entities("Ada")
@@ -143,7 +144,6 @@ async def test_hot_topic_context_hydrates_current_project_entity_mentions():
         entities=SimpleNamespace(),
         embedding_service=SimpleNamespace(),
         knowledge_store=store,
-        postgres=_Postgres(),
     )
 
     hydrated = await retrieval.get_hot_topic_context(
@@ -204,6 +204,52 @@ async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
         await tools.close()
 
     assert retrieval.calls == [("project memory", "session-1", 3)]
+
+
+@pytest.mark.no_network
+async def test_run_graph_limit_controls_the_relationship_retrieval_query():
+    class Retrieval:
+        def __init__(self):
+            self.calls = []
+
+        async def get_connections(self, entity_id, *, session_id, limit):
+            self.calls.append((entity_id, session_id, limit))
+            return [{"relationship_id": "r-1"}]
+
+    entities = SimpleNamespace(
+        embedding_service=SimpleNamespace(),
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+    )
+    retrieval = Retrieval()
+    tools = Tools(
+        user_name="ada",
+        entities=entities,
+        session_id="session-1",
+        knowledge_retrieval=retrieval,
+        knowledge_store=SimpleNamespace(),
+        postgres=SimpleNamespace(),
+    )
+    run = AgentRun.open(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        user_query="Show connections",
+        run_id="run-1",
+        agent=AgentIdentity(
+            config=SimpleNamespace(id="agent-1"),
+            name="STELLA",
+            persona="",
+        ),
+        limits=AgentRunLimits(max_accumulated_graph=2),
+    )
+    try:
+        install_tool_runtime(tools, run.tool_runtime, {})
+        assert await tools.get_connections(7) == [{"relationship_id": "r-1"}]
+    finally:
+        await tools.close()
+
+    assert retrieval.calls == [(7, "session-1", 2)]
 
 
 @pytest.mark.no_network
@@ -280,7 +326,6 @@ async def test_exact_entity_episode_lookup_uses_the_store_contract_without_sessi
         entities=Entities(),
         embedding_service=SimpleNamespace(),
         knowledge_store=store,
-        postgres=_Postgres(),
     )
 
     result = await retrieval.episode_check(
@@ -301,28 +346,33 @@ async def test_exact_entity_episode_lookup_uses_the_store_contract_without_sessi
 
 
 @pytest.mark.no_network
-async def test_message_discovery_session_scope_only_includes_open_sessions():
-    class Postgres:
+async def test_message_discovery_reads_visible_sessions_through_store_boundary():
+    class Store:
         def __init__(self):
-            self.query = ""
+            self.calls = []
 
-        async def fetch_all(self, query, _params):
-            self.query = query
-            return [{"session_id": "open-session"}]
+        async def get_visible_session_ids(self, **kwargs):
+            self.calls.append(kwargs)
+            return ["open-session"]
 
-    postgres = Postgres()
+        async def search_messages_fts(self, _query, **kwargs):
+            assert kwargs["session_ids"] == ["open-session"]
+            return []
+
+    store = Store()
     retrieval = KnowledgeRetrieval(
         project_id="project-1",
         readable_project_ids=["project-1"],
         user_name="ada",
         entities=SimpleNamespace(),
         embedding_service=SimpleNamespace(),
-        knowledge_store=SimpleNamespace(),
-        postgres=postgres,
+        knowledge_store=store,
     )
 
-    assert await retrieval._get_visible_session_ids() == ["open-session"]
-    assert "status = 'open'" in postgres.query
+    assert await retrieval.search_messages("plan", session_id="session-1") == []
+    assert store.calls == [
+        {"user_name": "ada", "visible_project_ids": ["project-1"]}
+    ]
 
 
 @pytest.mark.no_network
@@ -393,7 +443,6 @@ async def test_episode_reads_receive_the_directional_readable_project_scope():
         entities=SimpleNamespace(),
         embedding_service=SimpleNamespace(),
         knowledge_store=store,
-        postgres=_Postgres(),
     )
 
     result = await retrieval.read_recent_episodes(session_id="session-1")

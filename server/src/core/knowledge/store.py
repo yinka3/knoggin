@@ -1324,6 +1324,19 @@ class KnowledgeStore:
         )
 
 
+    async def get_visible_session_ids(
+        self,
+        *,
+        user_name: str,
+        visible_project_ids: List[str],
+    ) -> List[str]:
+        """Return open sessions visible to scoped message retrieval."""
+
+        return await self._message_reader.get_visible_session_ids(
+            user_name=user_name,
+            visible_project_ids=visible_project_ids,
+        )
+
     async def get_message_text(
         self,
         message_id: int,
@@ -1332,7 +1345,7 @@ class KnowledgeStore:
         session_id: str,
         visible_project_ids: List[str],
     ) -> str:
-        return await self._graph_reader.get_message_text(
+        return await self._message_reader.get_message_text(
             message_id,
             user_name=user_name,
             session_id=session_id,
@@ -1347,7 +1360,7 @@ class KnowledgeStore:
         session_ids: List[str],
         visible_project_ids: List[str],
     ) -> List[Dict]:
-        return await self._graph_reader.get_messages_by_ids(
+        return await self._message_reader.get_messages_by_ids(
             ids,
             user_name=user_name,
             session_ids=session_ids,
@@ -1361,7 +1374,7 @@ class KnowledgeStore:
         limit: int,
         before_message_id: Optional[int] = None,
     ) -> List[Dict]:
-        return await self._graph_reader.get_recent_project_messages(
+        return await self._message_reader.get_recent_project_messages(
             user_name,
             project_id,
             limit,
@@ -1379,7 +1392,7 @@ class KnowledgeStore:
         target_total: int = 10,
         discoverable_only: bool = False,
     ) -> List[Dict]:
-        return await self._graph_reader.get_surrounding_messages(
+        return await self._message_reader.get_surrounding_messages(
             message_id,
             user_name=user_name,
             session_id=session_id,

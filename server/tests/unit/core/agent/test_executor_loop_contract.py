@@ -532,9 +532,16 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
         return {
             "data": [
                 {
-                    "source": "Knoggin",
-                    "target": "Profile",
-                    "observed_relationship_label": "OWNER_FACT_ADA",
+                    "entity_id": 7,
+                    "entity": "Knoggin",
+                    "time": 1_700_000_000_000,
+                    "evidence": [
+                        {
+                            "id": "message-2",
+                            "session_id": "session-1",
+                            "message": "OWNER_FACT_ADA",
+                        }
+                    ],
                 }
             ]
         }
@@ -568,21 +575,26 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert "LAUNCH_FACT_VIOLET" in llm.calls[-1]["user"]
     assert "OWNER_FACT_ADA" in llm.calls[-1]["user"]
     assert (
-        "Relationships:\n- R1 Knoggin -> Profile: OWNER_FACT_ADA\n"
+        "Activities:\n- ACT1 E1 Knoggin at 1700000000000 (evidence: M2)"
         in llm.calls[-1]["user"]
     )
     assert "Messages:\n- M1: LAUNCH_FACT_VIOLET" in llm.calls[-1]["user"]
-    assert "observed evidence, not a current-state claim" in llm.calls[-1]["user"]
     assert run.attempt_count == 4
     assert run.call_count == 2
     assert run.notebook.section_items("messages") == (
         {"id": "message-1", "message": "LAUNCH_FACT_VIOLET", "score": 0.9},
-    )
-    assert run.notebook.section_items("relationships") == (
         {
-            "source": "Knoggin",
-            "target": "Profile",
-            "observed_relationship_label": "OWNER_FACT_ADA",
+            "id": "message-2",
+            "session_id": "session-1",
+            "message": "OWNER_FACT_ADA",
+        },
+    )
+    assert run.notebook.section_items("activities") == (
+        {
+            "entity_id": 7,
+            "entity": "Knoggin",
+            "time": 1_700_000_000_000,
+            "evidence_refs": ["message::session-1:message-2"],
         },
     )
     assert run.usage["total_tokens"] == 20

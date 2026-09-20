@@ -74,7 +74,6 @@ class EpisodeTool(KnowledgeRetrieval):
             entities=object(),
             embedding_service=None,
             knowledge_store=object(),
-            postgres=object(),
         )
         self.fallback_calls = []
 

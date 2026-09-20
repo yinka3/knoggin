@@ -168,8 +168,8 @@ class _WebPdfSnapshot:
     content_hash: str
 
 
-def _web_page_error(message: str) -> ToolExecutionError:
-    return ToolExecutionError("read_web_page", message)
+def _web_page_error(message: str, *, retryable: bool = False) -> ToolExecutionError:
+    return ToolExecutionError("read_web_page", message, retryable=retryable)
 
 
 def _normalize_web_url(value: object) -> str:
@@ -1330,8 +1330,16 @@ class SearchTools:
             except ToolExecutionError:
                 raise
             except httpx.TimeoutException as exc:
-                raise _web_page_error("webpage request timed out") from exc
-            except (httpx.HTTPError, ValueError) as exc:
+                raise _web_page_error(
+                    "webpage request timed out",
+                    retryable=True,
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise _web_page_error(
+                    f"webpage request failed: {exc}",
+                    retryable=True,
+                ) from exc
+            except ValueError as exc:
                 raise _web_page_error(f"webpage request failed: {exc}") from exc
 
             if media_type == "application/pdf":

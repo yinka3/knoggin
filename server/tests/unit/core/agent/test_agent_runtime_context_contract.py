@@ -42,16 +42,6 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
         ],
         is_community=True,
         current_participants=["agent-1", "agent-2"],
-        hot_topic_context={
-            "Identity": {
-                "entities": [
-                    {
-                        "name": "Ada",
-                        "episodes": ["prefers scoped profile updates"],
-                    }
-                ]
-            }
-        },
     )
     ctx.call_count = 1
     ctx.last_error = "Duplicate call skipped"
@@ -114,8 +104,6 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     ) in message
     assert '"relationship_observation"' not in message
     assert "`search_messages`: Error - boom" in message
-    assert "[HOT: Identity]" in message
-    assert "Ada: prefers scoped profile updates" in message
     assert "**Accumulated context:**" in message
     assert "RUN NOTEBOOK" in message
     assert "E1 Grace" in message
@@ -567,7 +555,23 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
     )
     ctx.accumulate_tool_result(
         "get_recent_activity",
-        {"data": [{"source": "Ada", "target": "Testing"}]},
+        {
+            "data": [
+                {
+                    "entity_id": 1,
+                    "entity": "Ada",
+                    "project_id": "project-1",
+                    "time": 1_700_000_000_000,
+                    "evidence": [
+                        {
+                            "id": "msg_17",
+                            "session_id": "session-1",
+                            "message": "Ada reviewed the testing plan.",
+                        }
+                    ],
+                }
+            ]
+        },
     )
     ctx.accumulate_tool_result(
         "find_path",
@@ -664,7 +668,15 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
     )
     assert ctx.notebook.section_items("relationships") == (
         {"source": "Ada", "target": "Knoggin", "score": 0.8},
-        {"source": "Ada", "target": "Testing"},
+    )
+    assert ctx.notebook.section_items("activities") == (
+        {
+            "entity_id": 1,
+            "entity": "Ada",
+            "project_id": "project-1",
+            "time": 1_700_000_000_000,
+            "evidence_refs": ["message::session-1:msg_17"],
+        },
     )
     assert ctx.notebook.section_items("paths") == (
         {"entity_a": "Ada", "entity_b": "Knoggin"},
@@ -677,9 +689,10 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     assert [
-        (msg["id"], msg["source_type"], msg["message"])
+        (msg["id"], msg.get("source_type"), msg["message"])
         for msg in ctx.notebook.model_view()["messages"]
     ] == [
+        ("msg_17", None, "Ada reviewed the testing plan."),
         ("document:file-1:2", "document", "profile plan"),
         (
             "document:file-1:lines:10-12",
@@ -687,6 +700,9 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
             "10: exact content",
         ),
     ]
+    rendered = build_evidence_context(ctx)
+    assert "Activities:" in rendered
+    assert "ACT1 E1 Ada at 1700000000000 (evidence: M1)" in rendered
     assert ctx.notebook.model_view()["sources"] == [
         {
             "title": "Example A",

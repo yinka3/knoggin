@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
@@ -45,6 +45,54 @@ class MessageReader:
     def _sanitize_fts_query(query: str) -> str:
         tokens = re.findall(r"\w+", query or "")
         return " | ".join(tokens)
+
+    @staticmethod
+    def _clean_string(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip('"')
+        return value
+
+    def _parse_message_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "user_name": self._clean_string(row["user_name"]),
+            "session_id": self._clean_string(row["session_id"]),
+            "role": self._clean_string(row["role"]),
+            "content": self._clean_string(row["content"]),
+            "timestamp": row["timestamp"],
+        }
+
+    async def get_visible_session_ids(
+        self,
+        *,
+        user_name: str,
+        visible_project_ids: List[str],
+    ) -> List[str]:
+        """Return open sessions visible to one scoped message search."""
+
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_visible_session_ids",
+        )
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_visible_session_ids",
+        )
+        try:
+            rows = await self.client.fetch_all(
+                """
+                SELECT session_id
+                FROM public.sessions
+                WHERE user_name = %s
+                  AND project_id = ANY(%s)
+                  AND status = 'open'
+                """,
+                (user_name, visible_project_ids),
+            )
+        except Exception as exc:
+            self._raise_storage_read("get_visible_session_ids", exc)
+        return sorted({str(row["session_id"]) for row in rows})
 
     async def search_fts(
         self,
@@ -200,3 +248,290 @@ class MessageReader:
             assistant_metadata=metadata,
             source_ref_ids=tuple(str(value) for value in source_ref_ids),
         )
+
+    async def get_message_text(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        session_id: str,
+        visible_project_ids: List[str],
+    ) -> str:
+        """Return one scoped canonical message body or normal absence."""
+
+        user_name = require_scope_value(user_name, "user_name", "get_message_text")
+        session_id = require_scope_value(session_id, "session_id", "get_message_text")
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_message_text",
+        )
+        try:
+            row = await self.client.fetch_one(
+                """
+                SELECT content
+                FROM messages
+                WHERE user_name = %s
+                  AND session_id = %s
+                  AND message_id = %s
+                  AND project_id = ANY(%s)
+                """,
+                (user_name, session_id, message_id, visible_project_ids),
+            )
+        except Exception as exc:
+            self._raise_storage_read("get_message_text", exc)
+        if not row:
+            return ""
+        return self._clean_string(row["content"])
+
+    async def get_messages_by_ids(
+        self,
+        ids: List[int],
+        *,
+        user_name: str,
+        session_ids: List[str],
+        visible_project_ids: List[str],
+        discoverable_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return scoped canonical messages, with discovery filtering when asked."""
+
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_messages_by_ids",
+        )
+        if not session_ids:
+            raise ValueError("get_messages_by_ids requires session_ids scope")
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_messages_by_ids",
+        )
+        if not ids:
+            return []
+
+        discovery_clause = (
+            """
+          AND lifecycle_state = 'sealed'
+          AND EXISTS (
+              SELECT 1
+              FROM sessions
+              WHERE sessions.session_id = messages.session_id
+                AND sessions.project_id = messages.project_id
+                AND sessions.user_name = messages.user_name
+                AND sessions.status = 'open'
+          )
+            """
+            if discoverable_only
+            else ""
+        )
+        query = f"""
+        SELECT
+            message_id AS id,
+            user_name,
+            session_id,
+            role,
+            content,
+            timestamp_ms AS timestamp
+        FROM messages
+        WHERE message_id = ANY(%s)
+          AND user_name = %s
+          AND session_id = ANY(%s)
+          AND project_id = ANY(%s)
+          {discovery_clause}
+        ORDER BY message_id ASC
+        """
+        try:
+            rows = await self.client.fetch_all(
+                query,
+                (
+                    ids,
+                    user_name,
+                    session_ids,
+                    visible_project_ids,
+                ),
+            )
+        except Exception as exc:
+            self._raise_storage_read("get_messages_by_ids", exc)
+        return [self._parse_message_row(row) for row in rows]
+
+    async def get_recent_project_messages(
+        self,
+        user_name: str,
+        project_id: str,
+        limit: int,
+        before_message_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return a project-owned chronological message window."""
+
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_recent_project_messages",
+        )
+        project_id = require_scope_value(
+            project_id,
+            "project_id",
+            "get_recent_project_messages",
+        )
+        if limit <= 0:
+            return []
+
+        before_clause = "AND message_id < %s" if before_message_id is not None else ""
+        query = f"""
+        SELECT
+            message_id AS id,
+            user_name,
+            session_id,
+            role,
+            content,
+            timestamp_ms AS timestamp
+        FROM messages
+        WHERE user_name = %s
+        AND project_id = %s
+        {before_clause}
+        ORDER BY message_id DESC
+        LIMIT %s
+        """
+        query_params = (
+            (user_name, project_id, before_message_id)
+            if before_message_id is not None
+            else (user_name, project_id)
+        )
+        try:
+            rows = await self.client.fetch_all(query, (*query_params, limit))
+        except Exception as exc:
+            self._raise_storage_read("get_recent_project_messages", exc)
+        return [self._parse_message_row(row) for row in reversed(rows)]
+
+    async def get_surrounding_messages(
+        self,
+        message_id: int,
+        *,
+        user_name: str,
+        session_id: str,
+        visible_project_ids: List[str],
+        forward: int = 3,
+        target_total: int = 10,
+        discoverable_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return a bounded chronological window around one scoped message."""
+
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "get_surrounding_messages",
+        )
+        session_id = require_scope_value(
+            session_id,
+            "session_id",
+            "get_surrounding_messages",
+        )
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "get_surrounding_messages",
+        )
+        back_limit = max(0, target_total - forward - 1)
+        discovery_clause = (
+            """
+              AND lifecycle_state = 'sealed'
+              AND EXISTS (
+                  SELECT 1
+                  FROM sessions
+                  WHERE sessions.session_id = messages.session_id
+                    AND sessions.project_id = messages.project_id
+                    AND sessions.user_name = messages.user_name
+                    AND sessions.status = 'open'
+              )
+            """
+            if discoverable_only
+            else ""
+        )
+        try:
+            target_rows = await self.get_messages_by_ids(
+                [message_id],
+                user_name=user_name,
+                session_ids=[session_id],
+                visible_project_ids=visible_project_ids,
+                discoverable_only=discoverable_only,
+            )
+            if not target_rows:
+                return []
+            target = target_rows[0]
+            target_ts = target["timestamp"]
+            back_query = f"""
+            SELECT
+                message_id AS id,
+                user_name,
+                session_id,
+                role,
+                content,
+                timestamp_ms AS timestamp
+            FROM messages
+            WHERE (
+                    timestamp_ms < %s
+                 OR (timestamp_ms = %s AND message_id < %s)
+                 OR (%s::BIGINT IS NULL AND timestamp_ms IS NOT NULL)
+                 OR (
+                        %s::BIGINT IS NULL
+                    AND timestamp_ms IS NULL
+                    AND message_id < %s
+                 )
+              )
+              AND user_name = %s
+              AND session_id = %s
+              AND project_id = ANY(%s)
+              {discovery_clause}
+            ORDER BY timestamp_ms DESC NULLS FIRST, message_id DESC
+            LIMIT %s
+            """
+            forward_query = f"""
+            SELECT
+                message_id AS id,
+                user_name,
+                session_id,
+                role,
+                content,
+                timestamp_ms AS timestamp
+            FROM messages
+            WHERE (
+                    timestamp_ms > %s
+                 OR (timestamp_ms = %s AND message_id > %s)
+                 OR (%s::BIGINT IS NOT NULL AND timestamp_ms IS NULL)
+                 OR (
+                        %s::BIGINT IS NULL
+                    AND timestamp_ms IS NULL
+                    AND message_id > %s
+                 )
+              )
+              AND user_name = %s
+              AND session_id = %s
+              AND project_id = ANY(%s)
+              {discovery_clause}
+            ORDER BY timestamp_ms ASC NULLS LAST, message_id ASC
+            LIMIT %s
+            """
+            params_prefix = (
+                target_ts,
+                target_ts,
+                message_id,
+                target_ts,
+                target_ts,
+                message_id,
+                user_name,
+                session_id,
+                visible_project_ids,
+            )
+            previous_rows = await self.client.fetch_all(
+                back_query,
+                (*params_prefix, back_limit),
+            )
+            following_rows = await self.client.fetch_all(
+                forward_query,
+                (*params_prefix, forward),
+            )
+        except Exception as exc:
+            self._raise_storage_read("get_surrounding_messages", exc)
+        return [
+            *[self._parse_message_row(row) for row in reversed(previous_rows)],
+            target,
+            *[self._parse_message_row(row) for row in following_rows],
+        ]

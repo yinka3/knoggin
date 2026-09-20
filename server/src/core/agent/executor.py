@@ -11,7 +11,12 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from common.exceptions import ConfigurationError, LLMError, ToolExecutionError
+from common.exceptions import (
+    ConfigurationError,
+    LLMError,
+    StorageReadError,
+    ToolExecutionError,
+)
 from common.schema.agent.stream import (
     AgentExecutionEvent,
     ErrorEvent,
@@ -694,25 +699,25 @@ class AgentExecutor:
     async def _load_project_context(self) -> str:
         """Render bounded current Context from canonical storage only."""
 
-        reader = getattr(self.tools, "project_context_reader", None)
+        knowledge_store = getattr(self.tools, "knowledge_store", None)
         domain = getattr(self.tools, "compiled_domain", None)
-        if reader is None or domain is None:
+        if knowledge_store is None or domain is None:
             return ""
         try:
-            revision = await reader.get_current_revision(
+            revision = await knowledge_store.get_current_project_context_revision(
                 user_name=self.ctx.user_name,
                 project_id=self.ctx.project_id,
             )
             if revision is None:
                 return ""
-            snapshot = await reader.get_snapshot(
+            snapshot = await knowledge_store.get_project_context_snapshot(
                 revision.revision_id,
                 user_name=self.ctx.user_name,
                 project_id=self.ctx.project_id,
             )
             if snapshot is None or not snapshot.blocks:
                 return ""
-            supports_by_block = await reader.get_block_supports(
+            supports_by_block = await knowledge_store.get_project_context_block_supports(
                 [block.block_id for block in snapshot.blocks],
                 user_name=self.ctx.user_name,
                 project_id=self.ctx.project_id,
@@ -722,6 +727,8 @@ class AgentExecutor:
                 domain,
                 supports_by_block=supports_by_block,
             )
+        except StorageReadError:
+            raise
         except Exception as exc:
             logger.warning(
                 "AgentExecutor: canonical Project Context unavailable ({})",

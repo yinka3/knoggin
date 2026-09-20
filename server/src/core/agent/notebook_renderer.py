@@ -33,6 +33,7 @@ _IDENTIFIER_KEYS = {
 _REFERENCE_PREFIXES = {
     "entities": "E",
     "relationships": "R",
+    "activities": "ACT",
     "episodes": "EP",
     "paths": "P",
     "messages": "M",
@@ -40,6 +41,7 @@ _REFERENCE_PREFIXES = {
     "observation_supports": "O",
     "entity": "E",
     "relationship": "R",
+    "activity": "ACT",
     "episode": "EP",
     "path": "P",
     "message": "M",
@@ -70,6 +72,9 @@ Relationships:
   qualification: observed evidence, not a current-state claim
 {% if item.context %}  context: {{ item.context }}
 {% endif %}{{ '\n' }}
+{% endfor %}{% endif %}{% if activities %}
+Activities:
+{% for item in activities %}- {{ item.reference }}{% if item.entity %} {{ item.entity }}{% endif %}{% if item.time %} at {{ item.time }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if episodes %}
 Episodes:
 {% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}
@@ -160,7 +165,13 @@ class _ReferenceLocalizer:
         evidence = snapshot.get("evidence", {})
         yield from (
             (section, knowledge.get(section, {}))
-            for section in ("entities", "relationships", "episodes", "paths")
+            for section in (
+                "entities",
+                "relationships",
+                "activities",
+                "episodes",
+                "paths",
+            )
         )
         yield "messages", evidence.get("messages", {})
         yield "documents", evidence.get("documents", {})
@@ -492,6 +503,16 @@ def _record_list(
                 or ""
             )
             item["context"] = _safe_text(item.get("context") or "")
+        elif section == "activities":
+            entity_id = item.get("entity_id")
+            entity_name = _safe_text(item.get("entity") or "")
+            entity_ref = _entity_display_reference(localizer, entity_id)
+            item["entity"] = (
+                f"{entity_ref} {entity_name}".strip()
+                if entity_id is not None
+                else entity_name
+            )
+            item["time"] = _safe_text(item.get("time") or "", limit=80)
         elif section == "episodes":
             item["summary"] = _safe_text(item.get("summary") or "")
             item["chronology"] = _episode_chronology(item)
@@ -617,6 +638,9 @@ def _render_context(
         "entities": _record_list(knowledge["entities"], localizer, section="entities"),
         "relationships": _record_list(
             knowledge["relationships"], localizer, section="relationships"
+        ),
+        "activities": _record_list(
+            knowledge["activities"], localizer, section="activities"
         ),
         "episodes": _record_list(knowledge["episodes"], localizer, section="episodes"),
         "paths": _record_list(knowledge["paths"], localizer, section="paths"),

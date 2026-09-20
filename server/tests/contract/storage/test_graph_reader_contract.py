@@ -1,6 +1,5 @@
 import pytest
 
-from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
 from tests.fixtures.fakes import RecordingPostgresClient
 
@@ -18,6 +17,25 @@ def _message(message_id: int, timestamp: int | None) -> dict:
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_visible_message_search_sessions_are_owned_by_message_reader():
+    client = RecordingPostgresClient(
+        fetch_all_results=[[{"session_id": "session-2"}, {"session_id": "session-1"}]]
+    )
+
+    session_ids = await MessageReader(client).get_visible_session_ids(
+        user_name="ada",
+        visible_project_ids=["project-1"],
+    )
+
+    assert session_ids == ["session-1", "session-2"]
+    _, query, params = client.calls[0]
+    assert "FROM public.sessions" in query
+    assert "status = 'open'" in query
+    assert params == ("ada", ["project-1"])
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_surrounding_messages_use_strict_timestamp_and_message_id_bounds():
     client = RecordingPostgresClient(
         fetch_all_results=[
@@ -27,7 +45,7 @@ async def test_surrounding_messages_use_strict_timestamp_and_message_id_bounds()
         ]
     )
 
-    messages = await GraphReader(client).get_surrounding_messages(
+    messages = await MessageReader(client).get_surrounding_messages(
         3,
         user_name="ada",
         session_id="session-1",
@@ -58,7 +76,7 @@ async def test_discovery_surrounding_context_requires_open_sealed_history():
         ]
     )
 
-    await GraphReader(client).get_surrounding_messages(
+    await MessageReader(client).get_surrounding_messages(
         3,
         user_name="ada",
         session_id="session-1",
@@ -76,7 +94,7 @@ async def test_discovery_surrounding_context_requires_open_sealed_history():
 async def test_explicit_message_hydration_does_not_apply_discovery_lifecycle_filters():
     client = RecordingPostgresClient(fetch_all_results=[[_message(3, 200)]])
 
-    messages = await GraphReader(client).get_messages_by_ids(
+    messages = await MessageReader(client).get_messages_by_ids(
         [3],
         user_name="ada",
         session_ids=["deleted-session"],
@@ -111,7 +129,7 @@ async def test_fts_discovery_requires_open_sealed_history():
 async def test_recent_project_messages_uses_an_exclusive_cursor():
     client = RecordingPostgresClient(fetch_all_results=[[_message(6, 600)]])
 
-    await GraphReader(client).get_recent_project_messages(
+    await MessageReader(client).get_recent_project_messages(
         "ada",
         "project-1",
         limit=10,
@@ -149,7 +167,7 @@ async def test_surrounding_messages_do_not_repeat_same_timestamp_rows(
         """
     )
 
-    messages = await GraphReader(real_postgres_client).get_surrounding_messages(
+    messages = await MessageReader(real_postgres_client).get_surrounding_messages(
         3,
         user_name="ada",
         session_id="session-1",
@@ -203,8 +221,8 @@ async def test_discovery_excludes_unsealed_and_deleted_session_history_but_prove
         (101, "open-session")
     ]
 
-    graph_reader = GraphReader(real_postgres_client)
-    context = await graph_reader.get_surrounding_messages(
+    message_reader = MessageReader(real_postgres_client)
+    context = await message_reader.get_surrounding_messages(
         101,
         user_name="ada",
         session_id="open-session",
@@ -213,7 +231,7 @@ async def test_discovery_excludes_unsealed_and_deleted_session_history_but_prove
     )
     assert [message["id"] for message in context] == [101]
 
-    retained = await graph_reader.get_messages_by_ids(
+    retained = await message_reader.get_messages_by_ids(
         [104],
         user_name="ada",
         session_ids=["deleted-session"],

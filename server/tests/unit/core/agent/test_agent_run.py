@@ -121,7 +121,6 @@ def test_adaptive_briefing_uses_a_narrow_conversational_fast_path(user_query):
             {"document_selection_context": {"excerpt": "selected passage"}},
             "document_selection",
         ),
-        ({"hot_topics": ["ingestion"]}, "hot_topic_preload"),
         (
             {"limits": AgentRunLimits(project_briefing_mode="always")},
             "always",

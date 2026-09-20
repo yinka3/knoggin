@@ -802,7 +802,6 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
         entities=object(),
         embedding_service=None,
         knowledge_store=store,
-        postgres=real_postgres_client,
     )
     result = await retrieval.episode_check(
         "deploy",

@@ -76,17 +76,9 @@ class FakeConfigManager:
 class FakeTools:
     def __init__(self):
         self.closed = False
-        self.hot_topic_calls = []
 
     async def close(self):
         self.closed = True
-
-    async def get_hot_topic_context(self, hot_topics):
-        self.hot_topic_calls.append(hot_topics)
-        return {
-            topic: {"entities": [{"name": f"{topic} entity"}], "messages": []}
-            for topic in hot_topics
-        }
 
 
 class FakeExecutor:
@@ -276,10 +268,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.limits.max_calls == 9
     assert executor.ctx.limits.tool_timeout == 1.5
     assert executor.ctx.limits.get_tool_limit("search_entity") == 4
-    assert executor.ctx.hot_topics == []
     assert not hasattr(executor.ctx, "active_topics")
-    assert executor.ctx.hot_topic_context == {}
-    assert tools.hot_topic_calls == []
     assert executor.ctx.model == "agent-model"
     assert executor.ctx.temperature == 0.25
     assert "Use memory" in executor.ctx.brain
@@ -443,51 +432,6 @@ async def test_orchestrator_does_not_inject_maintenance_candidates(
 
     assert events == [_resolved_response_event()]
     assert not hasattr(FakeExecutor.instances[0].ctx, "maintenance_candidates")
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_orchestrator_explicit_hot_topics_override_config_and_are_validated(
-    monkeypatch,
-):
-    context = FakeSession()
-    tools = FakeTools()
-    context.resources.postgres.upsert_agent(
-        AgentConfig(
-            id="agent-1",
-            name="Researcher",
-            persona="Careful",
-            is_default=True,
-        )
-    )
-
-    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
-
-    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
-        return tools
-
-    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
-
-    events = [
-        event
-        async for event in make_orchestrator(context).run_stream(
-            user_query="hello",
-            context=context,
-            hot_topics=["Identity", "General", "Identity"],
-        )
-    ]
-
-    assert events == [_resolved_response_event()]
-    executor = FakeExecutor.instances[0]
-    assert executor.ctx.hot_topics == ["Identity"]
-    assert executor.ctx.hot_topic_context == {
-        "Identity": {
-            "entities": [{"name": "Identity entity"}],
-            "messages": [],
-        }
-    }
-    assert tools.hot_topic_calls == [["Identity"]]
-
 
 @pytest.mark.runtime
 @pytest.mark.no_network

@@ -155,9 +155,16 @@ class LLMBudgetExceededError(LLMError):
 class ToolExecutionError(KnogginError):
     """Raised when a tool fails to execute correctly."""
 
-    def __init__(self, tool_name: str, message: str, details: Optional[Dict] = None):
-        details = details or {}
-        details["tool"] = tool_name
+    def __init__(
+        self,
+        tool_name: str,
+        message: str,
+        details: Optional[Dict] = None,
+        *,
+        retryable: bool = False,
+    ):
+        details = {**(details or {}), "tool": tool_name, "retryable": retryable}
+        self.retryable = retryable
         super().__init__(
             f"Tool '{tool_name}' failed: {message}", code="tool_error", details=details
         )

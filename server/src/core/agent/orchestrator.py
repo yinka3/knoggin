@@ -60,7 +60,6 @@ class AgentOrchestrator:
         agent_id: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
         conversation_history: Optional[List[Dict]] = None,
-        hot_topics: Optional[List[str]] = None,
         user_message_id: Optional[int] = None,
         pasted_text_spans: Optional[List[Dict]] = None,
         request_document_focus: Optional[DocumentFocus] = None,
@@ -115,8 +114,6 @@ class AgentOrchestrator:
                 agent_cfg.id if agent_cfg else None,
                 effective_document_focus,
             )
-            compiled_domain = context.project.compiled_domain
-
             effective_enabled_tools = (
                 enabled_tools
                 if enabled_tools is not None
@@ -126,22 +123,6 @@ class AgentOrchestrator:
                     else agent_cfg.enabled_tools
                 )
             )
-            # One aggregate owns all mutable state for this execution.
-            requested_hot_topics = hot_topics or []
-            effective_hot_topics = []
-            for topic in requested_hot_topics:
-                normalized = compiled_domain.normalize_topic(topic)
-                if normalized and normalized not in effective_hot_topics:
-                    effective_hot_topics.append(normalized)
-            hot_topic_context = {}
-            if effective_hot_topics:
-                try:
-                    hot_topic_context = await tools.get_hot_topic_context(
-                        effective_hot_topics,
-                    )
-                except Exception as exc:
-                    logger.warning(f"Failed to preload hot topic context: {exc}")
-
             run = AgentRun.open(
                 user_name=context.user_name,
                 project_id=context.project_id or "",
@@ -155,8 +136,6 @@ class AgentOrchestrator:
                 temperature=effective_temperature,
                 brain=effective_brain,
                 enabled_tools=effective_enabled_tools,
-                hot_topics=effective_hot_topics,
-                hot_topic_context=hot_topic_context,
                 history=conversation_history or [],
                 document_focus=effective_document_focus,
                 document_selection_context=document_selection_context,

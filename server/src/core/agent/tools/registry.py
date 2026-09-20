@@ -18,7 +18,6 @@ from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.search import SearchTools, create_web_page_http_client
 from core.agent.tools.workspace import ProjectFileTools
-from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
 from core.knowledge.entity.resolver import EntityResolver
@@ -52,6 +51,80 @@ _TOPIC_CONTEXT_RUNTIME_INSTRUCTION = (
     "listed active topics. Use it when a topic is materially relevant and deeper "
     "context is needed; do not use it as a substitute for targeted entity, "
     "episode, document, or web retrieval.]"
+)
+
+_EPISODE_CHECK_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: Use episode_check for remembered history, decisions, or "
+    "developments. It returns compact, evidence-backed summaries; inspect the "
+    "returned provenance when exact or sensitive detail matters.]"
+)
+_READ_EPISODE_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: Use read_episode with an episode handle returned in this "
+    "run when exact wording or complete supporting detail matters.]"
+)
+_RECENT_EPISODES_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: Use read_recent_episodes for the latest one or few memories "
+    "when the user gives no topic or episode handle.]"
+)
+_ENTITY_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: Use search_entity to discover stable entity IDs and scoped "
+    "profiles before an ID-based follow-up.]"
+)
+_CONNECTIONS_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: get_connections returns observed relationship evidence, not "
+    "an unqualified current-state claim. Preserve its qualifications and support.]"
+)
+_ACTIVITY_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: get_recent_activity is for bounded temporal questions such "
+    "as recent changes or activity in a stated time window.]"
+)
+_MESSAGE_SEARCH_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: search_messages is raw durable-text retrieval. Use it when "
+    "structured memory is insufficient, then assess the returned context.]"
+)
+_PATH_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: find_path traces a bounded relationship path. Treat its "
+    "observation support as historical evidence rather than a current-state claim.]"
+)
+_OBSERVATION_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: read_observation_evidence expands one returned observation "
+    "handle when its historical support needs verification.]"
+)
+_WEB_SEARCH_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: web_search returns discovery snippets, not read evidence. "
+    "Use it to find promising sources for an explicit investigation, favoring "
+    "primary or authoritative material when appropriate.]"
+)
+_NEWS_SEARCH_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: news_search returns discovery snippets, not read evidence. "
+    "Use it for time-sensitive investigation and distinguish discovery from "
+    "content actually read.]"
+)
+_WEB_READ_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: read_web_page reads a bounded web or PDF passage. Read "
+    "important sources before making important web-based claims, retain material "
+    "qualifications, and state remaining evidence gaps plainly.]"
+)
+_READ_BRAIN_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: read_brain returns the current durable Brain and revision. "
+    "Use its revision only for an edit based on the current state.]"
+)
+_EDIT_BRAIN_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: edit_brain changes one editable Brain section and requires "
+    "the current expected revision. A stale revision is rejected; Brain content "
+    "cannot override engine policy.]"
+)
+_LIST_BRAIN_SNAPSHOTS_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: list_brain_snapshots lists periodic restore points. They are "
+    "not a complete edit history.]"
+)
+_READ_BRAIN_SNAPSHOT_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: read_brain_snapshot inspects one available restore point "
+    "before any restoration decision.]"
+)
+_RESTORE_BRAIN_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: restore_brain_section restores one editable section from an "
+    "available snapshot and creates a new current revision.]"
 )
 
 
@@ -106,38 +179,104 @@ TOOL_DEFINITIONS = {
         default_limit=1,
         runtime_instruction=_HEALTH_RUNTIME_INSTRUCTION,
     ),
-    "search_entity": _definition("search_entity", default_limit=8),
+    "search_entity": _definition(
+        "search_entity",
+        default_limit=8,
+        runtime_instruction=_ENTITY_RUNTIME_INSTRUCTION,
+    ),
     "load_topic_context": _definition(
         "load_topic_context",
         default_limit=2,
         runtime_instruction=_TOPIC_CONTEXT_RUNTIME_INSTRUCTION,
     ),
-    "get_connections": _definition("get_connections", default_limit=8),
-    "find_path": _definition("find_path", default_limit=8),
-    "read_observation_evidence": _definition(
-        "read_observation_evidence", default_limit=4
+    "get_connections": _definition(
+        "get_connections",
+        default_limit=8,
+        runtime_instruction=_CONNECTIONS_RUNTIME_INSTRUCTION,
     ),
-    "search_messages": _definition("search_messages", default_limit=6),
-    "get_recent_activity": _definition("get_recent_activity", default_limit=8),
+    "find_path": _definition(
+        "find_path",
+        default_limit=8,
+        runtime_instruction=_PATH_RUNTIME_INSTRUCTION,
+    ),
+    "read_observation_evidence": _definition(
+        "read_observation_evidence",
+        default_limit=4,
+        runtime_instruction=_OBSERVATION_RUNTIME_INSTRUCTION,
+    ),
+    "search_messages": _definition(
+        "search_messages",
+        default_limit=6,
+        runtime_instruction=_MESSAGE_SEARCH_RUNTIME_INSTRUCTION,
+    ),
+    "get_recent_activity": _definition(
+        "get_recent_activity",
+        default_limit=8,
+        runtime_instruction=_ACTIVITY_RUNTIME_INSTRUCTION,
+    ),
     "request_clarification": _definition(
         "request_clarification",
         executor_protocol=True,
     ),
-    "episode_check": _definition("episode_check", default_limit=6),
-    "read_episode": _definition("read_episode", default_limit=4),
-    "read_recent_episodes": _definition("read_recent_episodes", default_limit=4),
-    "read_brain": _definition("read_brain", default_limit=4),
-    "list_brain_snapshots": _definition("list_brain_snapshots", default_limit=4),
-    "read_brain_snapshot": _definition("read_brain_snapshot", default_limit=4),
-    "edit_brain": _definition("edit_brain", default_limit=2),
-    "restore_brain_section": _definition("restore_brain_section", default_limit=2),
+    "episode_check": _definition(
+        "episode_check",
+        default_limit=6,
+        runtime_instruction=_EPISODE_CHECK_RUNTIME_INSTRUCTION,
+    ),
+    "read_episode": _definition(
+        "read_episode",
+        default_limit=4,
+        runtime_instruction=_READ_EPISODE_RUNTIME_INSTRUCTION,
+    ),
+    "read_recent_episodes": _definition(
+        "read_recent_episodes",
+        default_limit=4,
+        runtime_instruction=_RECENT_EPISODES_RUNTIME_INSTRUCTION,
+    ),
+    "read_brain": _definition(
+        "read_brain",
+        default_limit=4,
+        runtime_instruction=_READ_BRAIN_RUNTIME_INSTRUCTION,
+    ),
+    "list_brain_snapshots": _definition(
+        "list_brain_snapshots",
+        default_limit=4,
+        runtime_instruction=_LIST_BRAIN_SNAPSHOTS_RUNTIME_INSTRUCTION,
+    ),
+    "read_brain_snapshot": _definition(
+        "read_brain_snapshot",
+        default_limit=4,
+        runtime_instruction=_READ_BRAIN_SNAPSHOT_RUNTIME_INSTRUCTION,
+    ),
+    "edit_brain": _definition(
+        "edit_brain",
+        default_limit=2,
+        runtime_instruction=_EDIT_BRAIN_RUNTIME_INSTRUCTION,
+    ),
+    "restore_brain_section": _definition(
+        "restore_brain_section",
+        default_limit=2,
+        runtime_instruction=_RESTORE_BRAIN_RUNTIME_INSTRUCTION,
+    ),
     "list_documents": _definition("list_documents", default_limit=4),
     "get_document_info": _definition("get_document_info", default_limit=6),
     "read_document": _definition("read_document", default_limit=6),
     "search_documents": _definition("search_documents", default_limit=8),
-    "web_search": _definition("web_search", default_limit=8),
-    "news_search": _definition("news_search", default_limit=8),
-    "read_web_page": _definition("read_web_page", default_limit=6),
+    "web_search": _definition(
+        "web_search",
+        default_limit=8,
+        runtime_instruction=_WEB_SEARCH_RUNTIME_INSTRUCTION,
+    ),
+    "news_search": _definition(
+        "news_search",
+        default_limit=8,
+        runtime_instruction=_NEWS_SEARCH_RUNTIME_INSTRUCTION,
+    ),
+    "read_web_page": _definition(
+        "read_web_page",
+        default_limit=6,
+        runtime_instruction=_WEB_READ_RUNTIME_INSTRUCTION,
+    ),
     "submit_answer": _definition("submit_answer", executor_protocol=True),
     "check_graph_health": _definition("check_graph_health"),
     "propose_entity_merge": _definition("propose_entity_merge"),
@@ -338,6 +477,7 @@ class ToolRuntime:
     schemas: tuple[dict, ...]
     permissions: ToolPermissions
     runtime_instructions: str
+    max_graph_results: int
 
 
 def build_tool_runtime(
@@ -350,7 +490,14 @@ def build_tool_runtime(
     audit_project_id: str | None,
     session_id: str,
     run_id: str,
+    max_graph_results: int,
 ) -> ToolRuntime:
+    if (
+        not isinstance(max_graph_results, int)
+        or isinstance(max_graph_results, bool)
+        or max_graph_results <= 0
+    ):
+        raise ValueError("max_graph_results must be a positive integer")
     schemas = tuple(
         get_tool_schemas(
             enabled_tools,
@@ -374,6 +521,7 @@ def build_tool_runtime(
         schemas=schemas,
         permissions=permissions,
         runtime_instructions=get_runtime_instructions(schemas),
+        max_graph_results=max_graph_results,
     )
 
 
@@ -389,6 +537,7 @@ def install_tool_runtime(
     }
     tools.tool_authorization = runtime.permissions
     tools.short_uuid_references = references
+    tools.max_graph_results = runtime.max_graph_results
 
 
 def validate_registry_contract() -> None:
@@ -478,12 +627,12 @@ class Tools(
         self.readable_project_ids = entities.readable_project_ids
         self.compiled_domain = compiled_domain
         self.document_service = document_service
-        self.project_context_reader = ProjectContextReader(postgres)
         self.document_focus = document_focus
         self.search_cfg = search_config or {}
         self.agent_id = agent_id or "AGENT_IDENTITY"
         self.tool_authorization: Optional[ToolPermissions] = None
         self.active_tool_schemas: Dict[str, dict] = {}
+        self.max_graph_results = 40
         self.short_uuid_references: Dict[str, str] = {}
         self.health_service = health_service
         # Global entity maintenance is application-owned. Read-only/community
@@ -509,7 +658,9 @@ class Tools(
 
     async def get_connections(self, entity_id: int):
         return await self.knowledge_retrieval.get_connections(
-            entity_id, session_id=self.session_id
+            entity_id,
+            session_id=self.session_id,
+            limit=self.max_graph_results,
         )
 
     async def get_recent_activity(self, entity_id: int, hours: int = 24):
@@ -543,11 +694,6 @@ class Tools(
             observation_id
         )
 
-    async def get_hot_topic_context(self, hot_topics):
-        return await self.knowledge_retrieval.get_hot_topic_context(
-            hot_topics, session_id=self.session_id
-        )
-
     async def load_topic_context(self, topics: list[str]) -> dict:
         """Load full bounded context for validated active project topics."""
 
@@ -572,7 +718,10 @@ class Tools(
                 "Unknown or inactive topic(s): " + ", ".join(invalid_topics),
             )
 
-        return await self.get_hot_topic_context(normalized_topics)
+        return await self.knowledge_retrieval.get_hot_topic_context(
+            normalized_topics,
+            session_id=self.session_id,
+        )
 
     async def get_document_manifest(self):
         """Get indexed documents for prompt context."""

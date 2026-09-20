@@ -267,7 +267,6 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         entities=resolver,
         embedding_service=embedding,
         knowledge_store=store,
-        postgres=postgres,
     )
     context = _session(
         resources,

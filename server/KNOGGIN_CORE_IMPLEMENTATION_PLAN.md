@@ -1,6 +1,6 @@
 # Knoggin Core Implementation Plan
 
-Status: Phases 1–2 complete. Phases 3–6 remain pending.
+Status: Phases 1–3 complete. Phases 4–6 remain pending.
 
 Based on [KNOGGIN_CORE_REVIEW.md](KNOGGIN_CORE_REVIEW.md) and the subsequent review of the current checkout. Initial code assessment: `ab817f4e8ba570c9e65b636f6604659b98d55664`. Recheck affected paths when starting each phase; the older revision named in the review is not the implementation baseline.
 
@@ -160,6 +160,15 @@ Canonical reads belong behind existing persistence boundaries. Tool results reta
 - Context absence returns an empty/absent result; a storage outage surfaces as failure.
 - Enabled-tool guidance matches the actual tool set; removed preload paths have no remaining consumers.
 - Exercise canonical message/session reads through persistence interfaces and relevant real DB contracts.
+
+### Phase 3 closeout — 2026-09-19
+
+- `KnowledgeRetrieval` no longer runs visible-session SQL, and canonical message reads now belong to `MessageReader`. `GraphReader` is graph-focused again, while `KnowledgeStore` remains the existing facade.
+- Agent Context loading now reads through `KnowledgeStore`. A missing revision stays empty, but a canonical storage failure propagates instead of looking like no Context exists.
+- Recent activity has its own `RunNotebook` record with entity, time, and admitted message evidence. It survives later tool calls and renders as an activity rather than a fabricated relationship.
+- The run's `max_accumulated_graph` controls both relationship retention and the `get_connections` query limit. Tool guidance is generated from the run's active schemas, and the hot-topic preload state and orchestration path are removed; topic context remains an explicit tool call.
+- The notebook no longer treats the briefing-only document manifest as a model result. `ToolExecutionError` now records cause-sensitive retryability: transient storage, dependency, timeout, and transport failures can retry; invalid, stale, unsupported, and corrupt inputs cannot.
+- Validation passed: 651 focused agent, knowledge, community, runtime, and public-contract unit tests; 23 storage and integration checks, including real PostgreSQL-backed flows; touched-path Ruff; and `git diff --check`.
 
 ## Phase 4 — Document parsing and provenance
 

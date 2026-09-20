@@ -154,8 +154,6 @@ class ProjectBriefing:
         research_profile: ResearchProfile,
         document_focus: Optional[DocumentFocus],
         document_selection_context: Optional[Dict[str, Any]],
-        hot_topics: List[str],
-        hot_topic_context: Dict[str, Dict],
     ) -> "ProjectBriefing":
         if mode not in {"always", "adaptive"}:
             raise ValueError("project briefing mode must be 'always' or 'adaptive'")
@@ -167,8 +165,6 @@ class ProjectBriefing:
             reason = "document_selection"
         elif document_focus is not None:
             reason = "document_focus"
-        elif hot_topics or hot_topic_context:
-            reason = "hot_topic_preload"
         elif _has_explicit_project_memory_intent(user_query):
             reason = "explicit_project_memory_intent"
         elif _is_simple_conversational_turn(user_query):
@@ -338,8 +334,6 @@ class AgentRun:
     history: List[Dict] = field(default_factory=list)
     document_focus: Optional[DocumentFocus] = None
     document_selection_context: Optional[Dict[str, Any]] = None
-    hot_topics: List[str] = field(default_factory=list)
-    hot_topic_context: Dict[str, Dict] = field(default_factory=dict)
     project_briefing: ProjectBriefing = field(
         default_factory=lambda: ProjectBriefing(
             mode="adaptive",
@@ -394,8 +388,6 @@ class AgentRun:
         history: Optional[List[Dict]] = None,
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
-        hot_topics: Optional[List[str]] = None,
-        hot_topic_context: Optional[Dict[str, Dict]] = None,
         notebook: Optional[RunNotebook] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
@@ -438,12 +430,11 @@ class AgentRun:
             audit_project_id=effective_audit_project_id,
             session_id=session_id,
             run_id=effective_run_id,
+            max_graph_results=limits.max_accumulated_graph,
         )
         effective_research_profile = (
             research_profile or DEFAULT_RESEARCH_PROFILES["normal"]
         )
-        effective_hot_topics = list(hot_topics or [])
-        effective_hot_topic_context = dict(hot_topic_context or {})
         return cls(
             run_id=effective_run_id,
             user_name=user_name,
@@ -462,16 +453,12 @@ class AgentRun:
             history=list(history or []),
             document_focus=document_focus,
             document_selection_context=document_selection_context,
-            hot_topics=effective_hot_topics,
-            hot_topic_context=effective_hot_topic_context,
             project_briefing=ProjectBriefing.for_run(
                 mode=limits.project_briefing_mode,
                 user_query=user_query,
                 research_profile=effective_research_profile,
                 document_focus=document_focus,
                 document_selection_context=document_selection_context,
-                hot_topics=effective_hot_topics,
-                hot_topic_context=effective_hot_topic_context,
             ),
             notebook=notebook or RunNotebook(limits=limits),
             is_community=is_community,
@@ -499,8 +486,6 @@ class AgentRun:
         history: Optional[List[Dict]] = None,
         document_focus: Optional[DocumentFocus] = None,
         document_selection_context: Optional[Dict[str, Any]] = None,
-        hot_topics: Optional[List[str]] = None,
-        hot_topic_context: Optional[Dict[str, Dict]] = None,
         notebook: Optional[RunNotebook] = None,
         is_community: bool = False,
         current_participants: Optional[List[str]] = None,
@@ -527,8 +512,6 @@ class AgentRun:
             history=history,
             document_focus=document_focus,
             document_selection_context=document_selection_context,
-            hot_topics=hot_topics,
-            hot_topic_context=hot_topic_context,
             notebook=notebook,
             is_community=is_community,
             current_participants=current_participants,

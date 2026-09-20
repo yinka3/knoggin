@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.exceptions import ToolExecutionError
+from common.exceptions import StorageReadError, ToolExecutionError
 from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS_BY_NAME,
     get_filtered_schemas,
@@ -75,6 +75,9 @@ class DispatchTools:
 
     async def broken(self):
         raise RuntimeError("method exploded")
+
+    async def broken_storage(self):
+        raise StorageReadError("message search")
 
 
 @pytest.mark.no_network
@@ -312,6 +315,37 @@ async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
 
     assert exc.value.details["tool"] == "broken_tool"
     assert "Tool execution failed" in exc.value.message
+    assert exc.value.retryable is False
+    assert exc.value.details["retryable"] is False
+
+
+@pytest.mark.no_network
+async def test_execute_tool_marks_transient_storage_failures_retryable(monkeypatch):
+    tools = DispatchTools()
+
+    monkeypatch.setattr(
+        "core.agent.tool_runtime.get_tool_definition",
+        lambda name: (
+            SimpleNamespace(
+                dispatch=("broken_storage", ()),
+                schema={
+                    "function": {
+                        "capability": "read",
+                        "parameters": {"type": "object"},
+                    }
+                },
+                capability="read",
+            )
+            if name == "broken_storage_tool"
+            else None
+        ),
+    )
+
+    with pytest.raises(ToolExecutionError) as exc:
+        await execute_tool(tools, "broken_storage_tool", {})
+
+    assert exc.value.retryable is True
+    assert exc.value.details["retryable"] is True
 
 
 class RecordingPostgres:

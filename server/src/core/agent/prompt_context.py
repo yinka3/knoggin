@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union
 
 from common.utils.time_utils import get_now, parse_iso_time_or_now
-from core.agent.formatters import format_hot_topic_context
+from core.agent.formatters import format_topic_context
 from core.agent.notebook_renderer import render_notebook
 from core.agent.run import AgentRun
 
@@ -118,7 +118,7 @@ def build_user_message(
                     msg += (
                         f"- `{tool}`: Loaded context for "
                         f"{len(topic_context)} topic(s).\n"
-                        f"{format_hot_topic_context(topic_context, label='TOPIC')}\n"
+                        f"{format_topic_context(topic_context)}\n"
                     )
                 else:
                     msg += f"- `{tool}`: No results found.\n"
@@ -126,12 +126,6 @@ def build_user_message(
                 msg += f"- `{tool}`: No results found\n"
             else:
                 msg += f"- `{tool}`: {json.dumps(data, indent=2, default=str)}\n"
-
-    if ctx.hot_topic_context:
-        msg += (
-            "\n**Hot topic context (pre-fetched):**\n"
-            f"{format_hot_topic_context(ctx.hot_topic_context)}\n"
-        )
 
     if ctx.has_any():
         msg += "\n**Accumulated context:**\n"
