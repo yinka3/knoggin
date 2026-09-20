@@ -344,3 +344,42 @@ async def test_repeated_project_semantic_wakes_coalesce_to_one_running_job(monke
     release.set()
     await asyncio.wait_for(job.finished.wait(), timeout=1)
     await scheduler.stop()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_targeted_wake_runs_a_not_due_job_and_retains_a_wake_during_execution(
+    monkeypatch,
+):
+    capture_events(monkeypatch)
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.CHECK_INTERVAL = 60
+    release = asyncio.Event()
+    job = ControlledJob(name="project_semantic", due=False, blocker=release)
+    scheduler.register(job)
+
+    await scheduler.start()
+    assert scheduler.wake_job(job.name) is True
+    await asyncio.wait_for(job.started.wait(), timeout=1)
+    assert job.execute_calls == 1
+
+    assert scheduler.wake_job(job.name) is True
+    release.set()
+    async with asyncio.timeout(1):
+        while job.execute_calls < 2:
+            await asyncio.sleep(0)
+
+    assert job.execute_calls == 2
+    await scheduler.stop()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_targeted_wake_rejects_an_unknown_job(monkeypatch):
+    capture_events(monkeypatch)
+    scheduler = Scheduler("ada", "project-1")
+    scheduler.register(ControlledJob())
+
+    await scheduler.start()
+    assert scheduler.wake_job("missing") is False
+    await scheduler.stop()

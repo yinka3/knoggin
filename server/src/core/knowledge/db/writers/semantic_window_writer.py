@@ -177,6 +177,7 @@ class SemanticWindowWriter:
                     """
                     UPDATE public.project_semantic_windows
                     SET stage = %s,
+                        attempt_count = 0,
                         context_revision_id = CASE
                             WHEN %s::uuid IS NULL THEN context_revision_id
                             ELSE %s::uuid

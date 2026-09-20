@@ -424,6 +424,19 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
         user_name="ada",
         project_id="project-1",
     ) is None
+    failed = await store.record_project_semantic_window_failure(
+        window_id=str(window.window_id),
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        failure_stage="episode_generation",
+        failure_code="ConnectionError",
+        error_summary="episode provider unavailable",
+        failed_at_ms=1_000,
+        next_retry_at_ms=31_000,
+    )
+    assert failed is not None
+    assert failed.attempt_count == 1
     assert await store.write_project_semantic_window_episodes(
         window_id=str(window.window_id),
         episodes=[episode],
@@ -448,9 +461,24 @@ async def test_semantic_episode_result_is_idempotent_and_has_no_legacy_side_effe
     assert result[0].entities == []
     assert result[0].relationships == []
     assert await real_postgres_client.fetch_one(
-        "SELECT stage, episode_result_recorded FROM project_semantic_windows WHERE window_id = %s",
+        """
+        SELECT stage, episode_result_recorded, attempt_count,
+               last_failure_stage, last_failure_code, last_failure_at_ms,
+               last_error_summary, next_retry_at_ms
+        FROM project_semantic_windows
+        WHERE window_id = %s
+        """,
         (window.window_id,),
-    ) == {"stage": "claimed", "episode_result_recorded": True}
+    ) == {
+        "stage": "claimed",
+        "episode_result_recorded": True,
+        "attempt_count": 0,
+        "last_failure_stage": None,
+        "last_failure_code": None,
+        "last_failure_at_ms": None,
+        "last_error_summary": None,
+        "next_retry_at_ms": None,
+    }
 
     zero_window = _window(project_id="project-2")
     assert (
@@ -862,6 +890,19 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
         expected_stage=SemanticWindowStage.CONTEXT_COMMITTED,
         next_stage=SemanticWindowStage.KNOWLEDGE_COMMITTED,
     )
+    claimed_failure = await window_writer.record_failure(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CLAIMED,
+        failure_stage="episode_generation",
+        failure_code="temporary_failure",
+        error_summary="retry later",
+        failed_at_ms=1_000,
+        next_retry_at_ms=31_000,
+    )
+    assert claimed_failure is not None
+    assert claimed_failure.attempt_count == 1
     assert await window_writer.advance_stage(
         window_id=window.window_id,
         user_name="ada",
@@ -870,6 +911,22 @@ async def test_semantic_window_stage_cas_and_failures_keep_the_last_successful_s
         next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
         context_revision_id=revision_id,
     )
+    assert await real_postgres_client.fetch_one(
+        """
+        SELECT attempt_count, last_failure_stage, last_failure_code,
+               last_failure_at_ms, last_error_summary, next_retry_at_ms
+        FROM public.project_semantic_windows
+        WHERE window_id = %s
+        """,
+        (window.window_id,),
+    ) == {
+        "attempt_count": 0,
+        "last_failure_stage": None,
+        "last_failure_code": None,
+        "last_failure_at_ms": None,
+        "last_error_summary": None,
+        "next_retry_at_ms": None,
+    }
     failed = await window_writer.record_failure(
         window_id=window.window_id,
         user_name="ada",

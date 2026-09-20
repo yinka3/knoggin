@@ -1,6 +1,6 @@
 # Knoggin Core Implementation Plan
 
-Status: Phase 1 complete. Phases 2–6 remain pending.
+Status: Phases 1–2 complete. Phases 3–6 remain pending.
 
 Based on [KNOGGIN_CORE_REVIEW.md](KNOGGIN_CORE_REVIEW.md) and the subsequent review of the current checkout. Initial code assessment: `ab817f4e8ba570c9e65b636f6604659b98d55664`. Recheck affected paths when starting each phase; the older revision named in the review is not the implementation baseline.
 
@@ -116,6 +116,15 @@ Once a window is ready, advance Episode → Context → Knowledge → completion
 - Exercise missed wakes, capacity rejection, repeated wakes, shutdown, and restart recovery.
 - Fail resolver publication and Context file writes after DB commit; verify recovery preserves canonical state and human edits.
 - Inspect real persisted state with PostgreSQL tests, alongside focused processor/lifecycle tests.
+
+### Phase 2 closeout — 2026-09-19
+
+- `ProjectSemanticJob` now drains one active window through Episode, Context, Knowledge, resolver publication, Episode enrichment, and completion in one bounded run. It reloads the durable window after every successful checkpoint and stops when a stage fails, a retry is not due, an attempt budget is exhausted, the active window changes, or no durable state advances.
+- Exchange closure now sends a targeted in-memory scheduler wake to the semantic job. It still uses normal admission to decide whether a new window is ready, so below-threshold windows remain open. A wake received during an active run is retained for one follow-up check; normal polling remains restart and missed-wake recovery.
+- Context update, projection, entity build, relationship extraction, and resolver publication are required collaborators. Context filesystem repair remains independent of canonical Context and Knowledge checkpoints.
+- Episode, Context/finalization, and Knowledge checkpoint writes atomically reset the retry counter and clear retry metadata. Resolver publication and Episode enrichment continue to resume from committed Knowledge without replaying the canonical mutation.
+- Validation passed: 55 focused semantic, scheduler, and project-runtime tests; 7 real PostgreSQL semantic-flow tests; and 3 real PostgreSQL checkpoint-storage contracts. Full `ruff check src tests`, the architecture import check, and `git diff --check` passed.
+- The broader suite lanes were not treated as passing: the service-free run waited in the unrelated model-stack smoke and project-workspace lifecycle tests, while the broader PostgreSQL storage lane later failed during host `psycopg` setup despite the Docker PostgreSQL service accepting direct reads. These did not block the focused real-storage validation above.
 
 ## Phase 3 — Retrieval, tool behavior, and evidence retention
 
@@ -270,7 +279,7 @@ Remove obsolete contracts and verify the connected engine flows before treating 
 ## Progress
 
 - [x] Phase 1 — Conversation completion and request identity
-- [ ] Phase 2 — Semantic processing and recovery
+- [x] Phase 2 — Semantic processing and recovery
 - [ ] Phase 3 — Retrieval, tool behavior, and evidence retention
 - [ ] Phase 4 — Document parsing and provenance
 - [ ] Phase 5 — Document recovery and public error contracts
