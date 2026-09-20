@@ -23,8 +23,11 @@ from pydantic import ValidationError
 
 from common.exceptions import (
     DependencyError,
+    IdempotencyConflictError,
     LLMProviderError,
     NotFoundError,
+    RequestInProgressError,
+    RequestInterruptedError,
     SessionBusyError,
     StorageError,
     ToolExecutionError,
@@ -475,12 +478,20 @@ def _status_for_error(error: Exception) -> int:
         return 503 if error.error.retryable else 502
     if isinstance(error, UnsupportedOperation):
         return 501
+    if isinstance(
+        error,
+        (
+            SessionBusyError,
+            IdempotencyConflictError,
+            RequestInProgressError,
+            RequestInterruptedError,
+        ),
+    ):
+        return 409
     if isinstance(error, (ValueError, ValidationError, RequestValidationError)):
         return 422
     if isinstance(error, NotFoundError):
         return 404
-    if isinstance(error, SessionBusyError):
-        return 409
     if isinstance(
         error,
         (DependencyError, StorageError, LLMProviderError),

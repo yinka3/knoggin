@@ -3,11 +3,17 @@ from datetime import datetime, timezone
 
 import pytest
 
-from common.exceptions import SessionBusyError
+from common.exceptions import (
+    IdempotencyConflictError,
+    RequestInProgressError,
+    RequestInterruptedError,
+    SessionBusyError,
+)
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import fetch_conversation_turns
+from core.knowledge.db.readers.message_reader import UserAgentExchange
 from runtime.session_runtime import SessionRuntime
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeResources
@@ -29,7 +35,13 @@ def _pasted_source_candidate():
     )
 
 
-def _response_event(content, *, sources_consulted=None, artifact=None):
+def _response_event(
+    content,
+    *,
+    sources_consulted=None,
+    artifact=None,
+    resolved_agent_id=None,
+):
     data = {
         "content": content,
         "usage": {
@@ -43,6 +55,8 @@ def _response_event(content, *, sources_consulted=None, artifact=None):
         data["sources_consulted"] = sources_consulted
     if artifact is not None:
         data["artifact"] = artifact
+    if resolved_agent_id is not None:
+        data["resolved_agent_id"] = resolved_agent_id
     return {"event": "response", "data": data}
 
 
@@ -443,6 +457,10 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
             "Durable final answer",
             sources_consulted=[candidate.model_dump(mode="json")],
         )
+        yield {
+            "event": "error",
+            "data": {"message": "must not follow a response"},
+        }
 
     ctx.get_conversation_context = history
     resources.knowledge_store.finalize_assistant_exchange = (
@@ -479,6 +497,146 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     }
     assert candidates[0].source_message_id == 1
     assert readable_project_ids == ["project-1"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_agent_stream_marks_the_turn_only_after_durable_persistence(context):
+    ctx, resources = context
+    persisted = False
+    completed_agents = []
+
+    async def handler(_kwargs):
+        yield _response_event("Durable answer", resolved_agent_id="agent-run-1")
+
+    async def persist_assistant(message, candidates, *, readable_project_ids, artifact=None):
+        nonlocal persisted
+        del candidates, readable_project_ids, artifact
+        resources.knowledge_store.saved_message_logs.append([message])
+        persisted = True
+        return message["id"], [], True
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+
+    async def mark_turn_completed(agent_id):
+        assert persisted is True
+        completed_agents.append(agent_id)
+        return True
+
+    orchestrator.mark_turn_completed = mark_turn_completed
+    resources.knowledge_store.finalize_assistant_exchange = persist_assistant
+    events = await _collect_turn(
+        ctx,
+        Message(content="Save this response"),
+        orchestrator,
+    )
+
+    assert completed_agents == ["agent-run-1"]
+    assert "resolved_agent_id" not in events[-1]["data"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_failed_assistant_persistence_does_not_mark_a_successful_turn(
+    context,
+    monkeypatch,
+):
+    ctx, resources = context
+    completed_agents = []
+
+    async def handler(_kwargs):
+        yield _response_event("Answer that cannot be saved")
+
+    async def fail_persistence(*_args, **_kwargs):
+        raise ConnectionError("Postgres unavailable")
+
+    async def skip_retry_delay(_delay):
+        return None
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+
+    async def mark_turn_completed(agent_id):
+        completed_agents.append(agent_id)
+        return True
+
+    orchestrator.mark_turn_completed = mark_turn_completed
+    resources.knowledge_store.finalize_assistant_exchange = fail_persistence
+    monkeypatch.setattr("runtime.session_runtime.asyncio.sleep", skip_retry_delay)
+    events = await _collect_turn(
+        ctx,
+        Message(content="Save this response"),
+        orchestrator,
+    )
+
+    assert events[-1]["event"] == "error"
+    assert completed_agents == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_run_agent_stream_persists_clarification_before_exposing_it(context):
+    """A user-visible clarification is a durable assistant turn, not cleanup."""
+
+    ctx, resources = context
+    persisted = False
+
+    async def handler(_kwargs):
+        yield {
+            "event": "clarification",
+            "data": {
+                "question": "Which profile should I use?",
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 0,
+                    "total_tokens": 3,
+                    "approximate": False,
+                },
+            },
+        }
+        yield _response_event("A response must not follow clarification")
+
+    async def persist_assistant(
+        message, candidates, *, readable_project_ids, artifact=None, outcome
+    ):
+        nonlocal persisted
+        assert candidates == []
+        assert readable_project_ids == ["project-1"]
+        assert artifact is None
+        assert outcome == "clarification"
+        resources.knowledge_store.saved_message_logs.append([message])
+        persisted = True
+        return message["id"], [], True
+
+    resources.knowledge_store.finalize_assistant_exchange = persist_assistant
+    events = []
+    async for event in ctx.run_agent_stream(
+        Message(content="Help me choose a profile"),
+        orchestrator=_FakeTurnOrchestrator(handler),
+    ):
+        assert persisted is True
+        events.append(event)
+
+    assert events == [
+        {
+            "event": "clarification",
+            "data": {
+                "question": "Which profile should I use?",
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 0,
+                    "total_tokens": 3,
+                    "approximate": False,
+                },
+                "assistant_message_id": 2,
+                "source_ref_ids": [],
+            },
+        }
+    ]
+    assert [batch[0]["role"] for batch in resources.knowledge_store.saved_message_logs] == [
+        "user",
+        "assistant",
+    ]
+    assert resources.knowledge_store.closed_exchanges == []
 
 
 @pytest.mark.runtime
@@ -606,6 +764,200 @@ async def test_run_agent_stream_rejects_an_overlapping_turn_before_persistence(c
 
     assert [call["user_query"] for call in orchestrator.calls] == ["first"]
     assert first_events[-1]["data"]["content"] == "answer to first"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_duplicate_idempotency_key_replays_the_canonical_response(context):
+    ctx, resources = context
+    orchestrator_calls = []
+
+    async def handler(kwargs):
+        orchestrator_calls.append(kwargs["user_query"])
+        yield _response_event("fresh response that must not be replayed")
+
+    async def replay_exchange(_message_id, **_kwargs):
+        return UserAgentExchange(
+            user_message_id=1,
+            exchange_state="closed",
+            exchange_outcome="assistant_final",
+            assistant_message_id=71,
+            assistant_content="canonical durable response",
+            assistant_metadata={
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                    "approximate": False,
+                },
+                "research_mode": "normal",
+            },
+            source_ref_ids=("source-1",),
+        )
+
+    resources.knowledge_store.get_user_agent_exchange = replay_exchange
+    first = [
+        event
+        async for event in ctx.run_agent_stream(
+            Message(content="Please summarize this"),
+            orchestrator=_FakeTurnOrchestrator(handler),
+            idempotency_key="summary-1",
+        )
+    ]
+    second = [
+        event
+        async for event in ctx.run_agent_stream(
+            Message(content="Please summarize this"),
+            orchestrator=_FakeTurnOrchestrator(handler),
+            idempotency_key="summary-1",
+        )
+    ]
+
+    assert first[-1]["event"] == "response"
+    assert orchestrator_calls == ["Please summarize this"]
+    assert second == [
+        {
+            "event": "response",
+            "data": {
+                "content": "canonical durable response",
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 2,
+                    "total_tokens": 5,
+                    "approximate": False,
+                },
+                "assistant_message_id": 71,
+                "source_ref_ids": ["source-1"],
+                "research_mode": "normal",
+            },
+        }
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_duplicate_idempotency_key_replays_the_canonical_clarification(context):
+    ctx, resources = context
+    resources.knowledge_store.accepted_message_ids["request:clarification-1"] = 41
+
+    async def replay_exchange(_message_id, **_kwargs):
+        return UserAgentExchange(
+            user_message_id=41,
+            exchange_state="closed",
+            exchange_outcome="clarification",
+            assistant_message_id=42,
+            assistant_content="Which profile should I use?",
+            assistant_metadata={
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 0,
+                    "total_tokens": 3,
+                    "approximate": False,
+                }
+            },
+            source_ref_ids=("source-1",),
+        )
+
+    resources.knowledge_store.get_user_agent_exchange = replay_exchange
+
+    events = [
+        event
+        async for event in ctx.run_agent_stream(
+            Message(content="Help me choose a profile"),
+            idempotency_key="clarification-1",
+        )
+    ]
+
+    assert events == [
+        {
+            "event": "clarification",
+            "data": {
+                "question": "Which profile should I use?",
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 0,
+                    "total_tokens": 3,
+                    "approximate": False,
+                },
+                "assistant_message_id": 42,
+                "source_ref_ids": ["source-1"],
+            },
+        }
+    ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_same_active_idempotency_key_is_in_progress_and_mismatch_conflicts(context):
+    ctx, _resources = context
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(_kwargs):
+        started.set()
+        await release.wait()
+        yield _response_event("done")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+    async def run_first():
+        return [
+            event
+            async for event in ctx.run_agent_stream(
+                Message(content="original request"),
+                orchestrator=orchestrator,
+                idempotency_key="same-request",
+            )
+        ]
+
+    first = asyncio.create_task(run_first())
+    await started.wait()
+
+    with pytest.raises(RequestInProgressError):
+        await ctx.open_agent_run_stream(
+            Message(content="original request"),
+            orchestrator=orchestrator,
+            idempotency_key="same-request",
+        )
+    with pytest.raises(IdempotencyConflictError):
+        await ctx.open_agent_run_stream(
+            Message(content="changed request"),
+            orchestrator=orchestrator,
+            idempotency_key="same-request",
+        )
+
+    release.set()
+    await first
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_interrupted_idempotent_submission_never_starts_another_agent_run(context):
+    ctx, resources = context
+    resources.knowledge_store.accepted_message_ids["request:interrupted-1"] = 71
+
+    async def interrupted_exchange(_message_id, **_kwargs):
+        return UserAgentExchange(
+            user_message_id=71,
+            exchange_state="open",
+            exchange_outcome=None,
+            assistant_message_id=None,
+            assistant_content=None,
+            assistant_metadata={},
+            source_ref_ids=(),
+        )
+
+    async def handler(_kwargs):
+        raise AssertionError("an interrupted submission must not be rerun")
+        yield
+
+    resources.knowledge_store.get_user_agent_exchange = interrupted_exchange
+
+    with pytest.raises(RequestInterruptedError):
+        await ctx.open_agent_run_stream(
+            Message(content="Continue the interrupted request"),
+            orchestrator=_FakeTurnOrchestrator(handler),
+            idempotency_key="interrupted-1",
+        )
 
 
 @pytest.mark.runtime

@@ -18,9 +18,12 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from common.exceptions import (
     ConfigurationError,
     DependencyError,
+    IdempotencyConflictError,
     LLMProviderError,
     LLMResponseError,
     NotFoundError,
+    RequestInProgressError,
+    RequestInterruptedError,
     SessionBusyError,
     StorageError,
     ToolExecutionError,
@@ -261,6 +264,7 @@ class StartRunRequest(PublicModel):
     enabled_tools: list[str] | None = None
     research_mode: ResearchMode = "normal"
     document_focus: RunDocumentFocus | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
     _normalise_tools = field_validator("enabled_tools")(_normalise_enabled_tools)
 
@@ -365,6 +369,21 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
     SessionBusyError: (
         "session_busy",
         "This session already has an active run.",
+        False,
+    ),
+    IdempotencyConflictError: (
+        "idempotency_conflict",
+        "This idempotency key was already used for a different request.",
+        False,
+    ),
+    RequestInProgressError: (
+        "request_in_progress",
+        "This request is already in progress.",
+        False,
+    ),
+    RequestInterruptedError: (
+        "request_interrupted",
+        "This request did not reach a durable outcome. Submit a new request to retry.",
         False,
     ),
     StorageError: (

@@ -474,6 +474,7 @@ class ApplicationRuntimePort:
             agent_id=request.agent_id,
             enabled_tools=request.enabled_tools,
             document_focus=document_focus,
+            idempotency_key=request.idempotency_key,
             research_mode=request.research_mode,
         )
         return self._public_run_stream(

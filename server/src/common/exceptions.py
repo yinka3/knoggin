@@ -44,6 +44,37 @@ class SessionBusyError(KnogginError):
         )
 
 
+class IdempotencyConflictError(KnogginError):
+    """Raised when one request key is reused for a different submission."""
+
+    def __init__(self):
+        KnogginError.__init__(
+            self,
+            "This idempotency key was already used for a different request",
+            code="idempotency_conflict",
+        )
+
+
+class RequestInProgressError(KnogginError):
+    """Raised when the same accepted request is still executing locally."""
+
+    def __init__(self):
+        super().__init__(
+            "This request is already in progress",
+            code="request_in_progress",
+        )
+
+
+class RequestInterruptedError(KnogginError):
+    """Raised when a durable acceptance has no safe terminal result to replay."""
+
+    def __init__(self):
+        super().__init__(
+            "This request was accepted but did not reach a durable outcome",
+            code="request_interrupted",
+        )
+
+
 class StorageError(KnogginError):
     """Base class for failures at a durable persistence boundary."""
 

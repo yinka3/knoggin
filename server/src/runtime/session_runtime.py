@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
 from common.conf.manager import ConfigManager
-from common.exceptions import SessionBusyError
+from common.exceptions import (
+    IdempotencyConflictError,
+    RequestInProgressError,
+    RequestInterruptedError,
+    SessionBusyError,
+)
 from common.schema.agent.research import ResearchMode
 from common.schema.agent.stream import AgentExecutionEvent
 from common.schema.artifacts import ArtifactDraft
@@ -24,6 +30,8 @@ from common.utils.time_utils import get_now, parse_iso_time_or_now
 from core.knowledge.documents import DocumentService
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
+
+_REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
 
 
 class SessionRuntime:
@@ -72,6 +80,8 @@ class SessionRuntime:
         self._shutdown_lock = asyncio.Lock()
         self._agent_run_reserved = False
         self._active_agent_task: Optional[asyncio.Task] = None
+        self._active_idempotency_key: str | None = None
+        self._active_request_fingerprint: str | None = None
         self._agent_runs_closed = False
         self._closed = False
 
@@ -154,21 +164,85 @@ class SessionRuntime:
         not allocate or persist a user message.
         """
 
+        supplied_idempotency_key = self._normalize_idempotency_key(idempotency_key)
+        embedded_idempotency_key = self._normalize_idempotency_key(
+            message.metadata.get("idempotency_key")
+        )
+        if (
+            supplied_idempotency_key is not None
+            and embedded_idempotency_key is not None
+            and supplied_idempotency_key != embedded_idempotency_key
+        ):
+            raise IdempotencyConflictError()
+        normalized_idempotency_key = (
+            supplied_idempotency_key or embedded_idempotency_key
+        )
+        request_fingerprint = (
+            self._request_fingerprint(
+                message=message,
+                user_timezone=user_timezone,
+                model=model,
+                agent_id=agent_id,
+                enabled_tools=enabled_tools,
+                document_focus=document_focus,
+                pasted_text_spans=pasted_text_spans,
+                research_mode=research_mode,
+            )
+            if normalized_idempotency_key is not None
+            else None
+        )
+        if normalized_idempotency_key is not None:
+            message.metadata = {
+                **message.metadata,
+                "idempotency_key": normalized_idempotency_key,
+                _REQUEST_FINGERPRINT_METADATA_KEY: request_fingerprint,
+            }
+
         async with self._agent_run_lock:
             if self._closed or self._agent_runs_closed:
                 raise RuntimeError("Session is shutting down")
             self._require_message_ingestion_ready()
             if self._agent_run_reserved:
+                if (
+                    normalized_idempotency_key is not None
+                    and normalized_idempotency_key == self._active_idempotency_key
+                ):
+                    if request_fingerprint != self._active_request_fingerprint:
+                        raise IdempotencyConflictError()
+                    raise RequestInProgressError()
                 raise SessionBusyError()
             self._agent_run_reserved = True
+            self._active_idempotency_key = normalized_idempotency_key
+            self._active_request_fingerprint = request_fingerprint
 
         try:
-            if idempotency_key:
-                message.metadata["idempotency_key"] = idempotency_key
-            accepted, _created = await self._accept_user_message(message)
+            accepted, created = await self._accept_user_message(
+                message,
+                request_fingerprint=request_fingerprint,
+            )
         except Exception:
             await self._release_agent_run(None)
             raise
+
+        if not created:
+            try:
+                exchange = await self.knowledge_store.get_user_agent_exchange(
+                    accepted.id,
+                    user_name=self.user_name,
+                    project_id=self.project_id,
+                    session_id=self.session_id,
+                )
+                if exchange is None:
+                    raise RuntimeError("Accepted user message could not be reloaded")
+                if exchange.exchange_state == "open":
+                    # We cannot safely infer whether an earlier owner is still
+                    # running or was interrupted. Either way, replaying the
+                    # request could repeat side effects, so keep the accepted
+                    # submission intact and require an explicit new request.
+                    raise RequestInterruptedError()
+                return self._replay_terminal_exchange(exchange)
+            finally:
+                await self._release_agent_run(None)
 
         return self._run_admitted_agent_stream(
             accepted,
@@ -250,6 +324,7 @@ class SessionRuntime:
                         )
                     response_seen = True
                     response = event["data"]
+                    resolved_agent_id = response.get("resolved_agent_id")
                     commit = await self.add_assistant_turn(
                         content=response["content"],
                         timestamp=get_now(),
@@ -259,16 +334,43 @@ class SessionRuntime:
                         artifact=self._response_artifact(response),
                         readable_project_ids=captured_readable_project_ids,
                     )
+                    await self._record_durable_agent_turn(
+                        orchestrator,
+                        agent_id=(
+                            resolved_agent_id
+                            if isinstance(resolved_agent_id, str)
+                            and resolved_agent_id.strip()
+                            else agent_id or self.agent_id
+                        ),
+                    )
                     response = dict(response)
+                    response.pop("resolved_agent_id", None)
                     response["assistant_message_id"] = commit["message_id"]
                     response["source_ref_ids"] = commit["source_ref_ids"]
                     event = {"event": "response", "data": response}
                     exchange_outcome = "assistant_final"
                 elif event["event"] == "clarification":
+                    clarification = dict(event["data"])
+                    commit = await self.add_assistant_turn(
+                        content=str(clarification["question"]),
+                        timestamp=get_now(),
+                        metadata=self._assistant_clarification_metadata(clarification),
+                        user_msg_id=accepted.id,
+                        source_candidates=self._response_source_candidates(
+                            clarification
+                        ),
+                        readable_project_ids=captured_readable_project_ids,
+                        outcome="clarification",
+                    )
+                    clarification["assistant_message_id"] = commit["message_id"]
+                    clarification["source_ref_ids"] = commit["source_ref_ids"]
+                    event = {"event": "clarification", "data": clarification}
                     exchange_outcome = "clarification"
                 elif event["event"] == "error":
                     exchange_outcome = "failed"
                 yield event
+                if event["event"] in {"response", "clarification", "error"}:
+                    return
 
             if not response_seen and exchange_outcome == "failed":
                 logger.error(
@@ -291,7 +393,7 @@ class SessionRuntime:
             }
         finally:
             try:
-                if exchange_outcome != "assistant_final":
+                if exchange_outcome not in {"assistant_final", "clarification"}:
                     await self._close_user_exchange(
                         accepted.id,
                         outcome=exchange_outcome,
@@ -313,6 +415,8 @@ class SessionRuntime:
             if task is None or self._active_agent_task is task:
                 self._active_agent_task = None
             self._agent_run_reserved = False
+            self._active_idempotency_key = None
+            self._active_request_fingerprint = None
 
     @staticmethod
     def _assistant_response_metadata(response: Dict[str, Any]) -> dict:
@@ -322,6 +426,34 @@ class SessionRuntime:
         if response.get("research_mode"):
             metadata["research_mode"] = response["research_mode"]
         if response.get("fallback"):
+            metadata["fallback"] = True
+        return metadata
+
+    async def _record_durable_agent_turn(
+        self,
+        orchestrator: Any,
+        *,
+        agent_id: str | None,
+    ) -> None:
+        """Record the clock only after the answer's durable transaction commits."""
+
+        mark_turn_completed = getattr(orchestrator, "mark_turn_completed", None)
+        if not callable(mark_turn_completed):
+            return
+        try:
+            await mark_turn_completed(agent_id)
+        except Exception:
+            # The committed answer remains valid when this secondary agent
+            # statistic cannot be updated. A later durable answer will repair
+            # the clock naturally.
+            logger.exception("Failed to record durable agent turn completion")
+
+    @staticmethod
+    def _assistant_clarification_metadata(clarification: Dict[str, Any]) -> dict:
+        """Persist server-owned metadata for one terminal clarification."""
+
+        metadata = {"usage": clarification.get("usage", {})}
+        if clarification.get("fallback"):
             metadata["fallback"] = True
         return metadata
 
@@ -348,12 +480,29 @@ class SessionRuntime:
             return None
         return ArtifactDraft.model_validate(raw_artifact)
 
-    async def _accept_user_message(self, msg: Message) -> tuple[Message, bool]:
+    async def _accept_user_message(
+        self,
+        msg: Message,
+        *,
+        request_fingerprint: str | None = None,
+    ) -> tuple[Message, bool]:
         """Persist one user message and report whether it was newly created."""
 
         msg.timestamp = self._normalize_timestamp(msg.timestamp)
 
-        idempotency_key = str(msg.metadata.get("idempotency_key", "")).strip()
+        idempotency_key = self._normalize_idempotency_key(
+            msg.metadata.get("idempotency_key")
+        )
+        if idempotency_key is not None:
+            if request_fingerprint is None:
+                raise ValueError(
+                    "Request idempotency acceptance requires a request fingerprint"
+                )
+            msg.metadata = {
+                **msg.metadata,
+                "idempotency_key": idempotency_key,
+                _REQUEST_FINGERPRINT_METADATA_KEY: request_fingerprint,
+            }
         # PostgreSQL owns this stable acceptance identity.  An application
         # request key wins; internal callers retain deterministic content/time
         # acceptance without a separate cache protocol.
@@ -368,7 +517,10 @@ class SessionRuntime:
         )
         msg.id = await self.knowledge_store.allocate_message_id()
 
-        acceptance = await self._persist_user_turn(msg, acceptance_key=acceptance_key)
+        persistence_kwargs = {"acceptance_key": acceptance_key}
+        if request_fingerprint is not None:
+            persistence_kwargs["request_fingerprint"] = request_fingerprint
+        acceptance = await self._persist_user_turn(msg, **persistence_kwargs)
         msg.id = acceptance.message_id
         if acceptance.created:
             # An editable message is not semantic evidence until its exchange
@@ -382,25 +534,138 @@ class SessionRuntime:
             return timestamp.replace(tzinfo=timezone.utc)
         return timestamp.astimezone(timezone.utc)
 
-    async def _persist_user_turn(self, msg: Message, *, acceptance_key: str):
+    @staticmethod
+    def _normalize_idempotency_key(value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("idempotency_key must be a string")
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        if len(value) > 200:
+            raise ValueError("idempotency_key must not exceed 200 characters")
+        return value
+
+    @staticmethod
+    def _request_fingerprint(
+        *,
+        message: Message,
+        user_timezone: str | None,
+        model: str | None,
+        agent_id: str | None,
+        enabled_tools: list[str] | None,
+        document_focus: DocumentFocus | None,
+        pasted_text_spans: list[dict] | None,
+        research_mode: ResearchMode,
+    ) -> str:
+        """Hash the caller-controlled inputs for one logical submission."""
+
+        focus = (
+            document_focus.model_dump(mode="json")
+            if hasattr(document_focus, "model_dump")
+            else document_focus
+        )
+        payload = {
+            "query": message.content.strip(),
+            "user_timezone": user_timezone,
+            "model": model,
+            "agent_id": agent_id,
+            "enabled_tools": (
+                sorted(set(enabled_tools)) if enabled_tools is not None else None
+            ),
+            "document_focus": focus,
+            "pasted_text_spans": pasted_text_spans,
+            "research_mode": research_mode,
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    async def _persist_user_turn(
+        self,
+        msg: Message,
+        *,
+        acceptance_key: str,
+        request_fingerprint: str | None = None,
+    ):
         """Durably create an editable canonical user message and revision one."""
+        payload = {
+            "id": msg.id,
+            "content": msg.content.strip(),
+            "role": "user",
+            "user_name": self.user_name,
+            "session_id": self.session_id,
+            "project_id": self.project_id,
+            "timestamp": msg.timestamp.timestamp() * 1000,
+            "metadata": msg.metadata,
+            "user_msg_id": msg.id,
+            "acceptance_key": acceptance_key,
+        }
+        if request_fingerprint is not None:
+            payload["request_fingerprint"] = request_fingerprint
         return await self.knowledge_store.create_editable_user_message(
-            {
-                "id": msg.id,
-                "content": msg.content.strip(),
-                "role": "user",
-                "user_name": self.user_name,
-                "session_id": self.session_id,
-                "project_id": self.project_id,
-                "timestamp": msg.timestamp.timestamp() * 1000,
-                "metadata": msg.metadata,
-                "user_msg_id": msg.id,
-                "acceptance_key": acceptance_key,
-            },
+            payload,
             edit_window_seconds=(
                 self.current_config.developer_settings.ingestion.message_edit_window_seconds
             ),
         )
+
+    async def _replay_terminal_exchange(self, exchange) -> AsyncGenerator[
+        AgentExecutionEvent, None
+    ]:
+        """Return the durable result for a duplicate submission without rerunning it."""
+
+        outcome = exchange.exchange_outcome
+        metadata = exchange.assistant_metadata
+        if outcome == "assistant_final":
+            if (
+                exchange.assistant_message_id is None
+                or exchange.assistant_content is None
+                or not isinstance(metadata.get("usage"), dict)
+            ):
+                raise RuntimeError("Completed request is missing its canonical response")
+            response = {
+                "content": exchange.assistant_content,
+                "usage": metadata["usage"],
+                "assistant_message_id": exchange.assistant_message_id,
+                "source_ref_ids": list(exchange.source_ref_ids),
+            }
+            for field in ("research_mode", "fallback"):
+                if field in metadata:
+                    response[field] = metadata[field]
+            yield {"event": "response", "data": response}
+            return
+        if outcome == "clarification":
+            if (
+                exchange.assistant_message_id is None
+                or exchange.assistant_content is None
+                or not isinstance(metadata.get("usage"), dict)
+            ):
+                raise RuntimeError("Completed request is missing its clarification")
+            clarification = {
+                "question": exchange.assistant_content,
+                "usage": metadata["usage"],
+                "assistant_message_id": exchange.assistant_message_id,
+                "source_ref_ids": list(exchange.source_ref_ids),
+            }
+            if metadata.get("fallback"):
+                clarification["fallback"] = True
+            yield {"event": "clarification", "data": clarification}
+            return
+        if outcome == "cancelled":
+            message = "The original request was cancelled. Submit a new request to retry."
+        elif outcome == "failed":
+            message = "The original request failed. Submit a new request to retry."
+        elif outcome == "user_only":
+            message = "This request was completed without an agent response."
+        else:
+            raise RuntimeError("Accepted request has an invalid terminal outcome")
+        yield {"event": "error", "data": {"message": message}}
 
     async def add_assistant_turn(
         self,
@@ -411,6 +676,7 @@ class SessionRuntime:
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
         artifact: ArtifactDraft | None = None,
         readable_project_ids: Optional[List[str]] = None,
+        outcome: str = "assistant_final",
     ) -> dict[str, Any]:
         """Add assistant turn to conversation log."""
         if metadata is None:
@@ -429,6 +695,7 @@ class SessionRuntime:
             source_candidates=source_candidates,
             artifact=artifact,
             readable_project_ids=readable_project_ids,
+            outcome=outcome,
         )
         self._signal_exchange_closed()
         return {
@@ -446,6 +713,7 @@ class SessionRuntime:
         source_candidates: Optional[List[SourceReferenceCandidate]] = None,
         artifact: ArtifactDraft | None = None,
         readable_project_ids: Optional[List[str]] = None,
+        outcome: str = "assistant_final",
     ) -> tuple[int, list[str]]:
         """Atomically persist an assistant response and close its user exchange."""
         max_retries = 3
@@ -472,15 +740,20 @@ class SessionRuntime:
                         "user_msg_id": user_msg_id,
                         "lifecycle_state": "sealed",
                         "sealed_at_ms": int(timestamp.timestamp() * 1000),
-            }
+                    }
                 ]
 
+                finalization = {
+                    "readable_project_ids": captured_readable_project_ids,
+                    "artifact": artifact,
+                }
+                if outcome != "assistant_final":
+                    finalization["outcome"] = outcome
                 persisted_id, source_ref_ids, _created = (
                     await self.knowledge_store.finalize_assistant_exchange(
                         agent_msg_batch[0],
                         source_candidates or [],
-                        readable_project_ids=captured_readable_project_ids,
-                        artifact=artifact,
+                        **finalization,
                     )
                 )
                 return persisted_id, source_ref_ids

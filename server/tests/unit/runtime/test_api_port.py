@@ -310,6 +310,7 @@ async def test_runtime_port_translates_project_session_and_research_stream(
                 session_id="session-1",
                 query="Investigate this",
                 research_mode="deep_research",
+                idempotency_key="run-1",
             ),
         )
     ]
@@ -318,6 +319,7 @@ async def test_runtime_port_translates_project_session_and_research_stream(
     assert parsed[-1].result.research_mode == "deep_research"
     assert parsed[-1].result.artifact is not None
     assert session.run_calls[0]["research_mode"] == "deep_research"
+    assert session.run_calls[0]["idempotency_key"] == "run-1"
     assert (
         "sources",
         43,

@@ -175,11 +175,22 @@ class AgentOrchestrator:
                 run,
                 context.llm,
                 tools,
-                on_successful_completion=self._agent_manager.mark_turn_completed,
             )
 
             async for event in executor.execute(user_timezone=user_timezone):
-                yield validate_agent_execution_event(event)
+                validated_event = validate_agent_execution_event(event)
+                if validated_event["event"] == "response":
+                    yield validate_agent_execution_event(
+                        {
+                            "event": "response",
+                            "data": {
+                                **validated_event["data"],
+                                "resolved_agent_id": identity.config.id,
+                            },
+                        }
+                    )
+                else:
+                    yield validated_event
 
         except Exception as e:
             logger.exception(f"Agent orchestration error: {e}")
@@ -195,6 +206,12 @@ class AgentOrchestrator:
                     await tools.close()
                 except Exception:
                     logger.exception("Failed to close agent tools")
+
+    async def mark_turn_completed(self, agent_id: str | None) -> bool:
+        """Record a durable session answer after its owner has committed it."""
+
+        identity = await self._resolve_agent_identity(agent_id)
+        return await self._agent_manager.mark_turn_completed(identity.config.id)
 
     async def _resolve_agent_identity(
         self,

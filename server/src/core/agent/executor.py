@@ -403,12 +403,18 @@ class AgentExecutor:
                             "question", "Could you clarify?"
                         )
                         self.ctx.finish_without_response()
+                        clarification_data = {
+                            "question": question,
+                            "usage": self.ctx.usage,
+                        }
+                        if self.ctx.source_candidates:
+                            clarification_data["sources_consulted"] = [
+                                candidate.model_dump(mode="json")
+                                for candidate in self.ctx.source_candidates
+                            ]
                         yield {
                             "event": "clarification",
-                            "data": {
-                                "question": question,
-                                "usage": self.ctx.usage,
-                            },
+                            "data": clarification_data,
                         }
                         return
 
@@ -1011,7 +1017,7 @@ class AgentExecutor:
         return artifact
 
     async def _finalize_successfully(self, content: str) -> None:
-        """Seal a successful run, then persist its agent's completion clock."""
+        """Seal a successful run before the session commits its response."""
 
         self.ctx.finalize(content)
         if self._on_successful_completion is None:
@@ -1039,16 +1045,22 @@ class AgentExecutor:
             and not self.ctx.has_grounded_investigation_evidence()
         ):
             self.ctx.finish_without_response()
+            clarification_data = {
+                "question": (
+                    "I couldn't complete the research because I didn't gather "
+                    "usable evidence. Which source or detail should I investigate?"
+                ),
+                "usage": self.ctx.usage,
+                "fallback": True,
+            }
+            if self.ctx.source_candidates:
+                clarification_data["sources_consulted"] = [
+                    candidate.model_dump(mode="json")
+                    for candidate in self.ctx.source_candidates
+                ]
             return {
                 "event": "clarification",
-                "data": {
-                    "question": (
-                        "I couldn't complete the research because I didn't gather "
-                        "usable evidence. Which source or detail should I investigate?"
-                    ),
-                    "usage": self.ctx.usage,
-                    "fallback": True,
-                },
+                "data": clarification_data,
             }
         if self.ctx.has_any():
             summary = await self._generate_fallback_summary()
@@ -1074,13 +1086,19 @@ class AgentExecutor:
             return event
         else:
             self.ctx.finish_without_response()
+            clarification_data = {
+                "question": "I'm having trouble with that. Could you rephrase?",
+                "usage": self.ctx.usage,
+                "fallback": True,
+            }
+            if self.ctx.source_candidates:
+                clarification_data["sources_consulted"] = [
+                    candidate.model_dump(mode="json")
+                    for candidate in self.ctx.source_candidates
+                ]
             return {
                 "event": "clarification",
-                "data": {
-                    "question": "I'm having trouble with that. Could you rephrase?",
-                    "usage": self.ctx.usage,
-                    "fallback": True,
-                },
+                "data": clarification_data,
             }
 
     async def _generate_fallback_summary(self) -> Optional[str]:

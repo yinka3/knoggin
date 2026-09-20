@@ -4,7 +4,11 @@ import httpx
 import pytest
 
 from api.app import create_app
-from common.exceptions import SessionBusyError, StorageReadError
+from common.exceptions import (
+    IdempotencyConflictError,
+    SessionBusyError,
+    StorageReadError,
+)
 from common.schema.artifacts import (
     ArtifactDraft,
     MarkdownArtifactBlock,
@@ -244,6 +248,11 @@ class BusyRunApplication(FakeApplication):
         raise SessionBusyError()
 
 
+class IdempotencyConflictRunApplication(FakeApplication):
+    async def open_run_stream(self, *, user_name, request: StartRunRequest):
+        raise IdempotencyConflictError()
+
+
 async def _client(app):
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
@@ -434,6 +443,26 @@ async def test_run_admission_conflict_is_returned_before_http_or_sse_starts():
     for response in (run, stream):
         assert response.status_code == 409
         assert response.json()["error"]["code"] == "session_busy"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_idempotency_conflict_is_returned_before_http_or_sse_starts():
+    app = create_app(IdempotencyConflictRunApplication())
+
+    async with await _client(app) as client:
+        response = await client.post(
+            "/v1/runs",
+            headers={"X-User-Name": "ada"},
+            json={
+                "session_id": "session-1",
+                "query": "hello",
+                "idempotency_key": "request-1",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "idempotency_conflict"
 
 
 @pytest.mark.unit

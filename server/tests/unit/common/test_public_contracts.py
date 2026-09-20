@@ -58,6 +58,14 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
         ).research_mode
         == "deep_research"
     )
+    assert (
+        StartRunRequest(
+            session_id="session-1",
+            query="hello",
+            idempotency_key="  retry-1  ",
+        ).idempotency_key
+        == "retry-1"
+    )
     selected_run = StartRunRequest(
         session_id="session-1",
         query="explain this",

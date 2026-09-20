@@ -172,7 +172,8 @@ class SemanticWindowReader:
                    membership.ordinal,
                    message.content,
                    message.timestamp_ms,
-                   message.user_msg_id
+                   message.user_msg_id,
+                   exchange_user.exchange_outcome
             FROM public.project_semantic_window_messages AS membership
             JOIN public.project_semantic_windows AS semantic_window
               ON semantic_window.window_id = membership.window_id
@@ -181,6 +182,12 @@ class SemanticWindowReader:
               ON message.message_id = membership.message_id
              AND message.project_id = membership.project_id
              AND message.session_id = membership.session_id
+            JOIN public.messages AS exchange_user
+              ON exchange_user.message_id = membership.exchange_user_message_id
+             AND exchange_user.project_id = membership.project_id
+             AND exchange_user.session_id = membership.session_id
+             AND exchange_user.user_name = semantic_window.user_name
+             AND exchange_user.role = 'user'
             WHERE membership.window_id = %s
               AND membership.project_id = %s
               AND semantic_window.user_name = %s

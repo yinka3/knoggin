@@ -172,6 +172,65 @@ def test_source_grounded_blocks_require_assistant_source_handles_and_keep_owner(
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_clarification_questions_cannot_establish_context_without_other_evidence():
+    messages = _messages()
+    messages[1]["exchange_outcome"] = "clarification"
+    source_id = uuid4()
+    build = ContextUpdateBuild(
+        project_id="project-1",
+        domain=_domain(),
+        snapshot=_snapshot(),
+        messages=messages,
+        assistant_source_refs=_source_refs(source_id),
+        episodes=[],
+    )
+
+    result = build.apply(
+        LLMContextUpdate(
+            operations=[
+                ContextAdd(
+                    section_key="current_state",
+                    markdown="The user has a local-only project.",
+                    assertion_kind=AssertionKind.AGENT_DERIVED,
+                    evidence=[{"handle": "M1"}, {"handle": "M2"}],
+                )
+            ]
+        )
+    )
+
+    assert result.materialization is not None
+    assert result.materialization.blocks[-1].source_time_ms == 100
+    assert [
+        (support.message_id, support.support_kind.value)
+        for support in result.materialization.supports
+    ] == [(11, "user_message")]
+    assert "kind=clarification_question" in build.evidence_brief()
+
+    clarification_only = ContextUpdateBuild(
+        project_id="project-1",
+        domain=_domain(),
+        snapshot=_snapshot(),
+        messages=[messages[1]],
+        assistant_source_refs=[],
+        episodes=[],
+    )
+    with pytest.raises(ValueError, match="Clarification questions alone"):
+        clarification_only.apply(
+            LLMContextUpdate(
+                operations=[
+                    ContextAdd(
+                        section_key="current_state",
+                        markdown="The project is local-only.",
+                        assertion_kind=AssertionKind.AGENT_DERIVED,
+                        evidence=[{"handle": "M1"}],
+                    )
+                ]
+            )
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_episode_aid_expands_to_current_messages_and_cannot_be_terminal_evidence():
     build, _ = _build(episodes=[_episode()])
 

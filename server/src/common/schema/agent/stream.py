@@ -141,6 +141,9 @@ class ResponseData(_StrictStreamDict):
     artifact: NotRequired[Dict[str, Any]]
     research_mode: NotRequired[ResearchMode]
     fallback: NotRequired[StrictBool]
+    # Internal orchestration handoff. SessionRuntime removes this before it
+    # exposes the persisted response to its caller.
+    resolved_agent_id: NotRequired[NonBlankString]
 
 
 class ResponseEvent(_StrictStreamDict):
@@ -152,6 +155,9 @@ class ClarificationData(_StrictStreamDict):
     question: NonBlankString
     usage: NotRequired[StreamUsage]
     fallback: NotRequired[StrictBool]
+    sources_consulted: NotRequired[List[Dict[str, Any]]]
+    assistant_message_id: NotRequired[NonNegativeInt]
+    source_ref_ids: NotRequired[List[str]]
 
 
 class ClarificationEvent(_StrictStreamDict):

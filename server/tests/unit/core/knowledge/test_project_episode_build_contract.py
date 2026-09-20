@@ -55,6 +55,19 @@ def test_brief_is_readable_and_preserves_source_sessions():
     assert "Prior project episodes" not in brief
 
 
+def test_brief_marks_clarification_as_an_unresolved_question():
+    build = _build()
+    build.messages[1]["exchange_outcome"] = "clarification"
+    build.prepare_local_references()
+
+    brief = build.evidence_brief()
+
+    assert (
+        "[message:2] source-position=2 "
+        "ASSISTANT CLARIFICATION (UNRESOLVED QUESTION): Drafted plan" in brief
+    )
+
+
 def test_window_rejects_overlapping_proposals():
     proposal = LLMEpisodeDecision(
         summary="Launch planning",

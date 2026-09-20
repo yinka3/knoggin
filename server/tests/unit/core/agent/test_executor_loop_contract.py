@@ -1488,6 +1488,33 @@ async def test_executor_replans_after_mixed_terminal_batch_without_dispatch(
 
 
 @pytest.mark.no_network
+async def test_executor_carries_admitted_sources_into_a_clarification():
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "request_clarification",
+                    '{"question": "Which part should I verify?"}',
+                    "clarify-with-source",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        initial_source_candidates=_validated_initial_source_candidates("pasted_text")
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert [event["event"] for event in events] == ["clarification"]
+    assert events[0]["data"]["sources_consulted"][0]["source_kind"] == (
+        "user_pasted_text"
+    )
+
+
+@pytest.mark.no_network
 async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypatch):
     secret = "RAW_SENSITIVE_SYNTHESIS_VALUE"
     llm = ScriptedLLM(

@@ -26,6 +26,9 @@ at most {max_episode_source_tokens} estimated source tokens.
 - Do not create a proposal for acknowledgements, filler, or low-signal material.
 - Proposals may not share any `message:N` source. Use every selected source
   exactly once in its proposal.
+- An `ASSISTANT CLARIFICATION (UNRESOLVED QUESTION)` is unanswered. It may
+  support an unresolved thread, but never treat the question or its implied
+  premise as an established fact.
 - Do not phrase the summary as permanent atomic claims. Write a concise,
   contextual account grounded in the window.
 </decision_rules>

@@ -75,6 +75,8 @@ class ProjectEpisodeBuild:
             message_id = int(message["message_id"])
             local = self.local_message_ids[message_id]
             role = str(message.get("role") or "message").upper()
+            if role == "ASSISTANT" and message.get("exchange_outcome") == "clarification":
+                role = "ASSISTANT CLARIFICATION (UNRESOLVED QUESTION)"
             content = " ".join(str(message.get("content") or "").split())
             lines.append(f"[{local}] source-position={position} {role}: {content}")
             if message.get("user_msg_id"):

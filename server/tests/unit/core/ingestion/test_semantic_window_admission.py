@@ -108,6 +108,65 @@ async def test_target_crossing_keeps_the_complete_exchange_and_stops_after_it():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_clarification_keeps_its_durable_assistant_question_as_evidence():
+    rows = [
+        _row(
+            1,
+            outcome="clarification",
+            assistant_id=10_001,
+            user_content="x",
+            assistant_content="x",
+        )
+    ]
+    admission = _admission(rows, target=2)
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [1, 10_001]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_failed_and_cancelled_exchanges_do_not_enter_semantic_evidence():
+    rows = [
+        _row(1, outcome="failed", user_content="x"),
+        _row(2, outcome="cancelled", user_content="x"),
+        _row(3, outcome="assistant_final", user_content="x", assistant_content="x"),
+    ]
+    admission = _admission(rows, target=2)
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [3, 10_003]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_user_only_exchange_remains_deliberate_user_evidence():
+    admission = _admission([_row(1, outcome="user_only", user_content="x")], target=1)
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [1]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_selection_reuses_the_last_exact_prefix_token_count():
     counted_values: list[int] = []
 

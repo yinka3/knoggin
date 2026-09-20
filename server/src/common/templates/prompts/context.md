@@ -28,6 +28,9 @@ transcript.
   extraction input. Never emit `human_asserted`.
 - An assistant restatement of a user statement must cite the user message and
   remain `user_asserted`; an unsupported assistant assertion is not evidence.
+- A message marked `kind=clarification_question` is an unanswered assistant
+  question. Do not use it alone for a Context change or infer that its premise
+  is true. A source handle remains usable only for what its excerpt establishes.
 - Preserve newer current state when late evidence has an older source time.
   Reconcile carefully instead of overwriting it merely because it arrived now.
 - Use `dependencies` only for unchanged `C` blocks whose downstream meaning is

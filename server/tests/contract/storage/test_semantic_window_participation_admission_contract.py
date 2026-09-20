@@ -72,3 +72,56 @@ async def test_semantic_admission_filters_participation_before_session_fifo(
 
     assert selected is not None
     assert [member.message_id for member in selected.messages] == [202, 205]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.requires_pgvector
+@pytest.mark.no_network
+async def test_clarification_admission_preserves_its_unresolved_outcome_in_evidence(
+    real_postgres_client,
+):
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.sessions (session_id, user_name, project_id)
+        VALUES ('session-clarification', 'ada', 'project-1');
+        INSERT INTO public.messages (
+            user_name, session_id, message_id, project_id, role, content,
+            user_msg_id, timestamp_ms, lifecycle_state, exchange_state,
+            exchange_outcome, exchange_closed_at_ms
+        ) VALUES
+            ('ada', 'session-clarification', 301, 'project-1', 'user',
+             'I need help choosing a deployment profile.', 301, 301,
+             'sealed', 'closed', 'clarification', 302),
+            ('ada', 'session-clarification', 302, 'project-1', 'assistant',
+             'Which deployment environment should I use?', 301, 302,
+             'sealed', 'open', NULL, NULL)
+        """
+    )
+    store = KnowledgeStore(real_postgres_client, object())
+    admission = SemanticWindowAdmission(
+        store,
+        IngestionSettings(semantic_window_tokens=100),
+        token_counter=lambda _text: 1,
+    )
+
+    claim = await admission.claim_next(
+        user_name="ada",
+        project_id="project-1",
+        domain=DomainConfig(version=1, topics=(), entity_types=()).compile(),
+        force_flush=True,
+    )
+
+    assert claim is not None
+    messages = await store.get_project_semantic_window_evidence_messages(
+        str(claim.window.window_id),
+        user_name="ada",
+        project_id="project-1",
+    )
+    assert [
+        (message["message_id"], message["role"], message["exchange_outcome"])
+        for message in messages
+    ] == [
+        (301, "user", "clarification"),
+        (302, "assistant", "clarification"),
+    ]

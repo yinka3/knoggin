@@ -206,6 +206,23 @@ class KnowledgeStore:
             message, edit_window_seconds=edit_window_seconds
         )
 
+    async def get_user_agent_exchange(
+        self,
+        user_message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ):
+        """Read one canonical accepted user exchange for idempotent replay."""
+
+        return await self._message_reader.get_user_agent_exchange(
+            user_message_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
     async def ensure_project_context(
         self,
         *,
@@ -615,12 +632,13 @@ class KnowledgeStore:
         *,
         readable_project_ids: List[str],
         artifact: ArtifactDraft | None = None,
+        outcome: str = "assistant_final",
     ) -> tuple[int, list[str], bool]:
-        """Commit one final assistant response and its exchange closure together.
+        """Commit one assistant terminal response and its exchange closure together.
 
         The result is ``(assistant_message_id, source_ref_ids, created)``.
-        Retries of the same finalization return the original assistant instead
-        of creating a second answer.
+        Retries of the same terminal response return the original assistant
+        instead of creating a second assistant message.
         """
 
         if message.get("role") != "assistant":
@@ -642,6 +660,7 @@ class KnowledgeStore:
                 project_id=message["project_id"],
                 session_id=message["session_id"],
                 user_message_id=user_message_id,
+                outcome=outcome,
                 cur=cur,
             )
             if existing is not None:
@@ -691,7 +710,7 @@ class KnowledgeStore:
                 project_id=message["project_id"],
                 session_id=message["session_id"],
                 user_message_id=user_message_id,
-                outcome="assistant_final",
+                outcome=outcome,
                 closed_at_ms=int(message.get("sealed_at_ms") or 0),
                 cur=cur,
             )
