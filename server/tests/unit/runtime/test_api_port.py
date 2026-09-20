@@ -40,6 +40,7 @@ class FakeDocumentService:
         self.calls.append(("selection", kwargs))
         return {
             "content_hash": kwargs["selection"].content_hash,
+            "parse_snapshot_id": kwargs["selection"].parse_snapshot_id,
             "locator": {
                 "kind": "code_lines",
                 "start_line": 2,
@@ -387,6 +388,7 @@ async def test_runtime_port_routes_pinned_and_request_document_focus(port):
                     "document_id": "document-1",
                     "selection": {
                         "content_hash": "a" * 64,
+                        "parse_snapshot_id": "snapshot-1",
                         "locator": {
                             "kind": "code_lines",
                             "start_line": 2,
@@ -403,6 +405,7 @@ async def test_runtime_port_routes_pinned_and_request_document_focus(port):
     request_focus = session.run_calls[0]["document_focus"]
     assert request_focus.mode == "request"
     assert request_focus.relative_path == "docs/notes.py"
+    assert request_focus.selection.parse_snapshot_id == "snapshot-1"
     assert request_focus.selection.locator.symbol_name is None
     assert runtime.sessions.focus_calls[-1] == ("get", "session-1")
 

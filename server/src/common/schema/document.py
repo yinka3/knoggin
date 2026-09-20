@@ -262,6 +262,7 @@ class DocumentSelection(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     content_hash: str = Field(min_length=64, max_length=64)
+    parse_snapshot_id: str = Field(min_length=1)
     locator: DocumentLocator
 
     @field_validator("content_hash")
@@ -272,6 +273,13 @@ class DocumentSelection(BaseModel):
                 "document selection content_hash must be a SHA-256 hex digest"
             )
         return value
+
+    @field_validator("parse_snapshot_id")
+    @classmethod
+    def _require_snapshot_identifier(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("document selection parse_snapshot_id must not be blank")
+        return normalized
 
 
 class DocumentFocusDocument(_DocumentFocusBase):

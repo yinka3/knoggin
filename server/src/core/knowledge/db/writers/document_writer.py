@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from infrastructure.postgres_client import PostgresClient
 
 if TYPE_CHECKING:
-    from core.knowledge.documents.storage import DocumentChunk
+    from core.knowledge.documents.storage import DocumentChunk, DocumentParseSnapshot
 
 
 class DocumentWriter:
@@ -38,6 +38,7 @@ class DocumentWriter:
             COPY public.document_chunks (
                 chunk_id,
                 document_id,
+                snapshot_id,
                 chunk_index,
                 content,
                 relative_path,
@@ -52,7 +53,8 @@ class DocumentWriter:
                 end_row,
                 section_path,
                 start_paragraph,
-                end_paragraph
+                end_paragraph,
+                layout_region
             ) FROM STDIN
             """
         ) as copy:
@@ -63,6 +65,7 @@ class DocumentWriter:
     def _chunk_copy_row(
         *,
         document_id: str,
+        snapshot_id: str,
         relative_path: str,
         chunk_index: int,
         chunk: Union["DocumentChunk", str],
@@ -75,6 +78,7 @@ class DocumentWriter:
         return (
             str(uuid.uuid4()),
             document_id,
+            snapshot_id,
             chunk_index,
             chunk.content,
             relative_path,
@@ -90,6 +94,7 @@ class DocumentWriter:
             list(chunk.section_path) if chunk.section_path is not None else None,
             chunk.start_paragraph,
             chunk.end_paragraph,
+            json.dumps(chunk.layout_region) if chunk.layout_region is not None else None,
         )
 
     async def insert_document(
@@ -144,7 +149,7 @@ class DocumentWriter:
         *,
         document_id: str,
     ) -> Optional[Dict]:
-        """Purge document content while retaining a provenance tombstone."""
+        """Tombstone a document while retaining immutable parse evidence."""
         async with self._client.transaction() as cur:
             await cur.execute(
                 """
@@ -165,6 +170,7 @@ class DocumentWriter:
                 extension,
                 size_bytes,
                 content_hash,
+                current_snapshot_id,
                 status,
                 created_at,
                 updated_at,
@@ -180,13 +186,6 @@ class DocumentWriter:
             await cur.execute(
                 """
                 DELETE FROM public.document_chunks
-                WHERE document_id = %s
-                """,
-                (document_id,),
-            )
-            await cur.execute(
-                """
-                DELETE FROM public.document_extractions
                 WHERE document_id = %s
                 """,
                 (document_id,),
@@ -209,7 +208,10 @@ class DocumentWriter:
                 UPDATE public.project_documents
                 SET
                     status = %s,
-                    indexed_at = NULL,
+                    indexed_at = CASE
+                        WHEN current_snapshot_id IS NULL THEN NULL
+                        ELSE indexed_at
+                    END,
                     error_message = NULL,
                     updated_at = %s
                 WHERE document_id = %s
@@ -223,6 +225,7 @@ class DocumentWriter:
                     extension,
                     size_bytes,
                     content_hash,
+                    current_snapshot_id,
                     status,
                     created_at,
                     updated_at,
@@ -245,7 +248,12 @@ class DocumentWriter:
         rows = await self._client.fetch_all(
             """
             UPDATE public.project_documents
-            SET status = 'queued', updated_at = %s
+            SET
+                status = CASE
+                    WHEN current_snapshot_id IS NULL THEN 'queued'
+                    ELSE 'indexed'
+                END,
+                updated_at = %s
             WHERE project_id = %s
               AND status = 'indexing'
             RETURNING document_id
@@ -267,8 +275,14 @@ class DocumentWriter:
             """
             UPDATE public.project_documents
             SET
-                status = 'queued',
-                indexed_at = NULL,
+                status = CASE
+                    WHEN current_snapshot_id IS NULL THEN 'queued'
+                    ELSE 'indexed'
+                END,
+                indexed_at = CASE
+                    WHEN current_snapshot_id IS NULL THEN NULL
+                    ELSE indexed_at
+                END,
                 error_message = NULL,
                 updated_at = %s
             WHERE project_id = %s
@@ -286,48 +300,51 @@ class DocumentWriter:
         document_id: str,
         chunks: List[Union["DocumentChunk", str]],
         embeddings: List[List[float]],
-        extracted_text: str,
+        parse_snapshot: "DocumentParseSnapshot",
         indexed_at: str,
         read_content_hash: str,
     ) -> Optional[Dict]:
-        """
-        Within a single transaction: lock the document row FOR UPDATE, verify
-        that the catalog hash matches the exact source bytes used for
-        extraction, replace existing chunks, and mark the document as indexed.
-        Returns the updated document row, or None when the claimed source is no
-        longer the current indexable catalog version.
+        """Publish one immutable parse snapshot and its current chunk projection.
+
+        The transaction verifies the exact bytes that were parsed, records the
+        snapshot first, replaces only the current retrieval projection, and
+        moves the document pointer last.  Earlier snapshots remain available to
+        existing source references after a reindex or tombstone.
         """
         self._validate_chunk_embeddings(
             chunks,
             embeddings,
             "persist_indexed_chunks",
         )
+        snapshot_id = str(uuid.uuid4())
+        snapshot_payload = json.dumps(parse_snapshot.to_storage_payload())
         async with self._client.transaction() as cur:
             await cur.execute(
                 """
-                        SELECT
-                            document_id,
-                            project_id,
-                            original_name,
-                            relative_path,
-                            extension,
-                            size_bytes,
-                            content_hash,
-                            status,
-                            created_at,
-                            updated_at,
-                            indexed_at,
-                            error_message,
-                            (
-                                SELECT COUNT(*)::INTEGER
-                                FROM public.document_chunks AS dc
-                                WHERE dc.document_id = pd.document_id
-                            ) AS chunk_count
-                        FROM public.project_documents AS pd
-                        WHERE pd.document_id = %s
-                          AND pd.project_id = %s
-                        FOR UPDATE
-                        """,
+                SELECT
+                    document_id,
+                    project_id,
+                    original_name,
+                    relative_path,
+                    extension,
+                    size_bytes,
+                    content_hash,
+                    current_snapshot_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    indexed_at,
+                    error_message,
+                    (
+                        SELECT COUNT(*)::INTEGER
+                        FROM public.document_chunks AS dc
+                        WHERE dc.document_id = pd.document_id
+                    ) AS chunk_count
+                FROM public.project_documents AS pd
+                WHERE pd.document_id = %s
+                  AND pd.project_id = %s
+                FOR UPDATE
+                """,
                 (document_id, self._project_id),
             )
             locked = await cur.fetchone()
@@ -342,9 +359,32 @@ class DocumentWriter:
 
             await cur.execute(
                 """
-                        DELETE FROM public.document_chunks
-                        WHERE document_id = %s
-                        """,
+                INSERT INTO public.document_parse_snapshots (
+                    snapshot_id,
+                    document_id,
+                    source_content_hash,
+                    parser_name,
+                    parser_version,
+                    parser_fingerprint,
+                    snapshot
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    snapshot_id,
+                    document_id,
+                    read_content_hash,
+                    parse_snapshot.parser_name,
+                    parse_snapshot.parser_version,
+                    parse_snapshot.parser_fingerprint,
+                    snapshot_payload,
+                ),
+            )
+            await cur.execute(
+                """
+                DELETE FROM public.document_chunks
+                WHERE document_id = %s
+                """,
                 (document_id,),
             )
             await self._copy_chunk_rows(
@@ -352,6 +392,7 @@ class DocumentWriter:
                 [
                     self._chunk_copy_row(
                         document_id=document_id,
+                        snapshot_id=snapshot_id,
                         relative_path=locked["relative_path"],
                         chunk_index=chunk_index,
                         chunk=chunk,
@@ -362,46 +403,33 @@ class DocumentWriter:
                     )
                 ],
             )
-            await cur.execute(
-                """
-                INSERT INTO public.document_extractions (
-                    document_id,
-                    extracted_text,
-                    extracted_content_hash
-                )
-                VALUES (%s, %s, %s)
-                ON CONFLICT (document_id) DO UPDATE
-                SET
-                    extracted_text = EXCLUDED.extracted_text,
-                    extracted_content_hash = EXCLUDED.extracted_content_hash
-                """,
-                (document_id, extracted_text, read_content_hash),
-            )
 
             await cur.execute(
                 """
-                        UPDATE public.project_documents
-                        SET
-                            status = 'indexed',
-                            indexed_at = %s,
-                            error_message = NULL,
-                            updated_at = %s
-                        WHERE document_id = %s
-                        RETURNING
-                            document_id,
-                            project_id,
-                            original_name,
-                            relative_path,
-                            extension,
-                            size_bytes,
-                            content_hash,
-                            status,
-                            created_at,
-                            updated_at,
-                            indexed_at,
-                            error_message
-                        """,
-                (indexed_at, indexed_at, document_id),
+                UPDATE public.project_documents
+                SET
+                    current_snapshot_id = %s,
+                    status = 'indexed',
+                    indexed_at = %s,
+                    error_message = NULL,
+                    updated_at = %s
+                WHERE document_id = %s
+                RETURNING
+                    document_id,
+                    project_id,
+                    original_name,
+                    relative_path,
+                    extension,
+                    size_bytes,
+                    content_hash,
+                    current_snapshot_id,
+                    status,
+                    created_at,
+                    updated_at,
+                    indexed_at,
+                    error_message
+                """,
+                (snapshot_id, indexed_at, indexed_at, document_id),
             )
             updated = await cur.fetchone()
             if updated is None:
@@ -418,14 +446,14 @@ class DocumentWriter:
         updated_at: str,
     ) -> None:
         """
-        Within a single transaction: lock the document row FOR UPDATE, skip if
-        already indexed, clear any partial chunks, and mark the document as
-        failed.
+        A failed first index has no usable projection and becomes ``failed``.
+        A failed reindex keeps the previous snapshot and stays readable as
+        ``indexed``; the error records why the newer parse was not published.
         """
         async with self._client.transaction() as cur:
             await cur.execute(
                 """
-                        SELECT status
+                        SELECT status, current_snapshot_id
                         FROM public.project_documents
                         WHERE document_id = %s
                           AND project_id = %s
@@ -435,6 +463,21 @@ class DocumentWriter:
             )
             row = await cur.fetchone()
             if row is None or row["status"] == "indexed":
+                return
+
+            if row["current_snapshot_id"] is not None:
+                await cur.execute(
+                    """
+                    UPDATE public.project_documents
+                    SET
+                        status = 'indexed',
+                        error_message = %s,
+                        updated_at = %s
+                    WHERE document_id = %s
+                      AND status = 'indexing'
+                    """,
+                    (error_message, updated_at, document_id),
+                )
                 return
 
             await cur.execute(

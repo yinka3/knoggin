@@ -55,7 +55,7 @@ async def test_session_deletion_tombstones_only_session_state_and_preserves_evid
     assert not any("UPDATE public.messages" in query for query in queries)
     assert not any("project_documents" in query for query in queries)
     assert not any("document_chunks" in query for query in queries)
-    assert not any("document_extractions" in query for query in queries)
+    assert not any("document_parse_snapshots" in query for query in queries)
     assert not any("document_workspace_sources" in query for query in queries)
 
 
@@ -144,7 +144,7 @@ async def test_session_deletion_preserves_project_library_rows(
         ) VALUES
             (
                 '33333333-3333-4333-8333-333333333333', 'project-1',
-                'first.txt', 'first.txt', '.txt', 7, 'first-hash'
+                'first.txt', 'first.txt', '.txt', 7, repeat('1', 64)
             ),
             (
                 '55555555-5555-4555-8555-555555555555', 'project-1',
@@ -158,9 +158,22 @@ async def test_session_deletion_preserves_project_library_rows(
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO public.document_extractions (
-            document_id, extracted_text, extracted_content_hash
-        ) VALUES ('33333333-3333-4333-8333-333333333333', 'session', 'first-hash')
+        INSERT INTO public.document_parse_snapshots (
+            snapshot_id, document_id, source_content_hash,
+            parser_name, parser_version, parser_fingerprint, snapshot
+        ) VALUES (
+            '44444444-4444-4444-8444-444444444444',
+            '33333333-3333-4333-8333-333333333333', repeat('1', 64),
+            'test', 'v1', repeat('a', 64), '{"schema_version": 1}'::jsonb
+        )
+        """
+    )
+    await real_postgres_client.execute(
+        """
+        UPDATE public.project_documents
+        SET current_snapshot_id = '44444444-4444-4444-8444-444444444444',
+            status = 'indexed'
+        WHERE document_id = '33333333-3333-4333-8333-333333333333'
         """
     )
 
@@ -177,7 +190,7 @@ async def test_session_deletion_preserves_project_library_rows(
         "WHERE project_id = 'project-1' AND status <> 'deleted'"
     ) == {"count": 3}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.document_extractions "
+        "SELECT count(*) AS count FROM public.document_parse_snapshots "
         "WHERE document_id = '33333333-3333-4333-8333-333333333333'"
     ) == {"count": 1}
     assert await real_postgres_client.fetch_one(

@@ -23,8 +23,7 @@ from common.schema.health import sanitize_health_details
 from common.schema.source.locators import (
     CodeLineLocator,
     CsvRowLocator,
-    DocxParagraphLocator,
-    PdfPageLocator,
+    LayoutRegionLocator,
     TextLineLocator,
 )
 from common.utils.time_utils import get_now_iso
@@ -59,10 +58,6 @@ from .policy import DocumentIndexPolicy
 from .scanning import build_folder_preview, normalize_relative_path
 from .storage import (
     csv_data_rows,
-    docx_heading_path,
-    extract_docx_paragraphs,
-    extract_pdf_pages,
-    extract_text,
     is_code_extension,
 )
 
@@ -162,18 +157,6 @@ class DocumentService:
         if self._filesystem_factory is None:
             return None
         return self._filesystem_factory.for_project(document["project_id"])
-
-    async def _read_source_bytes(
-        self,
-        document: Dict,
-    ) -> bytes | None:
-        filesystem = self._filesystem_for_document(document)
-        if filesystem is None:
-            raise RuntimeError("Document source filesystem is not configured")
-        return await self._run_blocking(
-            filesystem.read_bytes,
-            document["relative_path"],
-        )
 
     async def reconcile_project_files(self) -> Dict[str, int]:
         """Bring the manual-document catalog into line with the local project tree.
@@ -576,8 +559,9 @@ class DocumentService:
     @staticmethod
     def _public_metadata(row: Dict) -> Dict:
         metadata = dict(row)
-        if metadata.get("document_id") is not None:
-            metadata["document_id"] = str(metadata["document_id"])
+        for key in ("document_id", "current_snapshot_id"):
+            if metadata.get(key) is not None:
+                metadata[key] = str(metadata[key])
         for key in ("created_at", "updated_at", "indexed_at", "deleted_at"):
             value = metadata.get(key)
             if isinstance(value, datetime):
@@ -617,6 +601,51 @@ class DocumentService:
         )
         return self._public_metadata(document)
 
+    async def _current_parse_snapshot(self, document: Dict) -> tuple[Dict, Dict]:
+        snapshot = await self._reader.fetch_current_parse_snapshot(
+            document_id=str(document["document_id"]),
+            content_hash=document["content_hash"],
+        )
+        if snapshot is None:
+            raise RuntimeError("Document has not been indexed")
+        payload = snapshot.get("snapshot")
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            raise RuntimeError("Document parse snapshot is invalid")
+        return snapshot, payload
+
+    @staticmethod
+    def _snapshot_page(payload: Dict, page_number: int) -> Dict:
+        pages = payload.get("pages")
+        if not isinstance(pages, list):
+            raise ValueError("Document snapshot has no page data")
+        for page in pages:
+            if isinstance(page, dict) and page.get("page_number") == page_number:
+                if isinstance(page.get("text"), str):
+                    return page
+        raise ValueError(f"page_number {page_number} exceeds document page count {len(pages)}")
+
+    @staticmethod
+    def _page_layout_locator(page: Dict) -> Dict:
+        regions = page.get("regions")
+        extraction_method = "native_text"
+        if isinstance(regions, list):
+            for region in regions:
+                if isinstance(region, dict) and region.get("extraction_method") in {
+                    "native_text",
+                    "ocr",
+                    "model_interpretation",
+                }:
+                    extraction_method = region["extraction_method"]
+                    break
+        return {
+            "kind": "layout_region",
+            "page": page["page_number"],
+            "element_type": "page",
+            "extraction_method": extraction_method,
+            "coordinate_unit": "pdf_points",
+            "coordinate_origin": "bottom_left",
+        }
+
     async def read_document(
         self,
         *,
@@ -626,7 +655,7 @@ class DocumentService:
         start_line: int = 1,
         end_line: Optional[int] = None,
     ) -> Dict:
-        """Read a bounded line range from one visible managed document."""
+        """Read a bounded passage from the current immutable parse snapshot."""
         if (
             not isinstance(start_line, int)
             or isinstance(start_line, bool)
@@ -654,49 +683,20 @@ class DocumentService:
             document_id=document_id,
             relative_path=relative_path,
         )
+        snapshot, payload = await self._current_parse_snapshot(document_metadata)
         extension = document_metadata["extension"].lower()
         selected_page = None
-        docx_paragraphs = None
         if extension == ".pdf":
-            raw_bytes = await self._read_source_bytes(
-                document_metadata,
-            )
-            if raw_bytes is None:
-                raise FileNotFoundError("Document content is missing")
-            pages = await self._run_blocking(extract_pdf_pages, raw_bytes)
             selected_page = page_number or 1
-            if selected_page > len(pages):
-                raise ValueError(
-                    f"page_number {selected_page} exceeds document page count "
-                    f"{len(pages)}"
-                )
-            text = pages[selected_page - 1].text
-        elif extension == ".docx":
-            raw_bytes = await self._read_source_bytes(
-                document_metadata,
-            )
-            if raw_bytes is None:
-                raise FileNotFoundError("Document content is missing")
-            docx_paragraphs = await self._run_blocking(
-                extract_docx_paragraphs, raw_bytes
-            )
-            text = "\n".join(paragraph.text for paragraph in docx_paragraphs)
+            page = self._snapshot_page(payload, selected_page)
+            text = page["text"]
+            locator = self._page_layout_locator(page)
         else:
-            text = await self._reader.fetch_extracted_text(
-                document_id=str(document_metadata["document_id"]),
-                content_hash=document_metadata["content_hash"],
-            )
-            if text is None:
-                raw_bytes = await self._read_source_bytes(
-                    document_metadata,
-                )
-                if raw_bytes is None:
-                    raise FileNotFoundError("Document content is missing")
-                text = await self._run_blocking(
-                    extract_text,
-                    raw_bytes,
-                    document_metadata["extension"],
-                )
+            if page_number is not None:
+                raise ValueError("page_number is only supported for PDF documents")
+            text = payload["text"]
+            locator = None
+
         if extension == ".csv":
             lines = csv_data_rows(text)
             locator = {
@@ -704,20 +704,16 @@ class DocumentService:
                 "start_row": start_line,
                 "end_row": end_line,
             }
-        elif extension == ".docx":
-            lines = [paragraph.text for paragraph in docx_paragraphs]
-            locator = {
-                "kind": "docx_paragraphs",
-                "start_paragraph": start_line,
-                "end_paragraph": end_line,
-            }
-        else:
+        elif selected_page is None:
             lines = text.splitlines() or [text]
             locator = {
                 "kind": "text_lines",
                 "start_line": start_line,
                 "end_line": end_line,
             }
+        else:
+            lines = text.splitlines() or [text]
+
         total_lines = len(lines)
         if start_line > total_lines:
             raise ValueError(
@@ -731,12 +727,7 @@ class DocumentService:
         requested_end = min(requested_end, total_lines)
         if extension == ".csv":
             locator["end_row"] = requested_end
-        elif extension == ".docx":
-            locator["end_paragraph"] = requested_end
-            heading_path = docx_heading_path(docx_paragraphs, start_line)
-            if heading_path is not None:
-                locator["heading_path"] = list(heading_path)
-        else:
+        elif selected_page is None:
             locator["end_line"] = requested_end
         selected = lines[start_line - 1 : requested_end]
         numbered_lines = [
@@ -752,13 +743,12 @@ class DocumentService:
         result.update(
             {
                 "document_name": result["original_name"],
+                "parse_snapshot_id": snapshot["snapshot_id"],
                 "chunk_index": (
                     f"page:{selected_page}:lines:{start_line}-{requested_end}"
                     if selected_page is not None
                     else f"rows:{start_line}-{requested_end}"
                     if extension == ".csv"
-                    else f"paragraphs:{start_line}-{requested_end}"
-                    if extension == ".docx"
                     else f"lines:{start_line}-{requested_end}"
                 ),
                 "content": content,
@@ -766,11 +756,7 @@ class DocumentService:
                 "end_line": requested_end,
                 "total_lines": total_lines,
                 "truncated": character_truncated or requested_end < total_lines,
-                "locator": (
-                    {"kind": "pdf_page", "page": selected_page}
-                    if selected_page is not None
-                    else locator
-                ),
+                "locator": locator,
             }
         )
         if selected_page is not None:
@@ -783,12 +769,7 @@ class DocumentService:
         document_id: str,
         selection: DocumentSelection,
     ) -> Dict:
-        """Resolve a current, bounded passage selected from one document.
-
-        The browser provides only a version hash and coordinate. This boundary
-        checks both against the visible durable document and returns server-read
-        content plus a canonical locator, never client-supplied display metadata.
-        """
+        """Resolve a bounded passage from the exact snapshot the client saw."""
         document = await self._get_visible_document(
             document_id=document_id,
             relative_path=None,
@@ -797,33 +778,30 @@ class DocumentService:
             raise ValueError(
                 "Document selection is stale; refresh the document and select again"
             )
+        if selection.parse_snapshot_id != str(document.get("current_snapshot_id") or ""):
+            raise ValueError(
+                "Document selection is stale; refresh the document and select again"
+            )
 
         extension = str(document["extension"]).lower()
         locator = selection.locator
-        if isinstance(locator, PdfPageLocator):
+        if isinstance(locator, LayoutRegionLocator):
             if extension != ".pdf":
-                raise ValueError("PDF page selections require a PDF document")
+                raise ValueError("Layout-region selections require a PDF document")
             result = await self.read_document(
                 document_id=str(document["document_id"]),
                 page_number=locator.page,
             )
             if result["end_line"] != result["total_lines"]:
                 raise ValueError("Selected PDF page exceeds the readable passage limit")
-            canonical_locator = {"kind": "pdf_page", "page": locator.page}
-        elif isinstance(locator, DocxParagraphLocator):
-            if extension != ".docx":
-                raise ValueError("DOCX paragraph selections require a DOCX document")
-            result = await self.read_document(
-                document_id=str(document["document_id"]),
-                start_line=locator.start_paragraph,
-                end_line=locator.end_paragraph,
-            )
-            self._require_exact_selection_range(
-                result,
-                start=locator.start_paragraph,
-                end=locator.end_paragraph,
-            )
-            canonical_locator = dict(result["locator"])
+            canonical_locator = result["locator"]
+            if (
+                locator.model_dump(mode="json", exclude_none=True)
+                != canonical_locator
+            ):
+                raise ValueError(
+                    "Select a current PDF page; partial layout regions are not readable yet"
+                )
         elif isinstance(locator, CsvRowLocator):
             if extension != ".csv":
                 raise ValueError("CSV row selections require a CSV document")
@@ -857,7 +835,7 @@ class DocumentService:
                 "end_line": result["end_line"],
             }
         elif isinstance(locator, TextLineLocator):
-            if extension in {".pdf", ".docx", ".csv", ".ipynb", *IMAGE_EXTENSIONS}:
+            if extension in {".pdf", ".csv", ".ipynb", *IMAGE_EXTENSIONS}:
                 raise ValueError(
                     "Text line selections are unsupported for this document format"
                 )
@@ -1147,6 +1125,19 @@ class DocumentService:
         """Delegate document derivation to this project's DocumentIndexer."""
 
         row = await self._indexer.index_document(
+            document_id=document_id,
+            policy=policy,
+        )
+        return self._public_metadata(row)
+
+    async def reindex_document(
+        self,
+        *,
+        document_id: str,
+        policy: Optional[DocumentIndexPolicy] = None,
+    ) -> Dict:
+        """Create a fresh immutable parse snapshot for one current document."""
+        row = await self._indexer.reindex_document(
             document_id=document_id,
             policy=policy,
         )
@@ -1555,23 +1546,16 @@ class DocumentService:
         results = []
         for row in rows:
             result = dict(row)
-            if result.get("document_id") is not None:
-                result["document_id"] = str(result["document_id"])
+            for key in ("document_id", "snapshot_id"):
+                if result.get(key) is not None:
+                    result[key] = str(result[key])
             result["document_name"] = result.get("original_name")
             if result.get("score") is not None:
                 result["score"] = float(result["score"])
-            if (
-                result.get("extension", "").lower() == ".docx"
-                and isinstance(result.get("start_paragraph"), int)
-                and isinstance(result.get("end_paragraph"), int)
-            ):
-                locator = {
-                    "kind": "docx_paragraphs",
-                    "start_paragraph": result["start_paragraph"],
-                    "end_paragraph": result["end_paragraph"],
-                }
-                if result.get("section_path"):
-                    locator["heading_path"] = result["section_path"]
-                result["locator"] = locator
+            layout_region = result.get("layout_region")
+            if isinstance(layout_region, str):
+                layout_region = json.loads(layout_region)
+            if isinstance(layout_region, dict):
+                result["locator"] = layout_region
             results.append(result)
         return results

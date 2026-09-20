@@ -1258,6 +1258,7 @@ def _validated_initial_source_candidates(kind):
                 "relative_path": "notes/brief.md",
                 "extension": ".md",
                 "content_hash": "a" * 64,
+                "parse_snapshot_id": "snapshot-1",
                 "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
                 "excerpt": "Relevant selected document fact.",
             },

@@ -99,6 +99,7 @@ class DocumentIndexer:
         *,
         document_id: str,
         policy: Optional[DocumentIndexPolicy] = None,
+        force: bool = False,
     ) -> Dict:
         """Claim, derive, and atomically publish one document's index."""
 
@@ -110,13 +111,13 @@ class DocumentIndexer:
         metadata = rows[0] if rows else None
         if metadata is None:
             raise FileNotFoundError("Document not found")
-        if metadata["status"] == "indexed":
+        if metadata["status"] == "indexed" and not force:
             return metadata
 
         claimed = await self._writer.transition_index_status(
             document_id=document_id,
             status="indexing",
-            allowed_statuses=("queued", "failed"),
+            allowed_statuses=("queued", "failed", "indexed") if force else ("queued", "failed"),
             updated_at=get_now_iso(),
         )
         if claimed is None:
@@ -156,7 +157,7 @@ class DocumentIndexer:
                     document_id=document_id,
                     chunks=chunks,
                     embeddings=embeddings,
-                    extracted_text=extraction.text,
+                    parse_snapshot=extraction.snapshot,
                     indexed_at=get_now_iso(),
                     read_content_hash=read_content_hash,
                 )
@@ -172,6 +173,20 @@ class DocumentIndexer:
             raise RuntimeError(
                 f"Failed to index document: {detail[:MAX_ERROR_MESSAGE_LENGTH]}"
             ) from exc
+
+    async def reindex_document(
+        self,
+        *,
+        document_id: str,
+        policy: Optional[DocumentIndexPolicy] = None,
+    ) -> Dict:
+        """Publish a fresh snapshot without discarding current evidence first."""
+
+        return await self.index_document(
+            document_id=document_id,
+            policy=policy,
+            force=True,
+        )
 
     async def _source_bytes(
         self,

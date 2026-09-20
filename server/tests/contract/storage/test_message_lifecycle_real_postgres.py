@@ -356,6 +356,7 @@ async def test_real_postgres_finalizes_historical_document_sources_and_rolls_bac
         edit_window_seconds=600,
     )
     document_id = "00000000-0000-0000-0000-000000000511"
+    snapshot_id = "00000000-0000-0000-0000-000000001511"
     captured_hash = "a" * 64
     await real_postgres_client.execute(
         """
@@ -366,14 +367,37 @@ async def test_real_postgres_finalizes_historical_document_sources_and_rolls_bac
         """,
         (document_id, captured_hash),
     )
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.document_parse_snapshots (
+            snapshot_id, document_id, source_content_hash,
+            parser_name, parser_version, parser_fingerprint, snapshot
+        ) VALUES (%s, %s, %s, 'test', 'v1', %s, '{"schema_version": 1}'::jsonb)
+        """,
+        (snapshot_id, document_id, captured_hash, "d" * 64),
+    )
+    await real_postgres_client.execute(
+        """
+        UPDATE public.project_documents
+        SET current_snapshot_id = %s, status = 'indexed'
+        WHERE document_id = %s
+        """,
+        (snapshot_id, document_id),
+    )
     candidate = SourceReferenceCandidate(
         project_id="project-1",
         session_id=session_id,
         source_kind="pdf_document",
         document_id=document_id,
+        parse_snapshot_id=snapshot_id,
         source_project_id="project-1",
         content_hash=captured_hash,
-        locator={"kind": "pdf_page", "page": 1},
+        locator={
+            "kind": "layout_region",
+            "page": 1,
+            "element_type": "page",
+            "extraction_method": "native_text",
+        },
         excerpt="The version-A passage.",
         metadata={"document_name": "history.pdf"},
         encounter_kind="document_search",

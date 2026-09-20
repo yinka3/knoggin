@@ -211,6 +211,14 @@ One captured document version has one stored structured parse representation use
 - Test parser fingerprint changes, explicit reindexing, old reference stability, and historical versus missing status.
 - Document parser evaluation results and limitations; passing mocked parser tests is insufficient to choose a parser.
 
+### Phase 4 closeout — 2026-09-20
+
+- `document_parse_snapshots` is now the immutable parsed representation. A document points to its current snapshot; chunks, reads, selections, and source references all carry that same snapshot identity.
+- Explicit reindexing creates a new snapshot and moves only the current pointer. Existing citations retain their captured snapshot and become historical after replacement or tombstoning. Hard project deletion still removes the snapshots with their document.
+- Docling 2.129.0 is the parser for PDF and DOCX. A real local run verified native PDF text, image-only PDF OCR with an `ocr` layout locator, and DOCX heading/table Markdown output. Code, Markdown, CSV, notebooks, and image OCR retain their existing exact parsing paths.
+- The parser runs CPU-only with remote services, plugin loading, picture description, and picture classification disabled. PDF indexing requires the local Docling assets supplied by `setup.sh --prefetch-models`; there is no general image interpretation in this phase.
+- Validation passed: 157 focused unit and writer-contract checks; 24 PostgreSQL snapshot, provenance, and deletion contracts; 6 public runtime format cases; real Docling native-PDF, scanned-PDF, and DOCX-table probes; touched-path Ruff; source compilation; and `git diff --check`.
+
 ## Phase 5 — Document recovery and public error contracts
 
 ### Intended behavior
@@ -289,7 +297,7 @@ Remove obsolete contracts and verify the connected engine flows before treating 
 
 - [x] Phase 1 — Conversation completion and request identity
 - [x] Phase 2 — Semantic processing and recovery
-- [ ] Phase 3 — Retrieval, tool behavior, and evidence retention
-- [ ] Phase 4 — Document parsing and provenance
+- [x] Phase 3 — Retrieval, tool behavior, and evidence retention
+- [x] Phase 4 — Document parsing and provenance
 - [ ] Phase 5 — Document recovery and public error contracts
 - [ ] Phase 6 — Remaining cleanup and readiness verification

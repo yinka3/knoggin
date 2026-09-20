@@ -16,6 +16,50 @@ class PdfPageLocator(_StrictLocator):
     page: int = Field(ge=1)
 
 
+class LayoutBoundingBox(_StrictLocator):
+    """A PDF-point rectangle in a bottom-left coordinate system."""
+
+    left: float
+    bottom: float
+    right: float
+    top: float
+
+    @model_validator(mode="after")
+    def _validate_bounds(self):
+        if self.right <= self.left or self.top <= self.bottom:
+            raise ValueError("layout bounding boxes must have positive area")
+        return self
+
+
+class LayoutRegionLocator(_StrictLocator):
+    """A source-grade Docling region retained in a parse snapshot."""
+
+    kind: Literal["layout_region"] = "layout_region"
+    page: int = Field(ge=1)
+    element_type: str = Field(min_length=1)
+    extraction_method: Literal["native_text", "ocr", "model_interpretation"]
+    bbox: LayoutBoundingBox | None = None
+    text_start: int | None = Field(default=None, ge=0)
+    text_end: int | None = Field(default=None, ge=1)
+    coordinate_unit: Literal["pdf_points"] = "pdf_points"
+    coordinate_origin: Literal["bottom_left"] = "bottom_left"
+
+    @field_validator("element_type")
+    @classmethod
+    def _require_element_type(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("element_type must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_text_span(self):
+        if (self.text_start is None) != (self.text_end is None):
+            raise ValueError("layout text spans must include both boundaries")
+        if self.text_start is not None and self.text_end <= self.text_start:
+            raise ValueError("layout text_end must exceed text_start")
+        return self
+
+
 class TextLineLocator(_StrictLocator):
     """A one-based inclusive line range, optionally under a Markdown section."""
 
@@ -76,32 +120,6 @@ class CodeLineLocator(_StrictLocator):
         return value
 
 
-class DocxParagraphLocator(_StrictLocator):
-    """A one-based inclusive DOCX body-paragraph range under Word headings."""
-
-    kind: Literal["docx_paragraphs"] = "docx_paragraphs"
-    start_paragraph: int = Field(ge=1)
-    end_paragraph: int = Field(ge=1)
-    heading_path: tuple[str, ...] | None = None
-
-    @model_validator(mode="after")
-    def _validate_range(self):
-        if self.end_paragraph < self.start_paragraph:
-            raise ValueError(
-                "end_paragraph must be greater than or equal to start_paragraph"
-            )
-        return self
-
-    @field_validator("heading_path")
-    @classmethod
-    def _validate_heading_path(
-        cls, value: tuple[str, ...] | None
-    ) -> tuple[str, ...] | None:
-        if value is not None and any(not part.strip() for part in value):
-            raise ValueError("heading_path must not contain blank headings")
-        return value
-
-
 class PastedTextLocator(_StrictLocator):
     """A zero-based, end-exclusive span in the canonical user message."""
 
@@ -134,21 +152,20 @@ class SearchResultLocator(_StrictLocator):
 
 DocumentLocator = Annotated[
     Union[
-        PdfPageLocator,
+        LayoutRegionLocator,
         TextLineLocator,
         CsvRowLocator,
         CodeLineLocator,
-        DocxParagraphLocator,
     ],
     Field(discriminator="kind"),
 ]
 SourceLocator = Annotated[
     Union[
         PdfPageLocator,
+        LayoutRegionLocator,
         TextLineLocator,
         CsvRowLocator,
         CodeLineLocator,
-        DocxParagraphLocator,
         PastedTextLocator,
         SearchResultLocator,
     ],

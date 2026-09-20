@@ -361,7 +361,12 @@ async def test_document_index_accepts_changed_bytes_under_old_hash(
     assert indexed["status"] == "indexed"
     assert indexed["content_hash"] == hashlib.sha256(old).hexdigest()
     extraction = await client.fetch_one(
-        "SELECT extracted_text, extracted_content_hash FROM document_extractions WHERE document_id=%s",
+        """
+        SELECT snapshot ->> 'text' AS extracted_text,
+               source_content_hash AS extracted_content_hash
+        FROM document_parse_snapshots
+        WHERE document_id=%s
+        """,
         (metadata["document_id"],),
     )
     assert extraction["extracted_text"] == new.decode()

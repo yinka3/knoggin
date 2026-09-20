@@ -538,6 +538,7 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
         "relative_path": "docs/notes.py",
         "selection": {
             "content_hash": "a" * 64,
+            "parse_snapshot_id": "snapshot-1",
             "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
         },
         "created_at": "2026-06-22T12:00:00+00:00",

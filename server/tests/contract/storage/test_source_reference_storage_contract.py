@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -14,6 +15,9 @@ DOCUMENT_ID = "00000000-0000-0000-0000-000000000101"
 TEXT_DOCUMENT_ID = "00000000-0000-0000-0000-000000000102"
 CROSS_PROJECT_DOCUMENT_ID = "00000000-0000-0000-0000-000000000103"
 CROSS_PROJECT_SESSION_DOCUMENT_ID = "00000000-0000-0000-0000-000000000104"
+DOCUMENT_SNAPSHOT_ID = "00000000-0000-0000-0000-000000000111"
+TEXT_DOCUMENT_SNAPSHOT_ID = "00000000-0000-0000-0000-000000000112"
+CROSS_PROJECT_SNAPSHOT_ID = "00000000-0000-0000-0000-000000000113"
 SOURCE_REF_ID = "00000000-0000-0000-0000-000000000201"
 CONTENT_HASH = "b" * 64
 
@@ -24,9 +28,15 @@ def document_candidate(**overrides) -> SourceReferenceCandidate:
         "session_id": "session-1",
         "source_kind": "pdf_document",
         "document_id": DOCUMENT_ID,
+        "parse_snapshot_id": DOCUMENT_SNAPSHOT_ID,
         "source_project_id": "project-1",
         "content_hash": CONTENT_HASH,
-        "locator": {"kind": "pdf_page", "page": 2},
+        "locator": {
+            "kind": "layout_region",
+            "page": 2,
+            "element_type": "page",
+            "extraction_method": "native_text",
+        },
         "excerpt": "The retrieved second-page passage.",
         "metadata": {"document_name": "report.pdf"},
         "encounter_kind": "document_search",
@@ -61,6 +71,7 @@ def text_document_candidate(**overrides) -> SourceReferenceCandidate:
         "session_id": "session-1",
         "source_kind": "text_document",
         "document_id": TEXT_DOCUMENT_ID,
+        "parse_snapshot_id": TEXT_DOCUMENT_SNAPSHOT_ID,
         "source_project_id": "project-1",
         "content_hash": "d" * 64,
         "locator": {"kind": "text_lines", "start_line": 4, "end_line": 6},
@@ -95,10 +106,10 @@ def document_selection_candidate(**overrides) -> SourceReferenceCandidate:
 def docx_document_candidate(**overrides) -> SourceReferenceCandidate:
     return text_document_candidate(
         locator={
-            "kind": "docx_paragraphs",
-            "start_paragraph": 4,
-            "end_paragraph": 6,
-            "heading_path": ["Overview"],
+            "kind": "text_lines",
+            "start_line": 4,
+            "end_line": 6,
+            "section_path": ["Overview"],
         },
         excerpt="Overview\nThe exact Word passage.",
         metadata={"document_name": "overview.docx"},
@@ -202,6 +213,7 @@ def persisted_row(candidate: SourceReferenceCandidate, **overrides):
         "message_id": 101,
         "source_kind": candidate.source_kind,
         "document_id": candidate.document_id,
+        "parse_snapshot_id": candidate.parse_snapshot_id,
         "source_project_id": candidate.source_project_id,
         "canonical_url": candidate.canonical_url,
         "source_message_id": candidate.source_message_id,
@@ -242,20 +254,23 @@ async def test_writer_inserts_typed_candidates_through_scoped_assistant_message(
     assert "INSERT INTO public.message_source_refs" in query
     assert "message.role = 'assistant'" in query
     assert "document.project_id = ANY(%s)" in query
-    assert "document.content_hash = %s" not in query
+    assert "JOIN public.document_parse_snapshots AS snapshot" in query
+    assert "snapshot.source_content_hash = %s" in query
     assert "document.status <> 'deleted'" not in query
     assert "ON CONFLICT (idempotency_key) DO UPDATE" in query
     assert params[1:4] == ("project-1", "session-1", 101)
-    assert params[17] == SourceReferenceWriter.idempotency_key(candidate)
-    assert params[-8:] == (
+    assert params[18] == SourceReferenceWriter.idempotency_key(candidate)
+    assert params[-10:] == (
         101,
         "project-1",
         "session-1",
         "ada",
         DOCUMENT_ID,
+        DOCUMENT_SNAPSHOT_ID,
         DOCUMENT_ID,
         "project-1",
         ["project-1"],
+        CONTENT_HASH,
     )
 
 
@@ -344,10 +359,21 @@ async def test_reader_returns_only_message_scope_references_in_stable_order():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_reader_marks_a_deleted_document_source_unavailable():
+async def test_reader_marks_a_deleted_document_source_historical():
     candidate = document_candidate()
     client = RecordingPostgresClient(
-        fetch_all_results=[[persisted_row(candidate, document_status="deleted")]]
+        fetch_all_results=[
+            [
+                persisted_row(
+                    candidate,
+                    document_status="deleted",
+                    document_content_hash=candidate.content_hash,
+                    document_current_snapshot_id=candidate.parse_snapshot_id,
+                    snapshot_id=candidate.parse_snapshot_id,
+                    snapshot_content_hash=candidate.content_hash,
+                )
+            ]
+        ]
     )
     reader = SourceReferenceReader(client)
 
@@ -358,7 +384,7 @@ async def test_reader_marks_a_deleted_document_source_unavailable():
         session_id="session-1",
     )
 
-    assert references[0].source_status == "unavailable"
+    assert references[0].source_status == "historical"
 
 
 @pytest.mark.storage
@@ -372,6 +398,9 @@ async def test_reader_marks_a_replaced_document_version_historical():
                     candidate,
                     document_status="indexed",
                     document_content_hash="a" * 64,
+                    document_current_snapshot_id=candidate.parse_snapshot_id,
+                    snapshot_id=candidate.parse_snapshot_id,
+                    snapshot_content_hash=candidate.content_hash,
                 )
             ]
         ]
@@ -588,6 +617,63 @@ async def _seed_scope(real_postgres_client):
         """,
         (TEXT_DOCUMENT_ID, "d" * 64),
     )
+    await _seed_parse_snapshot(
+        real_postgres_client,
+        document_id=DOCUMENT_ID,
+        snapshot_id=DOCUMENT_SNAPSHOT_ID,
+        content_hash=CONTENT_HASH,
+    )
+    await _seed_parse_snapshot(
+        real_postgres_client,
+        document_id=TEXT_DOCUMENT_ID,
+        snapshot_id=TEXT_DOCUMENT_SNAPSHOT_ID,
+        content_hash="d" * 64,
+    )
+
+
+async def _seed_parse_snapshot(
+    real_postgres_client,
+    *,
+    document_id: str,
+    snapshot_id: str,
+    content_hash: str,
+) -> None:
+    await real_postgres_client.execute(
+        """
+        INSERT INTO public.document_parse_snapshots (
+            snapshot_id, document_id, source_content_hash,
+            parser_name, parser_version, parser_fingerprint, snapshot
+        )
+        VALUES (%s, %s, %s, 'test-parser', 'test', %s, %s::jsonb)
+        """,
+        (
+            snapshot_id,
+            document_id,
+            content_hash,
+            "a" * 64,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "text": "captured source text",
+                    "structure": {},
+                    "parser": {
+                        "name": "test-parser",
+                        "version": "test",
+                        "fingerprint": "a" * 64,
+                    },
+                    "pages": [],
+                }
+            ),
+        ),
+    )
+    await real_postgres_client.execute(
+        """
+        UPDATE public.project_documents
+        SET current_snapshot_id = %s, status = 'indexed'
+        WHERE document_id = %s
+        """,
+        (snapshot_id, document_id),
+    )
 
 
 @pytest.mark.storage
@@ -645,7 +731,7 @@ async def test_real_postgres_document_tombstone_preserves_message_provenance(
         project_id="project-1",
         session_id="session-1",
     )
-    assert sources[0].source_status == "unavailable"
+    assert sources[0].source_status == "historical"
 
 
 @pytest.mark.storage
@@ -679,7 +765,7 @@ async def test_real_postgres_saves_captured_document_encounter_after_tombstone(
 
     assert deleted is not None
     assert references[0].content_hash == candidate.content_hash
-    assert sources[0].source_status == "unavailable"
+    assert sources[0].source_status == "historical"
     assert sources[0].excerpt == candidate.excerpt
 
 
@@ -708,11 +794,18 @@ async def test_real_postgres_provenance_uses_captured_cross_project_document_sco
         """,
         (CROSS_PROJECT_DOCUMENT_ID, "e" * 64),
     )
+    await _seed_parse_snapshot(
+        real_postgres_client,
+        document_id=CROSS_PROJECT_DOCUMENT_ID,
+        snapshot_id=CROSS_PROJECT_SNAPSHOT_ID,
+        content_hash="e" * 64,
+    )
     writer = SourceReferenceWriter(real_postgres_client)
     reader = SourceReferenceReader(real_postgres_client)
     readable_scope = ["project-1", "project-2"]
     shared = document_candidate(
         document_id=CROSS_PROJECT_DOCUMENT_ID,
+        parse_snapshot_id=CROSS_PROJECT_SNAPSHOT_ID,
         source_project_id="project-2",
         content_hash="e" * 64,
     )
@@ -772,8 +865,15 @@ async def test_real_postgres_preserves_cross_project_provenance_after_source_del
         """,
         (CROSS_PROJECT_DOCUMENT_ID, "e" * 64),
     )
+    await _seed_parse_snapshot(
+        real_postgres_client,
+        document_id=CROSS_PROJECT_DOCUMENT_ID,
+        snapshot_id=CROSS_PROJECT_SNAPSHOT_ID,
+        content_hash="e" * 64,
+    )
     candidate = document_candidate(
         document_id=CROSS_PROJECT_DOCUMENT_ID,
+        parse_snapshot_id=CROSS_PROJECT_SNAPSHOT_ID,
         source_project_id="project-2",
         content_hash="e" * 64,
     )
@@ -816,9 +916,16 @@ async def test_real_postgres_marks_replaced_document_provenance_historical(
 ):
     await _seed_scope(real_postgres_client)
     document = document_candidate()
+    replacement_snapshot_id = "00000000-0000-0000-0000-000000000114"
     await real_postgres_client.execute(
         "UPDATE public.project_documents SET content_hash = %s WHERE document_id = %s",
         ("a" * 64, DOCUMENT_ID),
+    )
+    await _seed_parse_snapshot(
+        real_postgres_client,
+        document_id=DOCUMENT_ID,
+        snapshot_id=replacement_snapshot_id,
+        content_hash="a" * 64,
     )
     references = await SourceReferenceWriter(real_postgres_client).write_for_assistant_message(
         101,
@@ -957,7 +1064,10 @@ async def test_real_postgres_enforces_source_shape_without_source_document_fk(
         VALUES ('ada', 'session-2', 201, 'project-2', 'assistant', 'Answer')
         """
     )
-    valid_locator = '{"kind":"pdf_page","page":2}'
+    valid_locator = (
+        '{"kind":"layout_region","page":2,"element_type":"page",'
+        '"extraction_method":"native_text"}'
+    )
     valid_metadata = '{"document_name":"report.pdf"}'
 
     with pytest.raises(CheckViolation):
@@ -965,37 +1075,85 @@ async def test_real_postgres_enforces_source_shape_without_source_document_fk(
             """
             INSERT INTO public.message_source_refs (
                 source_ref_id, project_id, session_id, message_id, source_kind,
-                document_id, source_project_id, content_hash, locator, excerpt, metadata,
+                document_id, parse_snapshot_id, source_project_id, content_hash, locator, excerpt, metadata,
                 encounter_kind, agent_run_id, tool_call_id, result_position,
                 idempotency_key
             )
             VALUES (
                 '00000000-0000-0000-0000-000000000202',
-                'project-1', 'session-1', 101, 'pdf_document', %s, 'project-1', %s,
+                'project-1', 'session-1', 101, 'pdf_document', %s, %s, 'project-1', %s,
                 '{"kind":"search_result"}', 'excerpt', %s,
                 'document_search', 'run-invalid', 'call-invalid', 0,
                 'invalid-shape'
             )
             """,
-            (DOCUMENT_ID, CONTENT_HASH, valid_metadata),
+            (DOCUMENT_ID, DOCUMENT_SNAPSHOT_ID, CONTENT_HASH, valid_metadata),
+        )
+
+    with pytest.raises(CheckViolation):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.message_source_refs (
+                source_ref_id, project_id, session_id, message_id, source_kind,
+                canonical_url, content_hash, locator, excerpt, metadata,
+                encounter_kind, agent_run_id, tool_call_id, result_position,
+                idempotency_key
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000204',
+                'project-1', 'session-1', 101, 'web_search_result',
+                'https://example.com/result', %s,
+                '{"kind":"search_result","provider":"web","query":"source","rank":"1"}',
+                'excerpt', '{"title":"Result","discovery_snippet":true}',
+                'web_search', 'run-invalid', 'call-invalid', 0,
+                'invalid-search-locator'
+            )
+            """,
+            (CONTENT_HASH,),
+        )
+
+    with pytest.raises(CheckViolation):
+        await real_postgres_client.execute(
+            """
+            INSERT INTO public.message_source_refs (
+                source_ref_id, project_id, session_id, message_id, source_kind,
+                canonical_url, content_hash, locator, excerpt, metadata,
+                encounter_kind, agent_run_id, tool_call_id, result_position,
+                idempotency_key
+            ) VALUES (
+                '00000000-0000-0000-0000-000000000205',
+                'project-1', 'session-1', 101, 'web_search_result',
+                'https://example.com/result', %s,
+                '{"kind":"search_result","provider":"web","query":"source","rank":1}',
+                'excerpt', '{"discovery_snippet":true}',
+                'web_search', 'run-invalid', 'call-invalid', 0,
+                'invalid-search-title'
+            )
+            """,
+            (CONTENT_HASH,),
         )
 
     await real_postgres_client.execute(
         """
         INSERT INTO public.message_source_refs (
-            source_ref_id, project_id, session_id, message_id, source_kind,
-            document_id, source_project_id, content_hash, locator, excerpt, metadata,
+                source_ref_id, project_id, session_id, message_id, source_kind,
+                document_id, parse_snapshot_id, source_project_id, content_hash, locator, excerpt, metadata,
             encounter_kind, agent_run_id, tool_call_id, result_position,
             idempotency_key
         )
         VALUES (
             '00000000-0000-0000-0000-000000000203',
-            'project-2', 'session-2', 201, 'pdf_document', %s, 'project-2', %s, %s,
+                'project-2', 'session-2', 201, 'pdf_document', %s, %s, 'project-2', %s, %s,
             'excerpt', %s, 'document_search', 'run-cross-project',
             'call-cross-project', 0, 'cross-project-document'
         )
         """,
-        (DOCUMENT_ID, CONTENT_HASH, valid_locator, valid_metadata),
+        (
+            DOCUMENT_ID,
+            DOCUMENT_SNAPSHOT_ID,
+            CONTENT_HASH,
+            valid_locator,
+            valid_metadata,
+        ),
     )
     await real_postgres_client.execute(
         "DELETE FROM public.message_source_refs WHERE source_ref_id = %s",

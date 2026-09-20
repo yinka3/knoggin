@@ -335,6 +335,7 @@ async def test_document_focus_routes_keep_selection_request_only():
                 "document_id": "document-1",
                 "selection": {
                     "content_hash": "a" * 64,
+                    "parse_snapshot_id": "snapshot-1",
                     "locator": {
                         "kind": "text_lines",
                         "start_line": 1,

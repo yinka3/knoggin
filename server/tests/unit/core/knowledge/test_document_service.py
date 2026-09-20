@@ -31,12 +31,43 @@ async def run_inline(function, *args, **kwargs):
     return function(*args, **kwargs)
 
 
+def docling_snapshot(
+    text: str,
+    *,
+    pages: tuple[str, ...] = (),
+    structure: dict | None = None,
+):
+    """Build a deterministic captured parse for document-pipeline tests."""
+
+    return storage_module.DocumentParseSnapshot(
+        text=text,
+        structure=structure or {"kind": "docling-test"},
+        parser_name="docling",
+        parser_version="test",
+        parser_fingerprint="a" * 64,
+        pages=tuple(
+            storage_module.DocumentSnapshotPage(
+                page_number=page_number,
+                text=page_text,
+                regions=(
+                    storage_module.LayoutRegion(
+                        page_number=page_number,
+                        element_type="page",
+                        extraction_method="native_text",
+                    ),
+                ),
+            )
+            for page_number, page_text in enumerate(pages, start=1)
+        ),
+    )
+
+
 class MemoryPostgres:
     def __init__(self):
         self.rows = []
         self.scan_settings = {}
         self.chunks = []
-        self.extracted_text = {}  # document_id -> (content_hash, text)
+        self.parse_snapshots = {}  # snapshot_id -> immutable parse payload
         self.calls = []
         self.write_error = None
         self.transaction_error_at_chunk = None
@@ -114,7 +145,11 @@ class MemoryPostgres:
             self.chunks = [
                 chunk for chunk in self.chunks if chunk["document_id"] != document_id
             ]
-            self.extracted_text.pop(document_id, None)
+            self.parse_snapshots = {
+                snapshot_id: snapshot
+                for snapshot_id, snapshot in self.parse_snapshots.items()
+                if snapshot["document_id"] != document_id
+            }
             return [dict(row)]
         if (
             query.lstrip().startswith("UPDATE public.project_documents")
@@ -179,8 +214,8 @@ class MemoryPostgres:
         if "FROM public.project_document_scan_settings" in query:
             row = self.scan_settings.get(params[0])
             return [deepcopy(row)] if row else []
-        if "de.extracted_text" in query:
-            document_id, content_hash, readable_project_ids = params
+        if "FROM public.document_parse_snapshots AS snapshot" in query:
+            document_id, selector, readable_project_ids = params[:3]
             document = next(
                 (
                     row
@@ -195,10 +230,24 @@ class MemoryPostgres:
             )
             if document is None:
                 return []
-            cached = self.extracted_text.get(document_id)
-            if cached is None or cached[0] != content_hash:
+            if "snapshot.snapshot_id = pd.current_snapshot_id" in query:
+                snapshot_id = document.get("current_snapshot_id")
+                if document["content_hash"] != selector:
+                    return []
+            else:
+                snapshot_id = selector
+            snapshot = self.parse_snapshots.get(snapshot_id)
+            if snapshot is None or snapshot["document_id"] != document_id:
                 return []
-            return [{"extracted_text": cached[1]}]
+            result = deepcopy(snapshot)
+            result.update(
+                {
+                    "project_id": document["project_id"],
+                    "document_status": document["status"],
+                    "current_snapshot_id": document.get("current_snapshot_id"),
+                }
+            )
+            return [result]
         if (
             "FROM public.document_chunks AS dc" in query
             and "JOIN public.project_documents AS pd" in query
@@ -272,6 +321,7 @@ class MemoryCopy:
         (
             chunk_id,
             document_id,
+            snapshot_id,
             chunk_index,
             content,
             relative_path,
@@ -287,11 +337,13 @@ class MemoryCopy:
             section_path,
             start_paragraph,
             end_paragraph,
+            layout_region,
         ) = row
         self.postgres.chunks.append(
             {
                 "chunk_id": chunk_id,
                 "document_id": document_id,
+                "snapshot_id": snapshot_id,
                 "chunk_index": chunk_index,
                 "content": content,
                 "relative_path": relative_path,
@@ -307,6 +359,7 @@ class MemoryCopy:
                 "section_path": section_path,
                 "start_paragraph": start_paragraph,
                 "end_paragraph": end_paragraph,
+                "layout_region": json.loads(layout_region) if layout_region else None,
             }
         )
 
@@ -448,13 +501,6 @@ class MemoryCursor:
             self.result = None
             return
 
-        if normalized.startswith("DELETE FROM public.document_extractions"):
-            document_id = params[0]
-            self.postgres.extracted_text.pop(document_id, None)
-            self.result = None
-            return
-
-
         if normalized.startswith("DELETE FROM public.project_documents"):
             if self.postgres.delete_error is not None:
                 raise self.postgres.delete_error
@@ -478,16 +524,33 @@ class MemoryCursor:
                 for chunk in self.postgres.chunks
                 if chunk["document_id"] != document_id
             ]
-            self.postgres.extracted_text.pop(document_id, None)
+            self.postgres.parse_snapshots = {
+                snapshot_id: snapshot
+                for snapshot_id, snapshot in self.postgres.parse_snapshots.items()
+                if snapshot["document_id"] != document_id
+            }
             self.result = dict(row)
             return
 
-        if normalized.startswith("INSERT INTO public.document_extractions"):
-            document_id, extracted_text, content_hash = params
-            self.postgres.extracted_text[document_id] = (
-                content_hash,
-                extracted_text,
-            )
+        if normalized.startswith("INSERT INTO public.document_parse_snapshots"):
+            (
+                snapshot_id,
+                document_id,
+                source_content_hash,
+                parser_name,
+                parser_version,
+                parser_fingerprint,
+                snapshot,
+            ) = params
+            self.postgres.parse_snapshots[snapshot_id] = {
+                "snapshot_id": snapshot_id,
+                "document_id": document_id,
+                "source_content_hash": source_content_hash,
+                "parser_name": parser_name,
+                "parser_version": parser_version,
+                "parser_fingerprint": parser_fingerprint,
+                "snapshot": json.loads(snapshot),
+            }
             self.result = None
             return
 
@@ -514,6 +577,7 @@ class MemoryCursor:
                         "extension": extension,
                         "size_bytes": size_bytes,
                         "content_hash": content_hash,
+                        "current_snapshot_id": None,
                         "status": "queued",
                         "deleted_at": None,
                         "indexed_at": None,
@@ -543,13 +607,14 @@ class MemoryCursor:
             self.result = updated
             return
 
-        if "SET status = 'indexed'" in normalized:
-            indexed_at, updated_at, document_id = params
+        if "SET current_snapshot_id = %s" in normalized:
+            snapshot_id, indexed_at, updated_at, document_id = params
             row = next(
                 row for row in self.postgres.rows if row["document_id"] == document_id
             )
             row.update(
                 {
+                    "current_snapshot_id": snapshot_id,
                     "status": "indexed",
                     "indexed_at": indexed_at,
                     "error_message": None,
@@ -592,14 +657,14 @@ class MemoryTransaction:
     async def __aenter__(self):
         self.rows = deepcopy(self.postgres.rows)
         self.chunks = deepcopy(self.postgres.chunks)
-        self.extracted_text = deepcopy(self.postgres.extracted_text)
+        self.parse_snapshots = deepcopy(self.postgres.parse_snapshots)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         if exc_type is not None or self.postgres.transaction_commit_error:
             self.postgres.rows = self.rows
             self.postgres.chunks = self.chunks
-            self.postgres.extracted_text = self.extracted_text
+            self.postgres.parse_snapshots = self.parse_snapshots
         if exc_type is None and self.postgres.transaction_commit_error:
             raise self.postgres.transaction_commit_error
         return False
@@ -734,16 +799,13 @@ def test_tree_sitter_falls_back_to_regex_for_incomplete_python():
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
-    from types import SimpleNamespace
-
-    pages = [
-        SimpleNamespace(extract_text=lambda: "Page one only."),
-        SimpleNamespace(extract_text=lambda: "Page two only."),
-    ]
     monkeypatch.setattr(
         storage_module,
-        "PdfReader",
-        lambda _: SimpleNamespace(pages=pages),
+        "_extract_docling_snapshot",
+        lambda *_: docling_snapshot(
+            "Page one only.\n\nPage two only.",
+            pages=("Page one only.", "Page two only."),
+        ),
     )
 
     extraction = storage_module.extract_and_split_document(b"pdf", ".pdf")
@@ -786,32 +848,26 @@ def test_text_markdown_and_csv_chunks_have_reliable_locators():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_docx_chunks_preserve_paragraph_ranges_and_heading_paths(monkeypatch):
-    from types import SimpleNamespace
-
-    paragraphs = [
-        SimpleNamespace(text="Overview", style=SimpleNamespace(name="Heading 1")),
-        SimpleNamespace(text="The introduction.", style=SimpleNamespace(name="Normal")),
-        SimpleNamespace(text="Risks", style=SimpleNamespace(name="Heading 2")),
-        SimpleNamespace(
-            text="Mitigate dependency risk.", style=SimpleNamespace(name="Normal")
-        ),
-    ]
+def test_docx_chunks_derive_from_the_captured_structured_markdown(monkeypatch):
     monkeypatch.setattr(
         storage_module,
-        "DocxDocument",
-        lambda _: SimpleNamespace(paragraphs=paragraphs),
+        "_extract_docling_snapshot",
+        lambda *_: docling_snapshot(
+            "# Overview\nThe introduction.\n\n## Risks\nMitigate dependency risk.",
+            structure={"texts": [{"label": "section_header"}]},
+        ),
     )
 
     extraction = storage_module.extract_and_split_document(b"docx", ".docx")
 
     assert [
-        (chunk.start_paragraph, chunk.end_paragraph, chunk.section_path)
+        (chunk.start_line, chunk.end_line, chunk.section_path)
         for chunk in extraction.chunks
     ] == [
         (1, 2, ("Overview",)),
-        (3, 4, ("Overview", "Risks")),
+        (4, 5, ("Overview", "Risks")),
     ]
+    assert extraction.snapshot.structure == {"texts": [{"label": "section_header"}]}
 
 
 @pytest.mark.unit
@@ -912,8 +968,8 @@ async def test_manual_project_documents_read_and_index_from_the_local_file(
         content=b"current local text",
         original_name="notes.md",
     )
-    read = await service.read_document(document_id=document["document_id"])
     indexed = await service.index_document(document_id=document["document_id"])
+    read = await service.read_document(document_id=document["document_id"])
 
     assert read["content"] == "1: current local text"
     assert indexed["status"] == "indexed"
@@ -1259,6 +1315,7 @@ async def test_read_document_returns_bounded_numbered_lines(document_harness):
         content=b"first\nsecond\nthird\nfourth",
         original_name="notes.txt",
     )
+    await service.index_document(document_id=uploaded["document_id"])
 
     result = await service.read_document(
         document_id=uploaded["document_id"],
@@ -1286,11 +1343,13 @@ async def test_document_selection_resolves_current_server_canonical_code_passage
         content=b"one\ndef useful():\n    return 42\n",
         original_name="notes.py",
     )
+    indexed = await service.index_document(document_id=uploaded["document_id"])
 
     selection = await service.resolve_document_selection(
         document_id=uploaded["document_id"],
         selection=DocumentSelection(
             content_hash=uploaded["content_hash"],
+            parse_snapshot_id=indexed["current_snapshot_id"],
             locator={
                 "kind": "code_lines",
                 "start_line": 2,
@@ -1318,12 +1377,14 @@ async def test_document_selection_rejects_stale_or_incompatible_coordinates(
         content=b"first\nsecond\nthird",
         original_name="notes.txt",
     )
+    indexed = await service.index_document(document_id=uploaded["document_id"])
 
     with pytest.raises(ValueError, match="stale"):
         await service.resolve_document_selection(
             document_id=uploaded["document_id"],
             selection=DocumentSelection(
                 content_hash="a" * 64,
+                parse_snapshot_id=indexed["current_snapshot_id"],
                 locator={"kind": "text_lines", "start_line": 1, "end_line": 1},
             ),
         )
@@ -1332,6 +1393,7 @@ async def test_document_selection_rejects_stale_or_incompatible_coordinates(
             document_id=uploaded["document_id"],
             selection=DocumentSelection(
                 content_hash=uploaded["content_hash"],
+                parse_snapshot_id=indexed["current_snapshot_id"],
                 locator={"kind": "code_lines", "start_line": 1, "end_line": 1},
             ),
         )
@@ -1340,6 +1402,7 @@ async def test_document_selection_rejects_stale_or_incompatible_coordinates(
             document_id=uploaded["document_id"],
             selection=DocumentSelection(
                 content_hash=uploaded["content_hash"],
+                parse_snapshot_id=indexed["current_snapshot_id"],
                 locator={"kind": "text_lines", "start_line": 2, "end_line": 4},
             ),
         )
@@ -1347,7 +1410,7 @@ async def test_document_selection_rejects_stale_or_incompatible_coordinates(
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_read_document_uses_persisted_extracted_text_after_index(
+async def test_read_document_uses_persisted_parse_snapshot_after_index(
     monkeypatch,
     document_harness,
 ):
@@ -1359,16 +1422,19 @@ async def test_read_document_uses_persisted_extracted_text_after_index(
     )
     await service.index_document(document_id=uploaded["document_id"])
 
-    assert postgres.extracted_text[uploaded["document_id"]][1] == (
-        "first\nsecond\nthird"
+    snapshot_id = postgres.rows[0]["current_snapshot_id"]
+    assert (
+        postgres.parse_snapshots[snapshot_id]["snapshot"]["text"]
+        == "first\nsecond\nthird"
     )
 
-    def fail_if_reparsed(*args, **kwargs):
-        raise AssertionError("read_document reparsed the original document")
+    def fail_if_source_is_read(*args, **kwargs):
+        raise AssertionError("read_document read or reparsed the original document")
 
     monkeypatch.setattr(
-        "core.knowledge.documents.service.extract_text",
-        fail_if_reparsed,
+        service._filesystem,
+        "read_bytes",
+        fail_if_source_is_read,
     )
     result = await service.read_document(
         document_id=uploaded["document_id"],
@@ -1389,6 +1455,7 @@ async def test_read_document_validates_ranges_and_character_limit(
         content=b"0123456789\nsecond",
         original_name="notes.txt",
     )
+    await service.index_document(document_id=uploaded["document_id"])
 
     with pytest.raises(ValueError, match="positive integer"):
         await service.read_document(document_id=uploaded["document_id"], start_line=0)
@@ -1664,7 +1731,8 @@ async def test_document_service_search_embeds_query_with_project_scope(
     ]
     _, sql, params = postgres.calls[-1]
     assert "pd.project_id = ANY(%s)" in sql
-    assert "pd.status = 'indexed'" in sql
+    assert "pd.status IN ('indexed', 'indexing')" in sql
+    assert "dc.snapshot_id = pd.current_snapshot_id" in sql
     assert "websearch_to_tsquery('simple', %s)" in sql
     assert "ts_rank_cd(vc.search_vector, sq.terms)" in sql
     assert "1.0 / (60 + sc.semantic_rank)" in sql
@@ -1939,27 +2007,21 @@ async def test_index_document_records_text_extraction_failures(
 async def test_index_document_extracts_supported_documents(
     monkeypatch, document_harness, extension, expected_chunks
 ):
-    from types import SimpleNamespace
-
     service, postgres = document_harness
     if extension == ".pdf":
-        pages = [
-            SimpleNamespace(extract_text=lambda: "First page"),
-            SimpleNamespace(extract_text=lambda: "Second page"),
-        ]
         monkeypatch.setattr(
             storage_module,
-            "PdfReader",
-            lambda buf: SimpleNamespace(pages=pages),
+            "_extract_docling_snapshot",
+            lambda *_: docling_snapshot(
+                "First page\n\nSecond page",
+                pages=("First page", "Second page"),
+            ),
         )
     else:
-        paragraphs = [
-            SimpleNamespace(text="Document text", style=SimpleNamespace(name="Normal"))
-        ]
         monkeypatch.setattr(
             storage_module,
-            "DocxDocument",
-            lambda buf: SimpleNamespace(paragraphs=paragraphs),
+            "_extract_docling_snapshot",
+            lambda *_: docling_snapshot("Document text"),
         )
 
     uploaded = await service.add_document(
@@ -1972,8 +2034,8 @@ async def test_index_document_extracts_supported_documents(
     if extension == ".pdf":
         assert [chunk["page_number"] for chunk in postgres.chunks] == [1, 2]
     else:
-        assert postgres.chunks[0]["start_paragraph"] == 1
-        assert postgres.chunks[0]["end_paragraph"] == 1
+        assert postgres.chunks[0]["start_line"] == 1
+        assert postgres.chunks[0]["end_line"] == 1
 
 
 @pytest.mark.storage
@@ -1981,20 +2043,17 @@ async def test_index_document_extracts_supported_documents(
 async def test_read_document_keeps_pdf_line_ranges_page_local(
     monkeypatch, document_harness
 ):
-    from types import SimpleNamespace
-
-    pages = [
-        SimpleNamespace(extract_text=lambda: "First page line"),
-        SimpleNamespace(extract_text=lambda: "Second page first\nSecond page last"),
-    ]
     monkeypatch.setattr(
         storage_module,
-        "PdfReader",
-        lambda _: SimpleNamespace(pages=pages),
+        "_extract_docling_snapshot",
+        lambda *_: docling_snapshot(
+            "First page line\n\nSecond page first\nSecond page last",
+            pages=("First page line", "Second page first\nSecond page last"),
+        ),
     )
     service, _ = document_harness
     uploaded = await service.add_document(content=b"pdf", original_name="report.pdf")
-    await service.index_document(document_id=uploaded["document_id"])
+    indexed = await service.index_document(document_id=uploaded["document_id"])
 
     result = await service.read_document(
         document_id=uploaded["document_id"],
@@ -2003,59 +2062,61 @@ async def test_read_document_keeps_pdf_line_ranges_page_local(
     )
 
     assert result["page_number"] == 2
-    assert result["locator"] == {"kind": "pdf_page", "page": 2}
+    assert result["locator"] == {
+        "kind": "layout_region",
+        "page": 2,
+        "element_type": "page",
+        "extraction_method": "native_text",
+        "coordinate_unit": "pdf_points",
+        "coordinate_origin": "bottom_left",
+    }
     assert result["start_line"] == result["end_line"] == 2
     assert result["content"] == "2: Second page last"
     selection = await service.resolve_document_selection(
         document_id=uploaded["document_id"],
         selection=DocumentSelection(
             content_hash=uploaded["content_hash"],
-            locator={"kind": "pdf_page", "page": 2},
+            parse_snapshot_id=indexed["current_snapshot_id"],
+            locator=result["locator"],
         ),
     )
-    assert selection["locator"] == {"kind": "pdf_page", "page": 2}
+    assert selection["locator"] == result["locator"]
     assert selection["content"] == "1: Second page first\n2: Second page last"
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_document_selection_derives_docx_heading_path(
+async def test_document_selection_reads_docx_from_its_captured_snapshot(
     monkeypatch,
     document_harness,
 ):
-    from types import SimpleNamespace
-
-    paragraphs = [
-        SimpleNamespace(text="Overview", style=SimpleNamespace(name="Heading 1")),
-        SimpleNamespace(text="Current selection", style=SimpleNamespace(name="Normal")),
-    ]
     monkeypatch.setattr(
         storage_module,
-        "DocxDocument",
-        lambda _: SimpleNamespace(paragraphs=paragraphs),
+        "_extract_docling_snapshot",
+        lambda *_: docling_snapshot("# Overview\n\nCurrent selection"),
     )
     service, _ = document_harness
     uploaded = await service.add_document(content=b"docx", original_name="notes.docx")
+    indexed = await service.index_document(document_id=uploaded["document_id"])
 
     selection = await service.resolve_document_selection(
         document_id=uploaded["document_id"],
         selection=DocumentSelection(
             content_hash=uploaded["content_hash"],
+            parse_snapshot_id=indexed["current_snapshot_id"],
             locator={
-                "kind": "docx_paragraphs",
-                "start_paragraph": 2,
-                "end_paragraph": 2,
-                "heading_path": ["client-must-not-control-this"],
+                "kind": "text_lines",
+                "start_line": 3,
+                "end_line": 3,
             },
         ),
     )
 
-    assert selection["content"] == "2: Current selection"
+    assert selection["content"] == "3: Current selection"
     assert selection["locator"] == {
-        "kind": "docx_paragraphs",
-        "start_paragraph": 2,
-        "end_paragraph": 2,
-        "heading_path": ["Overview"],
+        "kind": "text_lines",
+        "start_line": 3,
+        "end_line": 3,
     }
 
 
@@ -2064,12 +2125,13 @@ async def test_document_selection_derives_docx_heading_path(
 async def test_read_document_reports_csv_data_rows_not_physical_file_lines(
     document_harness,
 ):
-    service, _ = document_harness
+    service, postgres = document_harness
     uploaded = await service.add_document(
         content=b"name,value\nalpha,1\nbeta,2\n",
         original_name="metrics.csv",
     )
     await service.index_document(document_id=uploaded["document_id"])
+    snapshot_id = postgres.rows[0]["current_snapshot_id"]
 
     result = await service.read_document(
         document_id=uploaded["document_id"],
@@ -2087,6 +2149,7 @@ async def test_read_document_reports_csv_data_rows_not_physical_file_lines(
         document_id=uploaded["document_id"],
         selection=DocumentSelection(
             content_hash=uploaded["content_hash"],
+            parse_snapshot_id=snapshot_id,
             locator={"kind": "csv_rows", "start_row": 1, "end_row": 2},
         ),
     )
@@ -2105,10 +2168,10 @@ async def test_index_document_records_document_parser_errors(
 ):
     service, postgres = document_harness
 
-    def fail_pdf_parse(buf):
+    def fail_pdf_parse(*_):
         raise ValueError("damaged PDF")
 
-    monkeypatch.setattr(storage_module, "PdfReader", fail_pdf_parse)
+    monkeypatch.setattr(storage_module, "_extract_docling_snapshot", fail_pdf_parse)
     uploaded = await service.add_document(
         content=b"not a valid PDF",
         original_name="notes.pdf",
@@ -2204,7 +2267,7 @@ async def test_index_document_reconciles_before_extraction_when_source_bytes_cha
     assert reconciled["document_id"] != uploaded["document_id"]
     assert reconciled["content_hash"] == hashlib.sha256(b"beta").hexdigest()
     assert postgres.chunks == []
-    assert postgres.extracted_text == {}
+    assert postgres.parse_snapshots == {}
     assert next(
         row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
     )["status"] == "deleted"
@@ -2214,7 +2277,10 @@ async def test_index_document_reconciles_before_extraction_when_source_bytes_cha
     assert indexed["status"] == "indexed"
     assert extraction_calls == 1
     assert postgres.chunks[0]["content"] == "beta"
-    assert postgres.extracted_text[indexed["document_id"]][0] == indexed["content_hash"]
+    assert (
+        postgres.parse_snapshots[indexed["current_snapshot_id"]]["source_content_hash"]
+        == indexed["content_hash"]
+    )
 
 
 @pytest.mark.storage
@@ -2242,7 +2308,7 @@ async def test_index_document_does_not_publish_after_catalog_changes_during_deri
     assert result["document_id"] != uploaded["document_id"]
     assert result["content_hash"] == hashlib.sha256(b"beta").hexdigest()
     assert postgres.chunks == []
-    assert postgres.extracted_text == {}
+    assert postgres.parse_snapshots == {}
     assert next(
         row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
     )["status"] == "deleted"

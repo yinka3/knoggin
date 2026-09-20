@@ -75,21 +75,56 @@ def _code_locator(start_line: int, end_line: int, symbol_name) -> Optional[Dict]
     return locator
 
 
-def _docx_locator(start_paragraph: int, end_paragraph: int, heading_path) -> Optional[Dict]:
-    locator = {
-        "kind": "docx_paragraphs",
-        "start_paragraph": start_paragraph,
-        "end_paragraph": end_paragraph,
-    }
-    if heading_path is None:
-        return locator
+def _layout_region_locator(value) -> Optional[Dict]:
+    if not isinstance(value, dict) or value.get("kind") != "layout_region":
+        return None
+    page = value.get("page")
+    element_type = value.get("element_type")
+    extraction_method = value.get("extraction_method")
     if (
-        not isinstance(heading_path, (list, tuple))
-        or not heading_path
-        or any(not isinstance(part, str) or not part.strip() for part in heading_path)
+        not _positive_int(page)
+        or not isinstance(element_type, str)
+        or not element_type.strip()
+        or extraction_method not in {"native_text", "ocr", "model_interpretation"}
     ):
         return None
-    locator["heading_path"] = list(heading_path)
+    locator: Dict = {
+        "kind": "layout_region",
+        "page": page,
+        "element_type": element_type,
+        "extraction_method": extraction_method,
+        "coordinate_unit": "pdf_points",
+        "coordinate_origin": "bottom_left",
+    }
+    bbox = value.get("bbox")
+    if bbox is not None:
+        if not isinstance(bbox, dict):
+            return None
+        bounds = tuple(bbox.get(key) for key in ("left", "bottom", "right", "top"))
+        if not all(isinstance(bound, (int, float)) for bound in bounds):
+            return None
+        left, bottom, right, top = bounds
+        if right <= left or top <= bottom:
+            return None
+        locator["bbox"] = {
+            "left": left,
+            "bottom": bottom,
+            "right": right,
+            "top": top,
+        }
+    start, end = value.get("text_start"), value.get("text_end")
+    if start is not None or end is not None:
+        if (
+            not isinstance(start, int)
+            or not isinstance(end, int)
+            or isinstance(start, bool)
+            or isinstance(end, bool)
+            or start < 0
+            or end <= start
+        ):
+            return None
+        locator["text_start"] = start
+        locator["text_end"] = end
     return locator
 
 
@@ -481,18 +516,12 @@ class SearchTools:
         if not isinstance(locator, dict):
             return page_number, start_line, end_line
         kind = locator.get("kind")
-        if kind == "pdf_page":
+        if kind == "layout_region":
             return locator.get("page"), start_line, end_line
         if kind in {"text_lines", "code_lines"}:
             return page_number, locator.get("start_line", 1), locator.get("end_line")
         if kind == "csv_rows":
             return page_number, locator.get("start_row", 1), locator.get("end_row")
-        if kind == "docx_paragraphs":
-            return (
-                page_number,
-                locator.get("start_paragraph", 1),
-                locator.get("end_paragraph"),
-            )
         return page_number, start_line, end_line
 
     @classmethod
@@ -561,6 +590,7 @@ class SearchTools:
         content = result.get("content")
         document_id = result.get("document_id")
         source_project_id = result.get("project_id")
+        parse_snapshot_id = result.get("parse_snapshot_id") or result.get("snapshot_id")
         content_hash = result.get("content_hash")
         document_name = result.get("document_name") or result.get("original_name")
         relative_path = result.get("relative_path")
@@ -572,6 +602,8 @@ class SearchTools:
             or not document_id.strip()
             or not isinstance(source_project_id, str)
             or not source_project_id.strip()
+            or not isinstance(parse_snapshot_id, str)
+            or not parse_snapshot_id.strip()
             or not isinstance(content_hash, str)
             or cls._CONTENT_HASH_RE.fullmatch(content_hash) is None
             or not isinstance(document_name, str)
@@ -587,7 +619,7 @@ class SearchTools:
         if locator is None:
             return None
         source_kind = "pdf_document" if extension == ".pdf" else "text_document"
-        if source_kind == "pdf_document" and locator["kind"] != "pdf_page":
+        if source_kind == "pdf_document" and locator["kind"] != "layout_region":
             return None
         if source_kind == "text_document" and locator["kind"] == "pdf_page":
             return None
@@ -602,6 +634,7 @@ class SearchTools:
         return {
             "source_kind": source_kind,
             "document_id": document_id,
+            "parse_snapshot_id": parse_snapshot_id,
             "source_project_id": source_project_id,
             "content_hash": content_hash,
             "locator": locator,
@@ -616,10 +649,12 @@ class SearchTools:
     ) -> Optional[Dict]:
         """Return a canonical locator without attempting text-based recovery."""
         locator = result.get("locator")
+        if not isinstance(locator, dict):
+            locator = result.get("layout_region")
         if isinstance(locator, dict):
             kind = locator.get("kind")
-            if kind == "pdf_page" and _positive_int(locator.get("page")):
-                return {"kind": "pdf_page", "page": locator["page"]}
+            if kind == "layout_region":
+                return _layout_region_locator(locator)
             if kind == "csv_rows" and _valid_range(
                 locator.get("start_row"), locator.get("end_row")
             ):
@@ -644,19 +679,9 @@ class SearchTools:
                     locator["end_line"],
                     locator.get("section_path"),
                 )
-            if kind == "docx_paragraphs" and _valid_range(
-                locator.get("start_paragraph"), locator.get("end_paragraph")
-            ):
-                return _docx_locator(
-                    locator["start_paragraph"],
-                    locator["end_paragraph"],
-                    locator.get("heading_path"),
-                )
             return None
 
-        if extension == ".pdf" and _positive_int(result.get("page_number")):
-            return {"kind": "pdf_page", "page": result["page_number"]}
-        if extension == ".docx":
+        if extension == ".pdf":
             return None
         if _valid_range(result.get("start_row"), result.get("end_row")):
             return {

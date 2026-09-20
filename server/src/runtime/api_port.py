@@ -392,6 +392,7 @@ class ApplicationRuntimePort:
             )
             target["selection"] = DocumentSelection(
                 content_hash=resolved["content_hash"],
+                parse_snapshot_id=resolved["parse_snapshot_id"],
                 locator=resolved["locator"],
             )
         return create_document_focus(

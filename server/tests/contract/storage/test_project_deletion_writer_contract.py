@@ -178,6 +178,7 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
 ):
     writer = ProjectDeletionWriter(real_postgres_client)
     document_id = "11111111-1111-4111-8111-111111111111"
+    snapshot_id = "12121212-1212-4121-8121-121212121212"
     chunk_id = "22222222-2222-4222-8222-222222222222"
     embedding = "[" + ",".join(["0"] * 1024) + "]"
 
@@ -200,26 +201,36 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
             document_id, project_id, original_name,
             relative_path, extension, size_bytes, content_hash
         )
-        VALUES (%s, 'project-1', 'notes.md', 'notes.md', '.md', 5, 'hash')
+        VALUES (%s, 'project-1', 'notes.md', 'notes.md', '.md', 5, repeat('1', 64))
         """,
         (document_id,),
     )
     await real_postgres_client.execute(
         """
-        INSERT INTO public.document_extractions (
-            document_id, extracted_text, extracted_content_hash
-        ) VALUES (%s, %s, 'hash')
+        INSERT INTO public.document_parse_snapshots (
+            snapshot_id, document_id, source_content_hash,
+            parser_name, parser_version, parser_fingerprint, snapshot
+        ) VALUES (%s, %s, repeat('1', 64), 'test', 'v1', repeat('a', 64),
+            '{"schema_version": 1}'::jsonb)
         """,
-        (document_id, "hello"),
+        (snapshot_id, document_id),
+    )
+    await real_postgres_client.execute(
+        """
+        UPDATE public.project_documents
+        SET current_snapshot_id = %s, status = 'indexed'
+        WHERE document_id = %s
+        """,
+        (snapshot_id, document_id),
     )
     await real_postgres_client.execute(
         """
         INSERT INTO public.document_chunks (
-            chunk_id, document_id, chunk_index, content, relative_path, embedding
+            chunk_id, document_id, snapshot_id, chunk_index, content, relative_path, embedding
         )
-        VALUES (%s, %s, 0, 'hello', 'notes.md', %s::vector)
+        VALUES (%s, %s, %s, 0, 'hello', 'notes.md', %s::vector)
         """,
-        (chunk_id, document_id, embedding),
+        (chunk_id, document_id, snapshot_id, embedding),
     )
 
     deleted = await writer.delete_project(user_name="ada", project_id="project-1")
@@ -236,7 +247,7 @@ async def test_project_deletion_executes_complete_aggregate_against_postgres(
         "WHERE project_id = 'project-1'"
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
-        "SELECT count(*) AS count FROM public.document_extractions WHERE document_id = %s",
+        "SELECT count(*) AS count FROM public.document_parse_snapshots WHERE document_id = %s",
         (document_id,),
     ) == {"count": 0}
     assert await real_postgres_client.fetch_one(
@@ -487,26 +498,52 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
         )
         await cur.execute(
             """
-            INSERT INTO document_extractions (
-                document_id, extracted_text, extracted_content_hash
+            INSERT INTO document_parse_snapshots (
+                snapshot_id, document_id, source_content_hash,
+                parser_name, parser_version, parser_fingerprint, snapshot
+            ) VALUES
+                (
+                    'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+                    '77777777-7777-4777-8777-777777777777', repeat('1', 64),
+                    'test', 'v1', repeat('a', 64), '{"schema_version": 1}'::jsonb
+                ),
+                (
+                    'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+                    '88888888-8888-4888-8888-888888888888', repeat('2', 64),
+                    'test', 'v1', repeat('b', 64), '{"schema_version": 1}'::jsonb
+                )
+            """
+        )
+        await cur.execute(
+            """
+            UPDATE project_documents
+            SET current_snapshot_id = CASE document_id
+                WHEN '77777777-7777-4777-8777-777777777777'
+                    THEN 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'::uuid
+                WHEN '88888888-8888-4888-8888-888888888888'
+                    THEN 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'::uuid
+            END,
+                status = 'indexed'
+            WHERE document_id IN (
+                '77777777-7777-4777-8777-777777777777',
+                '88888888-8888-4888-8888-888888888888'
             )
-            VALUES
-                ('77777777-7777-4777-8777-777777777777', 'delete', repeat('1', 64)),
-                ('88888888-8888-4888-8888-888888888888', 'keep', repeat('2', 64))
             """
         )
         await cur.execute(
             """
             INSERT INTO document_chunks (
-                chunk_id, document_id, chunk_index, content, relative_path, embedding
+                chunk_id, document_id, snapshot_id, chunk_index, content, relative_path, embedding
             ) VALUES
                 (
                     '99999999-9999-4999-8999-999999999999',
-                    '77777777-7777-4777-8777-777777777777', 0, 'delete', 'delete.md', %s::vector
+                    '77777777-7777-4777-8777-777777777777',
+                    'dddddddd-dddd-4ddd-8ddd-dddddddddddd', 0, 'delete', 'delete.md', %s::vector
                 ),
                 (
                     'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-                    '88888888-8888-4888-8888-888888888888', 0, 'keep', 'keep.md', %s::vector
+                    '88888888-8888-4888-8888-888888888888',
+                    'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 0, 'keep', 'keep.md', %s::vector
                 )
             """,
             (embedding, embedding),
@@ -515,19 +552,21 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             """
             INSERT INTO message_source_refs (
                 source_ref_id, project_id, session_id, message_id, source_kind,
-                document_id, source_project_id, content_hash, locator, excerpt, metadata, encounter_kind,
+                document_id, parse_snapshot_id, source_project_id, content_hash, locator, excerpt, metadata, encounter_kind,
                 agent_run_id, tool_call_id, result_position, idempotency_key
             ) VALUES
                 (
                     'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'project-1', 'session-1', 101,
-                    'text_document', '77777777-7777-4777-8777-777777777777', 'project-1', repeat('1', 64),
+                    'text_document', '77777777-7777-4777-8777-777777777777',
+                    'dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'project-1', repeat('1', 64),
                     '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
                     'delete', '{"document_name":"delete.md"}'::jsonb, 'document_search',
                     'run-delete', 'tool-delete', 0, 'source-delete'
                 ),
                 (
                     'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'project-2', 'session-2', 201,
-                    'text_document', '88888888-8888-4888-8888-888888888888', 'project-2', repeat('2', 64),
+                    'text_document', '88888888-8888-4888-8888-888888888888',
+                    'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'project-2', repeat('2', 64),
                     '{"kind":"text_lines","start_line":1,"end_line":1}'::jsonb,
                     'keep', '{"document_name":"keep.md"}'::jsonb, 'document_search',
                     'run-keep', 'tool-keep', 0, 'source-keep'
@@ -563,8 +602,8 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-1'"
         ),
-        "extractions": (
-            "SELECT count(*) AS count FROM document_extractions c "
+        "snapshots": (
+            "SELECT count(*) AS count FROM document_parse_snapshots c "
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-1'"
         ),
@@ -611,8 +650,8 @@ async def test_project_deletion_removes_episode_graph_search_and_source_aggregat
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-2'"
         ),
-        "extractions": (
-            "SELECT count(*) AS count FROM document_extractions c "
+        "snapshots": (
+            "SELECT count(*) AS count FROM document_parse_snapshots c "
             "JOIN project_documents d ON d.document_id = c.document_id "
             "WHERE d.project_id = 'project-2'"
         ),

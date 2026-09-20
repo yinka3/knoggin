@@ -299,11 +299,8 @@ def _format_locator(value: object) -> str:
         end = value.get("end_row")
         if isinstance(start, int) and isinstance(end, int):
             return f"rows {start}-{end}"
-    if kind == "docx_paragraphs":
-        start = value.get("start_paragraph")
-        end = value.get("end_paragraph")
-        if isinstance(start, int) and isinstance(end, int):
-            return f"paragraphs {start}-{end}"
+    if kind == "layout_region" and isinstance(value.get("page"), int):
+        return f"page {value['page']}"
     if kind == "pdf_page" and isinstance(value.get("page"), int):
         return f"page {value['page']}"
     if kind == "search_result" and isinstance(value.get("rank"), int):

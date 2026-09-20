@@ -16,7 +16,7 @@ from common.schema.immutable import FrozenDict
 from common.schema.source.locators import (
     CodeLineLocator,
     CsvRowLocator,
-    DocxParagraphLocator,
+    LayoutRegionLocator,
     PastedTextLocator,
     PdfPageLocator,
     SearchResultLocator,
@@ -53,6 +53,7 @@ class SourceReferenceCandidate(BaseModel):
     session_id: str = Field(min_length=1)
     source_kind: SourceKind
     document_id: str | None = None
+    parse_snapshot_id: str | None = None
     source_project_id: str | None = None
     canonical_url: str | None = None
     source_message_id: int | None = Field(default=None, gt=0)
@@ -69,6 +70,7 @@ class SourceReferenceCandidate(BaseModel):
         "project_id",
         "session_id",
         "document_id",
+        "parse_snapshot_id",
         "source_project_id",
         "agent_run_id",
         "tool_call_id",
@@ -118,6 +120,8 @@ class SourceReferenceCandidate(BaseModel):
         if self.source_kind in document_kinds:
             if not self.document_id:
                 raise ValueError("document sources require document_id")
+            if not self.parse_snapshot_id:
+                raise ValueError("document sources require parse_snapshot_id")
             if not self.source_project_id:
                 raise ValueError("document sources require source_project_id")
             if self.canonical_url is not None or self.source_message_id is not None:
@@ -136,12 +140,12 @@ class SourceReferenceCandidate(BaseModel):
             }:
                 raise ValueError("document sources require a document encounter kind")
             if self.source_kind == "pdf_document" and not isinstance(
-                self.locator, PdfPageLocator
+                self.locator, LayoutRegionLocator
             ):
-                raise ValueError("pdf_document sources require a PDF page locator")
+                raise ValueError("pdf_document sources require a layout-region locator")
             if self.source_kind == "text_document" and not isinstance(
                 self.locator,
-                (TextLineLocator, CsvRowLocator, CodeLineLocator, DocxParagraphLocator),
+                (TextLineLocator, CsvRowLocator, CodeLineLocator, LayoutRegionLocator),
             ):
                 raise ValueError("text_document sources require a text locator")
             self._require_text_metadata("document_name")
@@ -149,6 +153,7 @@ class SourceReferenceCandidate(BaseModel):
         elif self.source_kind == "user_pasted_text":
             if (
                 self.document_id is not None
+                or self.parse_snapshot_id is not None
                 or self.source_project_id is not None
                 or self.canonical_url is not None
             ):
@@ -170,6 +175,7 @@ class SourceReferenceCandidate(BaseModel):
             )
             if (
                 self.document_id is not None
+                or self.parse_snapshot_id is not None
                 or self.source_project_id is not None
                 or self.source_message_id is not None
             ):
@@ -192,6 +198,7 @@ class SourceReferenceCandidate(BaseModel):
         elif self.source_kind in {"web_page", "web_pdf"}:
             if (
                 self.document_id is not None
+                or self.parse_snapshot_id is not None
                 or self.source_project_id is not None
                 or self.source_message_id is not None
             ):

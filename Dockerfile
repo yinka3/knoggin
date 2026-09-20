@@ -31,6 +31,10 @@ CrossEncoder('BAAI/bge-reranker-large')"
 
 RUN python -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_large-v2.1')"
 
+# PDF layout, table, and OCR artifacts are local runtime dependencies. Keeping
+# them in the image prevents the first document index from reaching the network.
+RUN docling-tools models download layout tableformer rapidocr --quiet
+
 # Copy the entire workspace source
 COPY . .
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -60,6 +61,20 @@ async def prefetch_models() -> None:
             GLiNER25VP01Adapter.load,
             language="en",
             device=str(device),
+        )
+        logger.info("Prefetching Docling PDF layout, table, and OCR artifacts")
+        await asyncio.to_thread(
+            subprocess.run,
+            [
+                "docling-tools",
+                "models",
+                "download",
+                "layout",
+                "tableformer",
+                "rapidocr",
+                "--quiet",
+            ],
+            check=True,
         )
         logger.info("All local models are ready in the local cache")
     finally:

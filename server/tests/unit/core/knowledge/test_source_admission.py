@@ -74,6 +74,7 @@ async def test_promoting_a_document_source_is_rejected():
                 "session_id": "session-1",
                 "source_kind": "text_document",
                 "document_id": "doc-1",
+                "parse_snapshot_id": "snapshot-1",
                 "source_project_id": "project-1",
                 "content_hash": "a" * 64,
                 "locator": {

@@ -1,10 +1,14 @@
 import csv
+import hashlib
 import io
 import json
 import re
+import threading
 import warnings
 from dataclasses import dataclass
-from typing import List, Optional
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any, Dict, List, Optional
 
 import pytesseract
 import tree_sitter_bash
@@ -24,10 +28,8 @@ import tree_sitter_rust
 import tree_sitter_sql
 import tree_sitter_typescript
 import tree_sitter_yaml
-from docx import Document as DocxDocument
 from llama_index.core.node_parser import SentenceSplitter
 from PIL import Image as PILImage
-from pypdf import PdfReader
 from tree_sitter import Language, Parser
 
 from core.knowledge.documents.constants import (
@@ -61,6 +63,94 @@ class DocumentChunk:
     section_path: Optional[tuple[str, ...]] = None
     start_paragraph: Optional[int] = None
     end_paragraph: Optional[int] = None
+    layout_region: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class LayoutRegion:
+    """One source-grade region from a layout-aware parse snapshot.
+
+    Coordinates stay in PDF points with Docling's bottom-left origin.  Keeping
+    that convention avoids a lossy conversion between parsing, retrieval, and
+    provenance display.
+    """
+
+    page_number: int
+    element_type: str
+    extraction_method: str
+    bbox: tuple[float, float, float, float] | None = None
+    text_start: int | None = None
+    text_end: int | None = None
+
+    def as_locator(self) -> Dict[str, Any]:
+        locator: Dict[str, Any] = {
+            "kind": "layout_region",
+            "page": self.page_number,
+            "element_type": self.element_type,
+            "extraction_method": self.extraction_method,
+            "coordinate_unit": "pdf_points",
+            "coordinate_origin": "bottom_left",
+        }
+        if self.bbox is not None:
+            left, bottom, right, top = self.bbox
+            locator["bbox"] = {
+                "left": left,
+                "bottom": bottom,
+                "right": right,
+                "top": top,
+            }
+        if self.text_start is not None:
+            locator["text_start"] = self.text_start
+        if self.text_end is not None:
+            locator["text_end"] = self.text_end
+        return locator
+
+
+@dataclass(frozen=True)
+class DocumentSnapshotPage:
+    """The canonical text and regions for one one-based parsed page."""
+
+    page_number: int
+    text: str
+    regions: tuple[LayoutRegion, ...] = ()
+
+
+@dataclass(frozen=True)
+class DocumentParseSnapshot:
+    """Immutable, versioned parse data published with a document index.
+
+    This is the representation used by indexing, reading, selections, and
+    source evidence.  Source bytes are only used to create this snapshot; they
+    are not reparsed during ordinary reads.
+    """
+
+    text: str
+    structure: Dict[str, Any]
+    parser_name: str
+    parser_version: str
+    parser_fingerprint: str
+    pages: tuple[DocumentSnapshotPage, ...] = ()
+    schema_version: int = 1
+
+    def to_storage_payload(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "text": self.text,
+            "structure": self.structure,
+            "parser": {
+                "name": self.parser_name,
+                "version": self.parser_version,
+                "fingerprint": self.parser_fingerprint,
+            },
+            "pages": [
+                {
+                    "page_number": page.page_number,
+                    "text": page.text,
+                    "regions": [region.as_locator() for region in page.regions],
+                }
+                for page in self.pages
+            ],
+        }
 
 
 @dataclass(frozen=True)
@@ -69,23 +159,7 @@ class DocumentExtraction:
 
     text: str
     chunks: List[DocumentChunk]
-
-
-@dataclass(frozen=True)
-class PdfPage:
-    """Extracted text for one one-based PDF page."""
-
-    page_number: int
-    text: str
-
-
-@dataclass(frozen=True)
-class DocxParagraph:
-    """One body paragraph with its stable one-based Word position."""
-
-    paragraph_number: int
-    text: str
-    heading_level: Optional[int] = None
+    snapshot: DocumentParseSnapshot
 
 
 _CODE_LANGUAGES = {
@@ -110,8 +184,28 @@ _NOTEBOOK_CELL_HEADER = re.compile(
 )
 _DOCKERFILE_INSTRUCTION_PATTERN = re.compile(r"^([A-Za-z]+)(?:\s|$)")
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-_DOCX_HEADING_STYLE = re.compile(r"^Heading ([1-9])$", re.IGNORECASE)
 _TEXT_CHUNK_TARGET_CHARS = CHUNK_SIZE_TOKENS * 4
+_DOCLING_CONVERSION_LOCK = threading.RLock()
+_DOCLING_PARSER_CONFIGURATION = {
+    "accelerator": "cpu",
+    "do_ocr": True,
+    "do_table_structure": True,
+    "do_code_enrichment": False,
+    "do_formula_enrichment": False,
+    "do_picture_description": False,
+    "do_picture_classification": False,
+    "remote_services": False,
+    "external_plugins": False,
+}
+
+
+def _fingerprint(value: Dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+_DOCLING_PARSER_FINGERPRINT = _fingerprint(_DOCLING_PARSER_CONFIGURATION)
 
 def _dockerfile_language() -> Optional[Language]:
     """Load the Dockerfile grammar while isolating its legacy handle warning."""
@@ -244,13 +338,8 @@ def extract_text(content: bytes, extension: str) -> str:
             f"Accepted types include PDF, DOCX, plain text, source code, and images."
         )
 
-    if ext == ".pdf":
-        text = "\n\n".join(page.text for page in extract_pdf_pages(content))
-    elif ext == ".docx":
-        text = "\n".join(
-            paragraph.text for paragraph in extract_docx_paragraphs(content)
-            if paragraph.text.strip()
-        )
+    if ext in {".pdf", ".docx"}:
+        return _extract_docling_snapshot(content, ext).text
     elif ext == ".ipynb":
         text = _extract_notebook_text(content)
     elif ext in IMAGE_EXTENSIONS:
@@ -274,85 +363,249 @@ def extract_text(content: bytes, extension: str) -> str:
     return text
 
 
-def extract_pdf_pages(content: bytes) -> List[PdfPage]:
-    """Extract non-empty PDF pages without flattening their locations."""
+def _docling_version() -> str:
+    try:
+        return version("docling")
+    except PackageNotFoundError:  # pragma: no cover - dependency is declared.
+        return "unavailable"
 
-    reader = PdfReader(io.BytesIO(content))
-    pages = [
-        PdfPage(page_number=index, text=page.extract_text() or "")
-        for index, page in enumerate(reader.pages, start=1)
-    ]
-    if not any(page.text.strip() for page in pages):
+
+@lru_cache(maxsize=1)
+def _docling_converter():
+    """Build the one local-only converter shared by blocking index workers."""
+
+    from docling.datamodel.accelerator_options import (
+        AcceleratorDevice,
+        AcceleratorOptions,
+    )
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    pdf_options = PdfPipelineOptions(
+        accelerator_options=AcceleratorOptions(
+            device=AcceleratorDevice.CPU,
+            num_threads=2,
+        ),
+        do_ocr=True,
+        do_table_structure=True,
+        do_code_enrichment=False,
+        do_formula_enrichment=False,
+        do_picture_description=False,
+        do_picture_classification=False,
+        enable_remote_services=False,
+        allow_external_plugins=False,
+    )
+    return DocumentConverter(
+        allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
+        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pdf_options)},
+    )
+
+
+def _parse_with_docling(content: bytes, extension: str):
+    """Convert in a single serialized local pipeline invocation.
+
+    Docling keeps parser/model state inside its converter.  The lock prevents
+    concurrent index workers from racing that state while preserving the async
+    runtime because this function is always called through the blocking runner.
+    """
+
+    from docling_core.types.io import DocumentStream
+
+    try:
+        with _DOCLING_CONVERSION_LOCK:
+            return _docling_converter().convert(
+                DocumentStream(
+                    name=f"captured-document{extension}",
+                    stream=io.BytesIO(content),
+                )
+            ).document
+    except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        if "LocalEntryNotFoundError" in detail or "huggingface.co" in detail:
+            raise RuntimeError(
+                "Docling PDF models are not installed; run "
+                "./setup.sh --prefetch-models before indexing PDFs"
+            ) from exc
+        raise ValueError(f"Docling could not parse the {extension} document: {detail}") from exc
+
+
+def _native_pdf_page_numbers(content: bytes) -> set[int]:
+    """Identify pages with native PDF text before Docling OCR fills gaps."""
+
+    from docling_parse.pdf_parser import DoclingPdfParser
+
+    parser = DoclingPdfParser()
+    document = parser.load(io.BytesIO(content))
+    try:
+        return {
+            page_number
+            for page_number, page in document.iterate_pages()
+            if any(cell.text.strip() for cell in page.textline_cells)
+        }
+    finally:
+        document.unload()
+
+
+def _page_numbers(structure: Dict[str, Any]) -> List[int]:
+    pages = structure.get("pages")
+    if not isinstance(pages, dict):
+        return []
+    return sorted(
+        int(page_number)
+        for page_number in pages
+        if str(page_number).isdigit() and int(page_number) >= 1
+    )
+
+
+def _region_bbox(value: object) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, dict):
+        return None
+    values = (value.get("l"), value.get("b"), value.get("r"), value.get("t"))
+    if not all(isinstance(item, (int, float)) for item in values):
+        return None
+    left, bottom, right, top = (float(item) for item in values)
+    if right <= left or top <= bottom:
+        return None
+    return left, bottom, right, top
+
+
+def _regions_from_docling_structure(
+    structure: Dict[str, Any],
+    *,
+    native_page_numbers: set[int],
+) -> Dict[int, tuple[LayoutRegion, ...]]:
+    """Retain Docling element provenance in a small stable region projection."""
+
+    regions: Dict[int, list[LayoutRegion]] = {}
+    for collection in ("texts", "tables", "pictures", "key_value_items"):
+        entries = structure.get(collection)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            element_type = str(entry.get("label") or collection.rstrip("s"))
+            charspan = entry.get("charspan")
+            if not (
+                isinstance(charspan, list)
+                and len(charspan) == 2
+                and all(isinstance(item, int) and item >= 0 for item in charspan)
+                and charspan[1] >= charspan[0]
+            ):
+                charspan = None
+            provenance = entry.get("prov")
+            if not isinstance(provenance, list):
+                continue
+            for item in provenance:
+                if not isinstance(item, dict):
+                    continue
+                page_number = item.get("page_no")
+                if not isinstance(page_number, int) or page_number < 1:
+                    continue
+                regions.setdefault(page_number, []).append(
+                    LayoutRegion(
+                        page_number=page_number,
+                        element_type=element_type,
+                        extraction_method=(
+                            "native_text"
+                            if page_number in native_page_numbers
+                            else "ocr"
+                        ),
+                        bbox=_region_bbox(item.get("bbox")),
+                        text_start=charspan[0] if charspan is not None else None,
+                        text_end=charspan[1] if charspan is not None else None,
+                    )
+                )
+    return {page: tuple(items) for page, items in regions.items()}
+
+
+def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSnapshot:
+    document = _parse_with_docling(content, extension)
+    structure = document.export_to_dict(coord_precision=3)
+    text = document.export_to_markdown().strip()
+    if not text:
         raise ValueError("Document contains no extractable text")
-    return pages
 
-
-def extract_docx_paragraphs(content: bytes) -> List[DocxParagraph]:
-    """Extract DOCX body paragraphs without losing their Word positions."""
-
-    document = DocxDocument(io.BytesIO(content))
-    paragraphs = [
-        DocxParagraph(
-            paragraph_number=index,
-            text=paragraph.text,
-            heading_level=_docx_heading_level(paragraph.style.name),
+    pages: tuple[DocumentSnapshotPage, ...] = ()
+    if extension == ".pdf":
+        native_page_numbers = _native_pdf_page_numbers(content)
+        regions = _regions_from_docling_structure(
+            structure,
+            native_page_numbers=native_page_numbers,
         )
-        for index, paragraph in enumerate(document.paragraphs, start=1)
-    ]
-    if not any(paragraph.text.strip() for paragraph in paragraphs):
-        raise ValueError("Document contains no extractable text")
-    return paragraphs
+        page_numbers = _page_numbers(structure) or sorted(regions)
+        pages = tuple(
+            DocumentSnapshotPage(
+                page_number=page_number,
+                text=document.export_to_markdown(page_no=page_number).strip(),
+                regions=regions.get(page_number, ()),
+            )
+            for page_number in page_numbers
+        )
+        if not any(page.text for page in pages):
+            raise ValueError("Document contains no extractable text")
+
+    return DocumentParseSnapshot(
+        text=text,
+        structure=structure,
+        parser_name="docling",
+        parser_version=_docling_version(),
+        parser_fingerprint=_DOCLING_PARSER_FINGERPRINT,
+        pages=pages,
+    )
 
 
-def _docx_heading_level(style_name: str) -> Optional[int]:
-    match = _DOCX_HEADING_STYLE.fullmatch(style_name or "")
-    return int(match.group(1)) if match else None
+def _exact_text_snapshot(text: str, extension: str) -> DocumentParseSnapshot:
+    configuration = {"format": extension.lower(), "mode": "exact_text"}
+    return DocumentParseSnapshot(
+        text=text,
+        structure=configuration,
+        parser_name="knoggin-exact-text",
+        parser_version="1",
+        parser_fingerprint=_fingerprint(configuration),
+    )
 
 
-def docx_heading_path(
-    paragraphs: List[DocxParagraph], paragraph_number: int
-) -> Optional[tuple[str, ...]]:
-    """Return the active Word heading path at a one-based paragraph position."""
-
-    active_path: List[str] = []
-    for paragraph in paragraphs:
-        if paragraph.paragraph_number > paragraph_number:
-            break
-        if paragraph.heading_level is not None:
-            active_path = active_path[: paragraph.heading_level - 1]
-            active_path.append(paragraph.text.strip())
-    return tuple(active_path) or None
+def _page_locator(page: DocumentSnapshotPage) -> Dict[str, Any]:
+    method = (
+        page.regions[0].extraction_method
+        if page.regions
+        else "native_text"
+    )
+    return LayoutRegion(
+        page_number=page.page_number,
+        element_type="page",
+        extraction_method=method,
+    ).as_locator()
 
 
 def extract_and_split_document(content: bytes, extension: str) -> DocumentExtraction:
-    """Produce text and chunks together so PDF page boundaries remain intact."""
+    """Capture one canonical parse, then derive all retrieval chunks from it."""
 
-    if extension.lower() == ".pdf":
-        pages = extract_pdf_pages(content)
+    normalized_extension = extension.lower()
+    if normalized_extension == ".pdf":
+        snapshot = _extract_docling_snapshot(content, normalized_extension)
         chunks = [
-            DocumentChunk(content=chunk, page_number=page.page_number)
-            for page in pages
-            if page.text.strip()
+            DocumentChunk(
+                content=chunk,
+                page_number=page.page_number,
+                layout_region=_page_locator(page),
+            )
+            for page in snapshot.pages
+            if page.text
             for chunk in split_text(page.text)
         ]
-        if not chunks:
-            raise ValueError("Document produced no non-empty chunks")
-        return DocumentExtraction(
-            text="\n\n".join(page.text for page in pages),
-            chunks=chunks,
-        )
-
-    if extension.lower() == ".docx":
-        paragraphs = extract_docx_paragraphs(content)
-        return DocumentExtraction(
-            text="\n".join(
-                paragraph.text for paragraph in paragraphs if paragraph.text.strip()
-            ),
-            chunks=_split_docx(paragraphs),
-        )
-
-    text = extract_text(content, extension)
-    return DocumentExtraction(text=text, chunks=split_document(text, extension=extension))
+    elif normalized_extension == ".docx":
+        snapshot = _extract_docling_snapshot(content, normalized_extension)
+        chunks = split_document(snapshot.text, extension=".md")
+    else:
+        text = extract_text(content, normalized_extension)
+        snapshot = _exact_text_snapshot(text, normalized_extension)
+        chunks = split_document(text, extension=normalized_extension)
+    if not chunks:
+        raise ValueError("Document produced no non-empty chunks")
+    return DocumentExtraction(text=snapshot.text, chunks=chunks, snapshot=snapshot)
 
 
 def split_text(text: str) -> List[str]:
@@ -380,66 +633,6 @@ def split_document(
     if language is None:
         return _split_text_with_lines(text)
     return _split_code(text, language, extension.lower())
-
-
-def _split_docx(paragraphs: List[DocxParagraph]) -> List[DocumentChunk]:
-    """Keep DOCX chunks within a Word heading path and paragraph range."""
-
-    chunks: List[DocumentChunk] = []
-    active_path: List[str] = []
-    section_path: Optional[tuple[str, ...]] = None
-    section: List[DocxParagraph] = []
-
-    for paragraph in paragraphs:
-        if paragraph.heading_level is not None:
-            chunks.extend(_split_docx_section(section, section_path))
-            section = []
-            active_path = active_path[: paragraph.heading_level - 1]
-            active_path.append(paragraph.text.strip())
-            section_path = tuple(active_path)
-        section.append(paragraph)
-    chunks.extend(_split_docx_section(section, section_path))
-    if not chunks:
-        raise ValueError("Document produced no non-empty chunks")
-    return chunks
-
-
-def _split_docx_section(
-    paragraphs: List[DocxParagraph],
-    heading_path: Optional[tuple[str, ...]],
-) -> List[DocumentChunk]:
-    chunks: List[DocumentChunk] = []
-    current: List[DocxParagraph] = []
-    current_size = 0
-    for paragraph in paragraphs:
-        paragraph_size = len(paragraph.text) + 1
-        if current and current_size + paragraph_size > _TEXT_CHUNK_TARGET_CHARS:
-            chunk = _docx_chunk(current, heading_path)
-            if chunk is not None:
-                chunks.append(chunk)
-            current = []
-            current_size = 0
-        current.append(paragraph)
-        current_size += paragraph_size
-    chunk = _docx_chunk(current, heading_path)
-    if chunk is not None:
-        chunks.append(chunk)
-    return chunks
-
-
-def _docx_chunk(
-    paragraphs: List[DocxParagraph],
-    heading_path: Optional[tuple[str, ...]],
-) -> Optional[DocumentChunk]:
-    non_empty = [paragraph for paragraph in paragraphs if paragraph.text.strip()]
-    if not non_empty:
-        return None
-    return DocumentChunk(
-        content="\n".join(paragraph.text for paragraph in non_empty),
-        section_path=heading_path,
-        start_paragraph=non_empty[0].paragraph_number,
-        end_paragraph=non_empty[-1].paragraph_number,
-    )
 
 
 def _split_text_with_lines(

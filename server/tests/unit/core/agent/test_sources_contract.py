@@ -85,6 +85,7 @@ def test_document_selection_becomes_a_non_tool_source_candidate():
             "relative_path": "docs/notes.py",
             "extension": ".py",
             "content_hash": "a" * 64,
+            "parse_snapshot_id": "snapshot-1",
             "locator": {
                 "kind": "code_lines",
                 "start_line": 4,

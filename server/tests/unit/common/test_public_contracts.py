@@ -74,6 +74,7 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
             "document_id": "document-1",
             "selection": {
                 "content_hash": "a" * 64,
+                "parse_snapshot_id": "snapshot-1",
                 "locator": {
                     "kind": "code_lines",
                     "start_line": 4,
@@ -136,6 +137,7 @@ def test_run_document_focus_rejects_server_owned_and_invalid_selection_fields():
                 "document_id": "document-1",
                 "selection": {
                     "content_hash": "G" * 64,
+                    "parse_snapshot_id": "snapshot-1",
                     "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
                 },
             },
@@ -150,6 +152,7 @@ def test_run_document_focus_rejects_server_owned_and_invalid_selection_fields():
                 "path_prefix": "src",
                 "selection": {
                     "content_hash": "a" * 64,
+                    "parse_snapshot_id": "snapshot-1",
                     "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
                 },
             },
