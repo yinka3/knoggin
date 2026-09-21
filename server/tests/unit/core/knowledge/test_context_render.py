@@ -123,6 +123,66 @@ async def test_detected_user_edit_failure_keeps_its_admission_meaning():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_known_stale_projection_is_repaired_without_user_edit_blocking():
+    snapshot = _snapshot()
+    domain = _domain()
+    stale = b"previous generated projection"
+    writes = []
+
+    class Reader:
+        async def get_projection_state(self, **_kwargs):
+            return SimpleNamespace(
+                current_revision_id=snapshot.revision_id,
+                projection_revision_id=uuid4(),
+                projection_hash=hashlib.sha256(stale).hexdigest(),
+                projection_pending_hash=None,
+            )
+
+        async def get_snapshot(self, *_args, **_kwargs):
+            return snapshot
+
+    class Writer:
+        async def ensure_context(self, **_kwargs):
+            return None
+
+        async def record_projection(self, **_kwargs):
+            return True
+
+        async def record_projection_failure(self, **_kwargs):
+            raise AssertionError("known stale projection repair must not fail")
+
+    class Filesystem:
+        def read_bytes(self, _path):
+            return stale
+
+        def write_bytes(self, path, content, **kwargs):
+            writes.append((path, content, kwargs))
+
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    projection = ContextProjection(
+        reader=Reader(),
+        writer=Writer(),
+        filesystem=Filesystem(),
+    )
+
+    result = await projection.synchronize(
+        user_name="ada",
+        project_id="project-1",
+        ingestion_policy=policy,
+        allow_user_edit=True,
+    )
+
+    assert result.changed is True
+    assert writes[0][0] == "CONTEXT.md"
+    assert writes[0][2]["expected_content_hash"] == hashlib.sha256(stale).hexdigest()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_context_markdown_is_stable_and_keeps_local_handles_out_of_canonical_file():
     active_work = _block(section_key="active_work", markdown="Build the renderer.")
     current_state = _block(section_key="current_state", markdown="Knoggin is local.  \n")

@@ -40,6 +40,7 @@ from core.knowledge.context.models import (
     ContextMaterialization,
     ContextProjectionConflictError,
     ContextRevisionConflictError,
+    ContextUserEditSynchronizationError,
 )
 from core.knowledge.context.projection import ContextProjection
 from core.knowledge.context.render import context_block_hash, context_document_hash
@@ -1696,13 +1697,14 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
         writer=writer,
         filesystem=FailingFilesystem(),
     )
-    with pytest.raises(OSError, match="disk unavailable"):
+    with pytest.raises(ContextUserEditSynchronizationError) as caught:
         await failed_projection.synchronize(
             user_name="ada",
             project_id="project-1",
             ingestion_policy=_ingestion_policy(),
             allow_user_edit=True,
         )
+    assert isinstance(caught.value.__cause__, OSError)
     current = await reader.get_current_revision(user_name="ada", project_id="project-1")
     assert current is not None
     assert current.revision_number == 2
@@ -1717,7 +1719,10 @@ async def test_projection_write_failure_keeps_the_committed_context_revision(
     assert filesystem.read_bytes("CONTEXT.md") != previous_file
     failed_state = await reader.get_projection_state(user_name="ada", project_id="project-1")
     assert failed_state is not None
-    assert failed_state.projection_failure_code == "OSError"
+    assert (
+        failed_state.projection_failure_code
+        == "ContextUserEditSynchronizationError"
+    )
     assert failed_state.projection_pending_hash == hashlib.sha256(
         filesystem.read_bytes("CONTEXT.md")
     ).hexdigest()

@@ -282,6 +282,26 @@ class _BlockedUserEditProjection:
         raise ContextUserEditSynchronizationError("user edit requires retry")
 
 
+class _RetryingUserEditProjection:
+    def __init__(self, store, human_window):
+        self.store = store
+        self.human_window = human_window
+        self.calls = 0
+
+    async def synchronize(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise ContextUserEditSynchronizationError("user edit requires retry")
+        if self.calls == 2:
+            self.store.window = self.human_window
+            return ContextProjectionResult(
+                snapshot=None,
+                changed=True,
+                reconciliation_window_id=self.human_window.window_id,
+            )
+        return ContextProjectionResult(snapshot=None, changed=False)
+
+
 class _IdleAdmission:
     def update_settings(self, _settings):
         pass
@@ -569,6 +589,100 @@ async def test_unresolved_user_edit_blocks_new_semantic_admission():
 
     assert result.success is True
     assert "admission deferred" in result.summary
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_successful_user_edit_retry_finishes_before_conversation_admission():
+    human_window = _window().model_copy(
+        update={
+            "window_id": uuid4(),
+            "origin": SemanticWindowOrigin.HUMAN_EDIT,
+            "stage": SemanticWindowStage.KNOWLEDGE_COMMITTED,
+            "source_token_count": 0,
+            "token_estimator": "context-file",
+        }
+    )
+
+    class Store(_IdleStore):
+        def __init__(self):
+            self.window = None
+
+        async def get_active_project_semantic_window(self, **_kwargs):
+            if (
+                self.window is not None
+                and self.window.stage is not SemanticWindowStage.COMPLETED
+            ):
+                return self.window
+            return None
+
+        async def get_project_semantic_window_committed_entity_ids(
+            self, _window_id, **_kwargs
+        ):
+            return ()
+
+        async def enrich_project_semantic_window_episodes(self, **_kwargs):
+            return {"entities": 0, "relationships": 0}
+
+        async def advance_project_semantic_window_stage(self, **kwargs):
+            assert kwargs["window_id"] == str(human_window.window_id)
+            self.window = self.window.model_copy(
+                update={"stage": kwargs["next_stage"]}
+            )
+            return True
+
+    class RecordingAdmission(_IdleAdmission):
+        def __init__(self):
+            self.calls = 0
+
+        async def claim_next(self, **_kwargs):
+            self.calls += 1
+            return None
+
+    async def capture_policy():
+        return _policy()
+
+    store = Store()
+    admission = RecordingAdmission()
+    projection = _RetryingUserEditProjection(store, human_window)
+    job = ProjectSemanticProcessor(
+        admission,
+        store,
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_policy,
+        context_updater=_NoopUpdater(),
+        context_projection=projection,
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    blocked = await job.execute(context)
+    imported = await job.execute(context)
+    conversation = await job.execute(context)
+
+    assert "admission deferred" in blocked.summary
+    assert "finalization" in imported.summary
+    assert conversation.summary == "No semantic window is due"
+    assert admission.calls == 1
+    assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_active_window_continues_when_context_user_edit_is_blocked():
+    store = _ContextStore(_window())
+    updater = _Updater()
+    projection = _BlockedUserEditProjection()
+    job = _job(store, updater, projection=projection)
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success is True
+    assert store.window.stage is SemanticWindowStage.COMPLETED
+    assert len(store.commit_calls) == 1
 
 
 @pytest.mark.unit
