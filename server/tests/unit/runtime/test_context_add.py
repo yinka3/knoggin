@@ -10,6 +10,7 @@ from common.exceptions import (
     SessionBusyError,
 )
 from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
+from common.schema.document import create_document_focus
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
 from common.utils.core_utils import fetch_conversation_turns
@@ -92,7 +93,9 @@ def _runtime(resources, *, session_id="session-1", project_id="project-1"):
         agent_id=None,
         enabled_tools=None,
     )
-    runtime.project.project_semantic_job = object()
+    runtime.project.project_semantic_job = type(
+        "SemanticJob", (), {"name": "project_semantic"}
+    )()
     return runtime
 
 
@@ -832,6 +835,97 @@ async def test_duplicate_idempotency_key_replays_the_canonical_response(context)
             },
         }
     ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+def test_focus_resolution_timestamp_is_not_part_of_request_identity():
+    first = create_document_focus(
+        mode="request", behavior="restrict", created_at="2026-01-01T00:00:00Z",
+        target_type="document", document_id="doc-1", relative_path="notes.pdf",
+    )
+    second = create_document_focus(
+        mode="request", behavior="restrict", created_at="2026-01-02T00:00:00Z",
+        target_type="document", document_id="doc-1", relative_path="renamed.pdf",
+    )
+    inputs = dict(
+        message=Message(content="Summarize"), user_timezone=None, model=None,
+        agent_id=None, enabled_tools=None, pasted_text_spans=None,
+        research_mode="normal",
+    )
+
+    assert SessionRuntime._request_fingerprint(document_focus=first, **inputs) == (
+        SessionRuntime._request_fingerprint(document_focus=second, **inputs)
+    )
+    changed_behavior = first.model_copy(update={"behavior": "prefer"})
+    changed_target = first.model_copy(update={"document_id": "doc-2"})
+    baseline = SessionRuntime._request_fingerprint(document_focus=first, **inputs)
+    assert SessionRuntime._request_fingerprint(
+        document_focus=changed_behavior, **inputs
+    ) != baseline
+    assert SessionRuntime._request_fingerprint(
+        document_focus=changed_target, **inputs
+    ) != baseline
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_failed_request_replay_preserves_safe_terminal_error(context):
+    ctx, resources = context
+    resources.knowledge_store.accepted_message_ids["request:budget-1"] = 81
+
+    async def replay_exchange(_message_id, **_kwargs):
+        return UserAgentExchange(
+            user_message_id=81,
+            exchange_state="closed",
+            exchange_outcome="failed",
+            assistant_message_id=None,
+            assistant_content=None,
+            assistant_metadata={},
+            source_ref_ids=(),
+            terminal_error={"code": "llm_budget_exhausted", "retryable": False},
+        )
+
+    resources.knowledge_store.get_user_agent_exchange = replay_exchange
+    events = [
+        event
+        async for event in ctx.run_agent_stream(
+            Message(content="Use the model"), idempotency_key="budget-1"
+        )
+    ]
+
+    assert events[0]["data"]["code"] == "llm_budget_exhausted"
+    assert events[0]["data"]["retryable"] is False
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_terminal_error_is_closed_with_safe_replay_fields(context):
+    ctx, resources = context
+
+    async def handler(_kwargs):
+        yield {
+            "event": "error",
+            "data": {
+                "message": "internal wording is not persisted",
+                "code": "llm_budget_exhausted",
+                "retryable": False,
+            },
+        }
+
+    events = [
+        event
+        async for event in ctx.run_agent_stream(
+            Message(content="Use the model"),
+            orchestrator=_FakeTurnOrchestrator(handler),
+        )
+    ]
+
+    assert events[0]["event"] == "error"
+    assert resources.knowledge_store.closed_exchanges[-1]["terminal_error"] == {
+        "code": "llm_budget_exhausted",
+        "retryable": False,
+    }
 
 
 @pytest.mark.runtime

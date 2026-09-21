@@ -733,6 +733,7 @@ class KnowledgeStore:
         user_message_id: int,
         outcome: str,
         closed_at_ms: int | None = None,
+        terminal_error: dict[str, object] | None = None,
     ) -> ExchangeClosure:
         """Close a clarification, failure, cancellation, or user-only turn."""
 
@@ -743,6 +744,7 @@ class KnowledgeStore:
             user_message_id=user_message_id,
             outcome=outcome,
             closed_at_ms=closed_at_ms,
+            terminal_error=terminal_error,
         )
 
     async def get_project_artifact(

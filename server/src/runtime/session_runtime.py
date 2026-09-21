@@ -279,6 +279,10 @@ class SessionRuntime:
         """Execute one already-persisted, exclusively admitted run."""
 
         exchange_outcome = "failed"
+        terminal_error: dict[str, object] = {
+            "code": "run_failed",
+            "retryable": True,
+        }
         # Source candidates are authorized while the Agent run is admitted.
         # Keep that scope through finalization retries instead of consulting a
         # mutable runtime list after the response has been produced.
@@ -368,6 +372,7 @@ class SessionRuntime:
                     exchange_outcome = "clarification"
                 elif event["event"] == "error":
                     exchange_outcome = "failed"
+                    terminal_error = self._terminal_error_record(event.get("data"))
                 yield event
                 if event["event"] in {"response", "clarification", "error"}:
                     return
@@ -379,6 +384,7 @@ class SessionRuntime:
                 )
         except asyncio.CancelledError:
             exchange_outcome = "cancelled"
+            terminal_error = {"code": "run_cancelled", "retryable": False}
             raise
         except Exception:
             exchange_outcome = "failed"
@@ -397,6 +403,7 @@ class SessionRuntime:
                     await self._close_user_exchange(
                         accepted.id,
                         outcome=exchange_outcome,
+                        terminal_error=terminal_error,
                     )
             except Exception:
                 # Never replace the original stream failure or cancellation with
@@ -566,6 +573,15 @@ class SessionRuntime:
             if hasattr(document_focus, "model_dump")
             else document_focus
         )
+        if isinstance(focus, dict):
+            # created_at and relative_path are produced while the adapter
+            # resolves the caller's stable document_id.
+            focus = {
+                key: value
+                for key, value in focus.items()
+                if key != "created_at"
+                and not (focus.get("target_type") == "document" and key == "relative_path")
+            }
         payload = {
             "query": message.content.strip(),
             "user_timezone": user_timezone,
@@ -585,6 +601,22 @@ class SessionRuntime:
             default=str,
         )
         return hashlib.sha256(encoded.encode()).hexdigest()
+
+    @staticmethod
+    def _terminal_error_record(data: object) -> dict[str, object]:
+        """Keep only public, server-owned failure semantics for durable replay."""
+
+        if isinstance(data, dict):
+            code = data.get("code")
+            retryability = {
+                "llm_budget_exhausted": False,
+                "workspace_conflict": False,
+                "run_cancelled": False,
+                "run_failed": True,
+            }
+            if code in retryability:
+                return {"code": code, "retryable": retryability[code]}
+        return {"code": "run_failed", "retryable": True}
 
     async def _persist_user_turn(
         self,
@@ -665,7 +697,11 @@ class SessionRuntime:
             message = "This request was completed without an agent response."
         else:
             raise RuntimeError("Accepted request has an invalid terminal outcome")
-        yield {"event": "error", "data": {"message": message}}
+        terminal_error = self._terminal_error_record(
+            exchange.terminal_error
+            or {"code": "run_cancelled" if outcome == "cancelled" else "run_failed"}
+        )
+        yield {"event": "error", "data": {"message": message, **terminal_error}}
 
     async def add_assistant_turn(
         self,
@@ -778,7 +814,13 @@ class SessionRuntime:
 
         await self._close_user_exchange(user_message_id, outcome="user_only")
 
-    async def _close_user_exchange(self, user_message_id: int, *, outcome: str) -> None:
+    async def _close_user_exchange(
+        self,
+        user_message_id: int,
+        *,
+        outcome: str,
+        terminal_error: dict[str, object] | None = None,
+    ) -> None:
         """Close one terminal non-assistant path before waking its project owner."""
 
         if not isinstance(user_message_id, int) or user_message_id <= 0:
@@ -794,6 +836,7 @@ class SessionRuntime:
                     user_message_id=user_message_id,
                     outcome=outcome,
                     closed_at_ms=closed_at_ms,
+                    terminal_error=terminal_error,
                 )
                 self._signal_exchange_closed()
                 return

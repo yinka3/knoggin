@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from time import time
 from typing import Any, Dict
@@ -209,6 +210,7 @@ class MessageLifecycleWriter:
         user_message_id: int,
         outcome: str,
         closed_at_ms: int | None = None,
+        terminal_error: dict[str, object] | None = None,
         cur=None,
     ) -> ExchangeClosure:
         """Seal and close a user exchange exactly once.
@@ -226,6 +228,24 @@ class MessageLifecycleWriter:
         }
         if outcome not in valid_outcomes:
             raise ValueError("Invalid exchange outcome")
+        if terminal_error is not None:
+            expected_retryability = {
+                "llm_budget_exhausted": False,
+                "workspace_conflict": False,
+                "run_failed": True,
+                "run_cancelled": False,
+            }
+            code = terminal_error.get("code")
+            if (
+                outcome not in {"failed", "cancelled"}
+                or code not in expected_retryability
+                or (outcome == "cancelled") != (code == "run_cancelled")
+                or terminal_error != {
+                    "code": code,
+                    "retryable": expected_retryability[code],
+                }
+            ):
+                raise ValueError("Invalid terminal error record")
         closed_at_ms = self._now_ms() if closed_at_ms is None else closed_at_ms
         if (
             not isinstance(closed_at_ms, int)
@@ -243,6 +263,7 @@ class MessageLifecycleWriter:
                     user_message_id=user_message_id,
                     outcome=outcome,
                     closed_at_ms=closed_at_ms,
+                    terminal_error=terminal_error,
                     cur=transaction_cursor,
                 )
 
@@ -303,7 +324,11 @@ class MessageLifecycleWriter:
                 sealed_at_ms = COALESCE(sealed_at_ms, %s),
                 exchange_state = 'closed',
                 exchange_outcome = %s,
-                exchange_closed_at_ms = %s
+                exchange_closed_at_ms = %s,
+                metadata = CASE
+                    WHEN %s::jsonb IS NULL THEN metadata
+                    ELSE jsonb_set(metadata, '{terminal_error}', %s::jsonb, true)
+                END
             WHERE user_name = %s
               AND project_id = %s
               AND session_id = %s
@@ -316,6 +341,8 @@ class MessageLifecycleWriter:
                 closed_at_ms,
                 outcome,
                 closed_at_ms,
+                json.dumps(terminal_error) if terminal_error is not None else None,
+                json.dumps(terminal_error) if terminal_error is not None else None,
                 user_name,
                 project_id,
                 session_id,

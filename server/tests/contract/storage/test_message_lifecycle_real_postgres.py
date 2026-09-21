@@ -535,6 +535,7 @@ async def test_real_postgres_failure_and_cancellation_close_user_evidence(real_p
         user_message_id=601,
         outcome="failed",
         closed_at_ms=3_000,
+        terminal_error={"code": "llm_budget_exhausted", "retryable": False},
     )
     await store.close_user_exchange(
         user_name="ada",
@@ -544,11 +545,23 @@ async def test_real_postgres_failure_and_cancellation_close_user_evidence(real_p
         outcome="cancelled",
         closed_at_ms=3_100,
     )
+    failed_exchange = await store.get_user_agent_exchange(
+        601,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-terminal",
+    )
+
+    assert failed_exchange is not None
+    assert failed_exchange.terminal_error == {
+        "code": "llm_budget_exhausted",
+        "retryable": False,
+    }
 
     assert await real_postgres_client.fetch_all(
         """
         SELECT message_id, lifecycle_state, exchange_state, exchange_outcome,
-               exchange_closed_at_ms
+               exchange_closed_at_ms, metadata -> 'terminal_error' AS terminal_error
         FROM public.messages
         WHERE session_id = 'session-terminal'
         ORDER BY message_id
@@ -560,6 +573,10 @@ async def test_real_postgres_failure_and_cancellation_close_user_evidence(real_p
             "exchange_state": "closed",
             "exchange_outcome": "failed",
             "exchange_closed_at_ms": 3_000,
+            "terminal_error": {
+                "code": "llm_budget_exhausted",
+                "retryable": False,
+            },
         },
         {
             "message_id": 602,
@@ -567,5 +584,6 @@ async def test_real_postgres_failure_and_cancellation_close_user_evidence(real_p
             "exchange_state": "closed",
             "exchange_outcome": "cancelled",
             "exchange_closed_at_ms": 3_100,
+            "terminal_error": None,
         },
     ]

@@ -25,6 +25,7 @@ class UserAgentExchange:
     assistant_content: str | None
     assistant_metadata: dict[str, Any]
     source_ref_ids: tuple[str, ...]
+    terminal_error: dict[str, Any] | None = None
 
 
 class MessageReader:
@@ -181,6 +182,7 @@ class MessageReader:
                 SELECT user_message.message_id AS user_message_id,
                        user_message.exchange_state,
                        user_message.exchange_outcome,
+                       user_message.metadata AS user_metadata,
                        assistant_message.message_id AS assistant_message_id,
                        assistant_message.content AS assistant_content,
                        assistant_message.metadata AS assistant_metadata,
@@ -226,6 +228,18 @@ class MessageReader:
                 metadata = {}
         if not isinstance(metadata, dict):
             metadata = {}
+        user_metadata = row.get("user_metadata") or {}
+        if isinstance(user_metadata, str):
+            try:
+                user_metadata = json.loads(user_metadata)
+            except (TypeError, ValueError):
+                user_metadata = {}
+        terminal_error = (
+            user_metadata.get("terminal_error")
+            if isinstance(user_metadata, dict)
+            and isinstance(user_metadata.get("terminal_error"), dict)
+            else None
+        )
         source_ref_ids = row.get("source_ref_ids") or []
         return UserAgentExchange(
             user_message_id=int(row["user_message_id"]),
@@ -247,6 +261,7 @@ class MessageReader:
             ),
             assistant_metadata=metadata,
             source_ref_ids=tuple(str(value) for value in source_ref_ids),
+            terminal_error=terminal_error,
         )
 
     async def get_message_text(
