@@ -98,6 +98,38 @@ async def test_project_context_read_failure_is_not_reported_as_missing_context()
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_project_context_list_failure_is_not_reported_as_empty_context():
+    reader = ProjectContextReader(
+        RecordingPostgresClient(fetch_all_exceptions=[RuntimeError("database down")])
+    )
+
+    with pytest.raises(StorageReadError) as error:
+        await reader.get_revision_blocks(
+            user_name="ada",
+            project_id="project-1",
+            revision_id="00000000-0000-0000-0000-000000000001",
+        )
+
+    assert error.value.details["operation"] == "get_revision_blocks"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_visible_session_failure_is_not_reported_as_no_sessions():
+    reader = MessageReader(
+        RecordingPostgresClient(fetch_all_exceptions=[RuntimeError("database down")])
+    )
+
+    with pytest.raises(StorageReadError) as error:
+        await reader.get_visible_session_ids(
+            user_name="ada", visible_project_ids=["project-1"]
+        )
+
+    assert error.value.details["operation"] == "get_visible_session_ids"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_message_write_failure_is_standardized():
     writer = MessageWriter(
         RecordingPostgresClient(
