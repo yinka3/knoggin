@@ -810,6 +810,26 @@ TOOL_SCHEMAS = [
                         "required": ["title", "blocks"],
                         "additionalProperties": False,
                     },
+                    "research_coverage": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "description": "Required in research modes: evidence or a gap for each material subquestion.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subquestion": {"type": "string", "minLength": 1},
+                                "supporting_references": {
+                                    "type": "array",
+                                    "maxItems": 12,
+                                    "items": {"type": "string", "minLength": 1},
+                                },
+                                "unresolved_gap": {"type": "string", "minLength": 1},
+                            },
+                            "required": ["subquestion", "supporting_references"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": ["content"],
                 "additionalProperties": False,

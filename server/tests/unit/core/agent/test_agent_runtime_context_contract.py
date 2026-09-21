@@ -97,7 +97,8 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert "`search_entity`: Found 1 items" in message
     assert '`edit_brain`: {\n  "success": true,' in message
     assert '"section": "Project Context"' in message
-    assert "`episode_check`: No results found." in message
+    assert "`episode_check`: No results found on this retrieval surface." in message
+    assert "Simplify or paraphrase the query" in message
     assert (
         "`read_observation_evidence`: Loaded observation support. "
         "(See accumulated notebook below)"

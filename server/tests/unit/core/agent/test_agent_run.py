@@ -312,6 +312,68 @@ def test_agent_run_requires_read_content_after_document_or_web_discovery():
 
 
 @pytest.mark.no_network
+def test_research_coverage_requires_each_material_part_to_have_evidence_or_a_gap():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    applied = run.accumulate_tool_result(
+        "search_messages",
+        {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
+    )
+    reference = applied.references[0]
+
+    assert run.validate_research_coverage(
+        [
+            {
+                "subquestion": "What changed?",
+                "supporting_references": [reference],
+            },
+            {
+                "subquestion": "Why did it change?",
+                "supporting_references": [],
+                "unresolved_gap": "The available evidence does not explain why.",
+            },
+        ]
+    ) is None
+    assert "needs evidence or an unresolved gap" in run.validate_research_coverage(
+        [
+            {
+                "subquestion": "Why did it change?",
+                "supporting_references": [],
+            }
+        ]
+    )
+
+
+@pytest.mark.no_network
+def test_research_coverage_rejects_discovery_only_and_unknown_references():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    discovery = run.accumulate_tool_result(
+        "web_search",
+        {"data": [{"title": "Result", "url": "https://example.test", "snippet": "Lead"}]},
+    ).references[0]
+
+    for reference in (discovery, "message:missing"):
+        error = run.validate_research_coverage(
+            [
+                {
+                    "subquestion": "What changed?",
+                    "supporting_references": [reference],
+                }
+            ]
+        )
+        assert "unknown or discovery-only" in error
+
+
+@pytest.mark.no_network
+def test_cosmetically_repeated_empty_query_forces_early_replan():
+    run = make_run(
+        limits=AgentRunLimits(empty_result_replan_threshold=3),
+    )
+
+    assert run.record_empty_result([("search_messages", {"query": "Project Alpha?"})]) is False
+    assert run.record_empty_result([("search_messages", {"query": " project   alpha "})]) is True
+
+
+@pytest.mark.no_network
 def test_deep_research_gap_review_is_due_once_after_grounded_evidence():
     run = make_run(research_profile=resolve_research_profile("deep_research"))
 
@@ -409,7 +471,12 @@ class CompletingLLM:
                 "calls": [
                     {
                         "name": "submit_answer",
-                        "arguments": '{"content": "Done"}',
+                        "arguments": (
+                            '{"content": "Done", "research_coverage": ['
+                            '{"subquestion": "What changed?", '
+                            '"supporting_references": [], '
+                            '"unresolved_gap": "No notebook evidence was needed."}]}'
+                        ),
                         "id": "submit-1",
                     }
                 ],

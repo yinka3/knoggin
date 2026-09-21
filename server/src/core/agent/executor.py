@@ -365,6 +365,13 @@ class AgentExecutor:
                             )
                             step_failed = True
                             break
+                        coverage_error = self.ctx.validate_research_coverage(
+                            submit.args.get("research_coverage")
+                        )
+                        if coverage_error is not None:
+                            self._record_step_error(coverage_error, "research")
+                            step_failed = True
+                            break
                         artifact = None
                         raw_artifact = submit.args.get("artifact")
                         if raw_artifact is not None:
@@ -470,7 +477,9 @@ class AgentExecutor:
                         needs_replan = True
                         self.ctx.clear_empty_results()
                     elif all_empty:
-                        if self.ctx.record_empty_result():
+                        if self.ctx.record_empty_result(
+                            [(call.name, call.args) for call in pending_tool_calls]
+                        ):
                             logger.info(
                                 f"AgentExecutor: "
                                 f"{self.ctx.consecutive_empty_results} "

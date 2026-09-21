@@ -201,6 +201,8 @@ def _research_mode_guidance(profile: ResearchProfile) -> str:
             "pages, and corroborate important findings. Fill gaps with additional "
             "searches. The executor requires grounded investigation evidence "
             "before a final answer. Finish with a concise research brief artifact."
+            " When calling submit_answer, include research_coverage with each "
+            "material subquestion, its admitted notebook references, or an explicit gap."
         )
     return (
         "Treat this as a deep investigation. Decompose the question into "
@@ -209,6 +211,8 @@ def _research_mode_guidance(profile: ResearchProfile) -> str:
         "before synthesis. The executor requires grounded investigation evidence "
         "and one gap-review pass before final synthesis. Finish with a structured "
         "research report artifact."
+        " When calling submit_answer, include research_coverage with each material "
+        "subquestion, its admitted notebook references, or an explicit gap."
     )
 
 

@@ -82,7 +82,7 @@ def build_user_message(
                         "(See accumulated notebook below)\n"
                     )
                 else:
-                    msg += f"- `{tool}`: No results found.\n"
+                    msg += _empty_retrieval_guidance(tool)
             elif tool in (
                 "search_messages",
                 "search_entity",
@@ -103,7 +103,7 @@ def build_user_message(
                         "(See accumulated notebook below)\n"
                     )
                 else:
-                    msg += f"- `{tool}`: No results found.\n"
+                    msg += _empty_retrieval_guidance(tool)
             elif tool == "read_observation_evidence":
                 if isinstance(data, dict) and data.get("subject"):
                     msg += (
@@ -111,7 +111,7 @@ def build_user_message(
                         "(See accumulated notebook below)\n"
                     )
                 else:
-                    msg += f"- `{tool}`: No results found.\n"
+                    msg += _empty_retrieval_guidance(tool)
             elif tool == "load_topic_context":
                 topic_context = data if isinstance(data, dict) else {}
                 if topic_context:
@@ -121,9 +121,9 @@ def build_user_message(
                         f"{format_topic_context(topic_context)}\n"
                     )
                 else:
-                    msg += f"- `{tool}`: No results found.\n"
+                    msg += _empty_retrieval_guidance(tool)
             elif not data:
-                msg += f"- `{tool}`: No results found\n"
+                msg += _empty_retrieval_guidance(tool)
             else:
                 msg += f"- `{tool}`: {json.dumps(data, indent=2, default=str)}\n"
 
@@ -132,6 +132,24 @@ def build_user_message(
         msg += build_evidence_context(ctx)
 
     return msg
+
+
+def _empty_retrieval_guidance(tool: str) -> str:
+    alternatives = {
+        "episode_check": "messages, entities, or documents",
+        "read_recent_episodes": "messages or recent activity",
+        "search_messages": "Episodes, entities, or documents",
+        "search_entity": "messages, Episodes, or documents",
+        "search_documents": "messages, Episodes, or entities",
+        "web_search": "a simpler query, synonyms, or project sources",
+        "news_search": "a broader date range, synonyms, or web search",
+        "read_web_page": "another discovered source",
+    }
+    alternative = alternatives.get(tool, "another retrieval surface")
+    return (
+        f"- `{tool}`: No results found on this retrieval surface. "
+        f"Simplify or paraphrase the query, or try {alternative}.\n"
+    )
 
 
 def _format_last_turn_context(last_turn_at: object) -> str:

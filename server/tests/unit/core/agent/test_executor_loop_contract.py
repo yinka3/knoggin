@@ -1101,7 +1101,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Draft from the read passage."}',
+                    '{"content": "Draft from the read passage.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "The exact notebook reference was not retained."}]}',
                     "submit-draft",
                 ),
                 completed_event(),
@@ -1109,7 +1109,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Final answer from the read passage."}',
+                    '{"content": "Final answer from the read passage.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "The exact notebook reference was not retained."}]}',
                     "submit-final",
                 ),
                 completed_event(),
@@ -1276,7 +1276,7 @@ async def test_research_accepts_validated_supplied_evidence_without_dispatch(
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Answer from supplied evidence."}',
+                    '{"content": "Answer from supplied evidence.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "Evidence was supplied outside the run notebook."}]}',
                     "submit-supplied",
                 ),
                 completed_event(),
@@ -1319,7 +1319,7 @@ async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatc
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Evidence is sufficient after review."}',
+                    '{"content": "Evidence is sufficient after review.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "Final notebook reference selection remains."}]}',
                     "submit-gap-review",
                 ),
                 completed_event(),
@@ -1327,7 +1327,7 @@ async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatc
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Final deep-research answer."}',
+                    '{"content": "Final deep-research answer.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "No material gap remains beyond the cited answer."}]}',
                     "submit-synthesis",
                 ),
                 completed_event(),
