@@ -6,7 +6,12 @@ from typing import Dict, Optional, Tuple
 
 from loguru import logger
 
-from common.exceptions import DependencyError, StorageError, ToolExecutionError
+from common.exceptions import (
+    DependencyError,
+    StorageError,
+    ToolExecutionError,
+    WorkspaceConflictError,
+)
 from common.schema.agent.tool_contracts import (
     READ_CAPABILITY,
     TOOL_SCHEMAS,
@@ -221,7 +226,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 result=result,
             )
         return {"data": result}
-    except ToolExecutionError:
+    except (ToolExecutionError, WorkspaceConflictError):
         if audit_id:
             await _safe_finish_tool_audit(
                 tools,

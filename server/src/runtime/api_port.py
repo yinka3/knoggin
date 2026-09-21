@@ -532,10 +532,17 @@ class ApplicationRuntimePort:
                     succeeded=True,
                 )
             elif event_name == "tool_error":
+                error_code = data.get("code")
                 yield event(
                     ToolCompletedEvent,
                     tool_name=str(data["tool"]),
                     succeeded=False,
+                    error_code=(
+                        error_code
+                        if error_code in {"tool_failed", "workspace_conflict"}
+                        else None
+                    ),
+                    retryable=bool(data.get("retryable", False)),
                 )
             elif event_name == "response":
                 if response_seen:
@@ -575,12 +582,25 @@ class ApplicationRuntimePort:
                 )
             elif event_name == "error":
                 terminal_seen = True
+                error_code = data.get("code")
+                if error_code == "llm_budget_exhausted":
+                    public_code = "llm_budget_exhausted"
+                    message = "The model budget is exhausted."
+                    retryable = False
+                elif error_code == "workspace_conflict":
+                    public_code = "workspace_conflict"
+                    message = "The workspace changed before the request could be applied."
+                    retryable = False
+                else:
+                    public_code = "run_failed"
+                    message = "The response could not be completed or saved."
+                    retryable = True
                 yield event(
                     RunFailedEvent,
                     error=PublicError(
-                        code="run_failed",
-                        message="The response could not be completed or saved.",
-                        retryable=True,
+                        code=public_code,
+                        message=message,
+                        retryable=retryable,
                         run_id=run_id,
                     ),
                 )

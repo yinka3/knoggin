@@ -19,6 +19,7 @@ from common.exceptions import (
     ConfigurationError,
     DependencyError,
     IdempotencyConflictError,
+    LLMBudgetExceededError,
     LLMProviderError,
     LLMResponseError,
     NotFoundError,
@@ -27,6 +28,7 @@ from common.exceptions import (
     SessionBusyError,
     StorageError,
     ToolExecutionError,
+    WorkspaceConflictError,
 )
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
@@ -386,6 +388,11 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "This request did not reach a durable outcome. Submit a new request to retry.",
         False,
     ),
+    WorkspaceConflictError: (
+        "workspace_conflict",
+        "The workspace changed before the request could be applied.",
+        False,
+    ),
     StorageError: (
         "storage_unavailable",
         "Storage is temporarily unavailable.",
@@ -401,10 +408,10 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "The model returned an invalid response.",
         False,
     ),
-    ToolExecutionError: (
-        "tool_failed",
-        "A tool could not complete the request.",
-        True,
+    LLMBudgetExceededError: (
+        "llm_budget_exhausted",
+        "The model budget is exhausted.",
+        False,
     ),
 }
 
@@ -417,14 +424,21 @@ def to_public_error(
 ) -> PublicError:
     """Convert an internal exception without exposing details or stack text."""
 
-    projection = next(
-        (
-            value
-            for error_type, value in _PUBLIC_ERROR_PROJECTIONS.items()
-            if isinstance(error, error_type)
-        ),
-        None,
-    )
+    if isinstance(error, ToolExecutionError):
+        projection = (
+            "tool_failed",
+            "A tool could not complete the request.",
+            error.retryable,
+        )
+    else:
+        projection = next(
+            (
+                value
+                for error_type, value in _PUBLIC_ERROR_PROJECTIONS.items()
+                if isinstance(error, error_type)
+            ),
+            None,
+        )
     if projection is None:
         code, message, retryable = (
             ("invalid_request", "The request is invalid.", False)
@@ -470,6 +484,8 @@ class ToolCompletedEvent(_StreamEvent):
     type: Literal["tool.completed"] = "tool.completed"
     tool_name: str = Field(min_length=1)
     succeeded: bool
+    error_code: Literal["tool_failed", "workspace_conflict"] | None = None
+    retryable: bool | None = None
 
 
 class SourceAddedEvent(_StreamEvent):

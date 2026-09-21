@@ -703,6 +703,9 @@ CREATE TABLE public.project_documents (
     content_hash text NOT NULL,
     current_snapshot_id uuid,
     status text DEFAULT 'queued'::text NOT NULL,
+    index_attempt_count integer DEFAULT 0 NOT NULL,
+    next_index_retry_at timestamp with time zone,
+    last_index_failure_kind text,
     deleted_at timestamp with time zone,
     indexed_at timestamp with time zone,
     error_message text,
@@ -710,6 +713,8 @@ CREATE TABLE public.project_documents (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT project_documents_relative_path_size_check CHECK (((octet_length(relative_path) >= 1) AND (octet_length(relative_path) <= 2048))),
     CONSTRAINT project_documents_size_check CHECK ((size_bytes >= 0)),
+    CONSTRAINT project_documents_index_attempt_count_check CHECK ((index_attempt_count >= 0)),
+    CONSTRAINT project_documents_index_failure_kind_check CHECK (((last_index_failure_kind IS NULL) OR (last_index_failure_kind = ANY (ARRAY['transient_dependency'::text, 'invalid_content'::text])))),
     CONSTRAINT project_documents_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'indexing'::text, 'indexed'::text, 'failed'::text, 'deleted'::text])))
 );
 CREATE TABLE public.project_file_cleanup_tasks (
@@ -1231,6 +1236,7 @@ CREATE INDEX project_semantic_windows_retry_idx ON public.project_semantic_windo
 CREATE INDEX project_artifacts_project_updated_idx ON public.project_artifacts USING btree (project_id, updated_at DESC);
 CREATE INDEX project_artifacts_session_updated_idx ON public.project_artifacts USING btree (session_id, updated_at DESC);
 CREATE INDEX project_documents_hash_idx ON public.project_documents USING btree (project_id, content_hash);
+CREATE INDEX project_documents_retry_idx ON public.project_documents USING btree (project_id, next_index_retry_at) WHERE ((status = ANY (ARRAY['queued'::text, 'failed'::text])) AND (next_index_retry_at IS NOT NULL));
 CREATE UNIQUE INDEX project_documents_live_path_idx ON public.project_documents USING btree (project_id, relative_path) WHERE (status <> 'deleted'::text);
 CREATE INDEX project_documents_project_idx ON public.project_documents USING btree (project_id, created_at DESC);
 CREATE INDEX project_file_cleanup_tasks_user_idx ON public.project_file_cleanup_tasks USING btree (user_name, created_at, project_id);

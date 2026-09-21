@@ -562,7 +562,13 @@ class DocumentService:
         for key in ("document_id", "current_snapshot_id"):
             if metadata.get(key) is not None:
                 metadata[key] = str(metadata[key])
-        for key in ("created_at", "updated_at", "indexed_at", "deleted_at"):
+        for key in (
+            "created_at",
+            "updated_at",
+            "indexed_at",
+            "deleted_at",
+            "next_index_retry_at",
+        ):
             value = metadata.get(key)
             if isinstance(value, datetime):
                 metadata[key] = value.isoformat()

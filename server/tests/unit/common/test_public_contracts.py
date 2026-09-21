@@ -3,7 +3,12 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from common.exceptions import DependencyError, ToolExecutionError
+from common.exceptions import (
+    DependencyError,
+    LLMBudgetExceededError,
+    ToolExecutionError,
+    WorkspaceConflictError,
+)
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
@@ -186,11 +191,20 @@ def test_public_errors_use_safe_stable_projection_and_drop_internal_details():
     assert error == PublicError(
         code="tool_failed",
         message="A tool could not complete the request.",
-        retryable=True,
+        retryable=False,
         request_id="request-1",
         run_id="run-1",
     )
     assert "secret-host" not in error.model_dump_json()
+    assert to_public_error(
+        ToolExecutionError("search_messages", "temporary outage", retryable=True)
+    ).retryable is True
+    assert to_public_error(LLMBudgetExceededError("secret budget details")).code == (
+        "llm_budget_exhausted"
+    )
+    assert to_public_error(WorkspaceConflictError("secret file name")).code == (
+        "workspace_conflict"
+    )
     assert to_public_error(ValueError("bad input")).code == "invalid_request"
     assert to_public_error(DependencyError("service password")).retryable is True
 

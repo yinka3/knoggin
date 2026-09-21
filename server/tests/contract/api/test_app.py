@@ -6,8 +6,11 @@ import pytest
 from api.app import create_app
 from common.exceptions import (
     IdempotencyConflictError,
+    LLMBudgetExceededError,
     SessionBusyError,
     StorageReadError,
+    ToolExecutionError,
+    WorkspaceConflictError,
 )
 from common.schema.artifacts import (
     ArtifactDraft,
@@ -19,7 +22,10 @@ from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
     ProjectResponse,
+    PublicError,
+    RunFailedEvent,
     RunResult,
+    RunStartedEvent,
     SessionResponse,
     StartRunRequest,
 )
@@ -63,6 +69,7 @@ class FakeApplication:
     def __init__(self):
         self.calls = []
         self.fail_projects = False
+        self.project_error = None
         self.artifact, self.artifact_revision = _artifact_payloads()
         self.document_focus = None
 
@@ -70,6 +77,8 @@ class FakeApplication:
         self.calls.append(("project", user_name, request))
         if self.fail_projects:
             raise StorageReadError("postgres://secret should never leak")
+        if self.project_error is not None:
+            raise self.project_error
         return ProjectResponse(
             id="project-1",
             name=request.name,
@@ -241,6 +250,22 @@ class FakeApplication:
 class BrokenStreamApplication(FakeApplication):
     async def run_stream(self, *, user_name, request: StartRunRequest):
         yield {"type": "private.tool.payload", "secret": "do not expose"}
+
+
+class PublicRunFailureApplication(FakeApplication):
+    def __init__(self, error: PublicError):
+        super().__init__()
+        self.error = error
+
+    async def run_stream(self, *, user_name, request: StartRunRequest):
+        now = datetime.now(timezone.utc)
+        yield RunStartedEvent(run_id="run-1", sequence=0, timestamp=now)
+        yield RunFailedEvent(
+            run_id="run-1",
+            sequence=1,
+            timestamp=now,
+            error=self.error.model_copy(update={"run_id": "run-1"}),
+        )
 
 
 class BusyRunApplication(FakeApplication):
@@ -545,6 +570,40 @@ async def test_invalid_stream_event_becomes_sanitized_terminal_failure():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (
+            PublicError(
+                code="workspace_conflict",
+                message="The workspace changed before the request could be applied.",
+            ),
+            409,
+        ),
+        (
+            PublicError(
+                code="llm_budget_exhausted",
+                message="The model budget is exhausted.",
+            ),
+            429,
+        ),
+    ],
+)
+async def test_run_terminal_error_uses_its_public_http_status(error, status):
+    app = create_app(PublicRunFailureApplication(error))
+
+    async with await _client(app) as client:
+        response = await client.post(
+            "/v1/runs",
+            json={"session_id": "session-1", "query": "Update notes"},
+        )
+
+    assert response.status_code == status
+    assert response.json()["error"]["code"] == error.code
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_api_errors_have_stable_sanitized_public_shape():
     port = FakeApplication()
     port.fail_projects = True
@@ -573,3 +632,30 @@ async def test_api_errors_have_stable_sanitized_public_shape():
     assert "secret" not in storage.text
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("error", "status", "code", "retryable"),
+    [
+        (WorkspaceConflictError("secret workspace path"), 409, "workspace_conflict", False),
+        (LLMBudgetExceededError("secret budget value"), 429, "llm_budget_exhausted", False),
+        (ToolExecutionError("search", "secret timeout", retryable=True), 503, "tool_failed", True),
+        (ToolExecutionError("search", "secret invalid input"), 502, "tool_failed", False),
+    ],
+)
+async def test_api_projects_preserve_public_error_retryability(
+    error, status, code, retryable
+):
+    port = FakeApplication()
+    port.project_error = error
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        response = await client.post("/v1/projects", json={"name": "Research"})
+
+    assert response.status_code == status
+    assert response.json()["error"]["code"] == code
+    assert response.json()["error"]["retryable"] is retryable
+    assert "secret" not in response.text

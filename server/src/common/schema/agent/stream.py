@@ -81,6 +81,8 @@ class StepCompletedEvent(_StrictStreamDict):
 class StepErrorData(_StrictStreamDict):
     message: str
     kind: Literal["provider", "formatting"]
+    code: NotRequired[Literal["llm_budget_exhausted"]]
+    retryable: NotRequired[StrictBool]
     usage: NotRequired[StreamUsage]
 
 
@@ -125,6 +127,8 @@ class ToolErrorData(_StrictStreamDict):
     tool: NonBlankString
     error: NonBlankString
     call_id: NonBlankString
+    code: NotRequired[Literal["tool_failed", "workspace_conflict"]]
+    retryable: NotRequired[StrictBool]
 
 
 class ToolErrorEvent(_StrictStreamDict):
@@ -167,6 +171,8 @@ class ClarificationEvent(_StrictStreamDict):
 
 class ErrorData(_StrictStreamDict):
     message: NonBlankString
+    code: NotRequired[Literal["llm_budget_exhausted", "workspace_conflict"]]
+    retryable: NotRequired[StrictBool]
 
 
 class ErrorEvent(_StrictStreamDict):

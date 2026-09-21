@@ -13,9 +13,11 @@ from loguru import logger
 
 from common.exceptions import (
     ConfigurationError,
+    LLMBudgetExceededError,
     LLMError,
     StorageReadError,
     ToolExecutionError,
+    WorkspaceConflictError,
 )
 from common.schema.agent.stream import (
     AgentExecutionEvent,
@@ -303,6 +305,12 @@ class AgentExecutor:
 
                 if event_type == "step_error":
                     self._accumulate_usage(data.get("usage"))
+                    if data.get("code") == "llm_budget_exhausted":
+                        yield self._terminal_error(
+                            code="llm_budget_exhausted",
+                            retryable=False,
+                        )
+                        return
                     self._record_step_error(data["message"], data["kind"])
                     step_failed = True
                     break
@@ -605,6 +613,17 @@ class AgentExecutor:
                     }
                 else:
                     yield event
+        except LLMBudgetExceededError:
+            logger.info("LLM budget exhausted before a provider request")
+            yield {
+                "event": "step_error",
+                "data": {
+                    "kind": "provider",
+                    "message": "LLM budget exhausted",
+                    "code": "llm_budget_exhausted",
+                    "retryable": False,
+                },
+            }
         except (ConfigurationError, LLMError) as e:
             logger.error(f"LLM API Stream failed: {e}")
             yield {
@@ -764,11 +783,21 @@ class AgentExecutor:
             f"{self.ctx.limits.max_consecutive_errors}): {message}"
         )
 
-    def _terminal_error(self) -> ErrorEvent:
+    def _terminal_error(
+        self,
+        *,
+        code: str | None = None,
+        retryable: bool | None = None,
+    ) -> ErrorEvent:
         self.ctx.finish_without_response()
+        data: dict = {"message": PUBLIC_AGENT_FAILURE_MESSAGE}
+        if code is not None:
+            data["code"] = code
+        if retryable is not None:
+            data["retryable"] = retryable
         return {
             "event": "error",
-            "data": {"message": PUBLIC_AGENT_FAILURE_MESSAGE},
+            "data": data,
         }
 
     @staticmethod
@@ -936,6 +965,22 @@ class AgentExecutor:
                         "tool": call.name,
                         "error": message,
                         "call_id": call.call_id,
+                        "code": "tool_failed",
+                        "retryable": True,
+                    },
+                }
+            except WorkspaceConflictError:
+                message = "Workspace changed before the operation could be applied"
+                self.ctx.note_nonfatal_error(message)
+                results_out.append({"tool": call.name, "error": message})
+                yield {
+                    "event": "tool_error",
+                    "data": {
+                        "tool": call.name,
+                        "error": message,
+                        "call_id": call.call_id,
+                        "code": "workspace_conflict",
+                        "retryable": False,
                     },
                 }
             except ToolExecutionError as e:
@@ -958,6 +1003,8 @@ class AgentExecutor:
                         "tool": call.name,
                         "error": e.message,
                         "call_id": call.call_id,
+                        "code": "tool_failed",
+                        "retryable": e.retryable,
                     },
                 }
             except Exception as e:

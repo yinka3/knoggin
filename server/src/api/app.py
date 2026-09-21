@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from common.exceptions import (
     DependencyError,
     IdempotencyConflictError,
+    LLMBudgetExceededError,
     LLMProviderError,
     NotFoundError,
     RequestInProgressError,
@@ -31,6 +32,7 @@ from common.exceptions import (
     SessionBusyError,
     StorageError,
     ToolExecutionError,
+    WorkspaceConflictError,
 )
 from common.schema.public import (
     ArtifactListResponse,
@@ -475,6 +477,10 @@ def _status_for_error(error: Exception) -> int:
             return 422
         if error.error.code == "not_found":
             return 404
+        if error.error.code == "workspace_conflict":
+            return 409
+        if error.error.code == "llm_budget_exhausted":
+            return 429
         return 503 if error.error.retryable else 502
     if isinstance(error, UnsupportedOperation):
         return 501
@@ -488,6 +494,10 @@ def _status_for_error(error: Exception) -> int:
         ),
     ):
         return 409
+    if isinstance(error, WorkspaceConflictError):
+        return 409
+    if isinstance(error, LLMBudgetExceededError):
+        return 429
     if isinstance(error, (ValueError, ValidationError, RequestValidationError)):
         return 422
     if isinstance(error, NotFoundError):
@@ -498,7 +508,7 @@ def _status_for_error(error: Exception) -> int:
     ):
         return 503
     if isinstance(error, ToolExecutionError):
-        return 502
+        return 503 if error.retryable else 502
     return 500
 
 

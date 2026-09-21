@@ -343,6 +343,50 @@ async def test_runtime_port_translates_project_session_and_research_stream(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_runtime_port_projects_stable_terminal_and_tool_failure_codes(port):
+    application, runtime, _ = port
+
+    class FailureSession(FakeSession):
+        async def _events(self):
+            yield {
+                "event": "tool_error",
+                "data": {
+                    "tool": "update_project_file",
+                    "error": "private stale hash",
+                    "call_id": "call-1",
+                    "code": "workspace_conflict",
+                    "retryable": False,
+                },
+            }
+            yield {
+                "event": "error",
+                "data": {
+                    "message": "private budget details",
+                    "code": "llm_budget_exhausted",
+                    "retryable": False,
+                },
+            }
+
+    runtime.sessions.session = FailureSession()
+    events = [
+        event
+        async for event in application.run_stream(
+            user_name="ada",
+            request=StartRunRequest(session_id="session-1", query="Update notes"),
+        )
+    ]
+
+    parsed = validate_public_stream(events, require_terminal=True)
+    tool_failure = next(event for event in parsed if event.type == "tool.completed")
+    assert tool_failure.error_code == "workspace_conflict"
+    assert tool_failure.retryable is False
+    assert parsed[-1].error.code == "llm_budget_exhausted"
+    assert parsed[-1].error.retryable is False
+    assert "private" not in parsed[-1].error.message
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_runtime_port_rejects_other_user_and_missing_session(port):
     application, _, _ = port
 

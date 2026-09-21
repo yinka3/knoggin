@@ -2,8 +2,10 @@
 
 import json
 import uuid
+from datetime import timedelta
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+from common.utils.time_utils import parse_iso_time
 from infrastructure.postgres_client import PostgresClient
 
 if TYPE_CHECKING:
@@ -158,6 +160,9 @@ class DocumentWriter:
                 deleted_at = COALESCE(deleted_at, now()),
                 indexed_at = NULL,
                 error_message = NULL,
+                index_attempt_count = 0,
+                next_index_retry_at = NULL,
+                last_index_failure_kind = NULL,
                 updated_at = now()
             WHERE document_id = %s
               AND project_id = %s
@@ -172,6 +177,9 @@ class DocumentWriter:
                 content_hash,
                 current_snapshot_id,
                 status,
+                index_attempt_count,
+                next_index_retry_at,
+                last_index_failure_kind,
                 created_at,
                 updated_at,
                 indexed_at,
@@ -199,6 +207,7 @@ class DocumentWriter:
         status: str,
         allowed_statuses: tuple[str, ...],
         updated_at: str,
+        reset_attempts: bool = False,
     ) -> Optional[Dict]:
         """Atomically transition one project-owned document into a work state."""
         allowed = tuple(allowed_statuses)
@@ -213,6 +222,15 @@ class DocumentWriter:
                         ELSE indexed_at
                     END,
                     error_message = NULL,
+                    index_attempt_count = CASE
+                        WHEN %s THEN 0
+                        ELSE index_attempt_count
+                    END,
+                    next_index_retry_at = NULL,
+                    last_index_failure_kind = CASE
+                        WHEN %s THEN NULL
+                        ELSE last_index_failure_kind
+                    END,
                     updated_at = %s
                 WHERE document_id = %s
                   AND project_id = %s
@@ -227,6 +245,9 @@ class DocumentWriter:
                     content_hash,
                     current_snapshot_id,
                     status,
+                    index_attempt_count,
+                    next_index_retry_at,
+                    last_index_failure_kind,
                     created_at,
                     updated_at,
                     indexed_at,
@@ -234,6 +255,8 @@ class DocumentWriter:
                 """,
                 (
                     status,
+                    reset_attempts,
+                    reset_attempts,
                     updated_at,
                     document_id,
                     self._project_id,
@@ -249,10 +272,8 @@ class DocumentWriter:
             """
             UPDATE public.project_documents
             SET
-                status = CASE
-                    WHEN current_snapshot_id IS NULL THEN 'queued'
-                    ELSE 'indexed'
-                END,
+                status = 'queued',
+                next_index_retry_at = NULL,
                 updated_at = %s
             WHERE project_id = %s
               AND status = 'indexing'
@@ -275,14 +296,8 @@ class DocumentWriter:
             """
             UPDATE public.project_documents
             SET
-                status = CASE
-                    WHEN current_snapshot_id IS NULL THEN 'queued'
-                    ELSE 'indexed'
-                END,
-                indexed_at = CASE
-                    WHEN current_snapshot_id IS NULL THEN NULL
-                    ELSE indexed_at
-                END,
+                status = 'queued',
+                next_index_retry_at = NULL,
                 error_message = NULL,
                 updated_at = %s
             WHERE project_id = %s
@@ -331,6 +346,9 @@ class DocumentWriter:
                     content_hash,
                     current_snapshot_id,
                     status,
+                    index_attempt_count,
+                    next_index_retry_at,
+                    last_index_failure_kind,
                     created_at,
                     updated_at,
                     indexed_at,
@@ -412,6 +430,9 @@ class DocumentWriter:
                     status = 'indexed',
                     indexed_at = %s,
                     error_message = NULL,
+                    index_attempt_count = 0,
+                    next_index_retry_at = NULL,
+                    last_index_failure_kind = NULL,
                     updated_at = %s
                 WHERE document_id = %s
                 RETURNING
@@ -424,6 +445,9 @@ class DocumentWriter:
                     content_hash,
                     current_snapshot_id,
                     status,
+                    index_attempt_count,
+                    next_index_retry_at,
+                    last_index_failure_kind,
                     created_at,
                     updated_at,
                     indexed_at,
@@ -443,17 +467,28 @@ class DocumentWriter:
         *,
         document_id: str,
         error_message: str,
+        failure_kind: str,
+        retryable: bool,
+        max_attempts: int,
+        retry_backoff_seconds: int,
         updated_at: str,
-    ) -> None:
+    ) -> Dict | None:
         """
-        A failed first index has no usable projection and becomes ``failed``.
-        A failed reindex keeps the previous snapshot and stays readable as
-        ``indexed``; the error records why the newer parse was not published.
+        Record one classified failure and either schedule a bounded retry or
+        leave it failed for explicit user retry. Existing snapshots remain
+        queryable because publication never starts until this method succeeds.
         """
+        if failure_kind not in {"transient_dependency", "invalid_content"}:
+            raise ValueError("failure_kind is not supported")
+        if max_attempts < 1 or retry_backoff_seconds < 1:
+            raise ValueError("retry policy must be positive")
+        now = parse_iso_time(updated_at)
+        if now is None:
+            raise ValueError("updated_at must be an ISO timestamp")
         async with self._client.transaction() as cur:
             await cur.execute(
                 """
-                        SELECT status, current_snapshot_id
+                        SELECT status, current_snapshot_id, index_attempt_count
                         FROM public.project_documents
                         WHERE document_id = %s
                           AND project_id = %s
@@ -462,44 +497,63 @@ class DocumentWriter:
                 (document_id, self._project_id),
             )
             row = await cur.fetchone()
-            if row is None or row["status"] == "indexed":
-                return
-
-            if row["current_snapshot_id"] is not None:
+            if row is None or row["status"] != "indexing":
+                return None
+            attempt_count = int(row["index_attempt_count"]) + 1
+            should_retry = retryable and attempt_count < max_attempts
+            retry_at = (
+                now + timedelta(seconds=retry_backoff_seconds * (2 ** (attempt_count - 1)))
+                if should_retry
+                else None
+            )
+            if row["current_snapshot_id"] is None:
                 await cur.execute(
                     """
-                    UPDATE public.project_documents
-                    SET
-                        status = 'indexed',
-                        error_message = %s,
-                        updated_at = %s
+                    DELETE FROM public.document_chunks
                     WHERE document_id = %s
-                      AND status = 'indexing'
                     """,
-                    (error_message, updated_at, document_id),
+                    (document_id,),
                 )
-                return
-
             await cur.execute(
                 """
-                        DELETE FROM public.document_chunks
-                        WHERE document_id = %s
-                        """,
-                (document_id,),
+                UPDATE public.project_documents
+                SET
+                    status = CASE WHEN %s THEN 'queued' ELSE 'failed' END,
+                    indexed_at = CASE
+                        WHEN current_snapshot_id IS NULL THEN NULL
+                        ELSE indexed_at
+                    END,
+                    error_message = %s,
+                    index_attempt_count = %s,
+                    next_index_retry_at = %s,
+                    last_index_failure_kind = %s,
+                    updated_at = %s
+                WHERE document_id = %s
+                  AND project_id = %s
+                  AND status = 'indexing'
+                RETURNING
+                    document_id,
+                    project_id,
+                    current_snapshot_id,
+                    status,
+                    index_attempt_count,
+                    next_index_retry_at,
+                    last_index_failure_kind,
+                    error_message
+                """,
+                (
+                    should_retry,
+                    error_message,
+                    attempt_count,
+                    retry_at.isoformat() if retry_at is not None else None,
+                    failure_kind,
+                    updated_at,
+                    document_id,
+                    self._project_id,
+                ),
             )
-            await cur.execute(
-                """
-                        UPDATE public.project_documents
-                        SET
-                            status = 'failed',
-                            indexed_at = NULL,
-                            error_message = %s,
-                            updated_at = %s
-                        WHERE document_id = %s
-                          AND status <> 'indexed'
-                        """,
-                (error_message, updated_at, document_id),
-            )
+            updated = await cur.fetchone()
+            return dict(updated) if updated else None
 
     async def upsert_scan_settings(
         self,

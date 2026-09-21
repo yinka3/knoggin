@@ -14,6 +14,7 @@ from common.schema.document import (
     FolderScanSettings,
     FolderUploadEntry,
 )
+from common.utils.time_utils import frozen_time
 from core.knowledge.documents import (
     DocumentIndexPolicy,
     DocumentService,
@@ -192,11 +193,29 @@ class MemoryPostgres:
             return [
                 {
                     "count": sum(
-                        row["project_id"] == project_id and row["status"] == "queued"
+                        row["project_id"] == project_id
+                        and (
+                            row["status"] == "queued"
+                            or (
+                                row["status"] == "failed"
+                                and row.get("next_index_retry_at") is not None
+                            )
+                        )
                         for row in self.rows
                     )
                 }
             ]
+
+        if "MIN(next_index_retry_at) AS next_index_retry_at" in query:
+            project_id = params[0]
+            candidates = [
+                row.get("next_index_retry_at")
+                for row in self.rows
+                if row["project_id"] == project_id
+                and row["status"] in {"queued", "failed"}
+                and row.get("next_index_retry_at") is not None
+            ]
+            return [{"next_index_retry_at": min(candidates) if candidates else None}]
 
         if (
             "FROM public.project_documents" in query
@@ -204,12 +223,25 @@ class MemoryPostgres:
             and "LIMIT %s" in query
             and "pd." not in query
         ):
-            project_id, limit = params
+            project_id, due_at, _failed_due_at, limit = params
             return [
                 deepcopy(row)
                 for row in self.rows
                 if row["project_id"] == project_id
-                and row["status"] == "queued"
+                and (
+                    (
+                        row["status"] == "queued"
+                        and (
+                            row.get("next_index_retry_at") is None
+                            or row["next_index_retry_at"] <= due_at
+                        )
+                    )
+                    or (
+                        row["status"] == "failed"
+                        and row.get("next_index_retry_at") is not None
+                        and row["next_index_retry_at"] <= due_at
+                    )
+                )
             ][:limit]
         if "FROM public.project_document_scan_settings" in query:
             row = self.scan_settings.get(params[0])
@@ -431,7 +463,15 @@ class MemoryCursor:
             normalized.startswith("UPDATE public.project_documents")
             and "SET status = %s" in normalized
         ):
-            status, updated_at, document_id, project_id, allowed = params
+            (
+                status,
+                reset_attempts,
+                _clear_failure_kind,
+                updated_at,
+                document_id,
+                project_id,
+                allowed,
+            ) = params
             row = next(
                 (
                     row
@@ -450,6 +490,15 @@ class MemoryCursor:
                         "status": status,
                         "indexed_at": None,
                         "error_message": None,
+                        "index_attempt_count": (
+                            0 if reset_attempts else row.get("index_attempt_count", 0)
+                        ),
+                        "next_index_retry_at": None,
+                        "last_index_failure_kind": (
+                            None
+                            if reset_attempts
+                            else row.get("last_index_failure_kind")
+                        ),
                         "updated_at": updated_at,
                     }
                 )
@@ -579,6 +628,9 @@ class MemoryCursor:
                         "content_hash": content_hash,
                         "current_snapshot_id": None,
                         "status": "queued",
+                        "index_attempt_count": 0,
+                        "next_index_retry_at": None,
+                        "last_index_failure_kind": None,
                         "deleted_at": None,
                         "indexed_at": None,
                         "error_message": None,
@@ -618,6 +670,51 @@ class MemoryCursor:
                     "status": "indexed",
                     "indexed_at": indexed_at,
                     "error_message": None,
+                    "index_attempt_count": 0,
+                    "next_index_retry_at": None,
+                    "last_index_failure_kind": None,
+                    "updated_at": updated_at,
+                }
+            )
+            self.result = dict(row)
+            return
+
+        if "SET status = CASE WHEN %s THEN 'queued' ELSE 'failed' END" in normalized:
+            (
+                should_retry,
+                error_message,
+                attempt_count,
+                retry_at,
+                failure_kind,
+                updated_at,
+                document_id,
+                project_id,
+            ) = params
+            row = next(
+                (
+                    row
+                    for row in self.postgres.rows
+                    if row["document_id"] == document_id
+                    and row["project_id"] == project_id
+                    and row["status"] == "indexing"
+                ),
+                None,
+            )
+            if row is None:
+                self.result = None
+                return
+            row.update(
+                {
+                    "status": "queued" if should_retry else "failed",
+                    "indexed_at": (
+                        row["indexed_at"]
+                        if row.get("current_snapshot_id") is not None
+                        else None
+                    ),
+                    "error_message": error_message,
+                    "index_attempt_count": attempt_count,
+                    "next_index_retry_at": retry_at,
+                    "last_index_failure_kind": failure_kind,
                     "updated_at": updated_at,
                 }
             )
@@ -1731,7 +1828,8 @@ async def test_document_service_search_embeds_query_with_project_scope(
     ]
     _, sql, params = postgres.calls[-1]
     assert "pd.project_id = ANY(%s)" in sql
-    assert "pd.status IN ('indexed', 'indexing')" in sql
+    assert "pd.status <> 'deleted'" in sql
+    assert "pd.current_snapshot_id IS NOT NULL" in sql
     assert "dc.snapshot_id = pd.current_snapshot_id" in sql
     assert "websearch_to_tsquery('simple', %s)" in sql
     assert "ts_rank_cd(vc.search_vector, sq.terms)" in sql
@@ -2182,6 +2280,54 @@ async def test_index_document_records_document_parser_errors(
 
     assert postgres.rows[0]["status"] == "failed"
     assert postgres.rows[0]["error_message"] == "damaged PDF"
+    assert postgres.rows[0]["index_attempt_count"] == 1
+    assert postgres.rows[0]["last_index_failure_kind"] == "invalid_content"
+    assert postgres.rows[0]["next_index_retry_at"] is None
+    assert await service.indexer.recover_pending_indexes() == 0
+    assert (
+        await service.schedule_document_index(document_id=uploaded["document_id"])
+    )["status"] == "failed"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_transient_embedding_failure_retries_from_durable_due_state(
+    document_harness,
+):
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
+    policy = DocumentIndexPolicy.capture(max_attempts=2, retry_backoff_seconds=1)
+    original_encode = service._embedding.encode
+    attempts = 0
+
+    async def fail_once(values):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("embedding provider unavailable")
+        return await original_encode(values)
+
+    service._embedding.encode = fail_once
+    with pytest.raises(RuntimeError, match="embedding provider unavailable"):
+        await service.index_document(document_id=uploaded["document_id"], policy=policy)
+
+    failed = postgres.rows[0]
+    assert failed["status"] == "queued"
+    assert failed["index_attempt_count"] == 1
+    assert failed["last_index_failure_kind"] == "transient_dependency"
+    assert failed["next_index_retry_at"] is not None
+    assert postgres.chunks == []
+
+    with frozen_time(failed["next_index_retry_at"]):
+        assert await service.indexer.recover_pending_indexes() == 1
+
+    recovered = postgres.rows[0]
+    assert recovered["status"] == "indexed"
+    assert recovered["index_attempt_count"] == 0
+    assert recovered["next_index_retry_at"] is None
+    assert recovered["last_index_failure_kind"] is None
+    assert len(postgres.chunks) == 1
+    assert attempts == 2
 
 
 @pytest.mark.storage

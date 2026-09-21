@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.exceptions import LLMProviderError
+from common.exceptions import LLMBudgetExceededError, LLMProviderError
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.research import resolve_research_profile
 from core.agent.executor import AgentExecutor
@@ -1962,6 +1962,37 @@ async def test_executor_provider_failure_reaches_terminal_error_and_releases():
     assert events[-1]["data"]["message"] == (
         "The agent couldn't complete this request. Please try again."
     )
+    assert run.sealed is True
+    assert run.released is True
+
+
+@pytest.mark.no_network
+async def test_executor_budget_exhaustion_is_terminal_without_step_retries():
+    class BudgetExhaustedLLM(ScriptedLLM):
+        async def stream_with_tools(self, **kwargs):
+            self.calls.append(kwargs)
+            raise LLMBudgetExceededError("private budget details")
+            yield  # pragma: no cover
+
+    llm = BudgetExhaustedLLM([])
+    run = make_run(limits=AgentRunLimits(max_attempts=3, max_consecutive_errors=3))
+    executor = AgentExecutor(
+        run,
+        llm,
+        SimpleNamespace(document_service=None),
+    )
+
+    events = [event async for event in executor.execute()]
+
+    assert len(llm.calls) == 1
+    assert events[-1] == {
+        "event": "error",
+        "data": {
+            "message": "The agent couldn't complete this request. Please try again.",
+            "code": "llm_budget_exhausted",
+            "retryable": False,
+        },
+    }
     assert run.sealed is True
     assert run.released is True
 

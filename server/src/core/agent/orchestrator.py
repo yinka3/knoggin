@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, AsyncGenerator, Dict, List, Optional
 
 from loguru import logger
 
+from common.exceptions import LLMBudgetExceededError, WorkspaceConflictError
 from common.schema.agent.research import ResearchMode, resolve_research_profile
 from common.schema.agent.stream import (
     AgentExecutionEvent,
@@ -171,6 +172,30 @@ class AgentOrchestrator:
                 else:
                     yield validated_event
 
+        except LLMBudgetExceededError:
+            logger.info("Agent orchestration stopped because the LLM budget is exhausted")
+            yield validate_agent_execution_event(
+                {
+                    "event": "error",
+                    "data": {
+                        "message": "The model budget is exhausted.",
+                        "code": "llm_budget_exhausted",
+                        "retryable": False,
+                    },
+                }
+            )
+        except WorkspaceConflictError:
+            logger.info("Agent orchestration stopped because the workspace changed")
+            yield validate_agent_execution_event(
+                {
+                    "event": "error",
+                    "data": {
+                        "message": "The workspace changed before the request could be applied.",
+                        "code": "workspace_conflict",
+                        "retryable": False,
+                    },
+                }
+            )
         except Exception as e:
             logger.exception(f"Agent orchestration error: {e}")
             yield validate_agent_execution_event(

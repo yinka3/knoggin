@@ -315,6 +315,96 @@ async def test_document_publication_binds_chunks_to_the_snapshot_of_read_bytes(
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_transient_index_failure_is_durable_and_exhaustion_requires_explicit_retry(
+    real_postgres_client,
+):
+    document_id = str(uuid.uuid4())
+    content_hash = "a" * 64
+    await _insert_document(
+        real_postgres_client,
+        document_id=document_id,
+        content_hash=content_hash,
+        status="indexing",
+    )
+    snapshot_id = await _insert_snapshot(
+        real_postgres_client,
+        document_id=document_id,
+        content_hash=content_hash,
+    )
+    writer = DocumentWriter(real_postgres_client, "project-1")
+    reader = DocumentReader(real_postgres_client, "project-1")
+
+    first = await writer.record_index_failure(
+        document_id=document_id,
+        error_message="embedding provider unavailable",
+        failure_kind="transient_dependency",
+        retryable=True,
+        max_attempts=2,
+        retry_backoff_seconds=10,
+        updated_at="2026-09-20T00:00:00+00:00",
+    )
+
+    assert first is not None
+    assert first["status"] == "queued"
+    assert first["index_attempt_count"] == 1
+    assert first["last_index_failure_kind"] == "transient_dependency"
+    assert first["next_index_retry_at"] is not None
+    assert await reader.list_documents_for_index_recovery(
+        due_at="2026-09-20T00:00:09+00:00",
+        limit=10,
+    ) == []
+    assert [str(row["document_id"]) for row in await reader.list_documents_for_index_recovery(
+        due_at="2026-09-20T00:00:10+00:00",
+        limit=10,
+    )] == [document_id]
+
+    claimed = await writer.transition_index_status(
+        document_id=document_id,
+        status="indexing",
+        allowed_statuses=("queued",),
+        updated_at="2026-09-20T00:00:10+00:00",
+    )
+    assert claimed is not None
+    exhausted = await writer.record_index_failure(
+        document_id=document_id,
+        error_message="embedding provider still unavailable",
+        failure_kind="transient_dependency",
+        retryable=True,
+        max_attempts=2,
+        retry_backoff_seconds=10,
+        updated_at="2026-09-20T00:00:10+00:00",
+    )
+
+    assert exhausted is not None
+    assert exhausted["status"] == "failed"
+    assert exhausted["index_attempt_count"] == 2
+    assert exhausted["next_index_retry_at"] is None
+    assert await reader.list_documents_for_index_recovery(
+        due_at="2026-09-20T00:10:00+00:00",
+        limit=10,
+    ) == []
+    stored = (await reader.list_documents(limit=10))[0]
+    assert str(stored["current_snapshot_id"]) == snapshot_id
+    assert stored["status"] == "failed"
+    assert stored["index_attempt_count"] == 2
+    assert stored["last_index_failure_kind"] == "transient_dependency"
+
+    explicit_retry = await writer.transition_index_status(
+        document_id=document_id,
+        status="indexing",
+        allowed_statuses=("failed",),
+        updated_at="2026-09-20T00:10:00+00:00",
+        reset_attempts=True,
+    )
+
+    assert explicit_retry is not None
+    assert explicit_retry["index_attempt_count"] == 0
+    assert explicit_retry["last_index_failure_kind"] is None
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
 async def test_reindex_keeps_an_earlier_snapshot_for_historical_evidence(

@@ -251,6 +251,13 @@ Interrupted document work recovers, temporary failures retry within limits, dete
 - Verify budget exhaustion, workspace conflict, stale selection, invalid arguments, and temporary tool outage across API/stream paths.
 - Inspect durable retry state and rollback behavior with real storage tests.
 
+### Phase 5 closeout — 2026-09-20
+
+- `project_documents` now stores an attempt count, next retry time, and failure kind. Startup converts interrupted `indexing` claims to queued work. Transient dependency failures retry with a bounded exponential delay; corrupt or unsupported content fails without automatic retry; exhausted work remains failed until an explicit reindex resets its budget.
+- Snapshot publication remains atomic and clears the retry state. A previous captured snapshot stays searchable during a queued retry or exhausted reindex failure, so a temporary indexing fault cannot erase the last usable document representation.
+- The public boundary now projects `workspace_conflict` as HTTP 409 and `llm_budget_exhausted` as HTTP 429. Agent streams preserve those stable terminal codes, and tool-completed events expose safe `tool_failed` or `workspace_conflict` codes plus the actual retryability without raw exception details.
+- Validation passed: 174 focused document, API, agent, runtime-stream, filesystem, and public-contract tests; 18 real PostgreSQL document storage/indexing contracts; full touched-path Ruff; source compilation; and `git diff --check`.
+
 ## Phase 6 — Remaining cleanup and readiness verification
 
 ### Intended behavior

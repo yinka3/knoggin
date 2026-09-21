@@ -129,6 +129,9 @@ class DocumentReader:
                 pd.content_hash,
                 pd.current_snapshot_id,
                 pd.status,
+                pd.index_attempt_count,
+                pd.next_index_retry_at,
+                pd.last_index_failure_kind,
                 pd.created_at,
                 pd.updated_at,
                 pd.indexed_at,
@@ -231,8 +234,13 @@ class DocumentReader:
             snapshot["snapshot"] = json.loads(payload)
         return snapshot
 
-    async def list_documents_for_index_recovery(self, limit: int = 16) -> List[Dict]:
-        """Return queued project documents for durable indexing recovery."""
+    async def list_documents_for_index_recovery(
+        self,
+        *,
+        due_at: str,
+        limit: int = 16,
+    ) -> List[Dict]:
+        """Return immediately due initial and retryable document work."""
         return await self._client.fetch_all(
             """
             SELECT
@@ -245,6 +253,9 @@ class DocumentReader:
                 content_hash,
                 current_snapshot_id,
                 status,
+                index_attempt_count,
+                next_index_retry_at,
+                last_index_failure_kind,
                 created_at,
                 updated_at,
                 indexed_at,
@@ -252,11 +263,16 @@ class DocumentReader:
                 0::INTEGER AS chunk_count
             FROM public.project_documents
             WHERE project_id = %s
-              AND status = 'queued'
-            ORDER BY created_at ASC, document_id ASC
+              AND (
+                (status = 'queued' AND (
+                    next_index_retry_at IS NULL OR next_index_retry_at <= %s
+                ))
+                OR (status = 'failed' AND next_index_retry_at <= %s)
+              )
+            ORDER BY COALESCE(next_index_retry_at, created_at) ASC, document_id ASC
             LIMIT %s
             """,
-            (self._project_id, limit),
+            (self._project_id, due_at, due_at, limit),
         )
 
     async def list_documents_for_reconciliation(
@@ -277,6 +293,9 @@ class DocumentReader:
                 pd.content_hash,
                 pd.current_snapshot_id,
                 pd.status,
+                pd.index_attempt_count,
+                pd.next_index_retry_at,
+                pd.last_index_failure_kind,
                 pd.created_at,
                 pd.updated_at,
                 pd.indexed_at,
@@ -297,11 +316,29 @@ class DocumentReader:
             SELECT COUNT(*)::INTEGER AS count
             FROM public.project_documents
             WHERE project_id = %s
-              AND status = 'queued'
+              AND (
+                status = 'queued'
+                OR (status = 'failed' AND next_index_retry_at IS NOT NULL)
+              )
             """,
             (self._project_id,),
         )
         return int(rows[0]["count"]) if rows else 0
+
+    async def next_index_retry_at(self) -> str | None:
+        """Return the next delayed retry for this project, if one exists."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT MIN(next_index_retry_at) AS next_index_retry_at
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND next_index_retry_at IS NOT NULL
+              AND status IN ('queued', 'failed')
+            """,
+            (self._project_id,),
+        )
+        value = rows[0].get("next_index_retry_at") if rows else None
+        return value.isoformat() if hasattr(value, "isoformat") else value
 
     async def list_documents(
         self,
@@ -321,6 +358,9 @@ class DocumentReader:
                 pd.content_hash,
                 pd.current_snapshot_id,
                 pd.status,
+                pd.index_attempt_count,
+                pd.next_index_retry_at,
+                pd.last_index_failure_kind,
                 pd.created_at,
                 pd.updated_at,
                 pd.indexed_at,
@@ -401,7 +441,8 @@ class DocumentReader:
                 FROM public.document_chunks AS dc
                 JOIN public.project_documents AS pd
                     ON pd.document_id = dc.document_id
-                WHERE pd.status IN ('indexed', 'indexing')
+                WHERE pd.status <> 'deleted'
+                  AND pd.current_snapshot_id IS NOT NULL
                   AND dc.snapshot_id = pd.current_snapshot_id
         """
         params: list = [query_text, embedding_json]
