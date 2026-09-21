@@ -226,6 +226,7 @@ async def test_admission_persists_the_exact_context_entity_policy():
     assert IngestionPolicy.from_semantic_window_snapshot(ingestion_snapshot) == frozen_policy
     assert set(ingestion_snapshot) == {
         "gliner_threshold",
+        "llm_ner_mode",
         "candidate_fuzzy_threshold",
             "resolution_threshold",
             "resolution_margin",

@@ -1,4 +1,6 @@
 import asyncio
+import json
+import re
 import threading
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Iterable, Optional, Tuple
@@ -12,10 +14,12 @@ from common.schema.ingestion.contracts import (
     ContextBlockMention,
     ValidationIssue,
 )
+from common.schema.ingestion.extraction import ContextEntityExtraction
 from common.schema.settings import TextProcessorSettings
 from common.utils.core_utils import validate_entity
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.policy import IngestionPolicy
+from core.ingestion.prompts import context_ner_fallback_prompt
 from core.ingestion.vp01 import VP01EntityExtractor, VP01EntitySpan
 from core.knowledge.entity.profile import EntityProfile
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
@@ -67,6 +71,8 @@ class TextProcessor:
         settings: TextProcessorSettings,
         model_work: Optional[ModelWorkCoordinator] = None,
         get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
+        llm=None,
+        user_name: str | None = None,
     ):
         self.get_known_aliases = get_known_aliases
         self.get_alias_version = get_alias_version
@@ -77,6 +83,8 @@ class TextProcessor:
         if get_vp01 is not None and not callable(get_vp01):
             raise TypeError("get_vp01 must be callable")
         self._get_vp01 = get_vp01
+        self._llm = llm
+        self._user_name = user_name
         self._spacy_lock = threading.Lock()
         self._phrase_matcher_cache_version: Optional[int] = None
         self._phrase_matcher_cache: Optional[Tuple[PhraseMatcher, Dict[str, int]]] = (
@@ -87,6 +95,7 @@ class TextProcessor:
     def update_settings(self, config: TextProcessorSettings):
         """Update settings dynamically while running."""
         self.gliner_threshold = config.gliner_threshold
+        self.llm_ner_mode = config.llm_ner_mode
 
     def set_vp01(self, vp01: VP01EntityExtractor) -> None:
         """Install the adapter selected by the next active domain snapshot."""
@@ -205,11 +214,14 @@ class TextProcessor:
         def add_mention(mention: ContextBlockMention) -> bool:
             """Keep distinct typed occurrences, not just distinct surfaces."""
 
-            if mention.source_start is None or mention.source_end is None:
+            if (
+                mention.origin != "llm_fallback"
+                and (mention.source_start is None or mention.source_end is None)
+            ):
                 raise ValueError("Extracted Context mentions require source offsets")
             key = (
-                mention.source_start,
-                mention.source_end,
+                mention.source_start if mention.source_start is not None else -1,
+                mention.source_end if mention.source_end is not None else -1,
                 mention.name.casefold(),
                 mention.entity_type.casefold(),
             )
@@ -304,8 +316,166 @@ class TextProcessor:
             ):
                 accepted += 1
         build.trace.gliner_accepted_mentions = accepted
+        await self._add_llm_fallback_mentions(
+            build,
+            assembled=assembled,
+            mentions=mentions,
+            add_mention=add_mention,
+        )
         build.set_mentions(mentions)
         return mentions
+
+    async def _add_llm_fallback_mentions(
+        self,
+        build: SemanticWindowBuild,
+        *,
+        assembled: _ContextBlockText,
+        mentions: list[ContextBlockMention],
+        add_mention,
+    ) -> None:
+        """Run structured NER only for meaningful blocks left uncovered."""
+
+        if build.policy.llm_ner_mode == "disabled":
+            return
+        covered = {block_id for mention in mentions for block_id in mention.block_ids}
+        represented_names = {mention.name.casefold() for mention in mentions}
+        known_aliases = {
+            name.casefold(): name for name in self.get_known_aliases() if name.strip()
+        }
+        support_text_by_block: dict[UUID, str] = {}
+        alias_gap_blocks: set[UUID] = set()
+        for block in build.knowledge_input_blocks:
+            support_text = "\n".join(
+                build.message_text_by_id.get(support.message_id, "")
+                for support in build.block_supports.get(block.block_id, ())[:3]
+            )
+            support_text_by_block[block.block_id] = support_text
+            normalized_support = support_text.casefold()
+            if any(
+                alias not in represented_names and alias in normalized_support
+                for alias in known_aliases
+            ):
+                alias_gap_blocks.add(block.block_id)
+        gaps = [
+            block
+            for block in build.knowledge_input_blocks
+            if (block.block_id not in covered or block.block_id in alias_gap_blocks)
+            and len(re.findall(r"[A-Za-z0-9]+", block.markdown)) >= 3
+        ]
+        if not gaps:
+            return
+        trigger = (
+            "known_alias_missing_from_extraction"
+            if alias_gap_blocks
+            else "meaningful_context_without_candidates"
+        )
+        build.trace.fallbacks.append(
+            {"stage": "context_mentions", "trigger": trigger}
+        )
+        if self._llm is None or not self._user_name:
+            build.issues.append(
+                ValidationIssue(
+                    stage="context_mentions",
+                    code="llm_ner_fallback_unavailable",
+                    message="Context NER fallback was triggered but has no LLM runtime",
+                    metadata={"trigger": trigger},
+                )
+            )
+            return
+
+        local_to_block = {f"b{index}": block for index, block in enumerate(gaps, 1)}
+        known_names = sorted(self.get_known_aliases())[:50]
+        supporting_excerpts = []
+        for local_id, block in local_to_block.items():
+            excerpts = [
+                excerpt[:500]
+                for excerpt in support_text_by_block.get(block.block_id, "").splitlines()
+                if excerpt
+            ][:3]
+            supporting_excerpts.append({"block_id": local_id, "excerpts": excerpts})
+        prompt = json.dumps(
+            {
+                "trigger": trigger,
+                "allowed_entity_types": list(build.policy.domain.active_entity_types),
+                "known_candidate_names": known_names,
+                "context_blocks": [
+                    {
+                        "block_id": local_id,
+                        "section_key": block.section_key,
+                        "markdown": block.markdown,
+                    }
+                    for local_id, block in local_to_block.items()
+                ],
+                "supporting_excerpts": supporting_excerpts,
+            },
+            ensure_ascii=False,
+        )
+        build.trace.entity_model = getattr(self._llm, "extraction_model", None)
+        build.trace.entity_prompt = "VEGAPUNK-01-CONTEXT-FALLBACK"
+        result: ContextEntityExtraction = await self._llm.generate_structured(
+            response_model=ContextEntityExtraction,
+            system=context_ner_fallback_prompt(self._user_name),
+            user=prompt,
+            temperature=0.0,
+        )
+        build.trace.llm_mentions_seen += len(result.mentions)
+        block_offsets = {block_id: (start, end) for block_id, start, end in assembled.offsets}
+        for returned in result.mentions:
+            block = local_to_block.get(returned.block_id)
+            if block is None:
+                self._reject_fallback(build, returned.name, "unknown_block")
+                continue
+            entity_type = build.policy.domain.canonical_entity_type(returned.type)
+            topic = build.policy.domain.topic_for_entity_type(entity_type or "")
+            if entity_type is None or topic is None or not self._validate_domain_mention(
+                returned.name,
+                entity_type,
+                build.policy,
+                label=returned.type,
+            ):
+                self._reject_fallback(build, returned.name, "invalid_type_or_mention")
+                continue
+            literal = re.search(
+                r"(?<!\w)" + r"\s+".join(re.escape(part) for part in returned.name.split()) + r"(?!\w)",
+                block.markdown,
+                flags=re.IGNORECASE,
+            )
+            supporting_literal = re.search(
+                r"(?<!\w)" + r"\s+".join(re.escape(part) for part in returned.name.split()) + r"(?!\w)",
+                support_text_by_block.get(block.block_id, ""),
+                flags=re.IGNORECASE,
+            )
+            if literal is None and supporting_literal is None:
+                self._reject_fallback(build, returned.name, "literal_support_missing")
+                continue
+            block_start, _ = block_offsets[block.block_id]
+            if add_mention(
+                ContextBlockMention(
+                    block_ids=(block.block_id,),
+                    name=" ".join(returned.name.split()),
+                    entity_type=entity_type,
+                    topic=topic,
+                    origin="llm_fallback",
+                    source_start=(block_start + literal.start()) if literal else None,
+                    source_end=(block_start + literal.end()) if literal else None,
+                )
+            ):
+                build.trace.llm_mentions_accepted += 1
+
+    @staticmethod
+    def _reject_fallback(
+        build: SemanticWindowBuild, name: str, reason: str
+    ) -> None:
+        build.trace.llm_mentions_rejected += 1
+        build.issues.append(
+            ValidationIssue(
+                stage="context_mentions",
+                code="llm_ner_mention_rejected",
+                message="Context NER fallback mention failed validation",
+                item_ref=name,
+                metadata={"reason": reason},
+            )
+        )
 
     @staticmethod
     def _validate_domain_mention(

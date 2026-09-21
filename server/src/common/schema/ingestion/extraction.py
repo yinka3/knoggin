@@ -33,6 +33,27 @@ class EntityExtraction(StructuredLLMOutput):
     mentions: List[EntityMention] = Field(default_factory=list)
 
 
+class ContextEntityMention(BaseModel):
+    """One fallback mention tied to a local Context block reference."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str = Field(..., pattern=r"^b[1-9]\d*$")
+    name: str
+    type: str
+
+    @field_validator("name", "type")
+    @classmethod
+    def validate_required_text(cls, value: str, info) -> str:
+        return normalize_required_text(value, field_name=info.field_name)
+
+
+class ContextEntityExtraction(StructuredLLMOutput):
+    """Bounded Context-native output for targeted NER fallback."""
+
+    mentions: List[ContextEntityMention] = Field(default_factory=list)
+
+
 class RelationshipMention(StructuredLLMOutput):
     """One model-returned relationship with a local message reference."""
 

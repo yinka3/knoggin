@@ -300,7 +300,7 @@ class ContextBlockMention:
     name: str
     entity_type: str
     topic: str
-    origin: Literal["known_alias", "vp01"]
+    origin: Literal["known_alias", "vp01", "llm_fallback"]
     literal_message_ids: tuple[int, ...] = ()
     source_start: int | None = None
     source_end: int | None = None
@@ -327,7 +327,7 @@ class ContextBlockMention:
             "topic",
             _require_nonblank_text(self.topic, "ContextBlockMention.topic"),
         )
-        if self.origin not in {"known_alias", "vp01"}:
+        if self.origin not in {"known_alias", "vp01", "llm_fallback"}:
             raise ValueError("ContextBlockMention origin is unsupported")
         message_ids = tuple(
             _require_positive_id(

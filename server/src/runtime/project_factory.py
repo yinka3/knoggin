@@ -112,6 +112,8 @@ class ProjectRuntimeFactory:
                 settings=self.dev_settings.nlp_pipeline,
                 model_work=resources.model_work,
                 get_vp01=resources.get_vp01,
+                llm=resources.llm_service,
+                user_name=self.user_name,
             ),
         )
         scheduler = Scheduler(

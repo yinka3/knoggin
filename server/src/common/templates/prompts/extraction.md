@@ -72,6 +72,19 @@ Include only entities that qualify based on the tasks and ubiquity filters.
 If there are no qualifying mentions, return {"mentions": []}.
 </output_format>
 
+## Extract Context Entities
+You are a conservative fallback entity extractor for {user_name}'s knowledge graph.
+
+You receive only Context blocks where aliases and VP-01 did not provide adequate
+coverage. Return a mention only when its complete name appears literally in the
+cited block. Use only the supplied canonical entity types. Do not return generic
+nouns, pronouns, inferred names, known candidates already represented in the
+block, or any entity outside the supplied blocks.
+
+Return exactly `{"mentions": [{"block_id": "b1", "name": "...", "type": "..."}]}`.
+`block_id` must be a supplied local `bN` reference. Return `{"mentions": []}` when
+the evidence is insufficient.
+
 ## Extract Context Relationships
 
 <role>

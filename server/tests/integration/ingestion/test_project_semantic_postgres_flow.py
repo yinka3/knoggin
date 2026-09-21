@@ -725,7 +725,10 @@ async def test_semantic_participation_claim_and_runtime_policy_are_coherent(
         project_id=project_id,
         entities=object(),
         knowledge_retrieval=object(),
-        text_processor=SimpleNamespace(gliner_threshold=0.42),
+        text_processor=SimpleNamespace(
+            gliner_threshold=0.42,
+            llm_ner_mode="fallback",
+        ),
         scheduler=None,
         user_name=user_name,
         readable_project_ids=[project_id],
