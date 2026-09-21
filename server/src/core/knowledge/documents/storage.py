@@ -430,19 +430,34 @@ def _parse_with_docling(content: bytes, extension: str):
         raise ValueError(f"Docling could not parse the {extension} document: {detail}") from exc
 
 
-def _native_pdf_page_numbers(content: bytes) -> set[int]:
-    """Identify pages with native PDF text before Docling OCR fills gaps."""
+def _native_pdf_regions(
+    content: bytes,
+) -> Dict[int, tuple[tuple[float, float, float, float], ...]]:
+    """Read native text-cell bounds before Docling adds OCR-derived text."""
 
     from docling_parse.pdf_parser import DoclingPdfParser
 
     parser = DoclingPdfParser()
     document = parser.load(io.BytesIO(content))
     try:
-        return {
-            page_number
-            for page_number, page in document.iterate_pages()
-            if any(cell.text.strip() for cell in page.textline_cells)
-        }
+        regions: Dict[int, tuple[tuple[float, float, float, float], ...]] = {}
+        for page_number, page in document.iterate_pages():
+            boxes = []
+            for cell in page.textline_cells:
+                if not cell.text.strip():
+                    continue
+                rect = cell.rect
+                boxes.append(
+                    (
+                        min(rect.r_x0, rect.r_x1, rect.r_x2, rect.r_x3),
+                        min(rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3),
+                        max(rect.r_x0, rect.r_x1, rect.r_x2, rect.r_x3),
+                        max(rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3),
+                    )
+                )
+            if boxes:
+                regions[page_number] = tuple(boxes)
+        return regions
     finally:
         document.unload()
 
@@ -473,7 +488,7 @@ def _region_bbox(value: object) -> tuple[float, float, float, float] | None:
 def _regions_from_docling_structure(
     structure: Dict[str, Any],
     *,
-    native_page_numbers: set[int],
+    native_regions: Dict[int, tuple[tuple[float, float, float, float], ...]],
 ) -> Dict[int, tuple[LayoutRegion, ...]]:
     """Retain Docling element provenance in a small stable region projection."""
 
@@ -503,21 +518,41 @@ def _regions_from_docling_structure(
                 page_number = item.get("page_no")
                 if not isinstance(page_number, int) or page_number < 1:
                     continue
+                bbox = _region_bbox(item.get("bbox"))
+                native_boxes = native_regions.get(page_number, ())
+                if collection != "texts":
+                    extraction_method = "model_interpretation"
+                elif not native_boxes:
+                    extraction_method = "ocr"
+                elif bbox is None:
+                    extraction_method = "unknown"
+                elif any(_boxes_overlap(bbox, native) for native in native_boxes):
+                    extraction_method = "native_text"
+                else:
+                    extraction_method = "ocr"
                 regions.setdefault(page_number, []).append(
                     LayoutRegion(
                         page_number=page_number,
                         element_type=element_type,
-                        extraction_method=(
-                            "native_text"
-                            if page_number in native_page_numbers
-                            else "ocr"
-                        ),
-                        bbox=_region_bbox(item.get("bbox")),
+                        extraction_method=extraction_method,
+                        bbox=bbox,
                         text_start=charspan[0] if charspan is not None else None,
                         text_end=charspan[1] if charspan is not None else None,
                     )
                 )
     return {page: tuple(items) for page, items in regions.items()}
+
+
+def _boxes_overlap(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> bool:
+    """Return whether two PDF-point rectangles overlap with positive area."""
+
+    return (
+        min(first[2], second[2]) > max(first[0], second[0])
+        and min(first[3], second[3]) > max(first[1], second[1])
+    )
 
 
 def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSnapshot:
@@ -529,10 +564,10 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
 
     pages: tuple[DocumentSnapshotPage, ...] = ()
     if extension == ".pdf":
-        native_page_numbers = _native_pdf_page_numbers(content)
+        native_regions = _native_pdf_regions(content)
         regions = _regions_from_docling_structure(
             structure,
-            native_page_numbers=native_page_numbers,
+            native_regions=native_regions,
         )
         page_numbers = _page_numbers(structure) or sorted(regions)
         pages = tuple(
@@ -568,11 +603,8 @@ def _exact_text_snapshot(text: str, extension: str) -> DocumentParseSnapshot:
 
 
 def _page_locator(page: DocumentSnapshotPage) -> Dict[str, Any]:
-    method = (
-        page.regions[0].extraction_method
-        if page.regions
-        else "native_text"
-    )
+    methods = {region.extraction_method for region in page.regions}
+    method = next(iter(methods)) if len(methods) == 1 else "mixed" if methods else "unknown"
     return LayoutRegion(
         page_number=page.page_number,
         element_type="page",

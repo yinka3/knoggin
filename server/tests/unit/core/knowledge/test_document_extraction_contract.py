@@ -77,6 +77,34 @@ def test_pdf_extraction_preserves_captured_page_boundaries(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_mixed_pdf_page_classifies_regions_from_native_cell_bounds():
+    structure = {
+        "texts": [
+            {"label": "heading", "charspan": [0, 6], "prov": [{"page_no": 1, "bbox": {"l": 10, "b": 90, "r": 80, "t": 110}}]},
+            {"label": "text", "charspan": [7, 15], "prov": [{"page_no": 1, "bbox": {"l": 10, "b": 10, "r": 80, "t": 30}}]},
+        ]
+    }
+
+    regions = storage._regions_from_docling_structure(
+        structure,
+        native_regions={1: ((9, 89, 81, 111),)},
+    )
+
+    assert [region.extraction_method for region in regions[1]] == [
+        "native_text",
+        "ocr",
+    ]
+
+    page = DocumentSnapshotPage(
+        page_number=1,
+        text="Heading\nScanned body",
+        regions=regions[1],
+    )
+    assert storage._page_locator(page)["extraction_method"] == "mixed"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_docx_extraction_uses_the_captured_structured_markdown(monkeypatch):
     snapshot = DocumentParseSnapshot(
         text="# Overview\n\nAlpha paragraph.\n\n## Risks\n\nBeta paragraph.",

@@ -633,16 +633,21 @@ class DocumentService:
     @staticmethod
     def _page_layout_locator(page: Dict) -> Dict:
         regions = page.get("regions")
-        extraction_method = "native_text"
+        extraction_methods = set()
         if isinstance(regions, list):
             for region in regions:
                 if isinstance(region, dict) and region.get("extraction_method") in {
                     "native_text",
                     "ocr",
                     "model_interpretation",
+                    "unknown",
                 }:
-                    extraction_method = region["extraction_method"]
-                    break
+                    extraction_methods.add(region["extraction_method"])
+        extraction_method = (
+            next(iter(extraction_methods))
+            if len(extraction_methods) == 1
+            else "mixed" if extraction_methods else "unknown"
+        )
         return {
             "kind": "layout_region",
             "page": page["page_number"],

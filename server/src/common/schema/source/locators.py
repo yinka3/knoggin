@@ -32,12 +32,14 @@ class LayoutBoundingBox(_StrictLocator):
 
 
 class LayoutRegionLocator(_StrictLocator):
-    """A source-grade Docling region retained in a parse snapshot."""
+    """A retained region; mixed and unknown express page-level uncertainty."""
 
     kind: Literal["layout_region"] = "layout_region"
     page: int = Field(ge=1)
     element_type: str = Field(min_length=1)
-    extraction_method: Literal["native_text", "ocr", "model_interpretation"]
+    extraction_method: Literal[
+        "native_text", "ocr", "model_interpretation", "mixed", "unknown"
+    ]
     bbox: LayoutBoundingBox | None = None
     text_start: int | None = Field(default=None, ge=0)
     text_end: int | None = Field(default=None, ge=1)
