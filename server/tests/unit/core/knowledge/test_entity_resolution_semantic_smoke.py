@@ -28,15 +28,21 @@ async def test_local_embedding_service_similarity_ordering_smoke():
         "KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL",
         os.environ.get("KNOGGIN_RERANKER_MODEL", "BAAI/bge-reranker-large"),
     )
+    embedding_revision = os.environ.get("KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION")
+    reranker_revision = os.environ.get(
+        "KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION"
+    )
 
     try:
         embedding_model_path = huggingface_hub.snapshot_download(
             embedding_model_name,
             local_files_only=True,
+            revision=embedding_revision,
         )
         reranker_model_path = huggingface_hub.snapshot_download(
             reranker_model_name,
             local_files_only=True,
+            revision=reranker_revision,
         )
     except Exception as exc:
         if os.environ.get("KNOGGIN_REQUIRE_LOCAL_MODELS") == "1":
