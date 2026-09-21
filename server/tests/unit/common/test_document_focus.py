@@ -96,6 +96,18 @@ def test_document_focus_rejects_mixed_selectors_and_naive_timestamps():
             }
         )
 
+    with pytest.raises(ValidationError):
+        parse_document_focus(
+            {
+                "mode": "pinned",
+                "created_at": "2026-06-22T12:00:00+00:00",
+                "target_type": "document",
+                "document_id": "doc-1",
+                "relative_path": "docs/notes.md",
+                "path_prefix": None,
+            }
+        )
+
     with pytest.raises(ValidationError, match="must include a timezone"):
         parse_document_focus(
             {

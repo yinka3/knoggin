@@ -10,7 +10,7 @@ from common.schema.episode.models import (
     MessageEpisode,
     RelationshipEpisode,
 )
-from common.scoping import require_scope_value
+from common.scoping import require_scope_value, require_visible_project_ids
 from infrastructure.postgres_client import PostgresClient
 
 
@@ -19,122 +19,6 @@ class EpisodeReader:
 
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
-
-    async def get_episode(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Episode | None:
-        """Load one episode and every persisted attachment."""
-
-        scope = self._require_scope(user_name, project_id, session_id, "get_episode")
-        episode_id = require_scope_value(episode_id, "episode_id", "get_episode")
-        row = await self.client.fetch_one(
-            self._episode_query("e.episode_id = %s"),
-            (episode_id, *scope),
-        )
-        if row is None:
-            return None
-        return await self._hydrate_episode(row)
-
-    async def get_episodes_for_entity(
-        self,
-        entity_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        """Return all matching episodes in source chronology."""
-
-        if entity_id <= 0:
-            raise ValueError("get_episodes_for_entity requires a positive entity_id")
-        if limit <= 0:
-            return []
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_episodes_for_entity",
-        )
-        query = self._episode_query(
-            "ee.entity_id = %s",
-            joins=(
-                "JOIN episode_entities ee ON ee.episode_id = e.episode_id "
-                "AND ee.project_id = e.project_id"
-            ),
-            ordering="e.last_message_at DESC NULLS LAST, e.episode_id DESC",
-            limit=True,
-        )
-        rows = await self.client.fetch_all(query, (entity_id, *scope, limit))
-        return [await self._hydrate_episode_card(row) for row in rows]
-
-    async def get_episodes_for_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        """Return prior episodes ranked by overlap with a source entity set."""
-
-        normalized_entity_ids = sorted({int(entity_id) for entity_id in entity_ids})
-        if not normalized_entity_ids or limit <= 0:
-            return []
-        if any(entity_id <= 0 for entity_id in normalized_entity_ids):
-            raise ValueError("get_episodes_for_entities requires positive entity IDs")
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_episodes_for_entities",
-        )
-        rows = await self.client.fetch_all(
-            """
-            SELECT
-                e.episode_id,
-                e.project_id,
-                e.summary,
-                e.new_developments,
-                e.updates,
-                e.unresolved,
-                e.source_message_count,
-                e.first_message_at,
-                e.last_message_at,
-                e.generator_metadata,
-                e.user_modified,
-                e.created_at,
-                e.updated_at,
-                COUNT(DISTINCT ee.entity_id) AS entity_overlap
-            FROM episodes e
-            JOIN episode_entities ee
-              ON ee.episode_id = e.episode_id
-             AND ee.project_id = e.project_id
-            WHERE ee.entity_id = ANY(%s)
-              AND EXISTS (
-                  SELECT 1 FROM episode_messages em
-                  JOIN sessions s ON s.session_id = em.session_id
-                     AND s.project_id = em.project_id
-                  WHERE em.episode_id = e.episode_id
-                    AND em.project_id = e.project_id
-                    AND s.user_name = %s
-                    AND em.project_id = %s
-                    AND em.session_id = %s
-              )
-            GROUP BY e.episode_id
-            ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
-                     e.episode_id DESC
-            LIMIT %s
-            """,
-            (normalized_entity_ids, *scope, limit),
-        )
-        return [await self._hydrate_episode_card(row) for row in rows]
 
     async def get_merge_evidence_for_entities(
         self,
@@ -295,228 +179,6 @@ class EpisodeReader:
             )
         return evidence_by_entity
 
-    async def search_episodes(
-        self,
-        query: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        """Search scoped episode summaries and structured narrative fields."""
-
-        normalized_query = query.strip()
-        if not normalized_query or limit <= 0:
-            return []
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "search_episodes",
-        )
-        rows = await self.client.fetch_all(
-            """
-            WITH query_terms AS (
-                SELECT websearch_to_tsquery('simple', %s) AS terms
-            )
-            SELECT
-                e.episode_id,
-                e.project_id,
-                e.summary,
-                e.new_developments,
-                e.updates,
-                e.unresolved,
-                e.source_message_count,
-                e.first_message_at,
-                e.last_message_at,
-                e.generator_metadata,
-                e.user_modified,
-                e.created_at,
-                e.updated_at
-            FROM episodes e
-            CROSS JOIN query_terms q
-            WHERE EXISTS (
-                SELECT 1 FROM episode_messages em
-                JOIN sessions s ON s.session_id = em.session_id AND s.project_id = em.project_id
-                WHERE em.episode_id = e.episode_id AND em.project_id = e.project_id
-                  AND s.user_name = %s AND em.project_id = %s AND em.session_id = %s
-            )
-              AND e.search_tsvector @@ q.terms
-            ORDER BY
-                ts_rank_cd(e.search_tsvector, q.terms) DESC,
-                e.last_message_at DESC NULLS LAST,
-                e.episode_id DESC
-            LIMIT %s
-            """,
-            (normalized_query, *scope, limit),
-        )
-        return [await self._hydrate_episode_card(row) for row in rows]
-
-    async def search_episodes_by_embedding(
-        self,
-        embedding: List[float],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-        score_threshold: float = 0.35,
-    ) -> List[tuple[EpisodeCard, float]]:
-        """Return scoped episodes ranked by cosine similarity to a query vector."""
-
-        if limit <= 0:
-            return []
-        if not 0.0 <= score_threshold <= 1.0:
-            raise ValueError("episode score_threshold must be between 0 and 1")
-        normalized_embedding = self._normalize_embedding(embedding)
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "search_episodes_by_embedding",
-        )
-        vector = json.dumps(normalized_embedding)
-        rows = await self.client.fetch_all(
-            """
-            SELECT
-                e.episode_id,
-                e.project_id,
-                e.summary,
-                e.new_developments,
-                e.updates,
-                e.unresolved,
-                e.source_message_count,
-                e.first_message_at,
-                e.last_message_at,
-                e.embedding,
-                e.generator_metadata,
-                e.user_modified,
-                e.created_at,
-                e.updated_at,
-                1 - (e.embedding <=> %s::vector) AS similarity
-            FROM episodes e
-            WHERE EXISTS (
-                SELECT 1 FROM episode_messages em
-                JOIN sessions s ON s.session_id = em.session_id AND s.project_id = em.project_id
-                WHERE em.episode_id = e.episode_id AND em.project_id = e.project_id
-                  AND s.user_name = %s AND em.project_id = %s AND em.session_id = %s
-            )
-              AND e.embedding IS NOT NULL
-              AND 1 - (e.embedding <=> %s::vector) >= %s
-            ORDER BY e.embedding <=> %s::vector ASC
-            LIMIT %s
-            """,
-            (vector, *scope, vector, score_threshold, vector, limit),
-        )
-        return [
-            (await self._hydrate_episode_card(row), float(row["similarity"]))
-            for row in rows
-        ]
-
-    async def get_recent_episodes(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 1,
-    ) -> List[EpisodeCard]:
-        """Return the most recent source episodes in one conversation."""
-
-        if limit <= 0:
-            return []
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_recent_episodes",
-        )
-        rows = await self.client.fetch_all(
-            self._episode_query(
-                "TRUE", ordering="e.last_message_at DESC NULLS LAST, e.episode_id DESC", limit=True
-            ),
-            (*scope, limit),
-        )
-        return [await self._hydrate_episode_card(row) for row in rows]
-
-    async def get_episode_source_messages(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> List[Dict]:
-        """Expand an episode into its ordered canonical message evidence."""
-
-        scope = self._require_scope(
-            user_name,
-            project_id,
-            session_id,
-            "get_episode_source_messages",
-        )
-        episode_id = require_scope_value(
-            episode_id,
-            "episode_id",
-            "get_episode_source_messages",
-        )
-        query = """
-        SELECT
-            m.message_id,
-            m.role,
-            m.content,
-            m.timestamp_ms,
-            em.message_position,
-            em.attached_at
-        FROM episodes e
-        JOIN episode_messages em
-          ON em.episode_id = e.episode_id
-         AND em.project_id = e.project_id
-        JOIN sessions s
-          ON s.session_id = em.session_id
-         AND s.project_id = em.project_id
-        JOIN messages m
-          ON m.message_id = em.message_id
-         AND m.project_id = em.project_id
-         AND m.session_id = em.session_id
-        WHERE e.episode_id = %s
-          AND s.user_name = %s
-          AND e.project_id = %s
-          AND em.session_id = %s
-          AND m.user_name = %s
-          AND m.project_id = %s
-          AND m.session_id = %s
-        ORDER BY em.message_position
-        """
-        return await self.client.fetch_all(
-            query,
-            (episode_id, *scope, *scope),
-        )
-
-    async def get_episode_graph_context(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Dict[str, List[EntityEpisode] | List[RelationshipEpisode]] | None:
-        """Load the complete entity and relationship context for one episode."""
-
-        episode = await self.get_episode(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-        if episode is None:
-            return None
-        return {
-            "entities": episode.entities,
-            "relationships": episode.relationships,
-        }
-
     async def get_project_episode(
         self,
         episode_id: str,
@@ -525,13 +187,22 @@ class EpisodeReader:
         project_id: str,
         visible_project_ids: Optional[List[str]] = None,
     ) -> Episode | None:
+        episode_id = require_scope_value(
+            episode_id, "episode_id", "get_project_episode"
+        )
+        user_name, visible_project_ids = self._project_scope(
+            user_name,
+            project_id,
+            visible_project_ids,
+            "get_project_episode",
+        )
         row = await self.client.fetch_one(
             """
             SELECT e.* FROM episodes e
             JOIN projects p ON p.project_id = e.project_id
             WHERE e.episode_id = %s AND e.project_id = ANY(%s) AND p.user_name = %s
             """,
-            (episode_id, visible_project_ids or [project_id], user_name),
+            (episode_id, visible_project_ids, user_name),
         )
         return await self._hydrate_episode(row) if row else None
 
@@ -543,13 +214,21 @@ class EpisodeReader:
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
     ) -> List[EpisodeCard]:
+        if limit <= 0:
+            return []
+        user_name, visible_project_ids = self._project_scope(
+            user_name,
+            project_id,
+            visible_project_ids,
+            "get_recent_project_episodes",
+        )
         rows = await self.client.fetch_all(
             """
             SELECT e.* FROM episodes e JOIN projects p ON p.project_id = e.project_id
             WHERE e.project_id = ANY(%s) AND p.user_name = %s
             ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
             """,
-            (visible_project_ids or [project_id], user_name, limit),
+            (visible_project_ids, user_name, limit),
         )
         return [await self._hydrate_episode_card(row) for row in rows]
 
@@ -562,6 +241,15 @@ class EpisodeReader:
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
     ) -> List[EpisodeCard]:
+        query = query.strip()
+        if not query or limit <= 0:
+            return []
+        user_name, visible_project_ids = self._project_scope(
+            user_name,
+            project_id,
+            visible_project_ids,
+            "search_project_episodes",
+        )
         rows = await self.client.fetch_all(
             """
             WITH terms AS (SELECT websearch_to_tsquery('simple', %s) AS query)
@@ -572,7 +260,7 @@ class EpisodeReader:
             ORDER BY ts_rank_cd(e.search_tsvector, terms.query) DESC,
                      e.last_message_at DESC NULLS LAST, e.episode_id DESC LIMIT %s
             """,
-            (query, visible_project_ids or [project_id], user_name, limit),
+            (query, visible_project_ids, user_name, limit),
         )
         return [await self._hydrate_episode_card(row) for row in rows]
 
@@ -586,6 +274,16 @@ class EpisodeReader:
         score_threshold: float = 0.35,
         visible_project_ids: Optional[List[str]] = None,
     ) -> List[tuple[EpisodeCard, float]]:
+        if limit <= 0:
+            return []
+        if not 0.0 <= score_threshold <= 1.0:
+            raise ValueError("episode score_threshold must be between 0 and 1")
+        user_name, visible_project_ids = self._project_scope(
+            user_name,
+            project_id,
+            visible_project_ids,
+            "search_project_episodes_by_embedding",
+        )
         vector = json.dumps(self._normalize_embedding(embedding))
         rows = await self.client.fetch_all(
             """
@@ -597,7 +295,7 @@ class EpisodeReader:
             """,
             (
                 vector,
-                visible_project_ids or [project_id],
+                visible_project_ids,
                 user_name,
                 vector,
                 score_threshold,
@@ -619,8 +317,14 @@ class EpisodeReader:
         limit: int,
         visible_project_ids: Optional[List[str]] = None,
     ) -> List[EpisodeCard]:
-        if not entity_ids:
+        if not entity_ids or limit <= 0:
             return []
+        user_name, visible_project_ids = self._project_scope(
+            user_name,
+            project_id,
+            visible_project_ids,
+            "get_project_episodes_for_entities",
+        )
         rows = await self.client.fetch_all(
             """
             SELECT e.*, COUNT(DISTINCT ee.entity_id) AS entity_overlap
@@ -632,7 +336,7 @@ class EpisodeReader:
             ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST,
                      e.episode_id DESC LIMIT %s
             """,
-            (visible_project_ids or [project_id], user_name, entity_ids, limit),
+            (visible_project_ids, user_name, entity_ids, limit),
         )
         return [await self._hydrate_episode_card(row) for row in rows]
 
@@ -644,6 +348,17 @@ class EpisodeReader:
         project_id: str,
         visible_project_ids: Optional[List[str]] = None,
     ) -> List[Dict]:
+        episode_id = require_scope_value(
+            episode_id,
+            "episode_id",
+            "get_project_episode_source_messages",
+        )
+        user_name, visible_project_ids = self._project_scope(
+            user_name,
+            project_id,
+            visible_project_ids,
+            "get_project_episode_source_messages",
+        )
         return await self.client.fetch_all(
             """
             SELECT m.message_id, m.session_id, m.role, m.content, m.timestamp_ms,
@@ -657,66 +372,25 @@ class EpisodeReader:
             WHERE e.episode_id = %s AND e.project_id = ANY(%s) AND p.user_name = %s
             ORDER BY em.message_position
             """,
-            (episode_id, visible_project_ids or [project_id], user_name),
+            (episode_id, visible_project_ids, user_name),
         )
 
     @staticmethod
-    def _require_scope(
+    def _project_scope(
         user_name: str,
         project_id: str,
-        session_id: str,
+        visible_project_ids: Optional[List[str]],
         operation: str,
-    ) -> tuple[str, str, str]:
-        return (
-            require_scope_value(user_name, "user_name", operation),
-            require_scope_value(project_id, "project_id", operation),
-            require_scope_value(session_id, "session_id", operation),
+    ) -> tuple[str, List[str]]:
+        user_name = require_scope_value(user_name, "user_name", operation)
+        project_id = require_scope_value(project_id, "project_id", operation)
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids if visible_project_ids is not None else [project_id],
+            operation,
         )
-
-    @staticmethod
-    def _episode_query(
-        predicate: str,
-        *,
-        joins: str = "",
-        ordering: str = "e.last_message_at DESC NULLS LAST, e.episode_id DESC",
-        limit: bool = False,
-    ) -> str:
-        query = f"""
-        SELECT
-            e.episode_id,
-            e.project_id,
-            e.summary,
-            e.new_developments,
-            e.updates,
-            e.unresolved,
-            e.source_message_count,
-            e.first_message_at,
-            e.last_message_at,
-            e.embedding,
-            e.generator_metadata,
-            e.user_modified,
-            e.created_at,
-            e.updated_at
-        FROM episodes e
-        {joins}
-        WHERE {predicate}
-          AND EXISTS (
-              SELECT 1
-              FROM episode_messages em
-              JOIN sessions s
-                ON s.session_id = em.session_id
-               AND s.project_id = em.project_id
-              WHERE em.episode_id = e.episode_id
-                AND em.project_id = e.project_id
-                AND s.user_name = %s
-                AND e.project_id = %s
-                AND em.session_id = %s
-          )
-        ORDER BY {ordering}
-        """
-        if limit:
-            query += " LIMIT %s"
-        return query
+        if project_id not in visible_project_ids:
+            raise ValueError("visible_project_ids must include project_id")
+        return user_name, visible_project_ids
 
     async def _hydrate_episode(self, row: Dict) -> Episode:
         episode_id = str(row["episode_id"])

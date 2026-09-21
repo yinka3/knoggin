@@ -1,4 +1,3 @@
-import json
 from datetime import datetime, timezone
 
 import pytest
@@ -12,7 +11,6 @@ def episode_row(episode_id="episode-1"):
     return {
         "episode_id": episode_id,
         "project_id": "project-1",
-        "session_id": "session-1",
         "summary": "The team selected the episodic-memory storage slice.",
         "new_developments": '["Episode tables are available."]',
         "updates": "[]",
@@ -26,49 +24,41 @@ def episode_row(episode_id="episode-1"):
     }
 
 
-def attachment_results(*, focus=False):
+def aggregate_attachments():
+    now = datetime.now(timezone.utc)
     return [
         [
             {
                 "message_id": 11,
                 "session_id": "session-1",
                 "message_position": 0,
-                "attached_at": datetime.now(timezone.utc),
+                "attached_at": now,
             }
         ],
         [
             {
                 "entity_id": 2,
                 "source_message_count": 1,
-                "first_seen_at": datetime.now(timezone.utc),
-                "last_seen_at": datetime.now(timezone.utc),
+                "first_seen_at": now,
+                "last_seen_at": now,
             }
         ],
-        [
-            {
-                "relationship_id": "project-1:2:3",
-                "source_message_count": 1,
-            }
-        ],
+        [{"relationship_id": "project-1:2:3", "source_message_count": 1}],
     ]
 
 
-def card_attachment_results():
+def card_attachments():
+    now = datetime.now(timezone.utc)
     return [
         [
             {
                 "entity_id": 2,
                 "source_message_count": 1,
-                "first_seen_at": datetime.now(timezone.utc),
-                "last_seen_at": datetime.now(timezone.utc),
+                "first_seen_at": now,
+                "last_seen_at": now,
             }
         ],
-        [
-            {
-                "relationship_id": "project-1:2:3",
-                "source_message_count": 1,
-            }
-        ],
+        [{"relationship_id": "project-1:2:3", "source_message_count": 1}],
     ]
 
 
@@ -107,163 +97,102 @@ async def test_merge_evidence_selects_episode_session_before_serializing_it():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_episode_reader_hydrates_one_complete_episode_aggregate():
+async def test_project_episode_hydrates_aggregate_with_normalized_visible_scope():
     client = RecordingPostgresClient(
         fetch_one_results=[episode_row()],
-        fetch_all_results=attachment_results(focus=True),
+        fetch_all_results=aggregate_attachments(),
     )
-    reader = EpisodeReader(client)
 
-    episode = await reader.get_episode(
-        "episode-1",
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
+    episode = await EpisodeReader(client).get_project_episode(
+        " episode-1 ",
+        user_name=" ada ",
+        project_id=" project-1 ",
+        visible_project_ids=[" project-1 ", "project-2", "project-1"],
     )
 
     assert episode is not None
     assert episode.new_developments == ["Episode tables are available."]
-    assert episode.source_message_count == 1
-    assert episode.first_message_at is not None
     assert episode.messages[0].message_id == 11
-    assert episode.messages[0].attached_at is not None
     assert episode.entities[0].first_seen_at is not None
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "JOIN sessions s" in query
-    assert params == ("episode-1", "ada", "project-1", "session-1")
+    assert client.calls[0][2] == (
+        "episode-1",
+        ["project-1", "project-2"],
+        "ada",
+    )
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_episode_reader_entity_lookup_includes_non_focus_memberships():
+async def test_project_episode_searches_use_project_scope_and_stored_indexes():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *card_attachment_results()],
+        fetch_all_results=[[episode_row()], *card_attachments()]
     )
-    reader = EpisodeReader(client)
 
-    episodes = await reader.get_episodes_for_entity(
-        2,
+    episodes = await EpisodeReader(client).search_project_episodes(
+        " episodic memory ",
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert [episode.episode_id for episode in episodes] == ["episode-1"]
-    assert not hasattr(episodes[0], "messages")
-    assert len(client.calls) == 3
-    assert all("FROM messages" not in call[1] for call in client.calls)
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "e.last_message_at DESC" in query
-    assert params == (2, "ada", "project-1", "session-1", 10)
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_returns_scoped_semantic_matches():
-    client = RecordingPostgresClient(
-        fetch_all_results=[
-            [{**episode_row(), "similarity": 0.86}],
-            *card_attachment_results(),
-        ]
-    )
-    reader = EpisodeReader(client)
-
-    matches = await reader.search_episodes_by_embedding(
-        [0.1] * 1024,
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-        limit=3,
-        score_threshold=0.5,
-    )
-
-    assert [(episode.episode_id, score) for episode, score in matches] == [
-        ("episode-1", 0.86)
-    ]
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "e.embedding <=> %s::vector" in query
-    assert "e.embedding IS NOT NULL" in query
-    assert json.loads(params[0]) == [0.1] * 1024
-    assert params[1:4] == ("ada", "project-1", "session-1")
-    assert params[5] == 0.5
-    assert params[-1] == 3
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_uses_the_stored_lexical_search_vector():
-    client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *card_attachment_results()]
-    )
-    reader = EpisodeReader(client)
-
-    episodes = await reader.search_episodes(
-        "episodic memory",
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
+        visible_project_ids=["project-1"],
         limit=4,
     )
 
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
     query, params = client.calls[0][1], client.calls[0][2]
-    assert "e.search_tsvector @@ q.terms" in query
-    assert "ts_rank_cd(e.search_tsvector, q.terms)" in query
-    assert "to_tsvector" not in query
-    assert params == ("episodic memory", "ada", "project-1", "session-1", 4)
+    assert "e.search_tsvector @@ terms.query" in query
+    assert "ts_rank_cd(e.search_tsvector, terms.query)" in query
+    assert params == ("episodic memory", ["project-1"], "ada", 4)
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_episode_reader_ranks_episodes_by_source_entity_overlap():
+async def test_project_entity_and_semantic_queries_use_project_scope():
     client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *card_attachment_results()]
+        fetch_all_results=[
+            [{**episode_row(), "similarity": 0.86}],
+            *card_attachments(),
+            [episode_row()],
+            *card_attachments(),
+        ]
     )
     reader = EpisodeReader(client)
 
-    episodes = await reader.get_episodes_for_entities(
-        [3, 2, 3],
+    semantic_matches = await reader.search_project_episodes_by_embedding(
+        [0.1] * 1024,
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
+        visible_project_ids=["project-1"],
+        limit=3,
+        score_threshold=0.5,
+    )
+    episodes = await reader.get_project_episodes_for_entities(
+        [2],
+        user_name="ada",
+        project_id="project-1",
+        visible_project_ids=["project-1"],
         limit=3,
     )
 
+    assert [(episode.episode_id, score) for episode, score in semantic_matches] == [
+        ("episode-1", 0.86)
+    ]
     assert [episode.episode_id for episode in episodes] == ["episode-1"]
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "COUNT(DISTINCT ee.entity_id) AS entity_overlap" in query
-    assert "ORDER BY entity_overlap DESC, e.last_message_at DESC NULLS LAST" in query
-    assert params == ([2, 3], "ada", "project-1", "session-1", 3)
+    semantic_query, semantic_params = client.calls[0][1], client.calls[0][2]
+    assert "e.embedding <=> %s::vector" in semantic_query
+    assert semantic_params[1:3] == (["project-1"], "ada")
+    entity_query, entity_params = client.calls[3][1], client.calls[3][2]
+    assert "COUNT(DISTINCT ee.entity_id) AS entity_overlap" in entity_query
+    assert entity_params == (["project-1"], "ada", [2], 3)
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_episode_reader_loads_the_immediately_previous_episode():
-    client = RecordingPostgresClient(
-        fetch_all_results=[[episode_row()], *card_attachment_results()]
-    )
-    reader = EpisodeReader(client)
-
-    episodes = await reader.get_recent_episodes(
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert [episode.episode_id for episode in episodes] == ["episode-1"]
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "ORDER BY e.last_message_at DESC NULLS LAST, e.episode_id DESC" in query
-    assert params == ("ada", "project-1", "session-1", 1)
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_episode_reader_expands_source_messages_in_episode_order():
+async def test_project_episode_source_messages_require_current_project_visibility():
     client = RecordingPostgresClient(
         fetch_all_results=[
             [
                 {
                     "message_id": 11,
+                    "session_id": "session-1",
                     "role": "user",
                     "content": "Build the storage slice first.",
                     "timestamp_ms": 1700000000000,
@@ -275,36 +204,31 @@ async def test_episode_reader_expands_source_messages_in_episode_order():
     )
     reader = EpisodeReader(client)
 
-    messages = await reader.get_episode_source_messages(
+    messages = await reader.get_project_episode_source_messages(
         "episode-1",
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
+        visible_project_ids=["project-1"],
     )
 
     assert messages[0]["content"] == "Build the storage slice first."
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "ORDER BY em.message_position" in query
-    assert params == (
-        "episode-1",
-        "ada",
-        "project-1",
-        "session-1",
-        "ada",
-        "project-1",
-        "session-1",
-    )
+    assert client.calls[0][2] == ("episode-1", ["project-1"], "ada")
+    with pytest.raises(ValueError, match="include project_id"):
+        await reader.get_recent_project_episodes(
+            user_name="ada",
+            project_id="project-1",
+            visible_project_ids=["project-2"],
+            limit=1,
+        )
 
 
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network
-async def test_episode_reader_isolates_user_project_and_session_scopes(
+async def test_project_episode_reader_isolates_user_and_visible_project_scopes(
     real_postgres_client,
 ):
-    """Reader queries must not expose another user's or project's episodes."""
-
     await real_postgres_client.execute(
         """
         INSERT INTO projects (project_id, user_name, name, domain_config)
@@ -366,62 +290,51 @@ async def test_episode_reader_isolates_user_project_and_session_scopes(
     )
 
     reader = EpisodeReader(real_postgres_client)
-
-    visible = await reader.get_episode(
-        "episode-1",
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
+    visible = await reader.get_project_episode(
+        "episode-1", user_name="ada", project_id="project-1"
     )
     assert visible is not None
-    assert visible.summary == "Visible project one memory"
     assert [message.message_id for message in visible.messages] == [101]
 
-    assert await reader.get_episode(
+    assert await reader.get_project_episode(
         "episode-2",
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
+        visible_project_ids=["project-1"],
     ) is None
-    assert await reader.get_episode(
-        "episode-3",
+    shared = await reader.get_project_episode(
+        "episode-2",
         user_name="ada",
-        project_id="project-3",
-        session_id="session-3",
-    ) is None
-    assert await reader.get_episode(
+        project_id="project-1",
+        visible_project_ids=["project-1", "project-2"],
+    )
+    assert shared is not None
+    assert await reader.get_project_episode(
         "episode-1",
         user_name="bob",
         project_id="project-1",
-        session_id="session-1",
+        visible_project_ids=["project-1"],
     ) is None
 
-    recent = await reader.get_recent_episodes(
+    recent = await reader.get_recent_project_episodes(
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
+        visible_project_ids=["project-1"],
         limit=10,
     )
     assert [episode.episode_id for episode in recent] == ["episode-1"]
 
-    search_matches = await reader.search_episodes(
+    search_matches = await reader.search_project_episodes(
         "visible",
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
+        visible_project_ids=["project-1"],
         limit=10,
     )
     assert [episode.episode_id for episode in search_matches] == ["episode-1"]
-
-    assert await reader.get_episode_source_messages(
+    assert await reader.get_project_episode_source_messages(
         "episode-2",
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
-    ) == []
-    assert await reader.get_episode_source_messages(
-        "episode-3",
-        user_name="ada",
-        project_id="project-3",
-        session_id="session-3",
+        visible_project_ids=["project-1"],
     ) == []

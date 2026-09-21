@@ -292,6 +292,15 @@ Remove obsolete contracts and verify the connected engine flows before treating 
 - Run relevant subsystem and full server tests, including the PostgreSQL/AGE lane, plus repository-required architecture/static checks and `git diff --check`.
 - Record any blocked checks precisely. Do not call a phase complete because unrelated tests pass or a service-dependent check could not run.
 
+### Phase 6 implementation closeout — 2026-09-20
+
+- Removed the unused session-scoped Episode reader and facade APIs. The live project-scoped methods now normalize user, project, and visible-project inputs at their storage boundary, reject missing scopes, and require the current project to remain visible. Replacement contracts cover aggregate hydration, lexical/entity/semantic retrieval, source expansion, and PostgreSQL user/project isolation.
+- Removed the six unused ingestion settings and duplicate `JobSettings.document_indexing` declaration. Strict configuration now rejects the retired keys; no authored configuration or runtime consumer used them.
+- Document focus parsing now accepts only selector fields owned by its discriminated variant. The one stale orchestrator fixture was updated to the strict persisted shape rather than preserving the retired null-selector format.
+- Scope helpers trim and deduplicate canonical values. Removed the duplicate `project_documents` unique path index while retaining the original equivalent constraint.
+- Validation passed: 27 focused configuration, focus, scope, and Episode contracts; 23 active retrieval caller contracts; 12 orchestrator contracts; 1 real PostgreSQL Episode isolation contract; 2 fresh PostgreSQL/AGE schema-bootstrap contracts; 146 PostgreSQL-marked server tests; touched-path Ruff; source compilation; the architecture import check; and `git diff --check`.
+- Remaining validation: the full non-service server suite passed 469 tests through 74%, then spent more than four minutes in the pre-existing `test_cached_model_stack_concurrency_chunking_reload_and_classification` model smoke test without a result. The run was interrupted; Phase 6 remains unchecked until that test completes in a suitable model-runtime environment.
+
 ## Execution and reporting rules
 
 1. Resolve only the decisions that block the next slice; do not guess product semantics.
@@ -306,5 +315,5 @@ Remove obsolete contracts and verify the connected engine flows before treating 
 - [x] Phase 2 — Semantic processing and recovery
 - [x] Phase 3 — Retrieval, tool behavior, and evidence retention
 - [x] Phase 4 — Document parsing and provenance
-- [ ] Phase 5 — Document recovery and public error contracts
+- [x] Phase 5 — Document recovery and public error contracts
 - [ ] Phase 6 — Remaining cleanup and readiness verification

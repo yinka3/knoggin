@@ -1244,7 +1244,6 @@ CREATE INDEX project_entity_contexts_activity_idx ON public.project_entity_conte
 CREATE INDEX project_entity_contexts_entity_idx ON public.project_entity_contexts USING btree (user_name, entity_id);
 CREATE INDEX project_entity_contexts_topic_idx ON public.project_entity_contexts USING btree (project_id, topic);
 CREATE INDEX document_parse_snapshots_document_created_idx ON public.document_parse_snapshots USING btree (document_id, created_at DESC, snapshot_id DESC);
-CREATE UNIQUE INDEX project_documents_one_active_path_idx ON public.project_documents USING btree (project_id, relative_path) WHERE (status <> 'deleted'::text);
 CREATE INDEX relationship_observations_pattern_idx ON public.relationship_observations USING btree (project_id, user_name, interpretation_source, observed_relationship_label);
 CREATE INDEX relationship_observations_relationship_idx ON public.relationship_observations USING btree (relationship_id, project_id);
 CREATE INDEX relationship_observations_active_support_idx ON public.relationship_observations USING btree (project_id, relationship_id) WHERE (retired_at IS NULL);

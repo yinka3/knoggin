@@ -324,20 +324,10 @@ DocumentFocus = Annotated[
 ]
 
 _DOCUMENT_FOCUS_ADAPTER = TypeAdapter(DocumentFocus)
-_LEGACY_OPTIONAL_SELECTORS = {
-    "document_id",
-    "relative_path",
-    "path_prefix",
-}
 
 
 def parse_document_focus(value: object) -> DocumentFocus:
-    """Validate a focus, accepting legacy persisted null selector fields.
-
-    Newly written focus values contain only the selectors owned by their
-    discriminated variant. Removing null legacy fields makes old persisted
-    records readable without allowing conflicting non-null selectors.
-    """
+    """Validate a focus with exactly the selectors owned by its variant."""
 
     if isinstance(
         value,
@@ -346,11 +336,7 @@ def parse_document_focus(value: object) -> DocumentFocus:
         return value
     if not isinstance(value, dict):
         raise ValueError("document focus must be an object")
-    normalized = dict(value)
-    for selector in _LEGACY_OPTIONAL_SELECTORS:
-        if normalized.get(selector) is None:
-            normalized.pop(selector, None)
-    return _DOCUMENT_FOCUS_ADAPTER.validate_python(normalized)
+    return _DOCUMENT_FOCUS_ADAPTER.validate_python(value)
 
 
 def create_document_focus(

@@ -440,8 +440,6 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
     focus = {
         "mode": "pinned",
         "target_type": "subtree",
-        "document_id": None,
-        "relative_path": None,
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
@@ -454,8 +452,6 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
             }
             return {
                 "target_type": "subtree",
-                "document_id": None,
-                "relative_path": None,
                 "path_prefix": "src",
             }
 

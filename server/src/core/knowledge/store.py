@@ -1068,55 +1068,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_episode(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Optional[Episode]:
-        return await self._episode_reader.get_episode(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def get_episodes_for_entity(
-        self,
-        entity_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.get_episodes_for_entity(
-            entity_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
-    async def get_episodes_for_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.get_episodes_for_entities(
-            entity_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
     async def get_merge_evidence_for_entities(
         self,
         entity_ids: List[int],
@@ -1130,72 +1081,6 @@ class KnowledgeStore:
             project_id=project_id,
             evidence_limit=evidence_limit,
             source_message_limit=source_message_limit,
-        )
-
-    async def search_episodes(
-        self,
-        query: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.search_episodes(
-            query,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
-    async def search_episodes_by_embedding(
-        self,
-        embedding: List[float],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-        score_threshold: float = 0.35,
-    ) -> List[tuple[EpisodeCard, float]]:
-        return await self._episode_reader.search_episodes_by_embedding(
-            embedding,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-            score_threshold=score_threshold,
-        )
-
-    async def get_recent_episodes(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 1,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.get_recent_episodes(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
-    async def get_episode_source_messages(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> List[Dict]:
-        return await self._episode_reader.get_episode_source_messages(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
         )
 
     async def ensure_identity_entity(
