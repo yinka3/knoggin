@@ -77,6 +77,57 @@ def test_notebook_shares_relationship_evidence_across_retrieval_surfaces():
     )
 
 
+def test_notebook_retains_only_complete_activity_and_its_entity_dependency():
+    notebook = RunNotebook()
+
+    admission = notebook.apply(
+        "get_recent_activity",
+        {
+            "data": [
+                {"error": "unavailable", "entity_id": 1, "time": 1},
+                {"entity_id": 2},
+                {"time": 3},
+                {
+                    "entity_id": 24,
+                    "entity": "Sarah Johnson",
+                    "time": "2026-09-21T12:00:00Z",
+                    "content": "Sarah approved the release.",
+                },
+            ]
+        },
+    )
+
+    assert len(admission.references) == 1
+    assert admission.references[0].startswith("activity:")
+    assert notebook.section_items("activities") == (
+        {
+            "entity_id": 24,
+            "entity": "Sarah Johnson",
+            "time": "2026-09-21T12:00:00Z",
+            "content": "Sarah approved the release.",
+        },
+    )
+    assert notebook.entity_pages["entity:24"]["entity_ref"] == "entity:24"
+
+    notebook._retain_references(list(admission.references), recent_contributions=0)
+
+    assert "entity:24" in notebook.entity_pages
+    assert len(notebook.section_items("activities")) == 1
+
+
+def test_notebook_evidence_text_requires_visible_content():
+    notebook = RunNotebook()
+
+    assert notebook._record_has_text({"context": [{"content": "supported"}]}) is True
+    assert notebook._record_has_text({"context": [{"content": "  "}, None]}) is False
+    assert notebook._observation_support_has_text(
+        {"nodes": [{"excerpt": "source passage"}]}
+    ) is True
+    assert notebook._observation_support_has_text(
+        {"nodes": [{"excerpt": "  "}, {"label": "placeholder"}]}
+    ) is False
+
+
 def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges():
     notebook = RunNotebook(
         limits=AgentRunLimits(

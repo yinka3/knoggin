@@ -2,7 +2,7 @@ import pytest
 
 from common.schema.agent.tool_contracts import TOOL_SCHEMAS
 from common.schema.source.references import SourceReferenceCandidate
-from core.agent.tools.search import SearchTools
+from core.agent.tools.search import SearchTools, _layout_region_locator
 
 
 class EmptyDocumentService:
@@ -80,13 +80,7 @@ class ReadOnlyDocumentService:
         path_prefix=None,
         limit=50,
     ):
-        self.calls.append(
-            (
-                "list_documents",
-                path_prefix,
-                limit,
-            )
-        )
+        self.calls.append(("list_documents", path_prefix, limit))
         return [
             {
                 "document_id": "file-1",
@@ -116,13 +110,7 @@ class ReadOnlyDocumentService:
         end_line=None,
     ):
         self.calls.append(
-            (
-                "read_document",
-                document_id,
-                relative_path,
-                start_line,
-                end_line,
-            )
+            ("read_document", document_id, relative_path, start_line, end_line)
         )
         return self.read_result or {
             "document_id": document_id or "file-1",
@@ -131,6 +119,126 @@ class ReadOnlyDocumentService:
             "chunk_index": f"lines:{start_line}-{end_line or 3}",
             "content": "2: alpha\n3: beta",
         }
+
+
+def _source_result(**overrides):
+    result = {
+        "content": "Exact stored passage.",
+        "document_id": "doc_abc123",
+        "project_id": "project-1",
+        "parse_snapshot_id": "snapshot-1",
+        "content_hash": "a" * 64,
+        "document_name": "report.pdf",
+        "relative_path": "reports/report.pdf",
+        "extension": ".pdf",
+        "locator": {
+            "kind": "layout_region",
+            "page": 2,
+            "element_type": "paragraph",
+            "extraction_method": "native_text",
+            "bbox": {"left": 10, "bottom": 20, "right": 110, "top": 60},
+            "text_start": 0,
+            "text_end": 21,
+        },
+    }
+    result.update(overrides)
+    return result
+
+
+def test_document_source_context_preserves_valid_pdf_layout_provenance():
+    source = SearchTools._document_source_context(_source_result())
+
+    assert source is not None
+    assert source["source_kind"] == "pdf_document"
+    assert source["locator"] == {
+        "kind": "layout_region",
+        "page": 2,
+        "element_type": "paragraph",
+        "extraction_method": "native_text",
+        "coordinate_unit": "pdf_points",
+        "coordinate_origin": "bottom_left",
+        "bbox": {"left": 10, "bottom": 20, "right": 110, "top": 60},
+        "text_start": 0,
+        "text_end": 21,
+    }
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        None,
+        {"kind": "layout_region"},
+        {
+            "kind": "layout_region",
+            "page": 1,
+            "element_type": "paragraph",
+            "extraction_method": "native_text",
+            "bbox": "not-coordinates",
+        },
+        {
+            "kind": "layout_region",
+            "page": 1,
+            "element_type": "paragraph",
+            "extraction_method": "native_text",
+            "bbox": {"left": 10, "bottom": 0, "right": 5, "top": 20},
+        },
+        {
+            "kind": "layout_region",
+            "page": 1,
+            "element_type": "paragraph",
+            "extraction_method": "native_text",
+            "text_start": 9,
+            "text_end": 4,
+        },
+        {"kind": "text_lines", "start_line": 1, "end_line": 2},
+    ],
+)
+def test_document_source_context_rejects_unreliable_pdf_locators(locator):
+    assert SearchTools._document_source_context(_source_result(locator=locator)) is None
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "not-a-locator",
+        {
+            "kind": "layout_region",
+            "page": 1,
+            "element_type": "paragraph",
+            "extraction_method": "native_text",
+            "bbox": {"left": "10", "bottom": 0, "right": 20, "top": 30},
+        },
+    ],
+)
+def test_layout_region_normalization_rejects_malformed_boundaries(locator):
+    assert _layout_region_locator(locator) is None
+
+
+@pytest.mark.parametrize(
+    ("locator", "expected"),
+    [
+        ({"kind": "layout_region", "page": 4}, (4, 1, None)),
+        (
+            {"kind": "code_lines", "start_line": 5, "end_line": 8},
+            (None, 5, 8),
+        ),
+        ({"kind": "csv_rows", "start_row": 2, "end_row": 6}, (None, 2, 6)),
+        ({"kind": "unknown"}, (None, 1, None)),
+    ],
+)
+def test_request_selection_defaults_follow_the_selected_locator(locator, expected):
+    tools = SearchTools()
+    tools.document_focus = {
+        "mode": "request",
+        "target_type": "document",
+        "selection": {"locator": locator},
+    }
+
+    assert tools._request_selection_defaults(
+        page_number=None,
+        start_line=1,
+        end_line=None,
+    ) == expected
 
 
 

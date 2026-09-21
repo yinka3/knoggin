@@ -2110,6 +2110,81 @@ async def test_one_parallel_read_failure_keeps_sibling_success(monkeypatch):
 
 
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("failure", "expected_error", "retryable"),
+    [
+        (TimeoutError(), "Tool execution timed out", True),
+        (RuntimeError("private failure"), "Internal tool failure", False),
+    ],
+)
+async def test_parallel_read_normalizes_timeout_and_internal_failures(
+    monkeypatch, failure, expected_error, retryable
+):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+
+    async def mixed_result(_tools, _name, args):
+        if args["query"] == "broken":
+            raise failure
+        return {"data": [{"id": "kept", "message": "usable"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", mixed_result)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "broken"}, call_id="bad"),
+                ToolCall("search_messages", {"query": "working"}, call_id="good"),
+            ],
+            results,
+        )
+    ]
+
+    assert events[2]["event"] == "tool_error"
+    assert events[2]["data"]["error"].startswith(expected_error)
+    assert events[2]["data"]["retryable"] is retryable
+    assert results[1]["result"]["data"][0]["id"] == "kept"
+
+
+@pytest.mark.no_network
+async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
+    run = make_run(
+        limits=AgentRunLimits(
+            max_attempts=1,
+            max_calls=4,
+            max_accumulated_messages=1,
+        )
+    )
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+
+    async def result_for_query(_tools, name, args):
+        return {"data": [{"id": args["query"], "message": name}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", result_for_query)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "first"}, call_id="first"),
+                ToolCall("search_messages", {"query": "second"}, call_id="second"),
+            ],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_end"
+    assert "exceeds the evidence capacity" in events[-1]["data"]["result"]
+    admission = results[-1]["result"]["notebook_admission"]
+    assert admission["accepted"] is False
+    assert admission["reason"] == "capacity"
+    assert [item["id"] for item in run.notebook.section_items("messages")] == [
+        "first"
+    ]
+
+
+@pytest.mark.no_network
 async def test_parallel_batch_cancellation_awaits_every_child(monkeypatch):
     run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
     executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
