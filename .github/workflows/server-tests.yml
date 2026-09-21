@@ -194,9 +194,7 @@ jobs:
 
   # Changed-line coverage is evaluated against both reports so a line covered
   # only by a real-service contract is not penalized by the service-free lane.
-  # It is PR-only because a push has no stable target branch to compare. The
-  # initial 70% floor is calibrated to this repository-wide refactor; raise it
-  # after the refactor lands and PR diffs return to their normal, narrow scope.
+  # It is PR-only because a push has no stable target branch to compare.
   changed-line-coverage:
     name: Changed-line coverage
     needs: [fast, services]
@@ -240,7 +238,7 @@ jobs:
           uv run diff-cover coverage-fast.xml coverage-services.xml
           --compare-branch "$BASE_BRANCH"
           --branch-coverage
-          --fail-under 70
+          --fail-under 90
 
   # Model artifacts are intentionally outside ordinary push/PR gates. A
   # release or an explicitly requested dispatch downloads the configured
