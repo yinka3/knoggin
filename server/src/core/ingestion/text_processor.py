@@ -356,19 +356,27 @@ class TextProcessor:
                 for alias in known_aliases
             ):
                 alias_gap_blocks.add(block.block_id)
+        endpoint_gap_blocks = {
+            item.block_id for item in build.unknown_endpoint_diagnostics
+        }
         gaps = [
             block
             for block in build.knowledge_input_blocks
-            if (block.block_id not in covered or block.block_id in alias_gap_blocks)
+            if (
+                block.block_id not in covered
+                or block.block_id in alias_gap_blocks
+                or block.block_id in endpoint_gap_blocks
+            )
             and len(re.findall(r"[A-Za-z0-9]+", block.markdown)) >= 3
         ]
         if not gaps:
             return
-        trigger = (
-            "known_alias_missing_from_extraction"
-            if alias_gap_blocks
-            else "meaningful_context_without_candidates"
-        )
+        if endpoint_gap_blocks:
+            trigger = "unknown_relationship_endpoint"
+        elif alias_gap_blocks:
+            trigger = "known_alias_missing_from_extraction"
+        else:
+            trigger = "meaningful_context_without_candidates"
         build.trace.fallbacks.append(
             {"stage": "context_mentions", "trigger": trigger}
         )
@@ -407,6 +415,19 @@ class TextProcessor:
                     for local_id, block in local_to_block.items()
                 ],
                 "supporting_excerpts": supporting_excerpts,
+                "unknown_endpoint_observations": [
+                    {
+                        "block_id": next(
+                            local_id
+                            for local_id, block in local_to_block.items()
+                            if block.block_id == item.block_id
+                        ),
+                        "name": item.name,
+                        "type": item.entity_type,
+                    }
+                    for item in build.unknown_endpoint_diagnostics
+                    if item.block_id in {block.block_id for block in gaps}
+                ],
             },
             ensure_ascii=False,
         )

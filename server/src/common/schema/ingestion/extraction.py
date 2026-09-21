@@ -148,3 +148,4 @@ class ContextRelationshipExtraction(StructuredLLMOutput):
     """The Context-native VP-02 response shape."""
 
     connections: List[ContextRelationshipMention] = Field(default_factory=list)
+    unknown_endpoints: List[ContextEntityMention] = Field(default_factory=list)

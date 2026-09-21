@@ -13,7 +13,10 @@ from common.schema.context import (
     ContextRevisionOrigin,
     ContextSnapshot,
 )
-from common.schema.ingestion.contracts import ContextEntityResult
+from common.schema.ingestion.contracts import (
+    ContextEntityResult,
+    UnknownEndpointDiagnostic,
+)
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
@@ -76,6 +79,36 @@ class _Builder:
 class _Relationships:
     async def extract(self, build):
         build.set_relationship_writes(())
+        return ()
+
+
+class _RecoveringBuilder(_Builder):
+    def __init__(self):
+        self.calls = 0
+
+    async def build(self, build):
+        self.calls += 1
+        return await super().build(build)
+
+
+class _DiagnosticRelationships(_Relationships):
+    def __init__(self):
+        self.calls = 0
+
+    async def extract(self, build):
+        self.calls += 1
+        build.set_relationship_writes(())
+        build.set_unknown_endpoint_diagnostics(
+            (
+                UnknownEndpointDiagnostic(
+                    block_id=build.knowledge_input_blocks[0].block_id,
+                    name="Grounded",
+                    entity_type="Concept",
+                ),
+            )
+            if self.calls == 1
+            else ()
+        )
         return ()
 
 
@@ -317,6 +350,22 @@ async def test_knowledge_commit_precedes_episode_enrichment_and_completes_termin
         "complete",
     ]
     assert store.window.stage is SemanticWindowStage.COMPLETED
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_unknown_endpoint_triggers_one_entity_recovery_and_final_relationship_pass():
+    store = _Store()
+    builder = _RecoveringBuilder()
+    relationships = _DiagnosticRelationships()
+    job = _job(store, builder=builder, relationships=relationships)
+
+    completed = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert completed.success
+    assert builder.calls == 2
+    assert relationships.calls == 2
+    assert len(store.commit_calls) == 1
 
 
 @pytest.mark.unit

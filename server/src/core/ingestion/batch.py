@@ -12,6 +12,7 @@ from common.schema.ingestion.contracts import (
     ContextEntityResult,
     ContextRelationshipWrite,
     ExtractionTrace,
+    UnknownEndpointDiagnostic,
     ValidationIssue,
 )
 from common.schema.semantic_window import SemanticWindowRecord, SemanticWindowStage
@@ -41,6 +42,7 @@ class SemanticWindowBuild:
     mentions: tuple[ContextBlockMention, ...] = ()
     entity_result: ContextEntityResult | None = None
     relationship_writes: tuple[ContextRelationshipWrite, ...] = ()
+    unknown_endpoint_diagnostics: tuple[UnknownEndpointDiagnostic, ...] = ()
 
     @classmethod
     def from_committed_window(
@@ -207,3 +209,14 @@ class SemanticWindowBuild:
                 "Context relationship writes must cite eligible blocks and resolved endpoints"
             )
         self.relationship_writes = values
+
+    def set_unknown_endpoint_diagnostics(
+        self, diagnostics: Iterable[UnknownEndpointDiagnostic]
+    ) -> None:
+        values = tuple(diagnostics)
+        if any(not isinstance(item, UnknownEndpointDiagnostic) for item in values):
+            raise TypeError("Unknown endpoint diagnostics must be typed")
+        input_ids = {block.block_id for block in self.knowledge_input_blocks}
+        if any(item.block_id not in input_ids for item in values):
+            raise ValueError("Unknown endpoint diagnostics must cite eligible blocks")
+        self.unknown_endpoint_diagnostics = values

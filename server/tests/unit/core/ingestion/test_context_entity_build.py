@@ -18,6 +18,7 @@ from common.schema.ingestion.contracts import (
     ContextBlockMention,
     ContextEntityResult,
     ProjectEntityClassification,
+    UnknownEndpointDiagnostic,
 )
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
@@ -615,6 +616,41 @@ async def test_llm_ner_fallback_uses_known_alias_support_when_block_is_covered()
     assert semantic_build.trace.fallbacks[-1]["trigger"] == (
         "known_alias_missing_from_extraction"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_unknown_endpoint_diagnostic_triggers_one_targeted_fallback():
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    mentions = await processor(vp01, llm=llm).extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Orion", "vp01"),
+        ("Zephyr Dynamics", "llm_fallback"),
+    ]
+    assert len(llm.calls) == 1
+    assert semantic_build.trace.fallbacks[-1]["trigger"] == (
+        "unknown_relationship_endpoint"
+    )
+    assert "unknown_endpoint_observations" in llm.calls[0]["user"]
 
 
 @pytest.mark.unit

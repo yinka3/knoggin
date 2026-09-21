@@ -378,6 +378,31 @@ class ContextBlockEntityAssociation:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class UnknownEndpointDiagnostic:
+    """Validated relationship endpoint observation that cannot write state."""
+
+    block_id: UUID
+    name: str
+    entity_type: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.block_id, UUID):
+            raise TypeError("UnknownEndpointDiagnostic.block_id must be a UUID")
+        object.__setattr__(
+            self,
+            "name",
+            _require_nonblank_text(self.name, "UnknownEndpointDiagnostic.name"),
+        )
+        object.__setattr__(
+            self,
+            "entity_type",
+            _require_nonblank_text(
+                self.entity_type, "UnknownEndpointDiagnostic.entity_type"
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ResolvedContextBlockMention:
     """One typed Context mention after identity resolution but before persistence."""
 

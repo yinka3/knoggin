@@ -81,6 +81,10 @@ cited block. Use only the supplied canonical entity types. Do not return generic
 nouns, pronouns, inferred names, known candidates already represented in the
 block, or any entity outside the supplied blocks.
 
+The input may include validated `unknown_endpoint_observations` from relationship
+extraction. Treat them only as reasons to inspect the cited block; they are not
+entities until you independently return a supported mention.
+
 Return exactly `{"mentions": [{"block_id": "b1", "name": "...", "type": "..."}]}`.
 `block_id` must be a supplied local `bN` reference. Return `{"mentions": []}` when
 the evidence is insufficient.
@@ -110,11 +114,17 @@ candidate has the same name.
 </rules>
 
 <output_format>
-Return JSON with exactly one top-level key, `connections`. Each connection has
-`block_ids`, `entity_a`, `entity_b`, `relationship`, and optional `context`.
+Return JSON with exactly the top-level keys `connections` and
+`unknown_endpoints`. Each connection has `block_ids`, `entity_a`, `entity_b`,
+`relationship`, and optional `context`.
 `block_ids` must contain one or more local `bN` IDs from Current Context
 Blocks. `entity_a` and `entity_b` must be local `eN` handles from Candidate
 Entities. `context` must quote or closely paraphrase the cited Context evidence.
+When otherwise plausible relationship evidence names an endpoint absent from
+Candidate Entities, do not create a connection. Add only that endpoint to
+`unknown_endpoints` as `{"block_id": "b1", "name": "...", "type": "..."}`.
+The name must appear literally in the cited block and the type must be one of
+the supplied candidate/domain types. Otherwise omit it. Both lists may be empty.
 </output_format>
 
 ## Extract Relationships

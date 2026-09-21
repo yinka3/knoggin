@@ -625,6 +625,9 @@ class ProjectSemanticJob(BaseJob):
             if build.impact_block_ids:
                 await self._context_entity_builder.build(build)
                 await self._context_relationship_extractor.extract(build)
+                if build.unknown_endpoint_diagnostics:
+                    await self._context_entity_builder.build(build)
+                    await self._context_relationship_extractor.extract(build)
             else:
                 build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)
