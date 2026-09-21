@@ -35,6 +35,7 @@ class ToolDefinition:
     default_limit: Optional[int] = None
     runtime_instruction: Optional[str] = None
     executor_protocol: bool = False
+    parallel_safe: bool = False
 
 
 _HEALTH_RUNTIME_INSTRUCTION = (
@@ -144,6 +145,7 @@ def _definition(
     default_limit: Optional[int] = None,
     runtime_instruction: Optional[str] = None,
     executor_protocol: bool = False,
+    parallel_safe: bool = False,
 ) -> ToolDefinition:
     schema = _canonical_schema(name)
     parameters = schema["function"].get("parameters", {}).get("properties", {})
@@ -155,6 +157,7 @@ def _definition(
         default_limit=default_limit,
         runtime_instruction=runtime_instruction,
         executor_protocol=executor_protocol,
+        parallel_safe=parallel_safe,
     )
 
 
@@ -183,6 +186,7 @@ TOOL_DEFINITIONS = {
         "search_entity",
         default_limit=8,
         runtime_instruction=_ENTITY_RUNTIME_INSTRUCTION,
+        parallel_safe=True,
     ),
     "load_topic_context": _definition(
         "load_topic_context",
@@ -208,6 +212,7 @@ TOOL_DEFINITIONS = {
         "search_messages",
         default_limit=6,
         runtime_instruction=_MESSAGE_SEARCH_RUNTIME_INSTRUCTION,
+        parallel_safe=True,
     ),
     "get_recent_activity": _definition(
         "get_recent_activity",
@@ -222,6 +227,7 @@ TOOL_DEFINITIONS = {
         "episode_check",
         default_limit=6,
         runtime_instruction=_EPISODE_CHECK_RUNTIME_INSTRUCTION,
+        parallel_safe=True,
     ),
     "read_episode": _definition(
         "read_episode",
@@ -261,7 +267,9 @@ TOOL_DEFINITIONS = {
     "list_documents": _definition("list_documents", default_limit=4),
     "get_document_info": _definition("get_document_info", default_limit=6),
     "read_document": _definition("read_document", default_limit=6),
-    "search_documents": _definition("search_documents", default_limit=8),
+    "search_documents": _definition(
+        "search_documents", default_limit=8, parallel_safe=True
+    ),
     "web_search": _definition(
         "web_search",
         default_limit=8,

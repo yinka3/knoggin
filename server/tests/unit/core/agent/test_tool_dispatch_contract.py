@@ -204,6 +204,17 @@ def test_read_web_page_registry_definition_matches_schema_and_default_limit():
         "read_web_page",
         ("url", "start_line", "max_lines", "query", "page_number"),
     )
+    assert definition.parallel_safe is False
+
+
+@pytest.mark.no_network
+def test_only_explicit_stateless_retrieval_tools_are_parallel_safe():
+    assert get_tool_definition("search_messages").parallel_safe is True
+    assert get_tool_definition("search_entity").parallel_safe is True
+    assert get_tool_definition("episode_check").parallel_safe is True
+    assert get_tool_definition("search_documents").parallel_safe is True
+    assert get_tool_definition("read_web_page").parallel_safe is False
+    assert get_tool_definition("edit_brain").parallel_safe is False
 
 
 @pytest.mark.no_network

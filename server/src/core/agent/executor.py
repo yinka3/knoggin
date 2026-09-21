@@ -831,7 +831,24 @@ class AgentExecutor:
     async def _execute_tools(
         self, tool_calls: List[_ToolCall], results_out: List[Dict]
     ) -> AsyncGenerator[Dict, None]:
-        """Executes a batch of tool calls sequentially to avoid shared state races."""
+        """Execute explicitly safe reads concurrently; keep other batches ordered."""
+
+        if len(tool_calls) > 1 and all(
+            (definition := get_tool_definition(call.name)) is not None
+            and definition.parallel_safe
+            and not definition.executor_protocol
+            for call in tool_calls
+        ):
+            async for event in self._execute_parallel_tools(tool_calls, results_out):
+                yield event
+            return
+        async for event in self._execute_tools_sequential(tool_calls, results_out):
+            yield event
+
+    async def _execute_tools_sequential(
+        self, tool_calls: List[_ToolCall], results_out: List[Dict]
+    ) -> AsyncGenerator[Dict, None]:
+        """Execute a batch in model-request order."""
 
         if self.ctx.call_count >= self.ctx.limits.max_calls:
             err_msg = f"Global call limit reached ({self.ctx.limits.max_calls})"
@@ -1030,6 +1047,133 @@ class AgentExecutor:
                         "call_id": call.call_id,
                     },
                 }
+
+    async def _execute_parallel_tools(
+        self, tool_calls: List[_ToolCall], results_out: List[Dict]
+    ) -> AsyncGenerator[Dict, None]:
+        """Run a validated safe batch, then admit results in request order."""
+
+        signatures: set[tuple[str, str]] = set()
+        pending_counts: dict[str, int] = {}
+        reservable = self.ctx.call_count + len(tool_calls) <= self.ctx.limits.max_calls
+        for call in tool_calls:
+            signature = (
+                call.name,
+                str(sorted(call.args.items())),
+            )
+            pending_counts[call.name] = pending_counts.get(call.name, 0) + 1
+            limit = self.ctx.limits.get_tool_limit(
+                call.name, self.ctx.limits.max_calls
+            )
+            reservable = reservable and not call.args.get("_parse_error")
+            reservable = reservable and not self.ctx.is_duplicate(
+                call.name, call.args
+            )
+            reservable = reservable and signature not in signatures
+            reservable = reservable and (
+                self.ctx.tool_call_counts.get(call.name, 0)
+                + pending_counts[call.name]
+                <= limit
+            )
+            signatures.add(signature)
+        if not reservable:
+            async for event in self._execute_tools_sequential(
+                tool_calls, results_out
+            ):
+                yield event
+            return
+
+        for call in tool_calls:
+            self.ctx.record_tool_call(call.name, call.args)
+            yield {
+                "event": "tool_start",
+                "data": {
+                    "tool": call.name,
+                    "args": call.args,
+                    "thinking": call.thinking,
+                    "call_id": call.call_id,
+                },
+            }
+
+        async def invoke(call: _ToolCall):
+            try:
+                async with asyncio.timeout(self.ctx.limits.tool_timeout):
+                    return await execute_tool(self.tools, call.name, call.args)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                return exc
+
+        tasks = [asyncio.create_task(invoke(call)) for call in tool_calls]
+        try:
+            outcomes = await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        for call, outcome in zip(tool_calls, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                if isinstance(outcome, TimeoutError):
+                    message = (
+                        "Tool execution timed out after "
+                        f"{self.ctx.limits.tool_timeout:g} seconds"
+                    )
+                    retryable = True
+                elif isinstance(outcome, ToolExecutionError):
+                    message = outcome.message
+                    retryable = outcome.retryable
+                else:
+                    logger.error("Parallel tool {} failed: {}", call.name, outcome)
+                    message = "Internal tool failure"
+                    retryable = False
+                self.ctx.record_error(message)
+                results_out.append({"tool": call.name, "error": message})
+                yield {
+                    "event": "tool_error",
+                    "data": {
+                        "tool": call.name,
+                        "error": message,
+                        "call_id": call.call_id,
+                        "code": "tool_failed",
+                        "retryable": retryable,
+                    },
+                }
+                continue
+
+            admission = self.ctx.accumulate_tool_result(call.name, outcome)
+            if not admission.accepted:
+                feedback, model_result = _notebook_rejection_feedback(admission)
+                self.ctx.note_nonfatal_error(feedback)
+                results_out.append({"tool": call.name, "result": model_result})
+                yield {
+                    "event": "tool_end",
+                    "data": {
+                        "tool": call.name,
+                        "result": feedback,
+                        "call_id": call.call_id,
+                    },
+                }
+                continue
+            if admission.changed:
+                self.ctx.record_sources(
+                    capture_tool_source_candidates(self.ctx, call, outcome)
+                )
+            summary, _ = summarize_result(call.name, outcome)
+            model_result = localize_agent_tool_result(
+                self.ctx, call.name, outcome
+            )
+            self.ctx.record_tool_success()
+            results_out.append({"tool": call.name, "result": model_result})
+            yield {
+                "event": "tool_end",
+                "data": {
+                    "tool": call.name,
+                    "result": summary,
+                    "call_id": call.call_id,
+                },
+            }
 
     def _global_limit_call_id(self) -> str:
         """Return a stable synthetic ID for a run-level, non-tool-specific limit."""

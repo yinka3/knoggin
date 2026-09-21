@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.exceptions import LLMBudgetExceededError, LLMProviderError
+from common.exceptions import (
+    LLMBudgetExceededError,
+    LLMProviderError,
+    ToolExecutionError,
+)
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.research import resolve_research_profile
 from core.agent.executor import AgentExecutor
@@ -2023,3 +2027,122 @@ async def test_executor_no_response_terminal_state_emits_error():
     assert run.final_content is None
     assert run.sealed is True
     assert run.released is True
+
+
+@pytest.mark.no_network
+async def test_parallel_safe_reads_overlap_and_preserve_request_order(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+    entered = 0
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def controlled_read(_tools, name, args):
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            both_entered.set()
+        await release.wait()
+        return {"data": [{"id": args["query"], "message": name}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", controlled_read)
+    results = []
+    events = []
+
+    async def consume():
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "first"}, call_id="first-call"),
+                ToolCall("search_messages", {"query": "second"}, call_id="second-call"),
+            ],
+            results,
+        ):
+            events.append(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(both_entered.wait(), timeout=1)
+    release.set()
+    await task
+
+    assert [event["data"]["call_id"] for event in events] == [
+        "first-call",
+        "second-call",
+        "first-call",
+        "second-call",
+    ]
+    assert [result["result"]["data"][0]["id"] for result in results] == [
+        "first",
+        "second",
+    ]
+
+
+@pytest.mark.no_network
+async def test_one_parallel_read_failure_keeps_sibling_success(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+
+    async def mixed_result(_tools, _name, args):
+        if args["query"] == "broken":
+            raise ToolExecutionError("search_messages", "one read failed")
+        return {"data": [{"id": "kept", "message": "usable"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", mixed_result)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "broken"}, call_id="bad"),
+                ToolCall("search_messages", {"query": "working"}, call_id="good"),
+            ],
+            results,
+        )
+    ]
+
+    assert [event["event"] for event in events] == [
+        "tool_start",
+        "tool_start",
+        "tool_error",
+        "tool_end",
+    ]
+    assert results[0]["error"] == "Tool 'search_messages' failed: one read failed"
+    assert results[1]["result"]["data"][0]["id"] == "kept"
+
+
+@pytest.mark.no_network
+async def test_parallel_batch_cancellation_awaits_every_child(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+    entered = asyncio.Event()
+    active = 0
+    finished = 0
+
+    async def blocked_read(_tools, _name, _args):
+        nonlocal active, finished
+        active += 1
+        if active == 2:
+            entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished += 1
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", blocked_read)
+
+    async def consume():
+        async for _ in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "first"}, call_id="first"),
+                ToolCall("search_messages", {"query": "second"}, call_id="second"),
+            ],
+            [],
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished == 2
