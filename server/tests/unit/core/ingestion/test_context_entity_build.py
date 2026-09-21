@@ -949,6 +949,95 @@ async def test_foreign_identity_does_not_overwrite_a_conflicting_target_type():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_ambiguous_alias_abstains_when_candidates_have_no_meaningful_lead():
+    compiled_domain = identity_domain()
+    current = block("Bob joined the project planning meeting.")
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Robert Chen",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+            {
+                "id": 702,
+                "user_name": "ada",
+                "canonical_name": "Bob Smith",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+        ]
+    )
+    mention = ContextBlockMention(
+        block_ids=(current.block_id,),
+        name="Bob",
+        entity_type="Person",
+        topic="Work",
+        origin="vp01",
+    )
+
+    resolution = await resolver(knowledge_store=store).resolve_context_block_mentions(
+        [mention],
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(703),
+    )
+
+    assert resolution["entity_ids"] == (703,)
+    assert resolution["new_entity_ids"] == frozenset({703})
+    assert resolution["identity_decisions"][0]["outcome"] == "abstained"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_ambiguous_alias_uses_explicit_context_name_to_select_owner():
+    compiled_domain = identity_domain()
+    current = block("Bob, whose full name is Robert Chen, joined the planning meeting.")
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Robert Chen",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+            {
+                "id": 702,
+                "user_name": "ada",
+                "canonical_name": "Bob Smith",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+        ]
+    )
+    mention = ContextBlockMention(
+        block_ids=(current.block_id,),
+        name="Bob",
+        entity_type="Person",
+        topic="Work",
+        origin="vp01",
+    )
+
+    resolution = await resolver(knowledge_store=store).resolve_context_block_mentions(
+        [mention],
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(703),
+    )
+
+    assert resolution["entity_ids"] == (701,)
+    assert resolution["new_entity_ids"] == frozenset()
+    decision = resolution["identity_decisions"][0]
+    assert decision["outcome"] == "reused"
+    assert decision["candidate_id"] == 701
+    assert "context_name_support" in decision["signals"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_pending_same_name_incompatible_types_do_not_collapse_by_topic():
     compiled_domain = identity_domain()
     first = block("Alex is the project sponsor.")

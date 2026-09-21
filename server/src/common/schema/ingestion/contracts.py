@@ -45,6 +45,7 @@ class ExtractionTrace(BaseModel):
     user_relationships_accepted: int = 0
     user_relationships_rejected: int = 0
     fallbacks: List[Dict[str, str]] = Field(default_factory=list)
+    identity_decisions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def normalize_relationship_type(value: object) -> str:

@@ -108,4 +108,7 @@ class ContextEntityBuildService:
             policy=semantic_build.policy,
             allocate_entity_id=self._allocate_entity_id,
         )
+        semantic_build.trace.identity_decisions.extend(
+            resolution.get("identity_decisions", ())
+        )
         return assemble_context_entity_result(semantic_build, resolution)

@@ -227,7 +227,8 @@ async def test_admission_persists_the_exact_context_entity_policy():
     assert set(ingestion_snapshot) == {
         "gliner_threshold",
         "candidate_fuzzy_threshold",
-        "resolution_threshold",
+            "resolution_threshold",
+            "resolution_margin",
         "common_word_frequency_threshold",
         "sparse_context_verbs",
         "compiled_domain",

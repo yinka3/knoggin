@@ -19,6 +19,7 @@ class IngestionPolicy:
     gliner_threshold: float
     candidate_fuzzy_threshold: int
     resolution_threshold: float
+    resolution_margin: float
     common_word_frequency_threshold: float
     sparse_context_verbs: tuple[str, ...]
     domain: CompiledDomain
@@ -37,6 +38,7 @@ class IngestionPolicy:
             gliner_threshold=text_processor.gliner_threshold,
             candidate_fuzzy_threshold=entity_resolution.candidate_fuzzy_threshold,
             resolution_threshold=entity_resolution.resolution_threshold,
+            resolution_margin=entity_resolution.resolution_margin,
             common_word_frequency_threshold=(
                 entity_resolution.common_word_frequency_threshold
             ),
@@ -55,6 +57,7 @@ class IngestionPolicy:
             "gliner_threshold": self.gliner_threshold,
             "candidate_fuzzy_threshold": self.candidate_fuzzy_threshold,
             "resolution_threshold": self.resolution_threshold,
+            "resolution_margin": self.resolution_margin,
             "common_word_frequency_threshold": self.common_word_frequency_threshold,
             "sparse_context_verbs": list(self.sparse_context_verbs),
             "compiled_domain": self.domain.to_dict(),
@@ -70,6 +73,7 @@ class IngestionPolicy:
             "gliner_threshold",
             "candidate_fuzzy_threshold",
             "resolution_threshold",
+            "resolution_margin",
             "common_word_frequency_threshold",
             "sparse_context_verbs",
             "compiled_domain",
@@ -80,6 +84,7 @@ class IngestionPolicy:
             gliner_threshold = payload["gliner_threshold"]
             candidate_fuzzy_threshold = payload["candidate_fuzzy_threshold"]
             resolution_threshold = payload["resolution_threshold"]
+            resolution_margin = payload["resolution_margin"]
             common_word_frequency_threshold = payload[
                 "common_word_frequency_threshold"
             ]
@@ -94,6 +99,8 @@ class IngestionPolicy:
             or isinstance(candidate_fuzzy_threshold, bool)
             or not isinstance(resolution_threshold, (int, float))
             or isinstance(resolution_threshold, bool)
+            or not isinstance(resolution_margin, (int, float))
+            or isinstance(resolution_margin, bool)
             or not isinstance(common_word_frequency_threshold, (int, float))
             or isinstance(common_word_frequency_threshold, bool)
             or any(not isinstance(verb, str) for verb in sparse_context_verbs)
@@ -103,6 +110,7 @@ class IngestionPolicy:
             gliner_threshold=float(gliner_threshold),
             candidate_fuzzy_threshold=candidate_fuzzy_threshold,
             resolution_threshold=float(resolution_threshold),
+            resolution_margin=float(resolution_margin),
             common_word_frequency_threshold=float(common_word_frequency_threshold),
             sparse_context_verbs=sparse_context_verbs,
             domain=domain,
