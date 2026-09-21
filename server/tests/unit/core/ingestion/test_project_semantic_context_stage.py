@@ -23,7 +23,7 @@ from common.schema.settings import (
     TextProcessorSettings,
 )
 from core.ingestion.policy import IngestionPolicy
-from core.ingestion.project_semantic_job import ProjectSemanticJob
+from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.knowledge.context.models import ContextRevisionConflictError
 from core.knowledge.context.projection import ContextProjectionResult
 from core.knowledge.context.render import apply_context_edits, context_block_hash
@@ -323,7 +323,7 @@ def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
     async def capture_semantic_policy():
         return _policy()
 
-    return ProjectSemanticJob(
+    return ProjectSemanticProcessor(
         _Admission(),
         store,
         object(),
@@ -362,7 +362,7 @@ def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
     collaborators[missing] = None
 
     with pytest.raises(TypeError, match=f"requires {missing}"):
-        ProjectSemanticJob(
+        ProjectSemanticProcessor(
             _Admission(),
             object(),
             object(),
@@ -380,7 +380,7 @@ def test_semantic_processor_requires_an_entity_publication_callback():
         return _policy()
 
     with pytest.raises(TypeError, match="publish_committed_entity_ids must be callable"):
-        ProjectSemanticJob(
+        ProjectSemanticProcessor(
             _Admission(),
             object(),
             object(),
@@ -423,7 +423,7 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
     async def capture_semantic_policy():
         return policy
 
-    job = ProjectSemanticJob(
+    job = ProjectSemanticProcessor(
         _IdleAdmission(),
         _IdleStore(),
         object(),
@@ -472,7 +472,7 @@ async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
         return policy
 
     admission = ClaimingAdmission()
-    job = ProjectSemanticJob(
+    job = ProjectSemanticProcessor(
         admission,
         NoActiveWindowStore(),
         object(),

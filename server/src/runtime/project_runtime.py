@@ -63,7 +63,7 @@ class ProjectRuntime:
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
 
-        self.project_semantic_job: Optional[Any] = None
+        self.project_semantic_processor: Optional[Any] = None
         self.conflict_discovery_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._closed = False
@@ -74,9 +74,9 @@ class ProjectRuntime:
     def signal_semantic_work(self) -> bool:
         """Expose one project-owned wake edge to every attached session."""
 
-        if self.project_semantic_job is None or self.scheduler is None:
+        if self.project_semantic_processor is None or self.scheduler is None:
             return False
-        return self.scheduler.wake_job(self.project_semantic_job.name)
+        return self.scheduler.wake_job(self.project_semantic_processor.name)
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""

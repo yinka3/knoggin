@@ -28,7 +28,7 @@ from common.schema.settings import (
     TextProcessorSettings,
 )
 from core.ingestion.policy import IngestionPolicy
-from core.ingestion.project_semantic_job import ProjectSemanticJob
+from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from infrastructure.job.base import JobContext, JobResult
 
 
@@ -307,7 +307,7 @@ def _job(
     publisher=_publish_nothing,
     now_ms=None,
 ):
-    return ProjectSemanticJob(
+    return ProjectSemanticProcessor(
         _Admission(),
         store,
         object(),

@@ -35,7 +35,7 @@ from common.schema.settings import (
 )
 from core.ingestion.context_entity_build import ContextEntityBuildService
 from core.ingestion.policy import IngestionPolicy
-from core.ingestion.project_semantic_job import ProjectSemanticJob
+from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
@@ -886,7 +886,7 @@ async def test_semantic_participation_claim_and_runtime_policy_are_coherent(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
+async def test_project_semantic_processor_uses_real_storage_for_agent_derived_context(
     real_server_scope,
     tmp_path,
 ):
@@ -943,7 +943,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
     async def capture_semantic_policy():
         return policy
 
-    job = ProjectSemanticJob(
+    job = ProjectSemanticProcessor(
         SemanticWindowAdmission(
             store,
             IngestionSettings(semantic_window_tokens=100),
@@ -1021,7 +1021,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
         writer=ProjectContextWriter(postgres),
         filesystem=recovery_filesystem,
     )
-    human_edit_job = ProjectSemanticJob(
+    human_edit_job = ProjectSemanticProcessor(
         SemanticWindowAdmission(
             store,
             IngestionSettings(semantic_window_tokens=100),
@@ -1077,7 +1077,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_project_semantic_job_recovers_resolver_publication_and_commits_source_grounded_relationship_provenance(
+async def test_project_semantic_processor_recovers_resolver_publication_and_commits_source_grounded_relationship_provenance(
     real_server_scope,
     tmp_path,
 ):
@@ -1159,7 +1159,7 @@ async def test_project_semantic_job_recovers_resolver_publication_and_commits_so
     now = [1_000_000]
 
     def new_job(publisher):
-        return ProjectSemanticJob(
+        return ProjectSemanticProcessor(
             SemanticWindowAdmission(
                 store,
                 IngestionSettings(semantic_window_tokens=100),
@@ -1397,7 +1397,7 @@ async def test_context_vp02_persists_distinct_homonymous_handles_with_source_pro
         return policy
 
     entity_builder = _HomonymRelationshipEntityBuilder(store)
-    job = ProjectSemanticJob(
+    job = ProjectSemanticProcessor(
         SemanticWindowAdmission(
             store,
             IngestionSettings(semantic_window_tokens=100),
@@ -1478,7 +1478,7 @@ async def test_context_vp02_persists_distinct_homonymous_handles_with_source_pro
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_project_semantic_job_preserves_correction_history_through_noop_restart(
+async def test_project_semantic_processor_preserves_correction_history_through_noop_restart(
     real_server_scope,
     tmp_path,
 ):
@@ -1532,7 +1532,7 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
         return policy
 
     def new_job():
-        return ProjectSemanticJob(
+        return ProjectSemanticProcessor(
             SemanticWindowAdmission(
                 store,
                 settings,
@@ -1713,7 +1713,7 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
-async def test_project_semantic_job_composes_real_resolution_extraction_and_recovery(
+async def test_project_semantic_processor_composes_real_resolution_extraction_and_recovery(
     real_server_scope,
     tmp_path,
 ):
@@ -1814,7 +1814,7 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
             spacy=spacy.blank("en"),
             settings=TextProcessorSettings(),
         )
-        return ProjectSemanticJob(
+        return ProjectSemanticProcessor(
             SemanticWindowAdmission(
                 store,
                 settings,

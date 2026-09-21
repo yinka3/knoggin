@@ -100,7 +100,7 @@ async def test_ingestion_health_prefers_durable_semantic_window_state():
         projects=SimpleNamespace(
             active_projects={
                 "project-a": SimpleNamespace(
-                    project_semantic_job=object(),
+                    project_semantic_processor=object(),
                     scheduler=FakeScheduler({"state": "running"}),
                 )
             }
@@ -276,7 +276,7 @@ async def test_ingestion_health_reports_pending_semantic_windows():
         projects=SimpleNamespace(
             active_projects={
                 "project-a": SimpleNamespace(
-                    project_semantic_job=object(),
+                    project_semantic_processor=object(),
                     scheduler=FakeScheduler({"state": "running"}),
                 )
             }
@@ -300,7 +300,7 @@ async def test_ingestion_health_reports_pending_semantic_windows():
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_ingestion_health_reports_stopped_semantic_job_and_failed_work():
+async def test_ingestion_health_reports_stopped_semantic_processor_and_failed_work():
     class Store:
         async def get_semantic_window_health(self, **_kwargs):
             return {
@@ -318,7 +318,7 @@ async def test_ingestion_health_reports_stopped_semantic_job_and_failed_work():
         projects=SimpleNamespace(
             active_projects={
                 "project-a": SimpleNamespace(
-                    project_semantic_job=object(),
+                    project_semantic_processor=object(),
                     scheduler=FakeScheduler({"state": "stopped"}),
                 )
             }
@@ -358,7 +358,7 @@ async def test_ingestion_health_marks_exhausted_windows_for_manual_retry():
         projects=SimpleNamespace(
             active_projects={
                 "project-a": SimpleNamespace(
-                    project_semantic_job=object(),
+                    project_semantic_processor=object(),
                     scheduler=FakeScheduler({"state": "running"}),
                 )
             }
@@ -408,7 +408,7 @@ async def test_ingestion_health_surfaces_bounded_context_projection_failure():
         projects=SimpleNamespace(
             active_projects={
                 "project-a": SimpleNamespace(
-                    project_semantic_job=object(),
+                    project_semantic_processor=object(),
                     scheduler=FakeScheduler({"state": "running"}),
                 )
             }
@@ -447,7 +447,7 @@ async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
         projects=SimpleNamespace(
             active_projects={
                 "project-a": SimpleNamespace(
-                    project_semantic_job=object(),
+                    project_semantic_processor=object(),
                     scheduler=FakeScheduler({"state": "running"}),
                 )
             }

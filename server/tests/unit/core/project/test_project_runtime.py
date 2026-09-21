@@ -159,14 +159,14 @@ def test_project_runtime_exposes_one_semantic_wake_edge_only_when_registered():
             self.requested_jobs.append(job_name)
             return True
 
-    class SemanticJob:
+    class SemanticProcessor:
         name = "project_semantic"
 
     scheduler = RecordingScheduler()
     state = make_project_state(scheduler=scheduler)
 
     assert state.signal_semantic_work() is False
-    state.project_semantic_job = SemanticJob()
+    state.project_semantic_processor = SemanticProcessor()
     assert state.signal_semantic_work() is True
     assert scheduler.wakes == 1
     assert scheduler.requested_jobs == ["project_semantic"]

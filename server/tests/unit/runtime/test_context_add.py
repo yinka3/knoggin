@@ -93,8 +93,8 @@ def _runtime(resources, *, session_id="session-1", project_id="project-1"):
         agent_id=None,
         enabled_tools=None,
     )
-    runtime.project.project_semantic_job = type(
-        "SemanticJob", (), {"name": "project_semantic"}
+    runtime.project.project_semantic_processor = type(
+        "SemanticProcessor", (), {"name": "project_semantic"}
     )()
     return runtime
 
@@ -116,7 +116,7 @@ def context(monkeypatch):
 async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
     resources = FakeResources()
     ctx = _runtime(resources)
-    ctx.project.project_semantic_job = None
+    ctx.project.project_semantic_processor = None
 
     with pytest.raises(RuntimeError, match="not fully initialized"):
         await ctx.open_agent_run_stream(Message(content="hello"))

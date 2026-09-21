@@ -11,7 +11,7 @@ from common.schema.settings import (
     TextProcessorSettings,
 )
 from core.ingestion.policy import IngestionPolicy
-from core.ingestion.project_semantic_job import ProjectSemanticJob
+from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from infrastructure.job.base import JobContext
 from tests.fixtures.factories import make_domain_config
@@ -550,7 +550,7 @@ def _job(
     context_updater=None,
     now_ms=None,
 ):
-    return ProjectSemanticJob(
+    return ProjectSemanticProcessor(
         admission,
         store,
         generator,
@@ -567,7 +567,7 @@ def _job(
 
 @pytest.mark.unit
 @pytest.mark.no_network
-async def test_project_semantic_job_records_zero_result_for_one_claimed_window():
+async def test_project_semantic_processor_records_zero_result_for_one_claimed_window():
     store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
     admission = SemanticWindowAdmission(
         store,

@@ -90,7 +90,7 @@ class RecordingStartupRuntime:
         self.project_id = kwargs["project_id"]
         self.scheduler = kwargs["scheduler"]
         self.document_service = kwargs["document_service"]
-        self.project_semantic_job = None
+        self.project_semantic_processor = None
 
     async def shutdown(self):
         raise AssertionError("startup test should not require shutdown")
@@ -117,7 +117,7 @@ class RecordingStartupJob:
         self.events.append("sync")
 
 
-class CapturedSemanticJob:
+class CapturedSemanticProcessor:
     def __init__(self, *_args, **kwargs):
         self.kwargs = kwargs
 
@@ -197,7 +197,7 @@ async def test_current_project_jobs_and_config_subscriptions_are_registered(
         project_state,
         entities=entities,
         processor=processor,
-        project_semantic_job=semantic,
+        project_semantic_processor=semantic,
     )
 
     assert list(project_state.scheduler._jobs) == ["project_semantic"]
@@ -237,7 +237,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
         state,
         entities=entities,
         processor=processor,
-        project_semantic_job=semantic,
+        project_semantic_processor=semantic,
     )
 
     marker = object()
@@ -253,7 +253,7 @@ async def test_config_updates_fan_out_only_to_current_runtime_components(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_project_semantic_job_is_registered_with_its_settings(
+async def test_project_semantic_processor_is_registered_with_its_settings(
     monkeypatch,
 ):
     config_manager = RecordingConfigManager()
@@ -274,7 +274,7 @@ async def test_project_semantic_job_is_registered_with_its_settings(
         state,
         entities=entities,
         processor=processor,
-        project_semantic_job=semantic,
+        project_semantic_processor=semantic,
     )
 
     assert list(state.scheduler._jobs) == ["project_semantic"]
@@ -315,7 +315,7 @@ async def test_conflict_discovery_job_is_registered_with_its_policy_subscription
         state,
         entities=entities,
         processor=processor,
-        project_semantic_job=semantic,
+        project_semantic_processor=semantic,
         conflict_discovery_job=conflict_job,
     )
 
@@ -381,10 +381,10 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
         lambda _root: SimpleNamespace(for_project=lambda _project_id: object()),
     )
     monkeypatch.setattr(
-        "runtime.project_factory.ProjectSemanticJob", CapturedSemanticJob
+        "runtime.project_factory.ProjectSemanticProcessor", CapturedSemanticProcessor
     )
 
-    job = factory._create_project_semantic_job(runtime, resources=resources)
+    job = factory._create_project_semantic_processor(runtime, resources=resources)
 
     assert job.kwargs["publish_committed_entity_ids"] is publisher
     assert job.kwargs["capture_semantic_policy"] is runtime.capture_semantic_policy
@@ -514,7 +514,7 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
     )
     monkeypatch.setattr(
         factory,
-        "_create_project_semantic_job",
+        "_create_project_semantic_processor",
         lambda *_args, **_kwargs: job,
     )
     monkeypatch.setattr(
@@ -527,7 +527,7 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
         project_id="project-1", readable_project_ids=["project-1"]
     )
 
-    assert runtime.project_semantic_job is job
+    assert runtime.project_semantic_processor is job
     assert job.calls == [("ada", "project-1", True)]
     assert events == ["sync", "indexer", "registered"]
     assert runtime.scheduler.started is True

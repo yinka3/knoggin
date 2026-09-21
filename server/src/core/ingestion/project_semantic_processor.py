@@ -128,7 +128,7 @@ class SemanticEpisodeStore(Protocol):
     ) -> SemanticWindowRecord | None: ...
 
 
-class ProjectSemanticJob(BaseJob):
+class ProjectSemanticProcessor(BaseJob):
     """Drain one durable project semantic window through its checkpoints.
 
     The scheduler supplies bounded execution and periodic recovery. Once this
@@ -157,7 +157,7 @@ class ProjectSemanticJob(BaseJob):
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not callable(capture_semantic_policy):
-            raise TypeError("ProjectSemanticJob requires a semantic policy callback")
+            raise TypeError("ProjectSemanticProcessor requires a semantic policy callback")
         required_collaborators = {
             "context_updater": context_updater,
             "context_projection": context_projection,
@@ -170,12 +170,12 @@ class ProjectSemanticJob(BaseJob):
         ]
         if missing:
             raise TypeError(
-                "ProjectSemanticJob requires " + ", ".join(missing)
+                "ProjectSemanticProcessor requires " + ", ".join(missing)
             )
         if not callable(publish_committed_entity_ids):
             raise TypeError("publish_committed_entity_ids must be callable")
         if not isinstance(settings, IngestionSettings):
-            raise TypeError("ProjectSemanticJob requires IngestionSettings")
+            raise TypeError("ProjectSemanticProcessor requires IngestionSettings")
         self.admission = admission
         self.knowledge_store = knowledge_store
         self.episode_generator = episode_generator

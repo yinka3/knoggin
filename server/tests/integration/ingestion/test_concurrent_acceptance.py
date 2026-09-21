@@ -44,7 +44,7 @@ def _session(resources, *, user_name, project_id, session_id):
         resources,
         session_id=session_id,
         project_id=project_id,
-        project=SimpleNamespace(scheduler=object(), project_semantic_job=object()),
+        project=SimpleNamespace(scheduler=object(), project_semantic_processor=object()),
         model=None,
         agent_id=None,
         enabled_tools=None,

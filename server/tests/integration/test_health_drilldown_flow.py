@@ -81,7 +81,7 @@ async def test_health_drilldown_is_bounded_scoped_and_read_only():
     )
     project = SimpleNamespace(
         project_id="project-a",
-        project_semantic_job=object(),
+        project_semantic_processor=object(),
         scheduler=HealthCoordinator(
             {
                 "state": "running",

@@ -259,7 +259,7 @@ class SessionRuntime:
     def _require_message_ingestion_ready(self) -> None:
         if (
             not getattr(self.project, "scheduler", None)
-            or getattr(self.project, "project_semantic_job", None) is None
+            or getattr(self.project, "project_semantic_processor", None) is None
         ):
             raise RuntimeError("Session is not fully initialized for message ingestion")
 
