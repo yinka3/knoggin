@@ -96,6 +96,15 @@ data/
 # Local Nia Brooks benchmark bundle (corpus, evaluation suite, and reports)
 /benchmark_nia_brooks/
 
+# Local engineering notes and generated document-parser evidence
+/CODE_REVIEW_GUIDE.md
+/KNOGGIN_*_PLAN.md
+/agent_behavior/
+/doc_testing/parser_evaluation/
+/server/*_IMPLEMENTATION_PLAN.md
+/server/*_REVIEW.md
+/server/reviews/*.md
+
 # IDEs and Editors
 .vscode/
 .idea/
