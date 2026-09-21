@@ -165,6 +165,39 @@ async def test_message_search_keeps_all_candidates_when_reranker_is_incomplete()
 
 
 @pytest.mark.no_network
+async def test_message_search_propagates_lexical_storage_failure():
+    failure = RuntimeError("lexical storage unavailable")
+
+    class Store:
+        async def get_visible_session_ids(self, **_kwargs):
+            return ["session-1"]
+
+        async def search_messages_fts(self, _query, **_kwargs):
+            raise failure
+
+        async def search_messages_semantic(self, _embedding, **_kwargs):
+            return []
+
+    class Embeddings:
+        async def encode_query(self, _query):
+            return [0.1] * 1024
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=Embeddings(),
+        knowledge_store=Store(),
+    )
+
+    with pytest.raises(RuntimeError, match="lexical storage unavailable") as caught:
+        await retrieval._search_messages("query", session_id="session-1", k=8)
+
+    assert caught.value is failure
+
+
+@pytest.mark.no_network
 async def test_entity_search_returns_stable_identity_and_project_contexts():
     class Store:
         async def search_entity(self, query, **kwargs):

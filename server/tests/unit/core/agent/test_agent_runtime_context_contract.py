@@ -182,6 +182,20 @@ def test_topic_context_without_messages_does_not_count_as_new_evidence():
 
 
 @pytest.mark.no_network
+def test_build_user_message_explains_empty_specialized_tool_results():
+    message = build_user_message(
+        make_ctx(),
+        last_result=[
+            {"tool": "read_observation_evidence", "result": {"data": {}}},
+            {"tool": "load_topic_context", "result": {"data": []}},
+            {"tool": "custom_lookup", "result": {"data": None}},
+        ],
+    )
+
+    assert message.count("No results found on this retrieval surface") == 3
+
+
+@pytest.mark.no_network
 def test_duplicate_evidence_is_accepted_without_a_new_notebook_contribution():
     ctx = make_ctx()
     result = {"data": [{"id": "msg-7", "message": "Already retained."}]}

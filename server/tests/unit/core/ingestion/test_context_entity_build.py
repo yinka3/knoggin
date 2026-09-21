@@ -243,6 +243,46 @@ def build(*, blocks, compiled_domain, supports=None, message_texts=None, impact=
     )
 
 
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_ingestion_contracts_reject_unsupported_origin_and_block_identity():
+    block_id = uuid4()
+    with pytest.raises(ValueError, match="origin is unsupported"):
+        ContextBlockMention(
+            block_ids=(block_id,),
+            name="Acme",
+            entity_type="Company",
+            topic="Work",
+            origin="invented",
+        )
+
+    with pytest.raises(TypeError, match="block_id must be a UUID"):
+        UnknownEndpointDiagnostic(
+            block_id="not-a-uuid",
+            name="Acme",
+            entity_type="Company",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_unknown_endpoint_diagnostics_require_typed_eligible_blocks():
+    compiled_domain = domain()
+    current = block("Acme is selected.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+
+    with pytest.raises(TypeError, match="must be typed"):
+        semantic_build.set_unknown_endpoint_diagnostics((object(),))
+    with pytest.raises(ValueError, match="eligible blocks"):
+        semantic_build.set_unknown_endpoint_diagnostics(
+            (
+                UnknownEndpointDiagnostic(
+                    block_id=uuid4(),
+                    name="Acme",
+                    entity_type="Company",
+                ),
+            )
+        )
 def processor(vp01, *, llm=None, llm_ner_mode="fallback"):
     async def no_profile(_entity_id):
         return None

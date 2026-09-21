@@ -1357,6 +1357,41 @@ async def test_research_plan_is_frozen_before_completion():
 
 
 @pytest.mark.no_network
+async def test_invalid_research_plan_is_rejected_before_investigation():
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "set_research_plan",
+                    '{"subquestions": []}',
+                    "invalid-plan",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "request_clarification",
+                    '{"question": "What should the research focus on?"}',
+                    "clarify-plan",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=2, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "clarification"
+    assert run.research_subquestions == ()
+    assert "requires 1-12 non-empty" in llm.calls[1]["user"]
+
+
+@pytest.mark.no_network
 async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatch):
     llm = ScriptedLLM(
         [

@@ -375,6 +375,79 @@ def test_research_coverage_rejects_discovery_only_and_unknown_references():
 
 
 @pytest.mark.no_network
+def test_research_plan_rejects_invalid_lifecycle_and_question_sets():
+    normal = make_run()
+    assert "only valid" in normal.set_research_plan(["What changed?"])
+
+    research = make_run(research_profile=resolve_research_profile("research"))
+    for invalid in (None, [], [""], ["question"] * 13):
+        assert "requires 1-12" in research.set_research_plan(invalid)
+    assert "unique" in research.set_research_plan(["Question?", " question? "])
+    assert research.set_research_plan(["  What   changed?  "]) is None
+    assert research.research_subquestions == ("What changed?",)
+    assert "already been set" in research.set_research_plan(["Another question?"])
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("coverage", "expected_error"),
+    [
+        (None, "requires a plan"),
+        ([], "requires 1-12"),
+        (["not-an-object"], "must be an object"),
+        (
+            [{"subquestion": "", "supporting_references": []}],
+            "requires a subquestion",
+        ),
+        (
+            [
+                {
+                    "subquestion": "What changed?",
+                    "supporting_references": [],
+                    "unresolved_gap": "unknown",
+                },
+                {
+                    "subquestion": " what changed? ",
+                    "supporting_references": [],
+                    "unresolved_gap": "unknown",
+                },
+            ],
+            "must be unique",
+        ),
+        (
+            [{"subquestion": "What changed?", "supporting_references": "bad"}],
+            "must be notebook references",
+        ),
+    ],
+)
+def test_research_coverage_rejects_malformed_contracts(coverage, expected_error):
+    run = make_run(research_profile=resolve_research_profile("research"))
+    if coverage is not None:
+        assert run.set_research_plan(["What changed?"]) is None
+
+    assert expected_error in run.validate_research_coverage(coverage)
+
+
+@pytest.mark.no_network
+def test_research_coverage_rejects_questions_outside_frozen_plan():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["What changed?"]) is None
+
+    error = run.validate_research_coverage(
+        [
+            {
+                "subquestion": question,
+                "supporting_references": [],
+                "unresolved_gap": "Evidence is unavailable.",
+            }
+            for question in ("What changed?", "Who approved it?")
+        ]
+    )
+
+    assert "outside the frozen plan" in error
+
+
+@pytest.mark.no_network
 def test_cosmetically_repeated_empty_query_forces_early_replan():
     run = make_run(
         limits=AgentRunLimits(empty_result_replan_threshold=3),
