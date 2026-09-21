@@ -65,6 +65,17 @@ def test_request_document_focus_can_include_a_version_bound_selection():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_document_selection_rejects_a_blank_snapshot_identifier():
+    with pytest.raises(ValidationError, match="parse_snapshot_id must not be blank"):
+        DocumentSelection(
+            content_hash="a" * 64,
+            parse_snapshot_id="   ",
+            locator={"kind": "text_lines", "start_line": 1, "end_line": 1},
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_pinned_document_focus_rejects_a_selection():
     with pytest.raises(ValidationError, match="only valid for request focus"):
         create_document_focus(

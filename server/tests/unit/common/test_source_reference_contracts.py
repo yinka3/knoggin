@@ -301,3 +301,43 @@ def test_locator_models_preserve_their_own_invariants():
             text_start=4,
             text_end=3,
         )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_layout_locators_reject_invalid_geometry_and_partial_text_spans():
+    valid = LayoutRegionLocator(
+        page=1,
+        element_type="table",
+        extraction_method="ocr",
+        bbox={"left": 0, "bottom": 0, "right": 10, "top": 20},
+    )
+    assert valid.bbox.right == 10
+
+    with pytest.raises(ValidationError, match="positive area"):
+        LayoutRegionLocator(
+            page=1,
+            element_type="table",
+            extraction_method="ocr",
+            bbox={"left": 10, "bottom": 0, "right": 10, "top": 20},
+        )
+    with pytest.raises(ValidationError, match="element_type must not be blank"):
+        LayoutRegionLocator(page=1, element_type=" ", extraction_method="ocr")
+    with pytest.raises(ValidationError, match="both boundaries"):
+        LayoutRegionLocator(
+            page=1,
+            element_type="text",
+            extraction_method="native_text",
+            text_start=0,
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_document_sources_require_snapshot_and_locator_matching_their_kind():
+    with pytest.raises(ValidationError, match="require parse_snapshot_id"):
+        SourceReferenceCandidate.model_validate(_candidate(parse_snapshot_id=None))
+    with pytest.raises(ValidationError, match="layout-region locator"):
+        SourceReferenceCandidate.model_validate(
+            _candidate(locator={"kind": "pdf_page", "page": 2})
+        )

@@ -383,3 +383,13 @@ async def test_targeted_wake_rejects_an_unknown_job(monkeypatch):
     await scheduler.start()
     assert scheduler.wake_job("missing") is False
     await scheduler.stop()
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("job_name", ["", "   ", None])
+def test_targeted_wake_rejects_invalid_job_names(job_name):
+    scheduler = Scheduler("ada", "project-1")
+
+    with pytest.raises(ValueError, match="non-blank string"):
+        scheduler.wake_job(job_name)

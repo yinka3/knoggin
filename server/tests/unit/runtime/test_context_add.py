@@ -540,6 +540,31 @@ async def test_run_agent_stream_marks_the_turn_only_after_durable_persistence(co
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_turn_completion_bookkeeping_failure_does_not_discard_the_answer(context):
+    ctx, _resources = context
+
+    async def handler(_kwargs):
+        yield _response_event("Durable answer", resolved_agent_id="agent-run-1")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+
+    async def fail_turn_completion(_agent_id):
+        raise ConnectionError("statistics unavailable")
+
+    orchestrator.mark_turn_completed = fail_turn_completion
+
+    events = await _collect_turn(
+        ctx,
+        Message(content="Save this response"),
+        orchestrator,
+    )
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["content"] == "Durable answer"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_failed_assistant_persistence_does_not_mark_a_successful_turn(
     context,
     monkeypatch,
@@ -839,6 +864,41 @@ async def test_duplicate_idempotency_key_replays_the_canonical_response(context)
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_conflicting_supplied_and_embedded_idempotency_keys_fail_before_acceptance(
+    context,
+):
+    ctx, resources = context
+    message = Message(
+        content="Summarize",
+        metadata={"idempotency_key": "embedded-key"},
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await ctx.open_agent_run_stream(message, idempotency_key="supplied-key")
+
+    assert resources.knowledge_store.saved_message_logs == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_duplicate_acceptance_requires_a_reloadable_exchange(context):
+    ctx, resources = context
+    resources.knowledge_store.accepted_message_ids["request:missing-exchange"] = 91
+
+    async def missing_exchange(_message_id, **_kwargs):
+        return None
+
+    resources.knowledge_store.get_user_agent_exchange = missing_exchange
+
+    with pytest.raises(RuntimeError, match="could not be reloaded"):
+        await ctx.open_agent_run_stream(
+            Message(content="Summarize"),
+            idempotency_key="missing-exchange",
+        )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 def test_focus_resolution_timestamp_is_not_part_of_request_identity():
     first = create_document_focus(
         mode="request", behavior="restrict", created_at="2026-01-01T00:00:00Z",
@@ -947,7 +1007,8 @@ async def test_duplicate_idempotency_key_replays_the_canonical_clarification(con
                     "completion_tokens": 0,
                     "total_tokens": 3,
                     "approximate": False,
-                }
+                },
+                "fallback": True,
             },
             source_ref_ids=("source-1",),
         )
@@ -975,6 +1036,7 @@ async def test_duplicate_idempotency_key_replays_the_canonical_clarification(con
                 },
                 "assistant_message_id": 42,
                 "source_ref_ids": ["source-1"],
+                "fallback": True,
             },
         }
     ]
@@ -1052,6 +1114,93 @@ async def test_interrupted_idempotent_submission_never_starts_another_agent_run(
             orchestrator=_FakeTurnOrchestrator(handler),
             idempotency_key="interrupted-1",
         )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("value", [7, "   ", "x" * 201])
+def test_idempotency_key_validation_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="idempotency_key"):
+        SessionRuntime._normalize_idempotency_key(value)
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_idempotent_acceptance_requires_a_request_fingerprint(context):
+    ctx, _resources = context
+
+    with pytest.raises(ValueError, match="requires a request fingerprint"):
+        await ctx._accept_user_message(
+            Message(content="Summarize", metadata={"idempotency_key": "request-1"})
+        )
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+def test_clarification_metadata_retains_only_usage_and_fallback():
+    assert SessionRuntime._assistant_clarification_metadata(
+        {"usage": {"total_tokens": 3}, "fallback": True, "private": "discard"}
+    ) == {"usage": {"total_tokens": 3}, "fallback": True}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+def test_unknown_terminal_error_is_reduced_to_safe_retryable_failure():
+    assert SessionRuntime._terminal_error_record({"code": "private_provider_error"}) == {
+        "code": "run_failed",
+        "retryable": True,
+    }
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("outcome", "expected_message"),
+    [
+        ("cancelled", "original request was cancelled"),
+        ("failed", "original request failed"),
+        ("user_only", "completed without an agent response"),
+    ],
+)
+async def test_terminal_exchange_replay_explains_non_response_outcomes(
+    context, outcome, expected_message
+):
+    ctx, _resources = context
+    exchange = UserAgentExchange(
+        user_message_id=1,
+        exchange_state="closed",
+        exchange_outcome=outcome,
+        assistant_message_id=None,
+        assistant_content=None,
+        assistant_metadata={},
+        source_ref_ids=(),
+    )
+
+    events = [event async for event in ctx._replay_terminal_exchange(exchange)]
+
+    assert events[0]["event"] == "error"
+    assert expected_message in events[0]["data"]["message"]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("outcome", ["assistant_final", "clarification", "unknown"])
+async def test_terminal_exchange_replay_rejects_incomplete_or_unknown_outcomes(
+    context, outcome
+):
+    ctx, _resources = context
+    exchange = UserAgentExchange(
+        user_message_id=1,
+        exchange_state="closed",
+        exchange_outcome=outcome,
+        assistant_message_id=None,
+        assistant_content=None,
+        assistant_metadata={},
+        source_ref_ids=(),
+    )
+
+    with pytest.raises(RuntimeError):
+        _ = [event async for event in ctx._replay_terminal_exchange(exchange)]
 
 
 @pytest.mark.runtime
