@@ -511,6 +511,10 @@ class KnowledgeRetrieval:
                         for result_session_id, message_key in candidate_keys
                     ],
                 )
+                if len(scores) != len(candidate_keys):
+                    raise ValueError(
+                        "Message reranker returned an unexpected score count"
+                    )
                 return [
                     (message_key, float(score), result_session_id)
                     for (result_session_id, message_key), score in sorted(

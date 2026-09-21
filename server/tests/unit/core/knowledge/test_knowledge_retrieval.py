@@ -122,6 +122,49 @@ async def test_message_search_fuses_lexical_and_semantic_episode_sources(scenari
 
 
 @pytest.mark.no_network
+async def test_message_search_keeps_all_candidates_when_reranker_is_incomplete():
+    class Store:
+        async def get_visible_session_ids(self, **_kwargs):
+            return ["session-1"]
+
+        async def search_messages_fts(self, _query, **_kwargs):
+            return [(1, 1.0, "session-1"), (2, 0.5, "session-1")]
+
+        async def search_messages_semantic(self, _embedding, **_kwargs):
+            return []
+
+        async def get_messages_by_ids(self, message_ids, **_kwargs):
+            return [
+                {
+                    "id": message_id,
+                    "session_id": "session-1",
+                    "content": f"evidence-{message_id}",
+                }
+                for message_id in message_ids
+            ]
+
+    class Embeddings:
+        async def encode_query(self, _query):
+            return [0.1] * 1024
+
+        async def rerank(self, _query, _candidates):
+            return [0.9]
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=Embeddings(),
+        knowledge_store=Store(),
+    )
+
+    results = await retrieval._search_messages("query", session_id="session-1", k=8)
+
+    assert [result[0] for result in results] == ["msg_1", "msg_2"]
+
+
+@pytest.mark.no_network
 async def test_entity_search_returns_stable_identity_and_project_contexts():
     class Store:
         async def search_entity(self, query, **kwargs):

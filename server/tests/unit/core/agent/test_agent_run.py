@@ -314,6 +314,7 @@ def test_agent_run_requires_read_content_after_document_or_web_discovery():
 @pytest.mark.no_network
 def test_research_coverage_requires_each_material_part_to_have_evidence_or_a_gap():
     run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["What changed?", "Why did it change?"]) is None
     applied = run.accumulate_tool_result(
         "search_messages",
         {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
@@ -342,10 +343,20 @@ def test_research_coverage_requires_each_material_part_to_have_evidence_or_a_gap
         ]
     )
 
+    assert "missing planned subquestions" in run.validate_research_coverage(
+        [
+            {
+                "subquestion": "What changed?",
+                "supporting_references": [reference],
+            }
+        ]
+    )
+
 
 @pytest.mark.no_network
 def test_research_coverage_rejects_discovery_only_and_unknown_references():
     run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["What changed?"]) is None
     discovery = run.accumulate_tool_result(
         "web_search",
         {"data": [{"title": "Result", "url": "https://example.test", "snippet": "Lead"}]},
@@ -561,6 +572,7 @@ async def test_research_profile_supplies_default_report_artifact_at_synthesis():
             agent_run_id="run-1",
         ),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(
         run,
         CompletingLLM(),

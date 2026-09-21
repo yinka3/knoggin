@@ -197,7 +197,8 @@ def _research_mode_guidance(profile: ResearchProfile) -> str:
     if profile.mode == "research":
         return (
             "Treat this as an explicit investigation. Break the question into "
-            "material subquestions, search for candidate sources, read promising "
+            "material subquestions and call set_research_plan before gathering "
+            "evidence. Then search for candidate sources, read promising "
             "pages, and corroborate important findings. Fill gaps with additional "
             "searches. The executor requires grounded investigation evidence "
             "before a final answer. Finish with a concise research brief artifact."
@@ -206,7 +207,8 @@ def _research_mode_guidance(profile: ResearchProfile) -> str:
         )
     return (
         "Treat this as a deep investigation. Decompose the question into "
-        "subquestions, gather broad primary and authoritative evidence, read the "
+        "subquestions and call set_research_plan before gathering evidence. Then "
+        "gather broad primary and authoritative evidence, read the "
         "underlying sources, seek disagreement or corroboration, and revisit gaps "
         "before synthesis. The executor requires grounded investigation evidence "
         "and one gap-review pass before final synthesis. Finish with a structured "

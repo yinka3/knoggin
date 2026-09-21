@@ -345,6 +345,38 @@ class AgentExecutor:
                         ),
                         None,
                     )
+                    research_plan = next(
+                        (
+                            call
+                            for call in pending_tool_calls
+                            if call.name == "set_research_plan"
+                        ),
+                        None,
+                    )
+                    if research_plan:
+                        plan_error = self.ctx.set_research_plan(
+                            research_plan.args.get("subquestions")
+                        )
+                        if plan_error is not None:
+                            self._record_step_error(plan_error, "research")
+                            step_failed = True
+                            break
+                        last_result = [
+                            {
+                                "tool": "set_research_plan",
+                                "result": {
+                                    "data": [
+                                        {
+                                            "status": "accepted",
+                                            "subquestions": list(
+                                                self.ctx.research_subquestions
+                                            ),
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                        break
                     if submit:
                         content = submit.args.get("content", "")
                         if not isinstance(content, str) or not content.strip():
@@ -519,13 +551,29 @@ class AgentExecutor:
         """Return the model-visible tools allowed for one executor phase."""
 
         if phase is not _AgentPhase.SYNTHESIZE:
-            return list(self.ctx.tool_runtime.schemas)
+            if (
+                phase is _AgentPhase.PLAN
+                and self.ctx.research_profile.mode != "normal"
+                and not self.ctx.research_subquestions
+            ):
+                return [
+                    schema
+                    for schema in self.ctx.tool_runtime.schemas
+                    if schema["function"]["name"]
+                    in {"request_clarification", "set_research_plan"}
+                ]
+            return [
+                schema
+                for schema in self.ctx.tool_runtime.schemas
+                if schema["function"]["name"] != "set_research_plan"
+            ]
         return [
             schema
             for schema in self.ctx.tool_runtime.schemas
             if (definition := get_tool_definition(schema["function"]["name"]))
             is not None
             and definition.executor_protocol
+            and schema["function"]["name"] != "set_research_plan"
         ]
 
     def _validate_tool_call_batch(
@@ -1101,20 +1149,20 @@ class AgentExecutor:
                     return await execute_tool(self.tools, call.name, call.args)
             except asyncio.CancelledError:
                 raise
-            except BaseException as exc:
+            except Exception as exc:
                 return exc
 
         tasks = [asyncio.create_task(invoke(call)) for call in tool_calls]
         try:
             outcomes = await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
+        except BaseException:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
         for call, outcome in zip(tool_calls, outcomes, strict=True):
-            if isinstance(outcome, BaseException):
+            if isinstance(outcome, Exception):
                 if isinstance(outcome, TimeoutError):
                     message = (
                         "Tool execution timed out after "

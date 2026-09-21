@@ -285,6 +285,9 @@ TOOL_DEFINITIONS = {
         default_limit=6,
         runtime_instruction=_WEB_READ_RUNTIME_INSTRUCTION,
     ),
+    "set_research_plan": _definition(
+        "set_research_plan", executor_protocol=True
+    ),
     "submit_answer": _definition("submit_answer", executor_protocol=True),
     "check_graph_health": _definition("check_graph_health"),
     "propose_entity_merge": _definition("propose_entity_merge"),
