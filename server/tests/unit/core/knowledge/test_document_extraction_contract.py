@@ -6,6 +6,7 @@ from core.knowledge.documents.storage import (
     DocumentParseSnapshot,
     DocumentSnapshotPage,
     LayoutRegion,
+    NativePdfTextCell,
 )
 from tests.fixtures.documents import (
     build_docx_bytes,
@@ -101,6 +102,65 @@ def test_mixed_pdf_page_classifies_regions_from_native_cell_bounds():
         regions=regions[1],
     )
     assert storage._page_locator(page)["extraction_method"] == "mixed"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_document_index_uses_native_lines_without_flattening_real_tables(monkeypatch):
+    structure = {
+        "pages": {"1": {}, "2": {}},
+        "texts": [],
+        "tables": [
+            {
+                "label": "document_index",
+                "charspan": [0, 20],
+                "prov": [{"page_no": 1, "bbox": {"l": 10, "b": 10, "r": 190, "t": 100}}],
+            },
+            {
+                "label": "table",
+                "charspan": [21, 40],
+                "prov": [{"page_no": 2, "bbox": {"l": 10, "b": 10, "r": 190, "t": 100}}],
+            }
+        ],
+    }
+
+    class ParsedDocument:
+        def export_to_dict(self, **_kwargs):
+            return structure
+
+        def export_to_markdown(self, page_no=None):
+            if page_no == 1:
+                return "| malformed contents |"
+            if page_no == 2:
+                return "| name | value |\n|---|---|\n| alpha | 1 |"
+            return "| malformed contents |\n\n| name | value |"
+
+    cells = (
+        NativePdfTextCell("Contents", (10, 90, 60, 100)),
+        NativePdfTextCell("Chapter One", (10, 70, 80, 80)),
+        NativePdfTextCell("12", (170, 70, 190, 80)),
+        NativePdfTextCell("Chapter Two", (10, 50, 80, 60)),
+        NativePdfTextCell("24", (170, 50, 190, 60)),
+    )
+    monkeypatch.setattr(storage, "_parse_with_docling", lambda *_: ParsedDocument())
+    monkeypatch.setattr(storage, "_native_pdf_cells", lambda _content: {1: cells})
+    monkeypatch.setattr(storage, "_docling_version", lambda: "test")
+
+    snapshot = storage._extract_docling_snapshot(b"pdf", ".pdf")
+
+    assert snapshot.pages[0].text == "Contents\nChapter One 12\nChapter Two 24"
+    assert snapshot.pages[1].text == "| name | value |\n|---|---|\n| alpha | 1 |"
+    assert snapshot.text == (
+        "Contents\nChapter One 12\nChapter Two 24\n\n"
+        "| name | value |\n|---|---|\n| alpha | 1 |"
+    )
+    assert snapshot.pages[1].regions[0].element_type == "table"
+    assert snapshot.pages[0].regions[0].extraction_method == "native_text"
+    assert all(
+        region.text_start is None and region.text_end is None
+        for page in snapshot.pages
+        for region in page.regions
+    )
 
 
 @pytest.mark.unit

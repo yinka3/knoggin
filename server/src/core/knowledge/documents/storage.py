@@ -5,7 +5,7 @@ import json
 import re
 import threading
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Dict, List, Optional
@@ -104,6 +104,14 @@ class LayoutRegion:
         if self.text_end is not None:
             locator["text_end"] = self.text_end
         return locator
+
+
+@dataclass(frozen=True)
+class NativePdfTextCell:
+    """One native PDF text cell used for provenance and index recovery."""
+
+    text: str
+    bbox: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -430,17 +438,17 @@ def _parse_with_docling(content: bytes, extension: str):
         raise ValueError(f"Docling could not parse the {extension} document: {detail}") from exc
 
 
-def _native_pdf_regions(
+def _native_pdf_cells(
     content: bytes,
-) -> Dict[int, tuple[tuple[float, float, float, float], ...]]:
-    """Read native text-cell bounds before Docling adds OCR-derived text."""
+) -> Dict[int, tuple[NativePdfTextCell, ...]]:
+    """Read native text and bounds before Docling adds OCR-derived text."""
 
     from docling_parse.pdf_parser import DoclingPdfParser
 
     parser = DoclingPdfParser()
     document = parser.load(io.BytesIO(content))
     try:
-        regions: Dict[int, tuple[tuple[float, float, float, float], ...]] = {}
+        regions: Dict[int, tuple[NativePdfTextCell, ...]] = {}
         for page_number, page in document.iterate_pages():
             boxes = []
             for cell in page.textline_cells:
@@ -448,11 +456,14 @@ def _native_pdf_regions(
                     continue
                 rect = cell.rect
                 boxes.append(
-                    (
-                        min(rect.r_x0, rect.r_x1, rect.r_x2, rect.r_x3),
-                        min(rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3),
-                        max(rect.r_x0, rect.r_x1, rect.r_x2, rect.r_x3),
-                        max(rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3),
+                    NativePdfTextCell(
+                        text=cell.text.strip(),
+                        bbox=(
+                            min(rect.r_x0, rect.r_x1, rect.r_x2, rect.r_x3),
+                            min(rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3),
+                            max(rect.r_x0, rect.r_x1, rect.r_x2, rect.r_x3),
+                            max(rect.r_y0, rect.r_y1, rect.r_y2, rect.r_y3),
+                        ),
                     )
                 )
             if boxes:
@@ -543,6 +554,54 @@ def _regions_from_docling_structure(
     return {page: tuple(items) for page, items in regions.items()}
 
 
+def _document_index_page_numbers(structure: Dict[str, Any]) -> set[int]:
+    """Return pages whose text was classified as a document index."""
+
+    pages: set[int] = set()
+    for collection in ("texts", "tables", "pictures", "key_value_items"):
+        entries = structure.get(collection)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("label") != "document_index":
+                continue
+            provenance = entry.get("prov")
+            if not isinstance(provenance, list):
+                continue
+            for item in provenance:
+                if isinstance(item, dict) and isinstance(item.get("page_no"), int):
+                    pages.add(item["page_no"])
+    return pages
+
+
+def _native_page_text(cells: tuple[NativePdfTextCell, ...]) -> str:
+    """Reconstruct readable lines from native cells in PDF coordinates."""
+
+    lines: list[dict[str, Any]] = []
+    for cell in sorted(cells, key=lambda item: (-item.bbox[3], item.bbox[0])):
+        bottom, top = cell.bbox[1], cell.bbox[3]
+        center = (bottom + top) / 2
+        height = top - bottom
+        line = next(
+            (
+                candidate
+                for candidate in lines
+                if abs(center - candidate["center"])
+                <= max(2.0, min(height, candidate["height"]) * 0.5)
+            ),
+            None,
+        )
+        if line is None:
+            lines.append({"center": center, "height": height, "cells": [cell]})
+        else:
+            line["cells"].append(cell)
+    rendered = []
+    for line in sorted(lines, key=lambda value: -value["center"]):
+        ordered = sorted(line["cells"], key=lambda item: item.bbox[0])
+        rendered.append(" ".join(cell.text for cell in ordered))
+    return "\n".join(value for value in rendered if value.strip()).strip()
+
+
 def _boxes_overlap(
     first: tuple[float, float, float, float],
     second: tuple[float, float, float, float],
@@ -564,22 +623,53 @@ def _extract_docling_snapshot(content: bytes, extension: str) -> DocumentParseSn
 
     pages: tuple[DocumentSnapshotPage, ...] = ()
     if extension == ".pdf":
-        native_regions = _native_pdf_regions(content)
+        native_cells = _native_pdf_cells(content)
         regions = _regions_from_docling_structure(
             structure,
-            native_regions=native_regions,
+            native_regions={
+                page: tuple(cell.bbox for cell in cells)
+                for page, cells in native_cells.items()
+            },
         )
+        document_index_pages = _document_index_page_numbers(structure)
         page_numbers = _page_numbers(structure) or sorted(regions)
         pages = tuple(
             DocumentSnapshotPage(
                 page_number=page_number,
-                text=document.export_to_markdown(page_no=page_number).strip(),
+                text=(
+                    _native_page_text(native_cells.get(page_number, ()))
+                    if page_number in document_index_pages
+                    and native_cells.get(page_number)
+                    else document.export_to_markdown(page_no=page_number).strip()
+                ),
                 regions=regions.get(page_number, ()),
             )
             for page_number in page_numbers
         )
         if not any(page.text for page in pages):
             raise ValueError("Document contains no extractable text")
+        if document_index_pages:
+            text = "\n\n".join(page.text for page in pages if page.text)
+            pages = tuple(
+                replace(
+                    page,
+                    regions=tuple(
+                        replace(
+                            region,
+                            extraction_method=(
+                                "native_text"
+                                if page.page_number in document_index_pages
+                                and region.element_type == "document_index"
+                                else region.extraction_method
+                            ),
+                            text_start=None,
+                            text_end=None,
+                        )
+                        for region in page.regions
+                    ),
+                )
+                for page in pages
+            )
 
     return DocumentParseSnapshot(
         text=text,
