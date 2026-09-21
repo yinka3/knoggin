@@ -71,7 +71,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["common*", "core*", "infrastructure*", "log*"]
+include = ["common*", "core*", "infrastructure*", "log*", "runtime*"]
+
+[tool.setuptools.package-data]
+common = ["templates/*.md", "templates/*.yaml", "templates/prompts/*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
@@ -89,6 +92,7 @@ markers = [
     "ingestion: ingestion and queue behavior tests",
     "integration: cross-subsystem tests",
     "slow: expensive tests",
+    "model: requires local model assets and may perform model inference",
     "requires_postgres: requires a real Postgres service",
     "requires_pgvector: requires pgvector support",
     "requires_async_psycopg: requires psycopg async support in this OS/event loop",

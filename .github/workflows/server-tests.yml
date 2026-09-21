@@ -1,0 +1,333 @@
+name: Server tests
+
+on:
+  push:
+    branches:
+      - main
+      - aadedewe/refactor
+  pull_request:
+    paths:
+      - "server/**"
+      - "docker/**"
+      - "docker-compose.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/server-tests.yml"
+  workflow_dispatch:
+    inputs:
+      run_model_lane:
+        description: "Run the cached-model pre-release lane"
+        required: true
+        type: boolean
+        default: false
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KNOGGIN_TEST_DATABASE_URL: postgresql://knoggin:knoggin@localhost:5432/knoggin_db
+
+jobs:
+  package:
+    name: Build server package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Build wheel and source distribution
+        run: uv build --package server
+
+      - name: Verify installed runtime assets are packaged
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = list(Path("dist").glob("server-*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one server wheel, found {len(wheels)}")
+
+          required = {
+              "runtime/application.py",
+              "common/templates/AGENT_IDENTITY.md",
+              "common/templates/topics.yaml",
+              "common/templates/prompts/context.md",
+              "common/templates/prompts/episode.md",
+              "common/templates/prompts/extraction.md",
+          }
+          with ZipFile(wheels[0]) as wheel:
+              missing = required.difference(wheel.namelist())
+          if missing:
+              raise SystemExit(f"server wheel is missing: {sorted(missing)}")
+          print(f"verified {wheels[0]} runtime package contents")
+          PY
+
+      - name: Upload server distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-distributions
+          path: dist/*
+          if-no-files-found: error
+
+  # This gate is deliberately service-free. It is the feedback loop for every
+  # ordinary push and PR and must not depend on a local database or model cache.
+  fast:
+    name: Fast server contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install workspace dependencies
+        run: uv sync --frozen --dev
+
+      - name: Run fast server tests with coverage report
+        working-directory: server
+        run: >-
+          uv run pytest -q
+          --ignore=tests/architecture
+          -m "not requires_postgres and not requires_pgvector and not requires_async_psycopg and not model and not slow"
+          --cov=src
+          --cov-branch
+          --cov-report=term-missing
+          --cov-report=xml:coverage-fast.xml
+
+      - name: Run architecture checks
+        working-directory: server
+        run: |
+          uv run python scripts/check_architecture.py
+          uv run pytest -q tests/architecture
+
+      - name: Run server Ruff
+        working-directory: server
+        run: uv run ruff check src tests scripts
+
+      - name: Run server mypy typed-boundary gate
+        working-directory: server
+        run: uv run mypy --config-file mypy.ini
+
+      - name: Upload fast coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage-fast
+          path: server/coverage-fast.xml
+          if-no-files-found: ignore
+
+  # This gate owns tests that explicitly declare a real service dependency.
+  # Keeping the marker boundary visible prevents a green unit run from being
+  # mistaken for evidence about PostgreSQL/AGE behavior.
+  services:
+    name: PostgreSQL contracts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install workspace dependencies
+        run: uv sync --frozen --dev
+
+      - name: Start PostgreSQL
+        run: docker compose up -d --build --wait postgres
+
+      - name: Run real-service contracts
+        working-directory: server
+        run: >-
+          uv run pytest -q
+          -m "requires_postgres"
+          --cov=src
+          --cov-branch
+          --cov-report=term-missing
+          --cov-report=xml:coverage-services.xml
+
+      - name: Upload service coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-coverage-services
+          path: server/coverage-services.xml
+          if-no-files-found: ignore
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
+
+  # Changed-line coverage is evaluated against both reports so a line covered
+  # only by a real-service contract is not penalized by the service-free lane.
+  # It is PR-only because a push has no stable target branch to compare.
+  changed-line-coverage:
+    name: Changed-line coverage
+    needs: [fast, services]
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.fast.result == 'success' &&
+      needs.services.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install workspace dependencies
+        run: uv sync --frozen --dev
+
+      - name: Download lane coverage reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: server-coverage-*
+          path: server
+          merge-multiple: true
+
+      - name: Enforce changed-line coverage
+        working-directory: server
+        env:
+          BASE_BRANCH: origin/${{ github.base_ref }}
+        run: >-
+          uv run diff-cover coverage-fast.xml coverage-services.xml
+          --compare-branch "$BASE_BRANCH"
+          --branch-coverage
+          --fail-under 90
+
+  # Model artifacts are intentionally outside ordinary push/PR gates. A
+  # release or an explicitly requested dispatch downloads the configured
+  # artifacts, then requires the embedding/reranker/NLI and runtime smoke
+  # tests to execute instead of silently accepting cache-miss skips.
+  model:
+    name: Cached model smoke
+    if: >-
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_model_lane == true)
+    runs-on: ubuntu-latest
+    env:
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      KNOGGIN_REQUIRE_LOCAL_MODELS: "1"
+      KNOGGIN_SEMANTIC_SMOKE_MODEL: dunzhang/stella_en_1.5B_v5
+      KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION: 7817065102fd9e1b031fe874e910c01f40b2f001
+      KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL: BAAI/bge-reranker-large
+      KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION: 55611d7bca2a7133960a6d3b71e083071bbfc312
+      KNOGGIN_SEMANTIC_SMOKE_NLI_MODEL: cross-encoder/nli-MiniLM2-L6-H768
+      KNOGGIN_SEMANTIC_SMOKE_NLI_REVISION: b95119ce93d3e065de6214e38cd4a97b0f2f2c6d
+      KNOGGIN_GLINER_MODEL: urchade/gliner_large-v2.1
+      KNOGGIN_GLINER_REVISION: abd49a1f1ebc12af1be84d06f6848221cf96dcad
+      KNOGGIN_GLINER_BASE_MODEL: microsoft/deberta-v3-large
+      KNOGGIN_GLINER_BASE_REVISION: 64a8c8eab3e352a784c658aef62be1662607476f
+      KNOGGIN_EMBEDDING_BACKEND: onnx
+      KNOGGIN_ONNX_PROVIDER: CPUExecutionProvider
+      KNOGGIN_SEMANTIC_SMOKE_EXPECTED_PROVIDER: CPUExecutionProvider
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install workspace dependencies
+        run: uv sync --frozen --dev
+
+      - name: Restore model cache
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: knoggin-models-${{ runner.os }}-stella-v5-bge-reranker-large-nli-gliner
+
+      - name: Provision configured model artifacts
+        working-directory: server
+        run: |
+          uv run python - <<'PY'
+          import os
+          from huggingface_hub import snapshot_download
+
+          artifacts = (
+              ("KNOGGIN_SEMANTIC_SMOKE_MODEL", "KNOGGIN_SEMANTIC_SMOKE_MODEL_REVISION"),
+              ("KNOGGIN_SEMANTIC_SMOKE_RERANKER_MODEL", "KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION"),
+              ("KNOGGIN_SEMANTIC_SMOKE_NLI_MODEL", "KNOGGIN_SEMANTIC_SMOKE_NLI_REVISION"),
+              ("KNOGGIN_GLINER_MODEL", "KNOGGIN_GLINER_REVISION"),
+              ("KNOGGIN_GLINER_BASE_MODEL", "KNOGGIN_GLINER_BASE_REVISION"),
+          )
+          for model_variable, revision_variable in artifacts:
+              snapshot_download(
+                  os.environ[model_variable],
+                  revision=os.environ[revision_variable],
+                  local_files_only=False,
+              )
+          PY
+
+      - name: Start PostgreSQL for runtime composition
+        run: docker compose up -d --build --wait postgres
+
+      - name: Run required cached-model smoke
+        working-directory: server
+        run: >-
+          uv run pytest -q
+          tests/unit/core/knowledge/test_entity_resolution_semantic_smoke.py
+          tests/unit/core/knowledge/test_model_gate_smoke.py
+          tests/integration/runtime/test_resource_manager_composition.py
+          -m "slow and model"
+          -rs
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
+
+      - name: Check diff formatting
+        run: git diff --check
