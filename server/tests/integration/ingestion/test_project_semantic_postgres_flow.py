@@ -1045,7 +1045,10 @@ async def test_project_semantic_processor_uses_real_storage_for_agent_derived_co
         project_id=project_id,
     )
     assert failed_state is not None
-    assert failed_state.projection_failure_code == "OSError"
+    assert (
+        failed_state.projection_failure_code
+        == "ContextUserEditSynchronizationError"
+    )
     assert failed_state.projection_failure_at is not None
 
     second_human_result = await human_edit_job.execute(context)
