@@ -24,7 +24,10 @@ from common.schema.settings import (
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
-from core.knowledge.context.models import ContextRevisionConflictError
+from core.knowledge.context.models import (
+    ContextRevisionConflictError,
+    ContextUserEditSynchronizationError,
+)
 from core.knowledge.context.projection import ContextProjectionResult
 from core.knowledge.context.render import apply_context_edits, context_block_hash
 from core.knowledge.context.updater import ContextUpdateResult
@@ -274,6 +277,11 @@ class _FailingProjection:
         raise OSError("local projection temporarily unavailable")
 
 
+class _BlockedUserEditProjection:
+    async def synchronize(self, **_kwargs):
+        raise ContextUserEditSynchronizationError("user edit requires retry")
+
+
 class _IdleAdmission:
     def update_settings(self, _settings):
         pass
@@ -496,6 +504,71 @@ async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
     assert policy_captures == 1
     assert admission.kwargs["ingestion_policy"] is policy
     assert admission.kwargs["domain"] is policy.domain
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_projection_failure_does_not_block_new_semantic_admission():
+    class RecordingAdmission(_IdleAdmission):
+        def __init__(self):
+            self.calls = 0
+
+        async def claim_next(self, **_kwargs):
+            self.calls += 1
+            return None
+
+    admission = RecordingAdmission()
+
+    async def capture_policy():
+        return _policy()
+
+    job = ProjectSemanticProcessor(
+        admission,
+        _IdleStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_policy,
+        context_updater=_NoopUpdater(),
+        context_projection=_FailingProjection(),
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success is True
+    assert result.summary == "No semantic window is due"
+    assert admission.calls == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_unresolved_user_edit_blocks_new_semantic_admission():
+    class UnexpectedAdmission(_IdleAdmission):
+        async def claim_next(self, **_kwargs):
+            raise AssertionError("blocked user steering must prevent admission")
+
+    async def capture_policy():
+        return _policy()
+
+    job = ProjectSemanticProcessor(
+        UnexpectedAdmission(),
+        _IdleStore(),
+        object(),
+        settings=IngestionSettings(semantic_window_tokens=1),
+        capture_semantic_policy=capture_policy,
+        context_updater=_NoopUpdater(),
+        context_projection=_BlockedUserEditProjection(),
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+    )
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success is True
+    assert "admission deferred" in result.summary
 
 
 @pytest.mark.unit

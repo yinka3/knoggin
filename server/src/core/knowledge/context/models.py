@@ -22,6 +22,10 @@ class ContextProjectionConflictError(RuntimeError):
     """Raised when a local Context file cannot safely be imported or replaced."""
 
 
+class ContextUserEditSynchronizationError(RuntimeError):
+    """Raised when detected human Context steering cannot be safely imported."""
+
+
 @dataclass(frozen=True, slots=True)
 class ContextBlockSupport:
     """One message/source reference attached to a newly-created block version."""
