@@ -9,8 +9,14 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
 
+from common.exceptions import (
+    DependencyError,
+    LLMProviderError,
+    StorageError,
+    ToolExecutionError,
+)
 from common.schema.health import sanitize_health_details
-from common.utils.time_utils import get_now_iso
+from common.utils.time_utils import get_now, get_now_iso, parse_iso_time
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents.constants import (
@@ -99,6 +105,8 @@ class DocumentIndexer:
         *,
         document_id: str,
         policy: Optional[DocumentIndexPolicy] = None,
+        force: bool = False,
+        reset_attempts: bool = False,
     ) -> Dict:
         """Claim, derive, and atomically publish one document's index."""
 
@@ -110,14 +118,15 @@ class DocumentIndexer:
         metadata = rows[0] if rows else None
         if metadata is None:
             raise FileNotFoundError("Document not found")
-        if metadata["status"] == "indexed":
+        if metadata["status"] == "indexed" and not force:
             return metadata
 
         claimed = await self._writer.transition_index_status(
             document_id=document_id,
             status="indexing",
-            allowed_statuses=("queued", "failed"),
+            allowed_statuses=("queued", "failed", "indexed") if force else ("queued", "failed"),
             updated_at=get_now_iso(),
+            reset_attempts=reset_attempts,
         )
         if claimed is None:
             refreshed = await self._reader.fetch_documents_by_reference(
@@ -131,6 +140,7 @@ class DocumentIndexer:
         try:
             async with self._index_claim(
                 document_id=document_id,
+                policy=policy,
             ):
                 raw_bytes = await self._source_bytes(claimed)
                 if raw_bytes is None:
@@ -156,7 +166,7 @@ class DocumentIndexer:
                     document_id=document_id,
                     chunks=chunks,
                     embeddings=embeddings,
-                    extracted_text=extraction.text,
+                    parse_snapshot=extraction.snapshot,
                     indexed_at=get_now_iso(),
                     read_content_hash=read_content_hash,
                 )
@@ -172,6 +182,21 @@ class DocumentIndexer:
             raise RuntimeError(
                 f"Failed to index document: {detail[:MAX_ERROR_MESSAGE_LENGTH]}"
             ) from exc
+
+    async def reindex_document(
+        self,
+        *,
+        document_id: str,
+        policy: Optional[DocumentIndexPolicy] = None,
+    ) -> Dict:
+        """Publish a fresh snapshot without discarding current evidence first."""
+
+        return await self.index_document(
+            document_id=document_id,
+            policy=policy,
+            force=True,
+            reset_attempts=True,
+        )
 
     async def _source_bytes(
         self,
@@ -229,6 +254,21 @@ class DocumentIndexer:
                 f"{EXPECTED_EMBEDDING_DIMENSION} dimensions"
             )
 
+    @staticmethod
+    def _classify_index_failure(exc: Exception) -> tuple[str, bool]:
+        """Classify the document-work boundary without retrying bad content."""
+        if isinstance(exc, ToolExecutionError):
+            return (
+                "transient_dependency" if exc.retryable else "invalid_content",
+                exc.retryable,
+            )
+        if isinstance(
+            exc,
+            (ConnectionError, TimeoutError, DependencyError, StorageError, LLMProviderError),
+        ):
+            return "transient_dependency", True
+        return "invalid_content", False
+
     async def _encode_embeddings(
         self,
         values: List[str],
@@ -249,6 +289,7 @@ class DocumentIndexer:
         self,
         *,
         document_id: str,
+        policy: DocumentIndexPolicy,
     ) -> AsyncIterator[None]:
         try:
             yield
@@ -260,11 +301,17 @@ class DocumentIndexer:
             raise
         except Exception as exc:
             detail = str(exc).strip() or type(exc).__name__
+            failure_kind, retryable = self._classify_index_failure(exc)
             await self._writer.record_index_failure(
                 document_id=document_id,
                 error_message=detail[:MAX_ERROR_MESSAGE_LENGTH],
+                failure_kind=failure_kind,
+                retryable=retryable,
+                max_attempts=policy.max_attempts,
+                retry_backoff_seconds=policy.retry_backoff_seconds,
                 updated_at=get_now_iso(),
             )
+            self._request_drain()
             raise
 
     async def schedule_document_index(
@@ -282,19 +329,9 @@ class DocumentIndexer:
         if not rows:
             raise FileNotFoundError("Document not found")
         document = rows[0]
-        if document["status"] in {"indexed", "indexing"}:
+        if document["status"] != "queued":
             return document
-        if document["status"] == "queued":
-            queued = document
-        else:
-            queued = await self._writer.transition_index_status(
-                document_id=document_id,
-                status="queued",
-                allowed_statuses=("failed",),
-                updated_at=get_now_iso(),
-            )
-            if queued is None:
-                return document
+        queued = document
 
         if (
             document["size_bytes"] <= self._policy.inline_index_max_bytes
@@ -391,10 +428,16 @@ class DocumentIndexer:
                     await self._admit_durable_work(_DRAIN_BATCH_SIZE)
                     if await self.pending_index_count() == 0:
                         break
+                    retry_at = await self._reader.next_index_retry_at()
+                    retry_time = parse_iso_time(retry_at) if retry_at is not None else None
+                    if retry_time is not None and not self._document_tasks:
+                        timeout = max(0.01, (retry_time - get_now()).total_seconds())
+                    else:
+                        timeout = _DRAIN_RETRY_SECONDS
                     try:
                         await asyncio.wait_for(
                             self._drain_wakeup.wait(),
-                            timeout=_DRAIN_RETRY_SECONDS,
+                            timeout=timeout,
                         )
                     except TimeoutError:
                         pass
@@ -407,16 +450,20 @@ class DocumentIndexer:
     async def _admit_durable_work(self, limit: int) -> int:
         """Submit one bounded durable slice, looking past local in-flight work."""
         pending = await self._reader.list_documents_for_index_recovery(
-            limit + len(self._document_tasks)
+            due_at=get_now_iso(),
+            limit=limit + len(self._document_tasks),
         )
         submitted = 0
         for document in pending:
             document_id = str(document["document_id"])
             if document_id in self._document_tasks:
                 continue
-            await self.schedule_document_index(
-                document_id=document_id,
-            )
+            try:
+                await self.schedule_document_index(document_id=document_id)
+            except Exception as exc:
+                # Failure state is already durable in ``_index_claim``. Keep
+                # this admission loop alive so a later scheduled retry can run.
+                logger.warning("Document index admission failed for {}: {}", document_id, exc)
             submitted += 1
             if submitted >= limit:
                 break
@@ -512,6 +559,8 @@ class DocumentIndexer:
         return {
             "inline_index_max_bytes": self._policy.inline_index_max_bytes,
             "embedding_chunk_batch_size": self._policy.embedding_chunk_batch_size,
+            "max_attempts": self._policy.max_attempts,
+            "retry_backoff_seconds": self._policy.retry_backoff_seconds,
             "local_submission_tasks": len(
                 [task for task in self._background_tasks if not task.done()]
             ),

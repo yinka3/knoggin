@@ -121,6 +121,7 @@ async def test_final_assistant_exchange_closes_the_user_in_the_same_transaction(
             "project_id": "project-1",
             "session_id": "session-1",
             "user_message_id": 7,
+            "outcome": "assistant_final",
             "cur": client.cursor,
         }
     ]

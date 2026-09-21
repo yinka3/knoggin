@@ -121,7 +121,6 @@ def test_adaptive_briefing_uses_a_narrow_conversational_fast_path(user_query):
             {"document_selection_context": {"excerpt": "selected passage"}},
             "document_selection",
         ),
-        ({"hot_topics": ["ingestion"]}, "hot_topic_preload"),
         (
             {"limits": AgentRunLimits(project_briefing_mode="always")},
             "always",
@@ -263,6 +262,53 @@ def test_agent_run_distinguishes_grounded_evidence_from_actions_and_validates_in
     assert sourced_run.has_grounded_investigation_evidence() is True
     with pytest.raises(TypeError, match="validated source references"):
         make_run(initial_source_candidates=[object()])
+
+
+@pytest.mark.no_network
+def test_agent_run_requires_read_content_after_document_or_web_discovery():
+    run = make_run()
+
+    run.notebook.apply(
+        "list_documents",
+        {
+            "data": [
+                {
+                    "document_id": "document-1",
+                    "document_name": "brief.md",
+                }
+            ]
+        },
+    )
+    run.notebook.apply(
+        "web_search",
+        {
+            "data": [
+                {
+                    "title": "Release notes",
+                    "url": "https://example.test/release-notes",
+                    "snippet": "A promising discovery snippet.",
+                }
+            ]
+        },
+    )
+
+    assert run.has_any() is True
+    assert run.has_grounded_investigation_evidence() is False
+
+    run.notebook.apply(
+        "read_document",
+        {
+            "data": [
+                {
+                    "document_id": "document-1",
+                    "document_name": "brief.md",
+                    "content": "The read passage supports the answer.",
+                }
+            ]
+        },
+    )
+
+    assert run.has_grounded_investigation_evidence() is True
 
 
 @pytest.mark.no_network

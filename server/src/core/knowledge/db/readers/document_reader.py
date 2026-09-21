@@ -127,7 +127,11 @@ class DocumentReader:
                 pd.extension,
                 pd.size_bytes,
                 pd.content_hash,
+                pd.current_snapshot_id,
                 pd.status,
+                pd.index_attempt_count,
+                pd.next_index_retry_at,
+                pd.last_index_failure_kind,
                 pd.created_at,
                 pd.updated_at,
                 pd.indexed_at,
@@ -151,23 +155,31 @@ class DocumentReader:
             (selector_value, *self._document_visibility_params()),
         )
 
-    async def fetch_extracted_text(
+    async def fetch_current_parse_snapshot(
         self,
         *,
         document_id: str,
         content_hash: str,
-    ) -> Optional[str]:
-        """Return visible derived text only when it matches the source hash."""
+    ) -> Optional[Dict]:
+        """Return the current immutable snapshot for a visible source hash."""
         rows = await self._client.fetch_all(
             """
-            SELECT de.extracted_text
-            FROM public.document_extractions AS de
+            SELECT
+                snapshot.snapshot_id,
+                snapshot.document_id,
+                snapshot.source_content_hash,
+                snapshot.parser_name,
+                snapshot.parser_version,
+                snapshot.parser_fingerprint,
+                snapshot.snapshot,
+                snapshot.created_at
+            FROM public.document_parse_snapshots AS snapshot
             JOIN public.project_documents AS pd
-                ON pd.document_id = de.document_id
-            WHERE de.document_id = %s
+                ON pd.document_id = snapshot.document_id
+            WHERE snapshot.document_id = %s
               AND pd.content_hash = %s
-              AND de.extracted_content_hash = pd.content_hash
-              AND de.extracted_text IS NOT NULL
+              AND snapshot.source_content_hash = pd.content_hash
+              AND snapshot.snapshot_id = pd.current_snapshot_id
               AND pd.status <> 'deleted'
             """
             + self._document_visibility_sql()
@@ -175,10 +187,60 @@ class DocumentReader:
             """,
             (document_id, content_hash, *self._document_visibility_params()),
         )
-        return rows[0]["extracted_text"] if rows else None
+        return self._normalize_snapshot(rows[0]) if rows else None
 
-    async def list_documents_for_index_recovery(self, limit: int = 16) -> List[Dict]:
-        """Return queued project documents for durable indexing recovery."""
+    async def fetch_parse_snapshot(
+        self,
+        *,
+        document_id: str,
+        snapshot_id: str,
+    ) -> Optional[Dict]:
+        """Read a retained snapshot, including one from a tombstoned document."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT
+                snapshot.snapshot_id,
+                snapshot.document_id,
+                snapshot.source_content_hash,
+                snapshot.parser_name,
+                snapshot.parser_version,
+                snapshot.parser_fingerprint,
+                snapshot.snapshot,
+                snapshot.created_at,
+                pd.project_id,
+                pd.status AS document_status,
+                pd.current_snapshot_id
+            FROM public.document_parse_snapshots AS snapshot
+            JOIN public.project_documents AS pd
+                ON pd.document_id = snapshot.document_id
+            WHERE snapshot.document_id = %s
+              AND snapshot.snapshot_id = %s
+            """
+            + self._document_visibility_sql()
+            + """
+            """,
+            (document_id, snapshot_id, *self._document_visibility_params()),
+        )
+        return self._normalize_snapshot(rows[0]) if rows else None
+
+    @staticmethod
+    def _normalize_snapshot(row: Dict) -> Dict:
+        snapshot = dict(row)
+        for key in ("snapshot_id", "document_id", "current_snapshot_id"):
+            if snapshot.get(key) is not None:
+                snapshot[key] = str(snapshot[key])
+        payload = snapshot.get("snapshot")
+        if isinstance(payload, str):
+            snapshot["snapshot"] = json.loads(payload)
+        return snapshot
+
+    async def list_documents_for_index_recovery(
+        self,
+        *,
+        due_at: str,
+        limit: int = 16,
+    ) -> List[Dict]:
+        """Return immediately due initial and retryable document work."""
         return await self._client.fetch_all(
             """
             SELECT
@@ -189,7 +251,11 @@ class DocumentReader:
                 extension,
                 size_bytes,
                 content_hash,
+                current_snapshot_id,
                 status,
+                index_attempt_count,
+                next_index_retry_at,
+                last_index_failure_kind,
                 created_at,
                 updated_at,
                 indexed_at,
@@ -197,11 +263,16 @@ class DocumentReader:
                 0::INTEGER AS chunk_count
             FROM public.project_documents
             WHERE project_id = %s
-              AND status = 'queued'
-            ORDER BY created_at ASC, document_id ASC
+              AND (
+                (status = 'queued' AND (
+                    next_index_retry_at IS NULL OR next_index_retry_at <= %s
+                ))
+                OR (status = 'failed' AND next_index_retry_at <= %s)
+              )
+            ORDER BY COALESCE(next_index_retry_at, created_at) ASC, document_id ASC
             LIMIT %s
             """,
-            (self._project_id, limit),
+            (self._project_id, due_at, due_at, limit),
         )
 
     async def list_documents_for_reconciliation(
@@ -220,7 +291,11 @@ class DocumentReader:
                 pd.extension,
                 pd.size_bytes,
                 pd.content_hash,
+                pd.current_snapshot_id,
                 pd.status,
+                pd.index_attempt_count,
+                pd.next_index_retry_at,
+                pd.last_index_failure_kind,
                 pd.created_at,
                 pd.updated_at,
                 pd.indexed_at,
@@ -241,11 +316,29 @@ class DocumentReader:
             SELECT COUNT(*)::INTEGER AS count
             FROM public.project_documents
             WHERE project_id = %s
-              AND status = 'queued'
+              AND (
+                status = 'queued'
+                OR (status = 'failed' AND next_index_retry_at IS NOT NULL)
+              )
             """,
             (self._project_id,),
         )
         return int(rows[0]["count"]) if rows else 0
+
+    async def next_index_retry_at(self) -> str | None:
+        """Return the next delayed retry for this project, if one exists."""
+        rows = await self._client.fetch_all(
+            """
+            SELECT MIN(next_index_retry_at) AS next_index_retry_at
+            FROM public.project_documents
+            WHERE project_id = %s
+              AND next_index_retry_at IS NOT NULL
+              AND status IN ('queued', 'failed')
+            """,
+            (self._project_id,),
+        )
+        value = rows[0].get("next_index_retry_at") if rows else None
+        return value.isoformat() if hasattr(value, "isoformat") else value
 
     async def list_documents(
         self,
@@ -263,7 +356,11 @@ class DocumentReader:
                 pd.extension,
                 pd.size_bytes,
                 pd.content_hash,
+                pd.current_snapshot_id,
                 pd.status,
+                pd.index_attempt_count,
+                pd.next_index_retry_at,
+                pd.last_index_failure_kind,
                 pd.created_at,
                 pd.updated_at,
                 pd.indexed_at,
@@ -272,6 +369,7 @@ class DocumentReader:
             FROM public.project_documents AS pd
             LEFT JOIN public.document_chunks AS dc
                 ON dc.document_id = pd.document_id
+               AND dc.snapshot_id = pd.current_snapshot_id
             WHERE pd.status <> 'deleted'
         """
         params: list = list(self._document_visibility_params())
@@ -323,6 +421,7 @@ class DocumentReader:
                     pd.relative_path,
                     pd.extension,
                     pd.content_hash,
+                    dc.snapshot_id,
                     dc.chunk_index,
                     dc.content,
                     dc.language,
@@ -336,12 +435,15 @@ class DocumentReader:
                     dc.section_path,
                     dc.start_paragraph,
                     dc.end_paragraph,
+                    dc.layout_region,
                     dc.embedding,
                     dc.search_vector
                 FROM public.document_chunks AS dc
                 JOIN public.project_documents AS pd
                     ON pd.document_id = dc.document_id
-                WHERE pd.status = 'indexed'
+                WHERE pd.status <> 'deleted'
+                  AND pd.current_snapshot_id IS NOT NULL
+                  AND dc.snapshot_id = pd.current_snapshot_id
         """
         params: list = [query_text, embedding_json]
         sql += self._document_visibility_sql()
@@ -406,6 +508,7 @@ class DocumentReader:
                 vc.relative_path,
                 vc.extension,
                 vc.content_hash,
+                vc.snapshot_id,
                 vc.chunk_index,
                 vc.content,
                 vc.language,
@@ -419,6 +522,7 @@ class DocumentReader:
                 vc.section_path,
                 vc.start_paragraph,
                 vc.end_paragraph,
+                vc.layout_region,
                 1 - (vc.embedding <=> qv.embedding) AS score
             FROM candidate_ids AS ci
             JOIN visible_chunks AS vc ON vc.chunk_id = ci.chunk_id

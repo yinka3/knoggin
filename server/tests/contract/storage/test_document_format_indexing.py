@@ -4,6 +4,11 @@ import pytest
 
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.documents import storage as document_storage
+from core.knowledge.documents.storage import (
+    DocumentParseSnapshot,
+    DocumentSnapshotPage,
+    LayoutRegion,
+)
 from tests.fixtures.documents import (
     build_docx_bytes,
     build_notebook_bytes,
@@ -127,18 +132,18 @@ def _document_samples():
             ),
             [
                 {
-                    "content": "Overview\nAlpha paragraph.",
+                    "content": "# Overview\n\nAlpha paragraph.",
                     "chunk_kind": "text",
                     "section_path": ["Overview"],
-                    "start_paragraph": 1,
-                    "end_paragraph": 2,
+                    "start_line": 1,
+                    "end_line": 3,
                 },
                 {
-                    "content": "Risks\nBeta paragraph.",
+                    "content": "## Risks\n\nBeta paragraph.",
                     "chunk_kind": "text",
                     "section_path": ["Overview", "Risks"],
-                    "start_paragraph": 3,
-                    "end_paragraph": 4,
+                    "start_line": 5,
+                    "end_line": 7,
                 },
             ],
         ),
@@ -157,6 +162,50 @@ def _document_samples():
     ]
 
 
+def _structured_parse_snapshot(content: bytes, extension: str) -> DocumentParseSnapshot:
+    if extension == ".pdf":
+        return DocumentParseSnapshot(
+            text="Alpha page.\n\nBeta page.",
+            structure={"pages": {"1": {}, "2": {}}},
+            parser_name="docling",
+            parser_version="test",
+            parser_fingerprint="a" * 64,
+            pages=(
+                DocumentSnapshotPage(
+                    page_number=1,
+                    text="Alpha page.",
+                    regions=(
+                        LayoutRegion(
+                            page_number=1,
+                            element_type="text",
+                            extraction_method="native_text",
+                        ),
+                    ),
+                ),
+                DocumentSnapshotPage(
+                    page_number=2,
+                    text="Beta page.",
+                    regions=(
+                        LayoutRegion(
+                            page_number=2,
+                            element_type="text",
+                            extraction_method="ocr",
+                        ),
+                    ),
+                ),
+            ),
+        )
+    if extension == ".docx":
+        return DocumentParseSnapshot(
+            text="# Overview\n\nAlpha paragraph.\n\n## Risks\n\nBeta paragraph.",
+            structure={"texts": [{"label": "section_header"}]},
+            parser_name="docling",
+            parser_version="test",
+            parser_fingerprint="a" * 64,
+        )
+    raise AssertionError(f"unexpected structured format {extension}")
+
+
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
@@ -170,6 +219,11 @@ async def test_representative_document_formats_publish_durable_located_chunks(
         document_storage.pytesseract,
         "image_to_string",
         lambda _: "Launch ready.\nProceed now.\n",
+    )
+    monkeypatch.setattr(
+        document_storage,
+        "_extract_docling_snapshot",
+        _structured_parse_snapshot,
     )
     service = DocumentService(
         project_id="project-1",
@@ -189,23 +243,25 @@ async def test_representative_document_formats_publish_durable_located_chunks(
         assert indexed["content_hash"] == hashlib.sha256(content).hexdigest()
         assert indexed["chunk_count"] == len(expected_chunks)
 
-        content_row = await real_postgres_client.fetch_one(
+        snapshot_row = await real_postgres_client.fetch_one(
             """
-            SELECT extracted_text, extracted_content_hash
-            FROM public.document_extractions
-            WHERE document_id = %s
+            SELECT source_content_hash, parser_name, snapshot ->> 'text' AS text
+            FROM public.document_parse_snapshots
+            WHERE snapshot_id = %s
             """,
-            (indexed["document_id"],),
+            (indexed["current_snapshot_id"],),
         )
-        assert content_row["extracted_text"].strip()
-        assert content_row["extracted_content_hash"] == indexed["content_hash"]
+        assert snapshot_row["text"].strip()
+        assert snapshot_row["source_content_hash"] == indexed["content_hash"]
+        if original_name.endswith((".pdf", ".docx")):
+            assert snapshot_row["parser_name"] == "docling"
 
         chunk_rows = await real_postgres_client.fetch_all(
             """
             SELECT
                 content, language, chunk_kind, symbol_name, page_number,
                 start_line, end_line, start_row, end_row, section_path,
-                start_paragraph, end_paragraph
+                start_paragraph, end_paragraph, layout_region
             FROM public.document_chunks
             WHERE document_id = %s
             ORDER BY chunk_index
@@ -214,6 +270,11 @@ async def test_representative_document_formats_publish_durable_located_chunks(
         )
         for actual, expected in zip(chunk_rows, expected_chunks, strict=True):
             assert actual == {**actual, **expected}
+        if original_name.endswith(".pdf"):
+            assert [row["layout_region"]["kind"] for row in chunk_rows] == [
+                "layout_region",
+                "layout_region",
+            ]
 
 
 @pytest.mark.storage
@@ -256,8 +317,8 @@ async def test_failed_extraction_publishes_no_partial_derived_document_state(
     )
     assert await real_postgres_client.fetch_one(
         """
-        SELECT extracted_text, extracted_content_hash
-        FROM public.document_extractions
+        SELECT snapshot_id
+        FROM public.document_parse_snapshots
         WHERE document_id = %s
         """,
         (document["document_id"],),

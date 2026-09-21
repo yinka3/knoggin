@@ -143,7 +143,7 @@ async def test_saved_web_links_are_project_owned_lightweight_bookmarks():
     assert all(
         "document_chunks" not in query
         and "project_documents" not in query
-        and "document_extractions" not in query
+        and "document_parse_snapshots" not in query
         for query in store.queries
     )
 

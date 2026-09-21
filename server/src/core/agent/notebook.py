@@ -19,7 +19,13 @@ from urllib.parse import urlsplit
 NotebookAudience = Literal["system", "agent"]
 
 
-_KNOWLEDGE_SECTIONS = ("entities", "relationships", "episodes", "paths")
+_KNOWLEDGE_SECTIONS = (
+    "entities",
+    "relationships",
+    "activities",
+    "episodes",
+    "paths",
+)
 _EVIDENCE_SECTIONS = (
     "messages",
     "documents",
@@ -28,6 +34,7 @@ _EVIDENCE_SECTIONS = (
     "web_reads",
 )
 _ALL_SECTIONS = _KNOWLEDGE_SECTIONS + _EVIDENCE_SECTIONS
+_GROUNDED_KNOWLEDGE_SECTIONS = ("relationships", "episodes", "paths")
 _ACTION_TOOLS = frozenset(
     {
         "edit_brain",
@@ -59,6 +66,7 @@ class NotebookCapacity:
 
     max_entities: int = 20
     max_relationships: int = 40
+    max_activities: int = 30
     max_episodes: int = 8
     max_paths: int = 8
     max_messages: int = 30
@@ -78,6 +86,7 @@ class NotebookCapacity:
         return cls(
             max_entities=_positive_limit(limits, "max_accumulated_profiles", 20),
             max_relationships=_positive_limit(limits, "max_accumulated_graph", 40),
+            max_activities=_positive_limit(limits, "max_accumulated_messages", 30),
             max_episodes=_positive_limit(limits, "max_accumulated_episodes", 8),
             max_paths=_positive_limit(limits, "max_accumulated_paths", 8),
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
@@ -226,6 +235,7 @@ class RunNotebook:
         return {
             "entities": self.capacity.max_entities,
             "relationships": self.capacity.max_relationships,
+            "activities": self.capacity.max_activities,
             "episodes": self.capacity.max_episodes,
             "paths": self.capacity.max_paths,
             "messages": self.capacity.max_messages,
@@ -323,6 +333,20 @@ class RunNotebook:
                         "target",
                         "relationship_type",
                         "observed_relationship_label",
+                    )
+                },
+            )
+        if section == "activities":
+            return self._hash_ref(
+                "activity",
+                {
+                    key: item.get(key)
+                    for key in (
+                        "project_id",
+                        "entity_id",
+                        "time",
+                        "evidence_refs",
+                        "observation_refs",
                     )
                 },
             )
@@ -502,6 +526,17 @@ class RunNotebook:
                 for evidence_ref in value.get("evidence_refs", []):
                     if evidence_ref not in page["evidence_refs"]:
                         page["evidence_refs"].append(evidence_ref)
+        return ref
+
+    def _add_activity(self, item: dict[str, Any]) -> str:
+        """Retain a chronological entity activity with its supporting evidence."""
+
+        value = deepcopy(item)
+        self._admit_evidence(value)
+        ref = self._upsert("activities", value)
+        entity_ref = self._link_entity(value.get("entity_id"))
+        if entity_ref:
+            self._add_entity_page(entity_ref)
         return ref
 
     def _add_episode(
@@ -731,6 +766,12 @@ class RunNotebook:
             value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
             relationships.append(value)
 
+        activities = []
+        for item in self._section_values("activities"):
+            value = deepcopy(item)
+            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
+            activities.append(value)
+
         paths = []
         for item in self._section_values("paths"):
             value = deepcopy(item)
@@ -783,6 +824,7 @@ class RunNotebook:
             "profiles": [deepcopy(item) for item in self._section_values("entities")],
             "entity_pages": deepcopy(self._entity_pages),
             "graph": relationships,
+            "activities": activities,
             "paths": paths,
             "episodes": episodes,
             "messages": [
@@ -840,7 +882,7 @@ class RunNotebook:
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_message(item))
-        elif tool_name in {"get_connections", "get_recent_activity"}:
+        elif tool_name == "get_connections":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict) and (
                     {"source", "target"}.issubset(item)
@@ -850,6 +892,15 @@ class RunNotebook:
                     }.issubset(item)
                 ):
                     references.append(self._add_relationship(item))
+        elif tool_name == "get_recent_activity":
+            for item in data if isinstance(data, list) else []:
+                if (
+                    isinstance(item, dict)
+                    and not item.get("error")
+                    and item.get("entity_id") is not None
+                    and item.get("time") is not None
+                ):
+                    references.append(self._add_activity(item))
         elif tool_name == "find_path":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
@@ -900,7 +951,6 @@ class RunNotebook:
                     references.append(self._add_message(item))
         elif tool_name in {
             "list_documents",
-            "get_document_manifest",
             "get_document_info",
             "search_documents",
             "read_document",
@@ -1049,6 +1099,7 @@ class RunNotebook:
         prefix = {
             "entity": "entities",
             "relationship": "relationships",
+            "activity": "activities",
             "episode": "episodes",
             "path": "paths",
             "message": "messages",
@@ -1096,6 +1147,8 @@ class RunNotebook:
                 for entity in item.get("entities", [])
                 if isinstance(entity, dict)
             )
+        elif section == "activities":
+            identifiers = (item.get("entity_id"),)
         else:
             identifiers = ()
         dependencies.update(
@@ -1337,13 +1390,49 @@ class RunNotebook:
     def has_admitted_evidence(self) -> bool:
         """Whether retained notebook evidence can ground an investigation.
 
-        Action records and summary prose alone are model-visible context, but do
-        not establish that an investigation produced evidence.
+        Structured Knowledge retrieval remains usable evidence. Entity profiles,
+        document metadata, unread web discoveries, action records, and summary
+        prose are model-visible context, but do not establish that an
+        investigation observed useful evidence.
         """
 
-        return bool(
-            any(self._orders[section] for section in _ALL_SECTIONS)
-            or self.summary.references
+        return any(
+            self._orders[section] for section in _GROUNDED_KNOWLEDGE_SECTIONS
+        ) or any(
+            self._record_has_text(item)
+            for section in ("messages", "documents", "web_reads")
+            for item in self._section_values(section)
+        ) or any(
+            self._observation_support_has_text(item)
+            for item in self._section_values("observation_supports")
+        )
+
+    @staticmethod
+    def _record_has_text(item: dict[str, Any]) -> bool:
+        """Return whether one direct result contains model-visible content."""
+
+        for key in ("message", "content", "excerpt"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+        context = item.get("context")
+        return isinstance(context, list) and any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("content"), str)
+            and entry["content"].strip()
+            for entry in context
+        )
+
+    @staticmethod
+    def _observation_support_has_text(bundle: dict[str, Any]) -> bool:
+        """Require expanded observation evidence rather than a path placeholder."""
+
+        nodes = bundle.get("nodes")
+        return isinstance(nodes, list) and any(
+            isinstance(node, dict)
+            and isinstance(node.get("excerpt"), str)
+            and node["excerpt"].strip()
+            for node in nodes
         )
 
     def fingerprint(self) -> str:

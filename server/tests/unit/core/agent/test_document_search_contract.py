@@ -482,9 +482,17 @@ async def test_search_documents_adds_source_context_from_the_stored_chunk():
         "relative_path": "reports/q2.pdf",
         "extension": ".pdf",
         "content_hash": content_hash,
+        "parse_snapshot_id": "snapshot-1",
         "chunk_index": 3,
         "content": "Revenue grew 18% year over year.",
-        "page_number": 7,
+        "layout_region": {
+            "kind": "layout_region",
+            "page": 7,
+            "element_type": "text",
+            "extraction_method": "native_text",
+            "coordinate_unit": "pdf_points",
+            "coordinate_origin": "bottom_left",
+        },
         "status": "indexed",
     }
     document_service = SearchableDocumentService(
@@ -508,9 +516,10 @@ async def test_search_documents_adds_source_context_from_the_stored_chunk():
     assert results[0]["source_context"] == {
         "source_kind": "pdf_document",
         "document_id": "file-1",
+        "parse_snapshot_id": "snapshot-1",
         "source_project_id": "project-1",
         "content_hash": content_hash,
-        "locator": {"kind": "pdf_page", "page": 7},
+        "locator": stored_chunk["layout_region"],
         "excerpt": stored_chunk["content"],
         "metadata": {
             "document_name": "report.pdf",
@@ -543,6 +552,7 @@ async def test_read_document_adds_source_context_from_the_returned_read_range():
         "relative_path": "docs/notes.md",
         "extension": ".md",
         "content_hash": content_hash,
+        "parse_snapshot_id": "snapshot-1",
         "chunk_index": "lines:3-4",
         "content": "3: alpha\n4: beta",
         "locator": {
@@ -562,6 +572,7 @@ async def test_read_document_adds_source_context_from_the_returned_read_range():
     assert results[0]["source_context"] == {
         "source_kind": "text_document",
         "document_id": "file-1",
+        "parse_snapshot_id": "snapshot-1",
         "source_project_id": "project-1",
         "content_hash": content_hash,
         "locator": {
@@ -592,6 +603,7 @@ async def test_request_document_selection_defaults_reads_to_the_selected_range()
         "relative_path": "docs/notes.md",
         "selection": {
             "content_hash": "a" * 64,
+            "parse_snapshot_id": "snapshot-1",
             "locator": {
                 "kind": "text_lines",
                 "start_line": 3,
@@ -617,7 +629,7 @@ async def test_request_document_selection_defaults_reads_to_the_selected_range()
 
 
 @pytest.mark.no_network
-async def test_search_documents_adds_docx_paragraph_source_context():
+async def test_search_documents_adds_docling_markdown_source_context():
     content_hash = "d" * 64
     stored_chunk = {
         "document_id": "file-1",
@@ -626,13 +638,14 @@ async def test_search_documents_adds_docx_paragraph_source_context():
         "relative_path": "docs/outline.docx",
         "extension": ".docx",
         "content_hash": content_hash,
+        "parse_snapshot_id": "snapshot-1",
         "chunk_index": 3,
         "content": "Architecture\nThe worker stores each passage.",
         "locator": {
-            "kind": "docx_paragraphs",
-            "start_paragraph": 7,
-            "end_paragraph": 8,
-            "heading_path": ["Architecture"],
+            "kind": "text_lines",
+            "start_line": 1,
+            "end_line": 2,
+            "section_path": ["Architecture"],
         },
     }
 
@@ -691,6 +704,7 @@ def test_search_documents_adds_exact_source_context_for_each_text_strategy(
             "relative_path": f"docs/source{extension}",
             "extension": extension,
             "content_hash": "e" * 64,
+            "parse_snapshot_id": "snapshot-1",
             "chunk_index": 2,
             "content": "The exact searchable passage.",
             "locator": locator,
@@ -702,6 +716,7 @@ def test_search_documents_adds_exact_source_context_for_each_text_strategy(
         "document_id": "file-1",
         "source_project_id": "project-1",
         "content_hash": "e" * 64,
+        "parse_snapshot_id": "snapshot-1",
         "locator": locator,
         "excerpt": "The exact searchable passage.",
         "metadata": {
@@ -735,7 +750,8 @@ def test_ocr_image_results_remain_searchable_without_unreliable_source_context()
     "result",
     [
         {
-            "document_id": "file-1",
+        "document_id": "file-1",
+        "parse_snapshot_id": "snapshot-1",
             "document_name": "legacy.txt",
             "relative_path": "docs/legacy.txt",
             "extension": ".txt",

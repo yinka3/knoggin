@@ -177,6 +177,7 @@ class SemanticWindowWriter:
                     """
                     UPDATE public.project_semantic_windows
                     SET stage = %s,
+                        attempt_count = 0,
                         context_revision_id = CASE
                             WHEN %s::uuid IS NULL THEN context_revision_id
                             ELSE %s::uuid
@@ -431,10 +432,10 @@ class SemanticWindowWriter:
                     for exchange_member in exchange_members[member.message_id]
                     if exchange_member.role == "assistant"
                 ]
-                if row["exchange_outcome"] == "assistant_final":
+                if row["exchange_outcome"] in {"assistant_final", "clarification"}:
                     if len(assistant_members) != 1:
                         raise ValueError(
-                            "Assistant-final exchanges require sealed assistant membership"
+                            "Assistant terminal exchanges require sealed assistant membership"
                         )
                 elif assistant_members:
                     raise ValueError(

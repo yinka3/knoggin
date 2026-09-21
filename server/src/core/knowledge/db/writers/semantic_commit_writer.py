@@ -176,6 +176,7 @@ class SemanticCommitWriter:
                     """
                     UPDATE public.project_semantic_windows
                     SET stage = 'knowledge_committed',
+                        attempt_count = 0,
                         last_failure_stage = NULL,
                         last_failure_code = NULL,
                         last_failure_at_ms = NULL,

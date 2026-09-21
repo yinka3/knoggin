@@ -56,13 +56,7 @@ class SemanticWindowRetrySettings(ConfigModel):
 
 
 class IngestionSettings(ConfigModel):
-    batch_size: int = Field(8, ge=1, le=100)
-    batch_debounce_seconds: float = Field(0.75, ge=0.0, le=10.0)
-    batch_timeout: float = Field(300.0, ge=10.0)
     message_edit_window_seconds: int = Field(600, ge=1, le=86_400)
-    message_lifecycle_poll_seconds: float = Field(15.0, ge=1.0, le=300.0)
-    ingestion_max_attempts: int = Field(3, ge=1, le=20)
-    session_window: int = Field(24, ge=1)
     # This is the sole user-configurable admission-size control for the new
     # project-level semantic windows.  Idle flush and unavoidable whole-exchange
     # overfill remain fixed runtime policy, not competing size knobs.
@@ -114,9 +108,6 @@ class JobSettings(ConfigModel):
     episode: EpisodeSettings = Field(default_factory=EpisodeSettings)
     conflict_discovery: ConflictDiscoverySettings = Field(
         default_factory=ConflictDiscoverySettings
-    )
-    document_indexing: DocumentIndexingSettings = Field(
-        default_factory=DocumentIndexingSettings
     )
 
 

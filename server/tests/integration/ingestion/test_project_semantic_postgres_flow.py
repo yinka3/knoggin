@@ -286,6 +286,10 @@ class _FailingCommittedEntityPublisher:
         raise OSError("injected resolver publication failure")
 
 
+async def _publish_nothing(_entity_ids: tuple[int, ...]) -> None:
+    return None
+
+
 class _ContextRelationshipLLM:
     extraction_model = "test-vp02"
 
@@ -951,11 +955,16 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
         context_projection=projection,
         context_entity_builder=_EmptyEntityBuilder(),
         context_relationship_extractor=_EmptyRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
     )
     context = JobContext(user_name=user_name, project_id=project_id)
 
-    results = [await job.execute(context) for _ in range(4)]
-    assert all(result.success for result in results)
+    result = await job.execute(context)
+    assert result.success
+    assert result.summary == (
+        "Semantic processor completed durable stages: "
+        "Episode -> Context -> Knowledge -> finalization"
+    )
 
     revision = await ProjectContextReader(postgres).get_current_revision(
         user_name=user_name,
@@ -1024,6 +1033,7 @@ async def test_project_semantic_job_uses_real_storage_for_agent_derived_context(
         context_projection=recovery_projection,
         context_entity_builder=_HumanEditEntityBuilder(),
         context_relationship_extractor=_HumanEditRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
     )
     first_human_result = await human_edit_job.execute(context)
     assert first_human_result.success
@@ -1169,17 +1179,14 @@ async def test_project_semantic_job_recovers_resolver_publication_and_commits_so
     job = new_job(failed_publisher)
     context = JobContext(user_name=user_name, project_id=project_id)
 
-    results = [await job.execute(context) for _ in range(3)]
-    assert all(result.success for result in results)
+    failed_finalization = await job.execute(context)
+    assert failed_finalization.success is False
     committed_window = await store.get_active_project_semantic_window(
         user_name=user_name,
         project_id=project_id,
     )
     assert committed_window is not None
     assert committed_window.stage is SemanticWindowStage.KNOWLEDGE_COMMITTED
-    failed_finalization = await job.execute(context)
-
-    assert failed_finalization.success is False
     assert entity_builder.sarah_id is not None
     assert entity_builder.delta_id is not None
     assert failed_publisher.calls == [
@@ -1421,13 +1428,11 @@ async def test_context_vp02_persists_distinct_homonymous_handles_with_source_pro
             ),
             entities=_PendingContextEntities(),
         ),
+        publish_committed_entity_ids=_publish_nothing,
     )
 
-    results = [
-        await job.execute(JobContext(user_name=user_name, project_id=project_id))
-        for _ in range(4)
-    ]
-    assert all(result.success for result in results)
+    result = await job.execute(JobContext(user_name=user_name, project_id=project_id))
+    assert result.success
     assert entity_builder.first_alex_id is not None
     assert entity_builder.second_alex_id is not None
     assert entity_builder.delta_id is not None
@@ -1539,13 +1544,14 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
             context_projection=projection,
             context_entity_builder=entity_builder,
             context_relationship_extractor=relationship_extractor,
+            publish_committed_entity_ids=_publish_nothing,
         )
 
     context = JobContext(user_name=user_name, project_id=project_id)
 
     async def complete_window(job):
-        results = [await job.execute(context) for _ in range(4)]
-        assert all(result.success for result in results)
+        result = await job.execute(context)
+        assert result.success
 
     job = new_job()
     await insert_closed_exchange(301, "Sarah owns Delta.", 1_000)
@@ -1579,19 +1585,11 @@ async def test_project_semantic_job_preserves_correction_history_through_noop_re
     assert correction_revision.revision_number == initial_revision.revision_number + 1
 
     await insert_closed_exchange(303, "No change to the ownership.", 3_000)
-    no_op_results = [await job.execute(context) for _ in range(2)]
-    assert all(result.success for result in no_op_results)
-    no_op_window = await store.get_active_project_semantic_window(
+    await complete_window(job)
+    assert await store.get_active_project_semantic_window(
         user_name=user_name,
         project_id=project_id,
-    )
-    assert no_op_window is not None
-    assert no_op_window.stage is SemanticWindowStage.CONTEXT_COMMITTED
-    assert no_op_window.context_revision_id == correction_revision.revision_id
-
-    restarted = new_job()
-    restart_results = [await restarted.execute(context) for _ in range(2)]
-    assert all(result.success for result in restart_results)
+    ) is None
 
     assert model.calls == 3
     assert entity_builder.calls == 2
@@ -1866,8 +1864,8 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
         )
 
     async def complete_window(job, context):
-        results = [await job.execute(context) for _ in range(4)]
-        assert all(result.success for result in results)
+        result = await job.execute(context)
+        assert result.success
 
     context = JobContext(user_name=user_name, project_id=project_id)
     cold_resolver = EntityResolver(
@@ -1879,8 +1877,8 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
     failed_job = new_job(cold_resolver, failed_publisher)
 
     await insert_closed_exchange(401, "Avery Stone owns Delta Corp.", 1_000)
-    initial_results = [await failed_job.execute(context) for _ in range(3)]
-    assert all(result.success for result in initial_results)
+    failed_finalization = await failed_job.execute(context)
+    assert failed_finalization.success is False
     committed_window = await store.get_active_project_semantic_window(
         user_name=user_name,
         project_id=project_id,
@@ -1963,8 +1961,6 @@ async def test_project_semantic_job_composes_real_resolution_extraction_and_reco
         },
     ]
 
-    failed_finalization = await failed_job.execute(context)
-    assert failed_finalization.success is False
     assert failed_publisher.calls == [(target_id, delta_id)]
     assert await postgres.fetch_one(
         """

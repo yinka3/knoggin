@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from common.schema.source.locators import (
     CodeLineLocator,
     CsvRowLocator,
-    DocxParagraphLocator,
+    LayoutRegionLocator,
     PastedTextLocator,
     PdfPageLocator,
     SearchResultLocator,
@@ -26,9 +26,15 @@ def _candidate(**overrides):
         "session_id": "session-1",
         "source_kind": "pdf_document",
         "document_id": "document-1",
+        "parse_snapshot_id": "snapshot-1",
         "source_project_id": "project-1",
         "content_hash": CONTENT_HASH,
-        "locator": {"kind": "pdf_page", "page": 2},
+        "locator": {
+            "kind": "layout_region",
+            "page": 2,
+            "element_type": "page",
+            "extraction_method": "native_text",
+        },
         "excerpt": "The second page's retrieved passage.",
         "metadata": {"document_name": "two-page-report.pdf"},
         "encounter_kind": "document_search",
@@ -39,15 +45,21 @@ def _candidate(**overrides):
     payload.update(overrides)
     if payload["source_kind"] not in {"pdf_document", "text_document"}:
         payload["source_project_id"] = None
+        payload["parse_snapshot_id"] = None
     return payload
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
-def test_pdf_candidate_accepts_page_aware_two_page_fixture():
+def test_pdf_candidate_binds_a_layout_aware_snapshot():
     candidate = SourceReferenceCandidate.model_validate(_candidate())
 
-    assert candidate.locator == PdfPageLocator(page=2)
+    assert candidate.locator == LayoutRegionLocator(
+        page=2,
+        element_type="page",
+        extraction_method="native_text",
+    )
+    assert candidate.parse_snapshot_id == "snapshot-1"
     assert candidate.metadata["document_name"] == "two-page-report.pdf"
 
 
@@ -183,7 +195,14 @@ def test_web_page_candidate_rejects_discovery_or_incompatible_shapes(overrides, 
     [
         (_candidate(document_id=None), "document sources require document_id"),
         (
-            _candidate(locator={"kind": "pdf_page", "page": 0}),
+            _candidate(
+                locator={
+                    "kind": "layout_region",
+                    "page": 0,
+                    "element_type": "page",
+                    "extraction_method": "native_text",
+                }
+            ),
             "greater than or equal to 1",
         ),
         (
@@ -266,11 +285,19 @@ def test_locator_models_preserve_their_own_invariants():
     assert TextLineLocator(start_line=1, end_line=1).kind == "text_lines"
     assert CsvRowLocator(start_row=2, end_row=2).kind == "csv_rows"
     assert CodeLineLocator(start_line=3, end_line=3).kind == "code_lines"
-    assert DocxParagraphLocator(
-        start_paragraph=4, end_paragraph=4
-    ).kind == "docx_paragraphs"
+    assert LayoutRegionLocator(
+        page=4,
+        element_type="table",
+        extraction_method="ocr",
+    ).kind == "layout_region"
 
     with pytest.raises(ValidationError, match="end_line"):
         TextLineLocator(start_line=4, end_line=3)
-    with pytest.raises(ValidationError, match="end_paragraph"):
-        DocxParagraphLocator(start_paragraph=4, end_paragraph=3)
+    with pytest.raises(ValidationError, match="text_end"):
+        LayoutRegionLocator(
+            page=4,
+            element_type="table",
+            extraction_method="ocr",
+            text_start=4,
+            text_end=3,
+        )

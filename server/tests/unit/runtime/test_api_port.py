@@ -40,6 +40,7 @@ class FakeDocumentService:
         self.calls.append(("selection", kwargs))
         return {
             "content_hash": kwargs["selection"].content_hash,
+            "parse_snapshot_id": kwargs["selection"].parse_snapshot_id,
             "locator": {
                 "kind": "code_lines",
                 "start_line": 2,
@@ -310,6 +311,7 @@ async def test_runtime_port_translates_project_session_and_research_stream(
                 session_id="session-1",
                 query="Investigate this",
                 research_mode="deep_research",
+                idempotency_key="run-1",
             ),
         )
     ]
@@ -318,6 +320,7 @@ async def test_runtime_port_translates_project_session_and_research_stream(
     assert parsed[-1].result.research_mode == "deep_research"
     assert parsed[-1].result.artifact is not None
     assert session.run_calls[0]["research_mode"] == "deep_research"
+    assert session.run_calls[0]["idempotency_key"] == "run-1"
     assert (
         "sources",
         43,
@@ -336,6 +339,50 @@ async def test_runtime_port_translates_project_session_and_research_stream(
             "session_id": "session-1",
         },
     ) in runtime.resources.knowledge_store.calls
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_runtime_port_projects_stable_terminal_and_tool_failure_codes(port):
+    application, runtime, _ = port
+
+    class FailureSession(FakeSession):
+        async def _events(self):
+            yield {
+                "event": "tool_error",
+                "data": {
+                    "tool": "update_project_file",
+                    "error": "private stale hash",
+                    "call_id": "call-1",
+                    "code": "workspace_conflict",
+                    "retryable": False,
+                },
+            }
+            yield {
+                "event": "error",
+                "data": {
+                    "message": "private budget details",
+                    "code": "llm_budget_exhausted",
+                    "retryable": False,
+                },
+            }
+
+    runtime.sessions.session = FailureSession()
+    events = [
+        event
+        async for event in application.run_stream(
+            user_name="ada",
+            request=StartRunRequest(session_id="session-1", query="Update notes"),
+        )
+    ]
+
+    parsed = validate_public_stream(events, require_terminal=True)
+    tool_failure = next(event for event in parsed if event.type == "tool.completed")
+    assert tool_failure.error_code == "workspace_conflict"
+    assert tool_failure.retryable is False
+    assert parsed[-1].error.code == "llm_budget_exhausted"
+    assert parsed[-1].error.retryable is False
+    assert "private" not in parsed[-1].error.message
 
 
 @pytest.mark.runtime
@@ -385,6 +432,7 @@ async def test_runtime_port_routes_pinned_and_request_document_focus(port):
                     "document_id": "document-1",
                     "selection": {
                         "content_hash": "a" * 64,
+                        "parse_snapshot_id": "snapshot-1",
                         "locator": {
                             "kind": "code_lines",
                             "start_line": 2,
@@ -401,6 +449,7 @@ async def test_runtime_port_routes_pinned_and_request_document_focus(port):
     request_focus = session.run_calls[0]["document_focus"]
     assert request_focus.mode == "request"
     assert request_focus.relative_path == "docs/notes.py"
+    assert request_focus.selection.parse_snapshot_id == "snapshot-1"
     assert request_focus.selection.locator.symbol_name is None
     assert runtime.sessions.focus_calls[-1] == ("get", "session-1")
 

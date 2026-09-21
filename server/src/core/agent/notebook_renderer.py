@@ -33,6 +33,7 @@ _IDENTIFIER_KEYS = {
 _REFERENCE_PREFIXES = {
     "entities": "E",
     "relationships": "R",
+    "activities": "ACT",
     "episodes": "EP",
     "paths": "P",
     "messages": "M",
@@ -40,6 +41,7 @@ _REFERENCE_PREFIXES = {
     "observation_supports": "O",
     "entity": "E",
     "relationship": "R",
+    "activity": "ACT",
     "episode": "EP",
     "path": "P",
     "message": "M",
@@ -49,6 +51,9 @@ _REFERENCE_PREFIXES = {
     "web_reads": "WR",
     "action": "A",
 }
+
+_SHORT_TEXT_LIMIT = 320
+_PASSAGE_TEXT_LIMIT = 1_200
 
 NOTEBOOK_TEMPLATE = """RUN NOTEBOOK
 {% if summary.text %}Summary: {{ summary.text }}{% if summary.references %} ({{ summary.references|join(', ') }}){% endif %}
@@ -67,6 +72,9 @@ Relationships:
   qualification: observed evidence, not a current-state claim
 {% if item.context %}  context: {{ item.context }}
 {% endif %}{{ '\n' }}
+{% endfor %}{% endif %}{% if activities %}
+Activities:
+{% for item in activities %}- {{ item.reference }}{% if item.entity %} {{ item.entity }}{% endif %}{% if item.time %} at {{ item.time }}{% endif %}{% if item.evidence %} (evidence: {{ item.evidence|join(', ') }}){% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if episodes %}
 Episodes:
 {% for item in episodes %}- {{ item.reference }}{% if item.summary %}: {{ item.summary }}{% endif %}
@@ -86,7 +94,9 @@ Messages:
 {% for item in messages %}- {{ item.reference }}{% if item.content %}: {{ item.content }}{% endif %}{{ '\n' }}{% endfor %}
 {% endif %}{% if documents %}
 Documents:
-{% for item in documents %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.content %}: {{ item.content }}{% endif %}
+{% for item in documents %}- {{ item.reference }}{% if item.name %} {{ item.name }}{% endif %}{% if item.content %}: {{ item.content }}{% endif %}{% if item.handle %} [document: {{ item.handle }}]{% endif %}{% if item.locator %} [{{ item.locator }}]{% endif %}
+{% if item.continuation %}  continuation: {{ item.continuation }}
+{% endif %}
 {{ '\n' }}{% endfor %}{% endif %}{% if observation_supports %}Observation support (expanded on demand):
 {% for item in observation_supports %}- {{ item.reference }} observation {{ item.observation_id }}{% if item.status %} ({{ item.status }}){% endif %}
 {% if item.context_blocks %}  context blocks: {{ item.context_blocks|join('; ') }}
@@ -97,7 +107,9 @@ Web discoveries (not read):
 {% for item in web_discoveries %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.snippet %} — discovery snippet: {{ item.snippet }}{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if web_reads %}
 Web reads:
-{% for item in web_reads %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.content %} — read passage: {{ item.content }}{% endif %}{{ '\n' }}
+{% for item in web_reads %}- {{ item.reference }}{% if item.title %} {{ item.title }}{% endif %}{% if item.url %}: {{ item.url }}{% endif %}{% if item.content %} — read passage: {{ item.content }}{% endif %}{% if item.locator %} [{{ item.locator }}]{% endif %}
+{% if item.continuation %}  continuation: {{ item.continuation }}
+{% endif %}{{ '\n' }}
 {% endfor %}{% endif %}{% if actions %}
 Actions:
 {% for item in actions %}- {{ item.reference }} {{ item.tool }}{% if item.result %}: {{ item.result }}{% endif %}{{ '\n' }}
@@ -153,7 +165,13 @@ class _ReferenceLocalizer:
         evidence = snapshot.get("evidence", {})
         yield from (
             (section, knowledge.get(section, {}))
-            for section in ("entities", "relationships", "episodes", "paths")
+            for section in (
+                "entities",
+                "relationships",
+                "activities",
+                "episodes",
+                "paths",
+            )
         )
         yield "messages", evidence.get("messages", {})
         yield "documents", evidence.get("documents", {})
@@ -201,11 +219,20 @@ class _ReferenceLocalizer:
         return self._handles.get(value)
 
 
-def _safe_text(value: object, *, limit: int = 320) -> str:
+def _safe_text(value: object, *, limit: int = _SHORT_TEXT_LIMIT) -> str:
     if value is None:
         return ""
     text = str(value).strip()
     return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _passage_text(value: object) -> tuple[str, bool]:
+    """Render a useful but bounded evidence passage and report display clipping."""
+
+    if value is None:
+        return "", False
+    text = str(value).strip()
+    return _safe_text(text, limit=_PASSAGE_TEXT_LIMIT), len(text) > _PASSAGE_TEXT_LIMIT
 
 
 def _bounded_text_items(
@@ -272,16 +299,71 @@ def _format_locator(value: object) -> str:
         end = value.get("end_row")
         if isinstance(start, int) and isinstance(end, int):
             return f"rows {start}-{end}"
-    if kind == "docx_paragraphs":
-        start = value.get("start_paragraph")
-        end = value.get("end_paragraph")
-        if isinstance(start, int) and isinstance(end, int):
-            return f"paragraphs {start}-{end}"
+    if kind == "layout_region" and isinstance(value.get("page"), int):
+        return f"page {value['page']}"
     if kind == "pdf_page" and isinstance(value.get("page"), int):
         return f"page {value['page']}"
     if kind == "search_result" and isinstance(value.get("rank"), int):
         return f"search result {value['rank']}"
     return _safe_text(kind or "", limit=48).replace("_", " ")
+
+
+def _result_locator(item: Mapping[str, Any]) -> str:
+    """Return the compact source position already available in a tool result."""
+
+    locator = item.get("locator")
+    if not isinstance(locator, Mapping):
+        source_context = item.get("source_context")
+        if isinstance(source_context, Mapping):
+            locator = source_context.get("locator")
+    if isinstance(locator, Mapping):
+        return _format_locator(dict(locator))
+
+    start_line = item.get("start_line")
+    end_line = item.get("end_line")
+    if type(start_line) is int and type(end_line) is int:
+        return f"lines {start_line}-{end_line}"
+    page_number = item.get("page_number")
+    if type(page_number) is int:
+        return f"page {page_number}"
+    return ""
+
+
+def _document_handle(item: Mapping[str, Any]) -> str:
+    """Expose only the model-safe document handle accepted by read tools."""
+
+    document_id = item.get("document_id")
+    return document_id if isinstance(document_id, str) and document_id.startswith("doc_") else ""
+
+
+def _source_continuation(
+    item: Mapping[str, Any],
+    *,
+    display_clipped: bool,
+) -> str:
+    """Tell the model when a bounded view should be expanded through a tool."""
+
+    next_start_line = item.get("next_start_line")
+    if type(next_start_line) is not int:
+        end_line = item.get("end_line")
+        total_lines = item.get("total_lines")
+        if (
+            item.get("truncated") is True
+            and type(end_line) is int
+            and type(total_lines) is int
+            and end_line < total_lines
+        ):
+            next_start_line = end_line + 1
+    if type(next_start_line) is int:
+        return (
+            f"more source text is available from line {next_start_line}; reread a "
+            "narrower range or use a targeted query."
+        )
+    if item.get("has_more") is True or item.get("truncated") is True:
+        return "more source text is available; reread a narrower range or use a targeted query."
+    if display_clipped:
+        return "the displayed passage is clipped; reread a narrower range or use a targeted query."
+    return ""
 
 
 def _observation_support(item: dict[str, Any]) -> dict[str, Any]:
@@ -418,6 +500,16 @@ def _record_list(
                 or ""
             )
             item["context"] = _safe_text(item.get("context") or "")
+        elif section == "activities":
+            entity_id = item.get("entity_id")
+            entity_name = _safe_text(item.get("entity") or "")
+            entity_ref = _entity_display_reference(localizer, entity_id)
+            item["entity"] = (
+                f"{entity_ref} {entity_name}".strip()
+                if entity_id is not None
+                else entity_name
+            )
+            item["time"] = _safe_text(item.get("time") or "", limit=80)
         elif section == "episodes":
             item["summary"] = _safe_text(item.get("summary") or "")
             item["chronology"] = _episode_chronology(item)
@@ -442,15 +534,32 @@ def _record_list(
                     for context in item["context"]
                     if isinstance(context, dict) and context.get("content")
                 )
-            item["content"] = _safe_text(content)
+            item["content"], display_clipped = _passage_text(content)
             item["name"] = _safe_text(
                 item.get("document_name") or item.get("original_name") or ""
             )
+            if section == "documents":
+                item["handle"] = _document_handle(item)
+                item["locator"] = _result_locator(item)
+                item["continuation"] = _source_continuation(
+                    item,
+                    display_clipped=display_clipped,
+                )
         elif section in {"web_discoveries", "web_reads"}:
             item["title"] = _safe_text(item.get("title") or "")
             item["url"] = _safe_text(item.get("url") or "")
             item["snippet"] = _safe_text(item.get("snippet") or "")
-            item["content"] = _safe_text(item.get("content") or "")
+            if section == "web_reads":
+                item["content"], display_clipped = _passage_text(
+                    item.get("content") or ""
+                )
+                item["locator"] = _result_locator(item)
+                item["continuation"] = _source_continuation(
+                    item,
+                    display_clipped=display_clipped,
+                )
+            else:
+                item["content"] = _safe_text(item.get("content") or "")
         values.append(item)
     return values
 
@@ -526,6 +635,9 @@ def _render_context(
         "entities": _record_list(knowledge["entities"], localizer, section="entities"),
         "relationships": _record_list(
             knowledge["relationships"], localizer, section="relationships"
+        ),
+        "activities": _record_list(
+            knowledge["activities"], localizer, section="activities"
         ),
         "episodes": _record_list(knowledge["episodes"], localizer, section="episodes"),
         "paths": _record_list(knowledge["paths"], localizer, section="paths"),

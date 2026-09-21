@@ -3,8 +3,8 @@ from psycopg import OperationalError
 
 from common.conf.domain_config import DomainConfig
 from common.exceptions import StorageReadError, StorageWriteError
-from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.message_reader import MessageReader
+from core.knowledge.db.readers.project_context_reader import ProjectContextReader
 from core.knowledge.db.writers.episode_writer import EpisodeWriter
 from core.knowledge.db.writers.message_writer import MessageWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
@@ -34,8 +34,8 @@ def _reclassification_domain():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_read_failure_is_not_reported_as_missing_message():
-    reader = GraphReader(
+async def test_message_read_failure_is_not_reported_as_missing_message():
+    reader = MessageReader(
         RecordingPostgresClient(fetch_one_exceptions=[RuntimeError("database down")])
     )
 
@@ -53,8 +53,8 @@ async def test_graph_read_failure_is_not_reported_as_missing_message():
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_graph_read_keeps_a_missing_message_as_normal_absence():
-    reader = GraphReader(RecordingPostgresClient(fetch_one_results=[None]))
+async def test_message_read_keeps_a_missing_message_as_normal_absence():
+    reader = MessageReader(RecordingPostgresClient(fetch_one_results=[None]))
 
     assert await reader.get_message_text(
         7,
@@ -81,6 +81,19 @@ async def test_message_search_failure_is_not_reported_as_empty_search():
 
     assert error.value.code == "storage_read_error"
     assert error.value.details["operation"] == "search_fts"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_context_read_failure_is_not_reported_as_missing_context():
+    reader = ProjectContextReader(
+        RecordingPostgresClient(fetch_one_exceptions=[RuntimeError("database down")])
+    )
+
+    with pytest.raises(StorageReadError) as error:
+        await reader.get_current_revision(user_name="ada", project_id="project-1")
+
+    assert error.value.details["operation"] == "get_current_revision"
 
 
 @pytest.mark.storage

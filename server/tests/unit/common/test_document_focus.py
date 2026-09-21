@@ -43,6 +43,7 @@ def test_request_document_focus_can_include_a_version_bound_selection():
         relative_path="docs/notes.py",
         selection=DocumentSelection(
             content_hash="a" * 64,
+            parse_snapshot_id="snapshot-1",
             locator={
                 "kind": "code_lines",
                 "start_line": 4,
@@ -53,6 +54,7 @@ def test_request_document_focus_can_include_a_version_bound_selection():
 
     assert dump_document_focus(focus)["selection"] == {
         "content_hash": "a" * 64,
+        "parse_snapshot_id": "snapshot-1",
         "locator": {
             "kind": "code_lines",
             "start_line": 4,
@@ -73,6 +75,7 @@ def test_pinned_document_focus_rejects_a_selection():
             relative_path="docs/notes.py",
             selection={
                 "content_hash": "a" * 64,
+                "parse_snapshot_id": "snapshot-1",
                 "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
             },
         )
@@ -90,6 +93,18 @@ def test_document_focus_rejects_mixed_selectors_and_naive_timestamps():
                 "document_id": "doc-1",
                 "relative_path": "docs/notes.md",
                 "folder_root_id": "folder-1",
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        parse_document_focus(
+            {
+                "mode": "pinned",
+                "created_at": "2026-06-22T12:00:00+00:00",
+                "target_type": "document",
+                "document_id": "doc-1",
+                "relative_path": "docs/notes.md",
+                "path_prefix": None,
             }
         )
 

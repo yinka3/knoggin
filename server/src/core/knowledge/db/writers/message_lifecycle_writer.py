@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from time import time
 from typing import Any, Dict
 
+from common.exceptions import IdempotencyConflictError
 from core.knowledge.db.writers.message_writer import MessageWriter
 from infrastructure.postgres_client import PostgresClient
+
+_ASSISTANT_EXCHANGE_OUTCOMES = frozenset({"assistant_final", "clarification"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +47,16 @@ class MessageLifecycleWriter:
     async def create_editable_user_message(
         self, message: Dict[str, Any], *, edit_window_seconds: int
     ) -> MessageAcceptance:
+        acceptance_key = message.get("acceptance_key")
+        request_fingerprint = message.get("request_fingerprint")
+        if not isinstance(acceptance_key, str) or not acceptance_key:
+            raise ValueError("Editable user message requires acceptance_key")
+        if acceptance_key.startswith("request:") and (
+            not isinstance(request_fingerprint, str) or not request_fingerprint
+        ):
+            raise ValueError(
+                "Request idempotency acceptance requires a request_fingerprint"
+            )
         now_ms = self._now_ms()
         row = {
             **message,
@@ -72,14 +86,17 @@ class MessageLifecycleWriter:
             if inserted_id is None:
                 await cur.execute(
                     """
-                    SELECT message_id
+                    SELECT message_id,
+                           metadata ->> 'request_fingerprint' AS request_fingerprint
                     FROM public.messages
                     WHERE user_name = %s
+                      AND project_id = %s
                       AND session_id = %s
                       AND acceptance_key = %s
                     """,
                     (
                         row["user_name"],
+                        row["project_id"],
                         row["session_id"],
                         row["acceptance_key"],
                     ),
@@ -87,6 +104,12 @@ class MessageLifecycleWriter:
                 accepted = await cur.fetchone()
                 if accepted is None:
                     raise RuntimeError("Accepted user message could not be reloaded")
+                if (
+                    row["acceptance_key"].startswith("request:")
+                    and accepted.get("request_fingerprint")
+                    != row["request_fingerprint"]
+                ):
+                    raise IdempotencyConflictError()
                 return MessageAcceptance(
                     message_id=int(accepted["message_id"]),
                     created=False,
@@ -117,14 +140,18 @@ class MessageLifecycleWriter:
         project_id: str,
         session_id: str,
         user_message_id: int,
+        outcome: str,
         cur,
     ) -> ExchangeClosure | None:
         """Lock one user exchange before an atomic assistant finalization.
 
-        A previous successful finalization is returned instead of writing a
-        second assistant message.  A different terminal outcome is never
+        A previous matching finalization is returned instead of writing a
+        second assistant message. A different terminal outcome is never
         overwritten: callers must preserve the first durable evidence.
         """
+
+        if outcome not in _ASSISTANT_EXCHANGE_OUTCOMES:
+            raise ValueError("Assistant finalization requires an assistant outcome")
 
         await cur.execute(
             """
@@ -145,7 +172,7 @@ class MessageLifecycleWriter:
             raise ValueError("Cannot finalize an unavailable user exchange")
         if user_row["exchange_state"] == "open":
             return None
-        if user_row["exchange_outcome"] != "assistant_final":
+        if user_row["exchange_outcome"] != outcome:
             raise ValueError(
                 "Cannot add an assistant response to an exchange already closed as "
                 f"{user_row['exchange_outcome']}"
@@ -168,7 +195,7 @@ class MessageLifecycleWriter:
             raise RuntimeError("Closed assistant exchange is missing its assistant row")
         return ExchangeClosure(
             user_message_id=user_message_id,
-            outcome="assistant_final",
+            outcome=outcome,
             closed_at_ms=int(user_row["exchange_closed_at_ms"]),
             assistant_message_id=int(assistant_row["message_id"]),
             already_closed=True,
@@ -183,6 +210,7 @@ class MessageLifecycleWriter:
         user_message_id: int,
         outcome: str,
         closed_at_ms: int | None = None,
+        terminal_error: dict[str, object] | None = None,
         cur=None,
     ) -> ExchangeClosure:
         """Seal and close a user exchange exactly once.
@@ -200,6 +228,24 @@ class MessageLifecycleWriter:
         }
         if outcome not in valid_outcomes:
             raise ValueError("Invalid exchange outcome")
+        if terminal_error is not None:
+            expected_retryability = {
+                "llm_budget_exhausted": False,
+                "workspace_conflict": False,
+                "run_failed": True,
+                "run_cancelled": False,
+            }
+            code = terminal_error.get("code")
+            if (
+                outcome not in {"failed", "cancelled"}
+                or code not in expected_retryability
+                or (outcome == "cancelled") != (code == "run_cancelled")
+                or terminal_error != {
+                    "code": code,
+                    "retryable": expected_retryability[code],
+                }
+            ):
+                raise ValueError("Invalid terminal error record")
         closed_at_ms = self._now_ms() if closed_at_ms is None else closed_at_ms
         if (
             not isinstance(closed_at_ms, int)
@@ -217,6 +263,7 @@ class MessageLifecycleWriter:
                     user_message_id=user_message_id,
                     outcome=outcome,
                     closed_at_ms=closed_at_ms,
+                    terminal_error=terminal_error,
                     cur=transaction_cursor,
                 )
 
@@ -244,7 +291,7 @@ class MessageLifecycleWriter:
                     f"{row['exchange_outcome']}, not {outcome}"
                 )
             assistant_message_id = None
-            if outcome == "assistant_final":
+            if outcome in _ASSISTANT_EXCHANGE_OUTCOMES:
                 await cur.execute(
                     """
                     SELECT message_id
@@ -259,9 +306,7 @@ class MessageLifecycleWriter:
                 )
                 assistant = await cur.fetchone()
                 if assistant is None:
-                    raise RuntimeError(
-                        "Closed assistant exchange is missing its assistant row"
-                    )
+                    raise RuntimeError("Closed assistant exchange is missing its assistant row")
                 assistant_message_id = int(assistant["message_id"])
             return ExchangeClosure(
                 user_message_id=user_message_id,
@@ -279,7 +324,11 @@ class MessageLifecycleWriter:
                 sealed_at_ms = COALESCE(sealed_at_ms, %s),
                 exchange_state = 'closed',
                 exchange_outcome = %s,
-                exchange_closed_at_ms = %s
+                exchange_closed_at_ms = %s,
+                metadata = CASE
+                    WHEN %s::jsonb IS NULL THEN metadata
+                    ELSE jsonb_set(metadata, '{terminal_error}', %s::jsonb, true)
+                END
             WHERE user_name = %s
               AND project_id = %s
               AND session_id = %s
@@ -292,6 +341,8 @@ class MessageLifecycleWriter:
                 closed_at_ms,
                 outcome,
                 closed_at_ms,
+                json.dumps(terminal_error) if terminal_error is not None else None,
+                json.dumps(terminal_error) if terminal_error is not None else None,
                 user_name,
                 project_id,
                 session_id,

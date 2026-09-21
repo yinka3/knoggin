@@ -262,6 +262,7 @@ class DocumentSelection(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     content_hash: str = Field(min_length=64, max_length=64)
+    parse_snapshot_id: str = Field(min_length=1)
     locator: DocumentLocator
 
     @field_validator("content_hash")
@@ -272,6 +273,13 @@ class DocumentSelection(BaseModel):
                 "document selection content_hash must be a SHA-256 hex digest"
             )
         return value
+
+    @field_validator("parse_snapshot_id")
+    @classmethod
+    def _require_snapshot_identifier(cls, value: str) -> str:
+        if not (normalized := value.strip()):
+            raise ValueError("document selection parse_snapshot_id must not be blank")
+        return normalized
 
 
 class DocumentFocusDocument(_DocumentFocusBase):
@@ -316,20 +324,10 @@ DocumentFocus = Annotated[
 ]
 
 _DOCUMENT_FOCUS_ADAPTER = TypeAdapter(DocumentFocus)
-_LEGACY_OPTIONAL_SELECTORS = {
-    "document_id",
-    "relative_path",
-    "path_prefix",
-}
 
 
 def parse_document_focus(value: object) -> DocumentFocus:
-    """Validate a focus, accepting legacy persisted null selector fields.
-
-    Newly written focus values contain only the selectors owned by their
-    discriminated variant. Removing null legacy fields makes old persisted
-    records readable without allowing conflicting non-null selectors.
-    """
+    """Validate a focus with exactly the selectors owned by its variant."""
 
     if isinstance(
         value,
@@ -338,11 +336,7 @@ def parse_document_focus(value: object) -> DocumentFocus:
         return value
     if not isinstance(value, dict):
         raise ValueError("document focus must be an object")
-    normalized = dict(value)
-    for selector in _LEGACY_OPTIONAL_SELECTORS:
-        if normalized.get(selector) is None:
-            normalized.pop(selector, None)
-    return _DOCUMENT_FOCUS_ADAPTER.validate_python(normalized)
+    return _DOCUMENT_FOCUS_ADAPTER.validate_python(value)
 
 
 def create_document_focus(

@@ -53,6 +53,11 @@ class _Exchange:
     messages: tuple[dict, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _SkippedExchange:
+    """A closed terminal run that intentionally contributes no evidence."""
+
+
 class SemanticWindowAdmission:
     """Select whole, FIFO-safe exchanges without becoming a semantic writer.
 
@@ -236,6 +241,8 @@ class SemanticWindowAdmission:
             if session_id in blocked_sessions:
                 continue
             exchange = self._exchange_from_row(row)
+            if isinstance(exchange, _SkippedExchange):
+                continue
             if exchange is None:
                 blocked_sessions.add(session_id)
                 continue
@@ -252,7 +259,7 @@ class SemanticWindowAdmission:
         )
 
     @staticmethod
-    def _exchange_from_row(row: dict) -> _Exchange | None:
+    def _exchange_from_row(row: dict) -> _Exchange | _SkippedExchange | None:
         """Return a sealed, closed exchange or mark its session FIFO-blocked."""
 
         if (
@@ -264,7 +271,9 @@ class SemanticWindowAdmission:
             return None
         outcome = str(row["user_exchange_outcome"])
         assistant_id = row.get("assistant_message_id")
-        if outcome == "assistant_final":
+        if outcome in {"failed", "cancelled"}:
+            return _SkippedExchange()
+        if outcome in {"assistant_final", "clarification"}:
             if (
                 assistant_id is None
                 or row.get("assistant_lifecycle_state") != "sealed"

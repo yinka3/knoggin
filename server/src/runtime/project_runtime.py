@@ -76,8 +76,7 @@ class ProjectRuntime:
 
         if self.project_semantic_job is None or self.scheduler is None:
             return False
-        wake = getattr(self.scheduler, "wake", None)
-        return bool(wake()) if callable(wake) else False
+        return self.scheduler.wake_job(self.project_semantic_job.name)
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""

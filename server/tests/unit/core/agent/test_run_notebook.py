@@ -143,3 +143,109 @@ def test_path_observation_handles_are_retained_and_expand_only_on_demand():
     assert "O1 observation 17 (active)" in expanded
     assert "context blocks: Ada joined Acme." in expanded
     assert "text document [lines 4-6]: Ada joined Acme." in expanded
+
+
+def test_notebook_renderer_keeps_long_text_evidence_and_source_continuations():
+    """Useful evidence after the old 320-character display cap stays visible."""
+
+    notebook = RunNotebook()
+    leading_context = "introductory context " * 24
+    notebook.apply(
+        "search_messages",
+        {
+            "data": [
+                {
+                    "id": "message-1",
+                    "message": f"{leading_context}MESSAGE_DECISION_IS_CANCELLED",
+                }
+            ]
+        },
+    )
+    notebook.apply(
+        "read_document",
+        {
+            "data": [
+                {
+                    "document_id": "doc_abc123",
+                    "document_name": "decision.md",
+                    "content": f"{leading_context}DOCUMENT_DECISION_IS_CANCELLED",
+                    "locator": {
+                        "kind": "text_lines",
+                        "start_line": 20,
+                        "end_line": 40,
+                    },
+                    "end_line": 40,
+                    "total_lines": 80,
+                    "truncated": True,
+                }
+            ]
+        },
+    )
+    notebook.apply(
+        "read_web_page",
+        {
+            "data": [
+                {
+                    "title": "Decision record",
+                    "url": "https://example.test/decision",
+                    "content": f"{leading_context}WEB_DECISION_IS_CANCELLED",
+                    "start_line": 50,
+                    "end_line": 90,
+                    "total_lines": 140,
+                    "has_more": True,
+                    "next_start_line": 91,
+                }
+            ]
+        },
+    )
+
+    rendered = render_notebook(notebook)
+
+    assert "MESSAGE_DECISION_IS_CANCELLED" in rendered
+    assert "DOCUMENT_DECISION_IS_CANCELLED" in rendered
+    assert "WEB_DECISION_IS_CANCELLED" in rendered
+    assert "decision.md:" in rendered
+    assert "[document: doc_abc123]" in rendered
+    assert "[lines 20-40]" in rendered
+    assert (
+        "continuation: more source text is available from line 41; reread a "
+        "narrower range or use a targeted query."
+    ) in rendered
+    assert (
+        "continuation: more source text is available from line 91; reread a "
+        "narrower range or use a targeted query."
+    ) in rendered
+
+
+def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
+    notebook = RunNotebook()
+    notebook.apply(
+        "read_document",
+        {
+            "data": [
+                {
+                    "document_id": "doc_abc123",
+                    "document_name": "long-decision.md",
+                    "content": ("leading evidence " * 90) + "TAIL_IS_NOT_RENDERED",
+                    "locator": {
+                        "kind": "text_lines",
+                        "start_line": 1,
+                        "end_line": 1,
+                    },
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "truncated": False,
+                }
+            ]
+        },
+    )
+
+    rendered = render_notebook(notebook)
+
+    assert "long-decision.md:" in rendered
+    assert "[lines 1-1]" in rendered
+    assert "TAIL_IS_NOT_RENDERED" not in rendered
+    assert (
+        "continuation: the displayed passage is clipped; reread a narrower "
+        "range or use a targeted query."
+    ) in rendered

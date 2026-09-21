@@ -148,6 +148,7 @@ class EpisodeWriter:
                 """
                 UPDATE public.project_semantic_windows
                 SET episode_result_recorded = TRUE,
+                    attempt_count = 0,
                     last_failure_stage = NULL,
                     last_failure_code = NULL,
                     last_failure_at_ms = NULL,

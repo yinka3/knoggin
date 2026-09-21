@@ -11,7 +11,14 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 
-from common.exceptions import ConfigurationError, LLMError, ToolExecutionError
+from common.exceptions import (
+    ConfigurationError,
+    LLMBudgetExceededError,
+    LLMError,
+    StorageReadError,
+    ToolExecutionError,
+    WorkspaceConflictError,
+)
 from common.schema.agent.stream import (
     AgentExecutionEvent,
     ErrorEvent,
@@ -298,6 +305,12 @@ class AgentExecutor:
 
                 if event_type == "step_error":
                     self._accumulate_usage(data.get("usage"))
+                    if data.get("code") == "llm_budget_exhausted":
+                        yield self._terminal_error(
+                            code="llm_budget_exhausted",
+                            retryable=False,
+                        )
+                        return
                     self._record_step_error(data["message"], data["kind"])
                     step_failed = True
                     break
@@ -403,12 +416,18 @@ class AgentExecutor:
                             "question", "Could you clarify?"
                         )
                         self.ctx.finish_without_response()
+                        clarification_data = {
+                            "question": question,
+                            "usage": self.ctx.usage,
+                        }
+                        if self.ctx.source_candidates:
+                            clarification_data["sources_consulted"] = [
+                                candidate.model_dump(mode="json")
+                                for candidate in self.ctx.source_candidates
+                            ]
                         yield {
                             "event": "clarification",
-                            "data": {
-                                "question": question,
-                                "usage": self.ctx.usage,
-                            },
+                            "data": clarification_data,
                         }
                         return
 
@@ -594,6 +613,17 @@ class AgentExecutor:
                     }
                 else:
                     yield event
+        except LLMBudgetExceededError:
+            logger.info("LLM budget exhausted before a provider request")
+            yield {
+                "event": "step_error",
+                "data": {
+                    "kind": "provider",
+                    "message": "LLM budget exhausted",
+                    "code": "llm_budget_exhausted",
+                    "retryable": False,
+                },
+            }
         except (ConfigurationError, LLMError) as e:
             logger.error(f"LLM API Stream failed: {e}")
             yield {
@@ -688,25 +718,25 @@ class AgentExecutor:
     async def _load_project_context(self) -> str:
         """Render bounded current Context from canonical storage only."""
 
-        reader = getattr(self.tools, "project_context_reader", None)
+        knowledge_store = getattr(self.tools, "knowledge_store", None)
         domain = getattr(self.tools, "compiled_domain", None)
-        if reader is None or domain is None:
+        if knowledge_store is None or domain is None:
             return ""
         try:
-            revision = await reader.get_current_revision(
+            revision = await knowledge_store.get_current_project_context_revision(
                 user_name=self.ctx.user_name,
                 project_id=self.ctx.project_id,
             )
             if revision is None:
                 return ""
-            snapshot = await reader.get_snapshot(
+            snapshot = await knowledge_store.get_project_context_snapshot(
                 revision.revision_id,
                 user_name=self.ctx.user_name,
                 project_id=self.ctx.project_id,
             )
             if snapshot is None or not snapshot.blocks:
                 return ""
-            supports_by_block = await reader.get_block_supports(
+            supports_by_block = await knowledge_store.get_project_context_block_supports(
                 [block.block_id for block in snapshot.blocks],
                 user_name=self.ctx.user_name,
                 project_id=self.ctx.project_id,
@@ -716,6 +746,8 @@ class AgentExecutor:
                 domain,
                 supports_by_block=supports_by_block,
             )
+        except StorageReadError:
+            raise
         except Exception as exc:
             logger.warning(
                 "AgentExecutor: canonical Project Context unavailable ({})",
@@ -751,11 +783,21 @@ class AgentExecutor:
             f"{self.ctx.limits.max_consecutive_errors}): {message}"
         )
 
-    def _terminal_error(self) -> ErrorEvent:
+    def _terminal_error(
+        self,
+        *,
+        code: str | None = None,
+        retryable: bool | None = None,
+    ) -> ErrorEvent:
         self.ctx.finish_without_response()
+        data: dict = {"message": PUBLIC_AGENT_FAILURE_MESSAGE}
+        if code is not None:
+            data["code"] = code
+        if retryable is not None:
+            data["retryable"] = retryable
         return {
             "event": "error",
-            "data": {"message": PUBLIC_AGENT_FAILURE_MESSAGE},
+            "data": data,
         }
 
     @staticmethod
@@ -923,6 +965,22 @@ class AgentExecutor:
                         "tool": call.name,
                         "error": message,
                         "call_id": call.call_id,
+                        "code": "tool_failed",
+                        "retryable": True,
+                    },
+                }
+            except WorkspaceConflictError:
+                message = "Workspace changed before the operation could be applied"
+                self.ctx.note_nonfatal_error(message)
+                results_out.append({"tool": call.name, "error": message})
+                yield {
+                    "event": "tool_error",
+                    "data": {
+                        "tool": call.name,
+                        "error": message,
+                        "call_id": call.call_id,
+                        "code": "workspace_conflict",
+                        "retryable": False,
                     },
                 }
             except ToolExecutionError as e:
@@ -945,6 +1003,8 @@ class AgentExecutor:
                         "tool": call.name,
                         "error": e.message,
                         "call_id": call.call_id,
+                        "code": "tool_failed",
+                        "retryable": e.retryable,
                     },
                 }
             except Exception as e:
@@ -1011,7 +1071,7 @@ class AgentExecutor:
         return artifact
 
     async def _finalize_successfully(self, content: str) -> None:
-        """Seal a successful run, then persist its agent's completion clock."""
+        """Seal a successful run before the session commits its response."""
 
         self.ctx.finalize(content)
         if self._on_successful_completion is None:
@@ -1034,6 +1094,28 @@ class AgentExecutor:
             f"{self.ctx.call_count} tool calls. "
             f"Evidence: {self.ctx.has_any()}"
         )
+        if (
+            self.ctx.research_profile.mode != "normal"
+            and not self.ctx.has_grounded_investigation_evidence()
+        ):
+            self.ctx.finish_without_response()
+            clarification_data = {
+                "question": (
+                    "I couldn't complete the research because I didn't gather "
+                    "usable evidence. Which source or detail should I investigate?"
+                ),
+                "usage": self.ctx.usage,
+                "fallback": True,
+            }
+            if self.ctx.source_candidates:
+                clarification_data["sources_consulted"] = [
+                    candidate.model_dump(mode="json")
+                    for candidate in self.ctx.source_candidates
+                ]
+            return {
+                "event": "clarification",
+                "data": clarification_data,
+            }
         if self.ctx.has_any():
             summary = await self._generate_fallback_summary()
             content = summary or "I found information but couldn't summarize it."
@@ -1058,13 +1140,19 @@ class AgentExecutor:
             return event
         else:
             self.ctx.finish_without_response()
+            clarification_data = {
+                "question": "I'm having trouble with that. Could you rephrase?",
+                "usage": self.ctx.usage,
+                "fallback": True,
+            }
+            if self.ctx.source_candidates:
+                clarification_data["sources_consulted"] = [
+                    candidate.model_dump(mode="json")
+                    for candidate in self.ctx.source_candidates
+                ]
             return {
                 "event": "clarification",
-                "data": {
-                    "question": "I'm having trouble with that. Could you rephrase?",
-                    "usage": self.ctx.usage,
-                    "fallback": True,
-                },
+                "data": clarification_data,
             }
 
     async def _generate_fallback_summary(self) -> Optional[str]:

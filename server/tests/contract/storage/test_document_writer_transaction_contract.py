@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.documents.storage import DocumentChunk
+from core.knowledge.documents.storage import DocumentChunk, DocumentParseSnapshot
 
 _MISMATCH_ERROR = "chunks and embeddings must have the same length"
 
@@ -13,6 +13,7 @@ _MISMATCH_ERROR = "chunks and embeddings must have the same length"
 def test_chunk_copy_row_preserves_all_source_locator_fields():
     row = DocumentWriter._chunk_copy_row(
         document_id="11111111-1111-4111-8111-111111111111",
+        snapshot_id="22222222-2222-4222-8222-222222222222",
         relative_path="docs/report.md",
         chunk_index=3,
         chunk=DocumentChunk(
@@ -29,7 +30,8 @@ def test_chunk_copy_row_preserves_all_source_locator_fields():
         embedding=[0.1] * 1024,
     )
 
-    assert row[9:17] == (2, 8, 9, 4, 5, ["Results", "Revenue"], 11, 13)
+    assert row[10:18] == (2, 8, 9, 4, 5, ["Results", "Revenue"], 11, 13)
+    assert row[18] is None
 
 
 class RecordingCursor:
@@ -85,7 +87,13 @@ async def test_document_writer_rejects_mismatched_chunk_embedding_lists():
             document_id="document-1",
             chunks=["chunk"],
             embeddings=[],
-            extracted_text="notes",
+            parse_snapshot=DocumentParseSnapshot(
+                text="notes",
+                structure={"format": "test"},
+                parser_name="test-parser",
+                parser_version="test",
+                parser_fingerprint="a" * 64,
+            ),
             indexed_at="2026-07-23T00:00:00+00:00",
             read_content_hash="hash",
         )

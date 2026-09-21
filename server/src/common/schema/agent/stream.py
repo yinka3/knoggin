@@ -81,6 +81,8 @@ class StepCompletedEvent(_StrictStreamDict):
 class StepErrorData(_StrictStreamDict):
     message: str
     kind: Literal["provider", "formatting"]
+    code: NotRequired[Literal["llm_budget_exhausted"]]
+    retryable: NotRequired[StrictBool]
     usage: NotRequired[StreamUsage]
 
 
@@ -125,6 +127,8 @@ class ToolErrorData(_StrictStreamDict):
     tool: NonBlankString
     error: NonBlankString
     call_id: NonBlankString
+    code: NotRequired[Literal["tool_failed", "workspace_conflict"]]
+    retryable: NotRequired[StrictBool]
 
 
 class ToolErrorEvent(_StrictStreamDict):
@@ -141,6 +145,9 @@ class ResponseData(_StrictStreamDict):
     artifact: NotRequired[Dict[str, Any]]
     research_mode: NotRequired[ResearchMode]
     fallback: NotRequired[StrictBool]
+    # Internal orchestration handoff. SessionRuntime removes this before it
+    # exposes the persisted response to its caller.
+    resolved_agent_id: NotRequired[NonBlankString]
 
 
 class ResponseEvent(_StrictStreamDict):
@@ -152,6 +159,9 @@ class ClarificationData(_StrictStreamDict):
     question: NonBlankString
     usage: NotRequired[StreamUsage]
     fallback: NotRequired[StrictBool]
+    sources_consulted: NotRequired[List[Dict[str, Any]]]
+    assistant_message_id: NotRequired[NonNegativeInt]
+    source_ref_ids: NotRequired[List[str]]
 
 
 class ClarificationEvent(_StrictStreamDict):
@@ -161,6 +171,8 @@ class ClarificationEvent(_StrictStreamDict):
 
 class ErrorData(_StrictStreamDict):
     message: NonBlankString
+    code: NotRequired[Literal["llm_budget_exhausted", "workspace_conflict"]]
+    retryable: NotRequired[StrictBool]
 
 
 class ErrorEvent(_StrictStreamDict):

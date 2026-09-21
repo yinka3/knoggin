@@ -22,6 +22,16 @@ FAKE_RESPONSE_EVENT = {
 }
 
 
+def _resolved_response_event(agent_id="agent-1"):
+    return {
+        **FAKE_RESPONSE_EVENT,
+        "data": {
+            **FAKE_RESPONSE_EVENT["data"],
+            "resolved_agent_id": agent_id,
+        },
+    }
+
+
 class FakeLimits:
     max_tool_calls = 9
     tool_timeout = 1.5
@@ -66,17 +76,9 @@ class FakeConfigManager:
 class FakeTools:
     def __init__(self):
         self.closed = False
-        self.hot_topic_calls = []
 
     async def close(self):
         self.closed = True
-
-    async def get_hot_topic_context(self, hot_topics):
-        self.hot_topic_calls.append(hot_topics)
-        return {
-            topic: {"entities": [{"name": f"{topic} entity"}], "messages": []}
-            for topic in hot_topics
-        }
 
 
 class FakeExecutor:
@@ -213,7 +215,7 @@ async def test_orchestrator_compiles_selected_research_mode_into_same_agent_run(
         )
     ]
 
-    assert events == [FAKE_RESPONSE_EVENT]
+    assert events == [_resolved_response_event()]
     run = FakeExecutor.instances[0].ctx
     assert run.research_profile.mode == "research"
     assert run.limits.max_calls == FakeLimits.max_tool_calls * 2
@@ -259,17 +261,14 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         )
     ]
 
-    assert events == [FAKE_RESPONSE_EVENT]
+    assert events == [_resolved_response_event()]
     executor = FakeExecutor.instances[0]
     assert executor.ctx.user_query == "hello"
     assert executor.ctx.history == [{"role": "user", "content": "prior"}]
     assert executor.ctx.limits.max_calls == 9
     assert executor.ctx.limits.tool_timeout == 1.5
     assert executor.ctx.limits.get_tool_limit("search_entity") == 4
-    assert executor.ctx.hot_topics == []
     assert not hasattr(executor.ctx, "active_topics")
-    assert executor.ctx.hot_topic_context == {}
-    assert tools.hot_topic_calls == []
     assert executor.ctx.model == "agent-model"
     assert executor.ctx.temperature == 0.25
     assert "Use memory" in executor.ctx.brain
@@ -277,6 +276,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.project_briefing.mode == "adaptive"
     assert executor.ctx.project_briefing.initial_reason is None
     assert executor.execute_kwargs == {"user_timezone": None}
+    assert executor.on_successful_completion is None
     assert tools.closed is True
 
 
@@ -395,7 +395,7 @@ async def test_orchestrator_preserves_an_explicit_empty_tool_allowlist(
         )
     ]
 
-    assert events == [FAKE_RESPONSE_EVENT]
+    assert events == [_resolved_response_event()]
     assert FakeExecutor.instances[0].ctx.enabled_tools == ()
 
 
@@ -430,53 +430,8 @@ async def test_orchestrator_does_not_inject_maintenance_candidates(
         )
     ]
 
-    assert events == [FAKE_RESPONSE_EVENT]
+    assert events == [_resolved_response_event()]
     assert not hasattr(FakeExecutor.instances[0].ctx, "maintenance_candidates")
-
-
-@pytest.mark.runtime
-@pytest.mark.no_network
-async def test_orchestrator_explicit_hot_topics_override_config_and_are_validated(
-    monkeypatch,
-):
-    context = FakeSession()
-    tools = FakeTools()
-    context.resources.postgres.upsert_agent(
-        AgentConfig(
-            id="agent-1",
-            name="Researcher",
-            persona="Careful",
-            is_default=True,
-        )
-    )
-
-    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FakeExecutor)
-
-    async def fake_bootstrap_services(self, context_arg, agent_id, document_focus):
-        return tools
-
-    monkeypatch.setattr(AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services)
-
-    events = [
-        event
-        async for event in make_orchestrator(context).run_stream(
-            user_query="hello",
-            context=context,
-            hot_topics=["Identity", "General", "Identity"],
-        )
-    ]
-
-    assert events == [FAKE_RESPONSE_EVENT]
-    executor = FakeExecutor.instances[0]
-    assert executor.ctx.hot_topics == ["Identity"]
-    assert executor.ctx.hot_topic_context == {
-        "Identity": {
-            "entities": [{"name": "Identity entity"}],
-            "messages": [],
-        }
-    }
-    assert tools.hot_topic_calls == [["Identity"]]
-
 
 @pytest.mark.runtime
 @pytest.mark.no_network
@@ -485,8 +440,6 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
     focus = {
         "mode": "pinned",
         "target_type": "subtree",
-        "document_id": None,
-        "relative_path": None,
         "path_prefix": "src",
         "created_at": "2026-06-22T12:00:00+00:00",
     }
@@ -499,8 +452,6 @@ async def test_orchestrator_resolves_session_document_focus_without_querying_pos
             }
             return {
                 "target_type": "subtree",
-                "document_id": None,
-                "relative_path": None,
                 "path_prefix": "src",
             }
 
@@ -583,6 +534,7 @@ async def test_orchestrator_preserves_canonical_request_document_selection():
         "relative_path": "docs/notes.py",
         "selection": {
             "content_hash": "a" * 64,
+            "parse_snapshot_id": "snapshot-1",
             "locator": {"kind": "code_lines", "start_line": 2, "end_line": 3},
         },
         "created_at": "2026-06-22T12:00:00+00:00",
@@ -649,7 +601,7 @@ async def test_orchestrator_seeds_pasted_text_candidates_from_canonical_turn(
         )
     ]
 
-    assert events == [FAKE_RESPONSE_EVENT]
+    assert events == [_resolved_response_event()]
     candidates = FakeExecutor.instances[0].ctx.initial_source_candidates
     assert len(candidates) == 1
     assert candidates[0].source_message_id == 42

@@ -9,6 +9,11 @@ from common.schema.public import StartRunRequest, validate_public_stream
 from core.agent.orchestrator import AgentOrchestrator
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.documents import storage as document_storage
+from core.knowledge.documents.storage import (
+    DocumentParseSnapshot,
+    DocumentSnapshotPage,
+    LayoutRegion,
+)
 from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 from core.knowledge.store import KnowledgeStore
@@ -146,7 +151,17 @@ def _runtime_document_cases():
             {
                 "source_kind": "pdf_document",
                 "excerpt": "The violet launch phrase is durable.",
-                "locator": {"kind": "pdf_page", "page": 1},
+                "locator": {
+                    "kind": "layout_region",
+                    "page": 1,
+                    "element_type": "page",
+                    "extraction_method": "native_text",
+                    "bbox": None,
+                    "text_start": None,
+                    "text_end": None,
+                    "coordinate_unit": "pdf_points",
+                    "coordinate_origin": "bottom_left",
+                },
             },
         ),
         (
@@ -159,12 +174,12 @@ def _runtime_document_cases():
             ),
             {
                 "source_kind": "text_document",
-                "excerpt": "Overview\nThe violet launch phrase is durable.",
+                "excerpt": "# Overview\n\nThe violet launch phrase is durable.",
                 "locator": {
-                    "kind": "docx_paragraphs",
-                    "start_paragraph": 1,
-                    "end_paragraph": 2,
-                    "heading_path": ("Overview",),
+                    "kind": "text_lines",
+                    "start_line": 1,
+                    "end_line": 3,
+                    "section_path": ("Overview",),
                 },
             },
         ),
@@ -195,6 +210,40 @@ def _runtime_document_cases():
     ]
 
 
+def _structured_parse_snapshot(_content: bytes, extension: str) -> DocumentParseSnapshot:
+    if extension == ".pdf":
+        text = "The violet launch phrase is durable."
+        return DocumentParseSnapshot(
+            text=text,
+            structure={"pages": {"1": {}}},
+            parser_name="docling",
+            parser_version="test",
+            parser_fingerprint="a" * 64,
+            pages=(
+                DocumentSnapshotPage(
+                    page_number=1,
+                    text=text,
+                    regions=(
+                        LayoutRegion(
+                            page_number=1,
+                            element_type="text",
+                            extraction_method="native_text",
+                        ),
+                    ),
+                ),
+            ),
+        )
+    if extension == ".docx":
+        return DocumentParseSnapshot(
+            text="# Overview\n\nThe violet launch phrase is durable.",
+            structure={"texts": [{"label": "section_header"}]},
+            parser_name="docling",
+            parser_version="test",
+            parser_fingerprint="a" * 64,
+        )
+    raise AssertionError(f"unexpected structured format {extension}")
+
+
 @pytest.mark.integration
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
@@ -218,6 +267,11 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         document_storage.pytesseract,
         "image_to_string",
         lambda _: "The violet launch phrase is durable.\n",
+    )
+    monkeypatch.setattr(
+        document_storage,
+        "_extract_docling_snapshot",
+        _structured_parse_snapshot,
     )
     embedding = _DeterministicEmbeddingService()
     llm = _DeterministicDocumentAgentLLM()
@@ -267,7 +321,6 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         entities=resolver,
         embedding_service=embedding,
         knowledge_store=store,
-        postgres=postgres,
     )
     context = _session(
         resources,

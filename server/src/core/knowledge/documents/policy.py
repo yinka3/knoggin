@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from .constants import (
     INDEX_EMBEDDING_CHUNK_BATCH_SIZE,
+    INDEX_MAX_ATTEMPTS,
+    INDEX_RETRY_BACKOFF_SECONDS,
     INLINE_INDEX_MAX_BYTES,
 )
 
@@ -16,6 +18,8 @@ class DocumentIndexPolicy:
 
     inline_index_max_bytes: int
     embedding_chunk_batch_size: int
+    max_attempts: int
+    retry_backoff_seconds: int
 
     @classmethod
     def capture(
@@ -23,10 +27,14 @@ class DocumentIndexPolicy:
         *,
         inline_index_max_bytes: int = INLINE_INDEX_MAX_BYTES,
         embedding_chunk_batch_size: int = INDEX_EMBEDDING_CHUNK_BATCH_SIZE,
+        max_attempts: int = INDEX_MAX_ATTEMPTS,
+        retry_backoff_seconds: int = INDEX_RETRY_BACKOFF_SECONDS,
     ) -> "DocumentIndexPolicy":
         values = {
             "inline_index_max_bytes": inline_index_max_bytes,
             "embedding_chunk_batch_size": embedding_chunk_batch_size,
+            "max_attempts": max_attempts,
+            "retry_backoff_seconds": retry_backoff_seconds,
         }
         cls._validate(values)
         return cls(**values)

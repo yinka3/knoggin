@@ -44,6 +44,7 @@ class SourceReferenceReader:
                 ref.message_id,
                 ref.source_kind,
                 ref.document_id,
+                ref.parse_snapshot_id,
                 ref.source_project_id,
                 ref.canonical_url,
                 ref.source_message_id,
@@ -58,7 +59,10 @@ class SourceReferenceReader:
                 ref.idempotency_key,
                 ref.created_at,
                 document.status AS document_status,
-                document.content_hash AS document_content_hash
+                document.content_hash AS document_content_hash,
+                document.current_snapshot_id AS document_current_snapshot_id,
+                snapshot.snapshot_id AS snapshot_id,
+                snapshot.source_content_hash AS snapshot_content_hash
             FROM public.message_source_refs AS ref
             JOIN public.messages AS message
               ON message.message_id = ref.message_id
@@ -70,6 +74,9 @@ class SourceReferenceReader:
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
              AND document.project_id = ref.source_project_id
+            LEFT JOIN public.document_parse_snapshots AS snapshot
+              ON snapshot.snapshot_id = ref.parse_snapshot_id
+             AND snapshot.document_id = ref.document_id
             WHERE ref.message_id = %s
               AND ref.project_id = %s
               AND ref.session_id = %s
@@ -83,6 +90,9 @@ class SourceReferenceReader:
                 self._reference_from_row(row),
                 document_status=row.get("document_status"),
                 document_content_hash=row.get("document_content_hash"),
+                document_current_snapshot_id=row.get("document_current_snapshot_id"),
+                snapshot_id=row.get("snapshot_id"),
+                snapshot_content_hash=row.get("snapshot_content_hash"),
                 document_status_resolved="document_status" in row,
             )
             for row in rows
@@ -201,6 +211,7 @@ class SourceReferenceReader:
                 ref.message_id,
                 ref.source_kind,
                 ref.document_id,
+                ref.parse_snapshot_id,
                 ref.source_project_id,
                 ref.canonical_url,
                 ref.source_message_id,
@@ -215,7 +226,10 @@ class SourceReferenceReader:
                 ref.idempotency_key,
                 ref.created_at,
                 document.status AS document_status,
-                document.content_hash AS document_content_hash
+                document.content_hash AS document_content_hash,
+                document.current_snapshot_id AS document_current_snapshot_id,
+                snapshot.snapshot_id AS snapshot_id,
+                snapshot.source_content_hash AS snapshot_content_hash
             FROM public.episode_messages AS attachment
             JOIN public.episodes AS episode
               ON episode.episode_id = attachment.episode_id
@@ -230,6 +244,9 @@ class SourceReferenceReader:
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
              AND document.project_id = ref.source_project_id
+            LEFT JOIN public.document_parse_snapshots AS snapshot
+              ON snapshot.snapshot_id = ref.parse_snapshot_id
+             AND snapshot.document_id = ref.document_id
             WHERE attachment.episode_id = %s
               AND episode.project_id = %s
               AND attachment.session_id = %s
@@ -252,6 +269,9 @@ class SourceReferenceReader:
                     reference,
                     document_status=row.get("document_status"),
                     document_content_hash=row.get("document_content_hash"),
+                    document_current_snapshot_id=row.get("document_current_snapshot_id"),
+                    snapshot_id=row.get("snapshot_id"),
+                    snapshot_content_hash=row.get("snapshot_content_hash"),
                     document_status_resolved="document_status" in row,
                 )
             )
@@ -265,7 +285,10 @@ class SourceReferenceReader:
             SELECT
                 ref.*,
                 document.status AS document_status,
-                document.content_hash AS document_content_hash
+                document.content_hash AS document_content_hash,
+                document.current_snapshot_id AS document_current_snapshot_id,
+                snapshot.snapshot_id AS snapshot_id,
+                snapshot.source_content_hash AS snapshot_content_hash
             FROM public.episode_messages attachment
             JOIN public.episodes episode
               ON episode.episode_id = attachment.episode_id
@@ -278,6 +301,9 @@ class SourceReferenceReader:
             LEFT JOIN public.project_documents AS document
               ON document.document_id = ref.document_id
              AND document.project_id = ref.source_project_id
+            LEFT JOIN public.document_parse_snapshots AS snapshot
+              ON snapshot.snapshot_id = ref.parse_snapshot_id
+             AND snapshot.document_id = ref.document_id
             WHERE attachment.episode_id = %s AND episode.project_id = %s
               AND project.user_name = %s
             ORDER BY attachment.message_position, ref.created_at,
@@ -296,6 +322,9 @@ class SourceReferenceReader:
                         reference,
                     document_status=row.get("document_status"),
                     document_content_hash=row.get("document_content_hash"),
+                    document_current_snapshot_id=row.get("document_current_snapshot_id"),
+                    snapshot_id=row.get("snapshot_id"),
+                    snapshot_content_hash=row.get("snapshot_content_hash"),
                     document_status_resolved="document_status" in row,
                     )
                 )
@@ -319,7 +348,10 @@ class SourceReferenceReader:
         payload = dict(row)
         payload.pop("document_status", None)
         payload.pop("document_content_hash", None)
-        for field in ("source_ref_id", "document_id"):
+        payload.pop("document_current_snapshot_id", None)
+        payload.pop("snapshot_id", None)
+        payload.pop("snapshot_content_hash", None)
+        for field in ("source_ref_id", "document_id", "parse_snapshot_id"):
             if payload.get(field) is not None:
                 payload[field] = str(payload[field])
         for field in ("locator", "metadata"):
@@ -334,13 +366,22 @@ class SourceReferenceReader:
         *,
         document_status: str | None = None,
         document_content_hash: str | None = None,
+        document_current_snapshot_id: object = None,
+        snapshot_id: object = None,
+        snapshot_content_hash: str | None = None,
         document_status_resolved: bool = False,
     ) -> SourceConsulted:
         if reference.source_kind in {"pdf_document", "text_document"}:
             if not document_status_resolved:
                 source_status = "available"
-            elif document_status in {None, "deleted"}:
+            elif document_status is None or snapshot_id is None:
                 source_status = "unavailable"
+            elif snapshot_content_hash != reference.content_hash:
+                source_status = "unavailable"
+            elif document_status == "deleted":
+                source_status = "historical"
+            elif str(document_current_snapshot_id) != reference.parse_snapshot_id:
+                source_status = "historical"
             elif document_content_hash != reference.content_hash:
                 source_status = "historical"
             else:
@@ -381,6 +422,7 @@ class SourceReferenceReader:
             reference.message_id,
             reference.source_kind,
             stable_identity,
+            reference.parse_snapshot_id,
             reference.content_hash,
             locator,
             excerpt_hash,

@@ -202,10 +202,27 @@ async def test_read_web_page_rejects_malformed_external_pdf_cleanly():
 
     tool = _web_tool(handler)
     try:
-        with pytest.raises(ToolExecutionError, match="PDF could not be extracted"):
+        with pytest.raises(ToolExecutionError, match="PDF could not be extracted") as error:
             await tool.read_web_page("https://example.test/bad.pdf")
     finally:
         await tool._web_page_client.aclose()
+
+    assert error.value.retryable is False
+
+
+@pytest.mark.no_network
+async def test_read_web_page_marks_transport_timeouts_retryable():
+    def handler(request):
+        raise httpx.ReadTimeout("upstream timed out", request=request)
+
+    tool = _web_tool(handler)
+    try:
+        with pytest.raises(ToolExecutionError, match="webpage request timed out") as error:
+            await tool.read_web_page("https://example.test/slow")
+    finally:
+        await tool._web_page_client.aclose()
+
+    assert error.value.retryable is True
 
 
 @pytest.mark.no_network

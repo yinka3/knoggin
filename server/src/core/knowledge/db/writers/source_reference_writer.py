@@ -39,10 +39,9 @@ class SourceReferenceWriter:
 
         The insert joins the canonical message and session so a caller cannot
         attach references to another user's scope or a non-assistant message.
-        It also checks document ownership within the readable scope before
-        inserting a document reference.  The captured hash describes the
-        encounter, so a later catalog version or tombstone must not invalidate
-        that history at answer-finalization time.
+        It also binds each document reference to its retained parse snapshot
+        within the readable scope. A later reindex or tombstone therefore
+        cannot reinterpret the evidence gathered for this answer.
         """
 
         if not candidates:
@@ -117,7 +116,14 @@ class SourceReferenceWriter:
                 "pasted:"
                 f"{candidate.source_message_id}:{locator.start_char}:{locator.end_char}"
             )
-        raw = "|".join((candidate.agent_run_id, candidate.source_kind, origin))
+        raw = "|".join(
+            (
+                candidate.agent_run_id,
+                candidate.source_kind,
+                candidate.parse_snapshot_id or "",
+                origin,
+            )
+        )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     @staticmethod
@@ -152,6 +158,7 @@ class SourceReferenceWriter:
             message_id,
             source_kind,
             document_id,
+            parse_snapshot_id,
             source_project_id,
             canonical_url,
             source_message_id,
@@ -167,7 +174,7 @@ class SourceReferenceWriter:
             created_at
         )
         SELECT
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb,
             %s, %s, %s, %s, %s, clock_timestamp()
         FROM public.messages AS message
         JOIN public.sessions AS session
@@ -184,9 +191,13 @@ class SourceReferenceWriter:
               OR EXISTS (
                   SELECT 1
                   FROM public.project_documents AS document
+                  JOIN public.document_parse_snapshots AS snapshot
+                    ON snapshot.snapshot_id = %s
+                   AND snapshot.document_id = document.document_id
                   WHERE document.document_id = %s
                     AND document.project_id = %s
                     AND document.project_id = ANY(%s)
+                    AND snapshot.source_content_hash = %s
               )
           )
         ON CONFLICT (idempotency_key) DO UPDATE
@@ -198,6 +209,7 @@ class SourceReferenceWriter:
             message_id,
             source_kind,
             document_id,
+            parse_snapshot_id,
             source_project_id,
             canonical_url,
             source_message_id,
@@ -232,6 +244,7 @@ class SourceReferenceWriter:
             message_id,
             candidate.source_kind,
             candidate.document_id,
+            candidate.parse_snapshot_id,
             candidate.source_project_id,
             candidate.canonical_url,
             candidate.source_message_id,
@@ -249,15 +262,17 @@ class SourceReferenceWriter:
             session_id,
             user_name,
             candidate.document_id,
+            candidate.parse_snapshot_id,
             candidate.document_id,
             candidate.source_project_id,
             list(readable_project_ids),
+            candidate.content_hash,
         )
 
     @staticmethod
     def _reference_from_row(row: dict) -> SourceReference:
         payload = dict(row)
-        for field in ("source_ref_id", "document_id"):
+        for field in ("source_ref_id", "document_id", "parse_snapshot_id"):
             if payload.get(field) is not None:
                 payload[field] = str(payload[field])
         for field in ("locator", "metadata"):

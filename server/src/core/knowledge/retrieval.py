@@ -39,7 +39,6 @@ class KnowledgeRetrieval:
         entities,
         embedding_service,
         knowledge_store,
-        postgres,
         search_config: Optional[Dict] = None,
     ) -> None:
         self.project_id = require_scope_value(
@@ -54,7 +53,6 @@ class KnowledgeRetrieval:
         self.entities = entities
         self.embedding_service = embedding_service
         self.knowledge_store = knowledge_store
-        self.postgres = postgres
         self.search_cfg = search_config or {}
 
     async def search_messages(
@@ -131,13 +129,21 @@ class KnowledgeRetrieval:
         )
         return results or []
 
-    async def get_connections(self, entity_id: int, *, session_id: str) -> List[Dict]:
+    async def get_connections(
+        self,
+        entity_id: int,
+        *,
+        session_id: str,
+        limit: int = 40,
+    ) -> List[Dict]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("get_connections limit must be a positive integer")
         if await self.entities.get_profile(entity_id) is None:
             return [{"error": f"Entity not found: '{entity_id}'"}]
 
         results = await self.knowledge_store.get_related_entities(
             [entity_id],
-            limit=50,
+            limit=limit,
             visible_project_ids=self.readable_project_ids,
         )
         return await self._hydrate_result_evidence(results, session_id=session_id)
@@ -421,7 +427,10 @@ class KnowledgeRetrieval:
     ) -> List[Tuple[str, float, Optional[str]]]:
         fts_limit = self.search_cfg.get("fts_limit", 50)
         rerank_candidates = self.search_cfg.get("rerank_candidates", 25)
-        visible_sessions = await self._get_visible_session_ids()
+        visible_sessions = await self.knowledge_store.get_visible_session_ids(
+            user_name=self.user_name,
+            visible_project_ids=self.readable_project_ids,
+        )
         fts_results = await self.knowledge_store.search_messages_fts(
             query,
             user_name=self.user_name,
@@ -650,19 +659,6 @@ class KnowledgeRetrieval:
                 result_bundles.append(bundle)
             hydrated.append(result_bundles)
         return hydrated
-
-    async def _get_visible_session_ids(self) -> List[str]:
-        rows = await self.postgres.fetch_all(
-            """
-            SELECT session_id
-            FROM public.sessions
-            WHERE user_name = %s
-              AND project_id = ANY(%s)
-              AND status = 'open'
-            """,
-            (self.user_name, self.readable_project_ids),
-        )
-        return sorted({str(row["session_id"]) for row in rows})
 
     async def _get_surrounding_context(
         self,

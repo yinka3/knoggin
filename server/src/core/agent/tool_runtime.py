@@ -6,7 +6,12 @@ from typing import Dict, Optional, Tuple
 
 from loguru import logger
 
-from common.exceptions import ToolExecutionError
+from common.exceptions import (
+    DependencyError,
+    StorageError,
+    ToolExecutionError,
+    WorkspaceConflictError,
+)
 from common.schema.agent.tool_contracts import (
     READ_CAPABILITY,
     TOOL_SCHEMAS,
@@ -221,7 +226,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 result=result,
             )
         return {"data": result}
-    except ToolExecutionError:
+    except (ToolExecutionError, WorkspaceConflictError):
         if audit_id:
             await _safe_finish_tool_audit(
                 tools,
@@ -230,7 +235,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 error="Tool execution was rejected.",
             )
         raise
-    except Exception:
+    except Exception as exc:
         if audit_id:
             await _safe_finish_tool_audit(
                 tools,
@@ -239,7 +244,20 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 error="Tool execution failed.",
             )
         logger.exception("Tool {} failed", name)
-        raise ToolExecutionError(name, "Tool execution failed")
+        raise ToolExecutionError(
+            name,
+            "Tool execution failed",
+            retryable=_is_retryable_tool_failure(exc),
+        ) from exc
+
+
+def _is_retryable_tool_failure(exc: Exception) -> bool:
+    """Classify transient durable or dependency failures at the tool boundary."""
+
+    return isinstance(
+        exc,
+        (DependencyError, StorageError, TimeoutError, ConnectionError),
+    )
 
 
 def _redact_audit_value(value):

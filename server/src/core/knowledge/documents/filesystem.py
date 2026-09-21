@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterator
 
+from common.exceptions import WorkspaceConflictError
 from core.knowledge.documents.constants import MAX_DOCUMENT_SIZE
 from core.knowledge.documents.scanning import normalize_relative_path
 
 
-class ProjectFilesystemConflictError(RuntimeError):
+class ProjectFilesystemConflictError(WorkspaceConflictError):
     """Raised when a caller attempts to replace stale project-file content."""
 
 

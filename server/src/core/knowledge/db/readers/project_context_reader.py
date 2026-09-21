@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from loguru import logger
+
+from common.exceptions import StorageReadError
 from common.schema.context import (
     ContextBlockRecord,
     ContextBlockSupportRecord,
@@ -21,6 +24,36 @@ class ProjectContextReader:
     def __init__(self, client: PostgresClient) -> None:
         self.client = client
 
+    @staticmethod
+    def _raise_storage_read(operation: str, exc: Exception) -> None:
+        logger.error("Storage read failed for {}: {}", operation, exc)
+        raise StorageReadError(
+            operation,
+            details={"error_type": type(exc).__name__},
+        ) from exc
+
+    async def _fetch_one(
+        self,
+        operation: str,
+        query: str,
+        params: tuple[object, ...],
+    ) -> dict | None:
+        try:
+            return await self.client.fetch_one(query, params)
+        except Exception as exc:
+            self._raise_storage_read(operation, exc)
+
+    async def _fetch_all(
+        self,
+        operation: str,
+        query: str,
+        params: tuple[object, ...],
+    ) -> list[dict]:
+        try:
+            return await self.client.fetch_all(query, params)
+        except Exception as exc:
+            self._raise_storage_read(operation, exc)
+
     async def get_current_revision(
         self,
         *,
@@ -30,7 +63,8 @@ class ProjectContextReader:
         """Return the current revision metadata, if Context has been initialized."""
 
         user_name, project_id = self._scope(user_name, project_id, "get_current_revision")
-        row = await self.client.fetch_one(
+        row = await self._fetch_one(
+            "get_current_revision",
             """
             SELECT
                 revision.revision_id,
@@ -61,7 +95,8 @@ class ProjectContextReader:
         """Return the owned projection checkpoint without reading filesystem state."""
 
         user_name, project_id = self._scope(user_name, project_id, "get_projection_state")
-        row = await self.client.fetch_one(
+        row = await self._fetch_one(
+            "get_projection_state",
             """
             SELECT
                 project_id,
@@ -91,7 +126,8 @@ class ProjectContextReader:
 
         user_name, project_id = self._scope(user_name, project_id, "get_revision")
         revision_id = self._uuid(revision_id, "revision_id")
-        row = await self.client.fetch_one(
+        row = await self._fetch_one(
+            "get_revision",
             """
             SELECT
                 revision.revision_id,
@@ -125,7 +161,8 @@ class ProjectContextReader:
 
         user_name, project_id = self._scope(user_name, project_id, "get_revision_blocks")
         revision_id = self._uuid(revision_id, "revision_id")
-        rows = await self.client.fetch_all(
+        rows = await self._fetch_all(
+            "get_revision_blocks",
             """
             SELECT
                 block.block_id,
@@ -192,7 +229,8 @@ class ProjectContextReader:
             user_name, project_id, "get_revision_impact_block_ids"
         )
         revision_id = self._uuid(revision_id, "revision_id")
-        rows = await self.client.fetch_all(
+        rows = await self._fetch_all(
+            "get_revision_impact_block_ids",
             """
             SELECT impact.block_id
             FROM public.project_context_revision_impact_blocks AS impact
@@ -227,7 +265,8 @@ class ProjectContextReader:
             user_name, project_id, "get_committed_window_affected_entity_ids"
         )
         window_id = self._uuid(window_id, "window_id")
-        rows = await self.client.fetch_all(
+        rows = await self._fetch_all(
+            "get_committed_window_affected_entity_ids",
             """
             SELECT DISTINCT association.entity_id
             FROM public.project_semantic_windows AS semantic_window
@@ -264,7 +303,8 @@ class ProjectContextReader:
         ids = [self._uuid(block_id, "block_id") for block_id in block_ids]
         if not ids:
             return {}
-        rows = await self.client.fetch_all(
+        rows = await self._fetch_all(
+            "get_block_supports",
             """
             SELECT support.block_id,
                    support.project_id,
@@ -304,7 +344,8 @@ class ProjectContextReader:
 
         user_name, project_id = self._scope(user_name, project_id, "get_window_snapshot")
         window_id = self._uuid(window_id, "window_id")
-        row = await self.client.fetch_one(
+        row = await self._fetch_one(
+            "get_window_snapshot",
             """
             SELECT revision_id
             FROM public.project_context_revisions

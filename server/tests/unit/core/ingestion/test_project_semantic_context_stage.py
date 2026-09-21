@@ -53,7 +53,10 @@ def _window():
         origin=SemanticWindowOrigin.CONVERSATION,
         stage=SemanticWindowStage.CLAIMED,
         domain_version=domain.version,
-        policy_snapshot={"compiled_domain": domain.to_dict()},
+        policy_snapshot={
+            "compiled_domain": domain.to_dict(),
+            "ingestion_policy": _policy().semantic_window_snapshot(),
+        },
         source_token_count=1,
         token_estimator="test",
         token_estimator_version="1",
@@ -102,7 +105,11 @@ class _ContextStore:
         self.external_snapshot_on_conflict = None
 
     async def get_active_project_semantic_window(self, **_kwargs):
-        return self.window
+        return (
+            None
+            if self.window.stage is SemanticWindowStage.COMPLETED
+            else self.window
+        )
 
     async def get_project_semantic_window_context_snapshot(self, _window_id, **_kwargs):
         return self.committed_snapshot
@@ -114,6 +121,12 @@ class _ContextStore:
 
     async def get_project_context_snapshot(self, _revision_id, **_kwargs):
         return self.current_snapshot
+
+    async def get_project_context_revision_impact_block_ids(self, _revision_id, **_kwargs):
+        return frozenset()
+
+    async def get_project_context_block_supports(self, _block_ids, **_kwargs):
+        return {}
 
     async def get_project_semantic_window_episode_result(self, _window_id, **_kwargs):
         return []
@@ -157,11 +170,20 @@ class _ContextStore:
 
     async def advance_project_semantic_window_stage(self, **kwargs):
         self.advance_calls.append(kwargs)
+        if kwargs["expected_stage"] is SemanticWindowStage.CLAIMED:
+            stage = SemanticWindowStage.CONTEXT_COMMITTED
+            context_revision_id = kwargs["context_revision_id"]
+        else:
+            assert kwargs["expected_stage"] is SemanticWindowStage.KNOWLEDGE_COMMITTED
+            assert kwargs["next_stage"] is SemanticWindowStage.COMPLETED
+            stage = SemanticWindowStage.COMPLETED
+            context_revision_id = self.window.context_revision_id
         self.window = self.window.model_validate(
             self.window.model_dump()
             | {
-                "stage": SemanticWindowStage.CONTEXT_COMMITTED,
-                "context_revision_id": kwargs["context_revision_id"],
+                "stage": stage,
+                "context_revision_id": context_revision_id,
+                "attempt_count": 0,
                 "last_failure_stage": None,
                 "last_failure_code": None,
                 "last_failure_at_ms": None,
@@ -170,6 +192,27 @@ class _ContextStore:
             }
         )
         return True
+
+    async def commit_project_semantic_knowledge(self, _build):
+        self.window = self.window.model_validate(
+            self.window.model_dump()
+            | {
+                "stage": SemanticWindowStage.KNOWLEDGE_COMMITTED,
+                "attempt_count": 0,
+                "last_failure_stage": None,
+                "last_failure_code": None,
+                "last_failure_at_ms": None,
+                "last_error_summary": None,
+                "next_retry_at_ms": None,
+            }
+        )
+        return SimpleNamespace(resumed=False, relationships_written=0)
+
+    async def get_project_semantic_window_committed_entity_ids(self, _window_id, **_kwargs):
+        return ()
+
+    async def enrich_project_semantic_window_episodes(self, **_kwargs):
+        return {"entities": 0, "relationships": 0}
 
     async def record_project_semantic_window_failure(self, **kwargs):
         self.failures.append(kwargs)
@@ -257,6 +300,25 @@ class _RecordingProjection:
         return ContextProjectionResult(snapshot=None, changed=False)
 
 
+class _NoopProjection:
+    async def synchronize(self, **_kwargs):
+        return ContextProjectionResult(snapshot=None, changed=False)
+
+
+class _UnexpectedBuilder:
+    async def build(self, _build):
+        raise AssertionError("empty Context impact must not rebuild entities")
+
+
+class _UnexpectedRelationships:
+    async def extract(self, _build):
+        raise AssertionError("empty Context impact must not rebuild relationships")
+
+
+async def _publish_nothing(_entity_ids):
+    return None
+
+
 def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
     async def capture_semantic_policy():
         return _policy()
@@ -268,9 +330,47 @@ def _job(store, updater, *, now_ms=lambda: 1_000, projection=None):
         settings=IngestionSettings(semantic_window_tokens=1),
         capture_semantic_policy=capture_semantic_policy,
         context_updater=updater,
-        context_projection=projection,
+        context_projection=projection or _NoopProjection(),
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
         now_ms=now_ms,
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "context_updater",
+        "context_projection",
+        "context_entity_builder",
+        "context_relationship_extractor",
+    ],
+)
+def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
+    async def capture_semantic_policy():
+        return _policy()
+
+    collaborators = {
+        "context_updater": _NoopUpdater(),
+        "context_projection": _NoopProjection(),
+        "context_entity_builder": _UnexpectedBuilder(),
+        "context_relationship_extractor": _UnexpectedRelationships(),
+    }
+    collaborators[missing] = None
+
+    with pytest.raises(TypeError, match=f"requires {missing}"):
+        ProjectSemanticJob(
+            _Admission(),
+            object(),
+            object(),
+            settings=IngestionSettings(semantic_window_tokens=1),
+            capture_semantic_policy=capture_semantic_policy,
+            publish_committed_entity_ids=_publish_nothing,
+            **collaborators,
+        )
 
 
 @pytest.mark.unit
@@ -288,7 +388,7 @@ async def test_context_stage_commits_then_checkpoints_even_if_file_projection_ne
     assert result.success
     assert len(updater.calls) == 1
     assert len(store.commit_calls) == 1
-    assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
+    assert store.window.stage is SemanticWindowStage.COMPLETED
     assert store.window.context_revision_id == store.current_snapshot.revision_id
     assert projection.calls == 1
 
@@ -308,7 +408,11 @@ async def test_scheduler_cadence_runs_context_sync_without_semantic_work():
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
         capture_semantic_policy=capture_semantic_policy,
+        context_updater=_NoopUpdater(),
         context_projection=projection,
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
     )
     scheduler = Scheduler("ada", "project-1")
     scheduler.register(job)
@@ -353,6 +457,11 @@ async def test_readiness_does_not_select_and_claim_uses_one_captured_policy():
         object(),
         settings=IngestionSettings(semantic_window_tokens=1),
         capture_semantic_policy=capture_semantic_policy,
+        context_updater=_NoopUpdater(),
+        context_projection=_NoopProjection(),
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
     )
 
     context = JobContext(user_name="ada", project_id="project-1")
@@ -380,10 +489,10 @@ async def test_context_stage_resumes_a_durable_revision_without_recalling_the_ll
     result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
 
     assert result.success
-    assert "resumed" in result.summary
     assert updater.calls == []
     assert store.commit_calls == []
     assert store.advance_calls[0]["context_revision_id"] == str(committed.revision_id)
+    assert store.window.stage is SemanticWindowStage.COMPLETED
 
 
 @pytest.mark.unit
@@ -402,7 +511,7 @@ async def test_context_noop_records_the_current_revision_without_creating_a_chil
     assert len(updater.calls) == 1
     assert store.commit_calls == []
     assert store.advance_calls[0]["context_revision_id"] == str(current.revision_id)
-    assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
+    assert store.window.stage is SemanticWindowStage.COMPLETED
 
 
 @pytest.mark.unit
@@ -444,4 +553,4 @@ async def test_stale_parent_conflict_retries_with_the_same_window_evidence_and_r
     assert second.success
     assert len(updater.calls) == 2
     assert updater.calls[1]["snapshot"].blocks[0].markdown == "Concurrent Context revision."
-    assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
+    assert store.window.stage is SemanticWindowStage.COMPLETED

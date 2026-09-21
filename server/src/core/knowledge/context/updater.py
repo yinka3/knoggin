@@ -57,6 +57,11 @@ class _MessageEvidence:
     session_id: str
     role: str
     timestamp_ms: int | None
+    exchange_outcome: str | None
+
+    @property
+    def is_clarification(self) -> bool:
+        return self.role == "assistant" and self.exchange_outcome == "clarification"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +134,11 @@ class ContextUpdateBuild:
                     timestamp_ms=(
                         None if raw.get("timestamp_ms") is None else int(raw["timestamp_ms"])
                     ),
+                    exchange_outcome=(
+                        None
+                        if raw.get("exchange_outcome") is None
+                        else str(raw["exchange_outcome"])
+                    ),
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError("Context window contains malformed message evidence") from exc
@@ -181,9 +191,10 @@ class ContextUpdateBuild:
             raw = self.messages[int(handle[1:]) - 1]
             source_time = "unknown" if message.timestamp_ms is None else str(message.timestamp_ms)
             content = str(raw.get("content") or "").strip()
+            kind = "clarification_question" if message.is_clarification else "message"
             lines.extend(
                 (
-                    f"[{handle}] role={message.role} session={message.session_id} source_time_ms={source_time}",
+                    f"[{handle}] role={message.role} kind={kind} session={message.session_id} source_time_ms={source_time}",
                     "<message>",
                     content,
                     "</message>",
@@ -295,6 +306,12 @@ class ContextUpdateBuild:
         )
         if not resolved.messages and not resolved.sources:
             raise ValueError("Context operation has no resolvable evidence")
+        if (
+            resolved.messages
+            and not resolved.sources
+            and all(message.is_clarification for message in resolved.messages)
+        ):
+            raise ValueError("Clarification questions alone cannot establish Context")
         if isinstance(operation, ContextDelete):
             return resolved
         if operation.assertion_kind is AssertionKind.HUMAN_ASSERTED:
@@ -313,7 +330,10 @@ class ContextUpdateBuild:
     def _evidence_source_time(evidence: _ResolvedEvidence) -> int | None:
         source_times = [
             message.timestamp_ms
-            for message in (*evidence.messages, *(source.message for source in evidence.sources))
+            for message in (
+                *(message for message in evidence.messages if not message.is_clarification),
+                *(source.message for source in evidence.sources),
+            )
             if message.timestamp_ms is not None
         ]
         return max(source_times) if source_times else None
@@ -361,7 +381,9 @@ class ContextUpdateBuild:
         elif operation.assertion_kind is AssertionKind.SOURCE_GROUNDED:
             messages = []
         else:
-            messages = list(evidence.messages)
+            messages = [
+                message for message in evidence.messages if not message.is_clarification
+            ]
         for message in messages:
             selected.append(
                 ContextBlockSupport(

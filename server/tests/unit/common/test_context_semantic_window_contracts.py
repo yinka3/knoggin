@@ -48,6 +48,26 @@ def test_semantic_window_settings_reject_invalid_targets_and_retry_policy(payloa
 
 @pytest.mark.unit
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    "retired_field",
+    [
+        "batch_size",
+        "batch_debounce_seconds",
+        "batch_timeout",
+        "message_lifecycle_poll_seconds",
+        "ingestion_max_attempts",
+        "session_window",
+    ],
+)
+def test_ingestion_settings_reject_retired_configuration_fields(retired_field):
+    with pytest.raises(ValidationError, match=retired_field):
+        RootConfig.model_validate(
+            {"developer_settings": {"ingestion": {retired_field: 1}}}
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_context_edit_and_reference_contracts_are_strict():
     assert LocalContextBlockReference(handle=" C12 ").handle == "C12"
     assert ContextAdd(

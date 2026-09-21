@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.exceptions import LLMProviderError
+from common.exceptions import LLMBudgetExceededError, LLMProviderError
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.research import resolve_research_profile
 from core.agent.executor import AgentExecutor
@@ -532,9 +532,16 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
         return {
             "data": [
                 {
-                    "source": "Knoggin",
-                    "target": "Profile",
-                    "observed_relationship_label": "OWNER_FACT_ADA",
+                    "entity_id": 7,
+                    "entity": "Knoggin",
+                    "time": 1_700_000_000_000,
+                    "evidence": [
+                        {
+                            "id": "message-2",
+                            "session_id": "session-1",
+                            "message": "OWNER_FACT_ADA",
+                        }
+                    ],
                 }
             ]
         }
@@ -568,21 +575,26 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     assert "LAUNCH_FACT_VIOLET" in llm.calls[-1]["user"]
     assert "OWNER_FACT_ADA" in llm.calls[-1]["user"]
     assert (
-        "Relationships:\n- R1 Knoggin -> Profile: OWNER_FACT_ADA\n"
+        "Activities:\n- ACT1 E1 Knoggin at 1700000000000 (evidence: M2)"
         in llm.calls[-1]["user"]
     )
     assert "Messages:\n- M1: LAUNCH_FACT_VIOLET" in llm.calls[-1]["user"]
-    assert "observed evidence, not a current-state claim" in llm.calls[-1]["user"]
     assert run.attempt_count == 4
     assert run.call_count == 2
     assert run.notebook.section_items("messages") == (
         {"id": "message-1", "message": "LAUNCH_FACT_VIOLET", "score": 0.9},
-    )
-    assert run.notebook.section_items("relationships") == (
         {
-            "source": "Knoggin",
-            "target": "Profile",
-            "observed_relationship_label": "OWNER_FACT_ADA",
+            "id": "message-2",
+            "session_id": "session-1",
+            "message": "OWNER_FACT_ADA",
+        },
+    )
+    assert run.notebook.section_items("activities") == (
+        {
+            "entity_id": 7,
+            "entity": "Knoggin",
+            "time": 1_700_000_000_000,
+            "evidence_refs": ["message::session-1:message-2"],
         },
     )
     assert run.usage["total_tokens"] == 20
@@ -1062,6 +1074,169 @@ async def test_research_modes_reject_ungrounded_terminal_answers(mode):
     )
 
 
+@pytest.mark.no_network
+async def test_research_requires_read_content_after_document_listing(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event("list_documents", "{}", "list-documents"),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "The listing is enough."}',
+                    "submit-metadata",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "read_document",
+                    '{"document_id": "document-1"}',
+                    "read-document",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Draft from the read passage."}',
+                    "submit-draft",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Final answer from the read passage."}',
+                    "submit-final",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=4, max_calls=2),
+        research_profile=resolve_research_profile("research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+    dispatched = []
+
+    async def document_results(_tools, name, args):
+        dispatched.append((name, args))
+        if name == "list_documents":
+            return {
+                "data": [
+                    {
+                        "document_id": "document-1",
+                        "document_name": "brief.md",
+                    }
+                ]
+            }
+        if name == "read_document":
+            return {
+                "data": [
+                    {
+                        "document_id": "document-1",
+                        "document_name": "brief.md",
+                        "content": "The read document contains the answer.",
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected tool: {name}")
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", document_results)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["content"] == "Final answer from the read passage."
+    assert events[-1]["data"]["artifact"]["kind"] == "research_brief"
+    assert dispatched == [
+        ("list_documents", {}),
+        ("read_document", {"document_id": "document-1"}),
+    ]
+    assert len(llm.calls) == 5
+    assert (
+        "Research mode requires grounded investigation evidence before submit_answer."
+        in llm.calls[2]["user"]
+    )
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("mode", ["research", "deep_research"])
+async def test_research_fallback_requires_grounded_investigation_evidence(mode):
+    llm = ScriptedLLM([])
+    summary_calls = []
+
+    async def generate_summary(**kwargs):
+        summary_calls.append(kwargs)
+        return "This should not become a research answer."
+
+    llm.generate_text = generate_summary
+    run = make_run(research_profile=resolve_research_profile(mode))
+    run.notebook.apply("edit_brain", {"data": {"success": True}})
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    event = await executor._fallback()
+
+    assert event == {
+        "event": "clarification",
+        "data": {
+            "question": (
+                "I couldn't complete the research because I didn't gather usable "
+                "evidence. Which source or detail should I investigate?"
+            ),
+            "usage": run.usage,
+            "fallback": True,
+        },
+    }
+    assert summary_calls == []
+    assert run.final_content is None
+    assert run.sealed is True
+
+
+@pytest.mark.no_network
+async def test_research_fallback_summarizes_grounded_evidence(monkeypatch):
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "search_messages",
+                    '{"query": "release"}',
+                    "search-release",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=1, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    async def grounded_result(*_args):
+        return {
+            "data": [
+                {
+                    "id": "message-1",
+                    "message": "The release notes describe the change.",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", grounded_result)
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "response"
+    assert events[-1]["data"]["fallback"] is True
+    assert events[-1]["data"]["artifact"]["kind"] == "research_brief"
+    assert run.final_content == "A concise evidence summary."
+
+
 def _validated_initial_source_candidates(kind):
     if kind == "pasted_text":
         return build_pasted_text_candidates(
@@ -1083,6 +1258,7 @@ def _validated_initial_source_candidates(kind):
                 "relative_path": "notes/brief.md",
                 "extension": ".md",
                 "content_hash": "a" * 64,
+                "parse_snapshot_id": "snapshot-1",
                 "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
                 "excerpt": "Relevant selected document fact.",
             },
@@ -1322,6 +1498,33 @@ async def test_executor_replans_after_mixed_terminal_batch_without_dispatch(
     assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
     assert "Terminal protocol tools must be called alone." in llm.calls[1]["user"]
     assert secret not in llm.calls[1]["user"]
+
+
+@pytest.mark.no_network
+async def test_executor_carries_admitted_sources_into_a_clarification():
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "request_clarification",
+                    '{"question": "Which part should I verify?"}',
+                    "clarify-with-source",
+                ),
+                completed_event(),
+            ]
+        ]
+    )
+    run = make_run(
+        initial_source_candidates=_validated_initial_source_candidates("pasted_text")
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert [event["event"] for event in events] == ["clarification"]
+    assert events[0]["data"]["sources_consulted"][0]["source_kind"] == (
+        "user_pasted_text"
+    )
 
 
 @pytest.mark.no_network
@@ -1759,6 +1962,37 @@ async def test_executor_provider_failure_reaches_terminal_error_and_releases():
     assert events[-1]["data"]["message"] == (
         "The agent couldn't complete this request. Please try again."
     )
+    assert run.sealed is True
+    assert run.released is True
+
+
+@pytest.mark.no_network
+async def test_executor_budget_exhaustion_is_terminal_without_step_retries():
+    class BudgetExhaustedLLM(ScriptedLLM):
+        async def stream_with_tools(self, **kwargs):
+            self.calls.append(kwargs)
+            raise LLMBudgetExceededError("private budget details")
+            yield  # pragma: no cover
+
+    llm = BudgetExhaustedLLM([])
+    run = make_run(limits=AgentRunLimits(max_attempts=3, max_consecutive_errors=3))
+    executor = AgentExecutor(
+        run,
+        llm,
+        SimpleNamespace(document_service=None),
+    )
+
+    events = [event async for event in executor.execute()]
+
+    assert len(llm.calls) == 1
+    assert events[-1] == {
+        "event": "error",
+        "data": {
+            "message": "The agent couldn't complete this request. Please try again.",
+            "code": "llm_budget_exhausted",
+            "retryable": False,
+        },
+    }
     assert run.sealed is True
     assert run.released is True
 

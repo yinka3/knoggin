@@ -18,12 +18,17 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 from common.exceptions import (
     ConfigurationError,
     DependencyError,
+    IdempotencyConflictError,
+    LLMBudgetExceededError,
     LLMProviderError,
     LLMResponseError,
     NotFoundError,
+    RequestInProgressError,
+    RequestInterruptedError,
     SessionBusyError,
     StorageError,
     ToolExecutionError,
+    WorkspaceConflictError,
 )
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
@@ -261,6 +266,7 @@ class StartRunRequest(PublicModel):
     enabled_tools: list[str] | None = None
     research_mode: ResearchMode = "normal"
     document_focus: RunDocumentFocus | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
     _normalise_tools = field_validator("enabled_tools")(_normalise_enabled_tools)
 
@@ -367,6 +373,26 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "This session already has an active run.",
         False,
     ),
+    IdempotencyConflictError: (
+        "idempotency_conflict",
+        "This idempotency key was already used for a different request.",
+        False,
+    ),
+    RequestInProgressError: (
+        "request_in_progress",
+        "This request is already in progress.",
+        False,
+    ),
+    RequestInterruptedError: (
+        "request_interrupted",
+        "This request did not reach a durable outcome. Submit a new request to retry.",
+        False,
+    ),
+    WorkspaceConflictError: (
+        "workspace_conflict",
+        "The workspace changed before the request could be applied.",
+        False,
+    ),
     StorageError: (
         "storage_unavailable",
         "Storage is temporarily unavailable.",
@@ -382,10 +408,10 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "The model returned an invalid response.",
         False,
     ),
-    ToolExecutionError: (
-        "tool_failed",
-        "A tool could not complete the request.",
-        True,
+    LLMBudgetExceededError: (
+        "llm_budget_exhausted",
+        "The model budget is exhausted.",
+        False,
     ),
 }
 
@@ -398,14 +424,21 @@ def to_public_error(
 ) -> PublicError:
     """Convert an internal exception without exposing details or stack text."""
 
-    projection = next(
-        (
-            value
-            for error_type, value in _PUBLIC_ERROR_PROJECTIONS.items()
-            if isinstance(error, error_type)
-        ),
-        None,
-    )
+    if isinstance(error, ToolExecutionError):
+        projection = (
+            "tool_failed",
+            "A tool could not complete the request.",
+            error.retryable,
+        )
+    else:
+        projection = next(
+            (
+                value
+                for error_type, value in _PUBLIC_ERROR_PROJECTIONS.items()
+                if isinstance(error, error_type)
+            ),
+            None,
+        )
     if projection is None:
         code, message, retryable = (
             ("invalid_request", "The request is invalid.", False)
@@ -451,6 +484,8 @@ class ToolCompletedEvent(_StreamEvent):
     type: Literal["tool.completed"] = "tool.completed"
     tool_name: str = Field(min_length=1)
     succeeded: bool
+    error_code: Literal["tool_failed", "workspace_conflict"] | None = None
+    retryable: bool | None = None
 
 
 class SourceAddedEvent(_StreamEvent):

@@ -44,6 +44,37 @@ class SessionBusyError(KnogginError):
         )
 
 
+class IdempotencyConflictError(KnogginError):
+    """Raised when one request key is reused for a different submission."""
+
+    def __init__(self):
+        KnogginError.__init__(
+            self,
+            "This idempotency key was already used for a different request",
+            code="idempotency_conflict",
+        )
+
+
+class RequestInProgressError(KnogginError):
+    """Raised when the same accepted request is still executing locally."""
+
+    def __init__(self):
+        super().__init__(
+            "This request is already in progress",
+            code="request_in_progress",
+        )
+
+
+class RequestInterruptedError(KnogginError):
+    """Raised when a durable acceptance has no safe terminal result to replay."""
+
+    def __init__(self):
+        super().__init__(
+            "This request was accepted but did not reach a durable outcome",
+            code="request_interrupted",
+        )
+
+
 class StorageError(KnogginError):
     """Base class for failures at a durable persistence boundary."""
 
@@ -124,9 +155,16 @@ class LLMBudgetExceededError(LLMError):
 class ToolExecutionError(KnogginError):
     """Raised when a tool fails to execute correctly."""
 
-    def __init__(self, tool_name: str, message: str, details: Optional[Dict] = None):
-        details = details or {}
-        details["tool"] = tool_name
+    def __init__(
+        self,
+        tool_name: str,
+        message: str,
+        details: Optional[Dict] = None,
+        *,
+        retryable: bool = False,
+    ):
+        details = {**(details or {}), "tool": tool_name, "retryable": retryable}
+        self.retryable = retryable
         super().__init__(
             f"Tool '{tool_name}' failed: {message}", code="tool_error", details=details
         )

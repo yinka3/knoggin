@@ -206,6 +206,23 @@ class KnowledgeStore:
             message, edit_window_seconds=edit_window_seconds
         )
 
+    async def get_user_agent_exchange(
+        self,
+        user_message_id: int,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+    ):
+        """Read one canonical accepted user exchange for idempotent replay."""
+
+        return await self._message_reader.get_user_agent_exchange(
+            user_message_id,
+            user_name=user_name,
+            project_id=project_id,
+            session_id=session_id,
+        )
+
     async def ensure_project_context(
         self,
         *,
@@ -615,12 +632,13 @@ class KnowledgeStore:
         *,
         readable_project_ids: List[str],
         artifact: ArtifactDraft | None = None,
+        outcome: str = "assistant_final",
     ) -> tuple[int, list[str], bool]:
-        """Commit one final assistant response and its exchange closure together.
+        """Commit one assistant terminal response and its exchange closure together.
 
         The result is ``(assistant_message_id, source_ref_ids, created)``.
-        Retries of the same finalization return the original assistant instead
-        of creating a second answer.
+        Retries of the same terminal response return the original assistant
+        instead of creating a second assistant message.
         """
 
         if message.get("role") != "assistant":
@@ -642,6 +660,7 @@ class KnowledgeStore:
                 project_id=message["project_id"],
                 session_id=message["session_id"],
                 user_message_id=user_message_id,
+                outcome=outcome,
                 cur=cur,
             )
             if existing is not None:
@@ -691,7 +710,7 @@ class KnowledgeStore:
                 project_id=message["project_id"],
                 session_id=message["session_id"],
                 user_message_id=user_message_id,
-                outcome="assistant_final",
+                outcome=outcome,
                 closed_at_ms=int(message.get("sealed_at_ms") or 0),
                 cur=cur,
             )
@@ -714,6 +733,7 @@ class KnowledgeStore:
         user_message_id: int,
         outcome: str,
         closed_at_ms: int | None = None,
+        terminal_error: dict[str, object] | None = None,
     ) -> ExchangeClosure:
         """Close a clarification, failure, cancellation, or user-only turn."""
 
@@ -724,6 +744,7 @@ class KnowledgeStore:
             user_message_id=user_message_id,
             outcome=outcome,
             closed_at_ms=closed_at_ms,
+            terminal_error=terminal_error,
         )
 
     async def get_project_artifact(
@@ -1049,55 +1070,6 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_episode(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Optional[Episode]:
-        return await self._episode_reader.get_episode(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
-
-    async def get_episodes_for_entity(
-        self,
-        entity_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.get_episodes_for_entity(
-            entity_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
-    async def get_episodes_for_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.get_episodes_for_entities(
-            entity_ids,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
     async def get_merge_evidence_for_entities(
         self,
         entity_ids: List[int],
@@ -1111,72 +1083,6 @@ class KnowledgeStore:
             project_id=project_id,
             evidence_limit=evidence_limit,
             source_message_limit=source_message_limit,
-        )
-
-    async def search_episodes(
-        self,
-        query: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.search_episodes(
-            query,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
-    async def search_episodes_by_embedding(
-        self,
-        embedding: List[float],
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 10,
-        score_threshold: float = 0.35,
-    ) -> List[tuple[EpisodeCard, float]]:
-        return await self._episode_reader.search_episodes_by_embedding(
-            embedding,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-            score_threshold=score_threshold,
-        )
-
-    async def get_recent_episodes(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-        limit: int = 1,
-    ) -> List[EpisodeCard]:
-        return await self._episode_reader.get_recent_episodes(
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-            limit=limit,
-        )
-
-    async def get_episode_source_messages(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> List[Dict]:
-        return await self._episode_reader.get_episode_source_messages(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
         )
 
     async def ensure_identity_entity(
@@ -1305,6 +1211,19 @@ class KnowledgeStore:
         )
 
 
+    async def get_visible_session_ids(
+        self,
+        *,
+        user_name: str,
+        visible_project_ids: List[str],
+    ) -> List[str]:
+        """Return open sessions visible to scoped message retrieval."""
+
+        return await self._message_reader.get_visible_session_ids(
+            user_name=user_name,
+            visible_project_ids=visible_project_ids,
+        )
+
     async def get_message_text(
         self,
         message_id: int,
@@ -1313,7 +1232,7 @@ class KnowledgeStore:
         session_id: str,
         visible_project_ids: List[str],
     ) -> str:
-        return await self._graph_reader.get_message_text(
+        return await self._message_reader.get_message_text(
             message_id,
             user_name=user_name,
             session_id=session_id,
@@ -1328,7 +1247,7 @@ class KnowledgeStore:
         session_ids: List[str],
         visible_project_ids: List[str],
     ) -> List[Dict]:
-        return await self._graph_reader.get_messages_by_ids(
+        return await self._message_reader.get_messages_by_ids(
             ids,
             user_name=user_name,
             session_ids=session_ids,
@@ -1342,7 +1261,7 @@ class KnowledgeStore:
         limit: int,
         before_message_id: Optional[int] = None,
     ) -> List[Dict]:
-        return await self._graph_reader.get_recent_project_messages(
+        return await self._message_reader.get_recent_project_messages(
             user_name,
             project_id,
             limit,
@@ -1360,7 +1279,7 @@ class KnowledgeStore:
         target_total: int = 10,
         discoverable_only: bool = False,
     ) -> List[Dict]:
-        return await self._graph_reader.get_surrounding_messages(
+        return await self._message_reader.get_surrounding_messages(
             message_id,
             user_name=user_name,
             session_id=session_id,

@@ -146,6 +146,7 @@ def test_notebook_compiles_independent_evidence_and_render_capacities():
     )
 
     assert capacity.max_messages == 2
+    assert capacity.max_activities == 2
     assert capacity.max_documents == 3
     assert capacity.max_web_discoveries == 4
     assert capacity.max_web_reads == 5

@@ -992,6 +992,7 @@ class FakeScheduler:
         self.running = False
         self.started = 0
         self.stopped = 0
+        self.requested_jobs: list[str] = []
 
     async def start(self):
         self.running = True
@@ -1000,6 +1001,10 @@ class FakeScheduler:
     async def stop(self):
         self.running = False
         self.stopped += 1
+
+    def wake_job(self, job_name: str) -> bool:
+        self.requested_jobs.append(job_name)
+        return self.running
 
 class FakeSession:
     def __init__(self, session_id="session-1", project_id="project-1"):

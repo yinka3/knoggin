@@ -126,7 +126,7 @@ TOOL_SCHEMAS = [
                 "Load compact entity and supporting-message context for one or "
                 "more active project topics. Use this when the user's question "
                 "materially depends on a listed active topic and more context is "
-                "needed than the pre-fetched hot-topic context provides."
+                "needed for a focused answer."
             ),
             "parameters": {
                 "type": "object",

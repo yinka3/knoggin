@@ -1,8 +1,8 @@
 from typing import Dict, Optional
 
 
-def format_hot_topic_context(context: Dict[str, Dict], *, label: str = "HOT") -> str:
-    """Format compact context for explicit or agent-loaded topics."""
+def format_topic_context(context: Dict[str, Dict], *, label: str = "TOPIC") -> str:
+    """Format compact context returned by targeted topic retrieval."""
 
     if not context:
         return ""

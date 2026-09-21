@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
+from common.schema.context import ContextRevisionOrigin, ContextSnapshot
 from common.schema.settings import (
     EntityResolutionSettings,
     EpisodeSettings,
@@ -104,6 +106,65 @@ async def test_target_crossing_keeps_the_complete_exchange_and_stops_after_it():
     assert selected.window.overfill_ratio == pytest.approx(5 / 15)
     assert selected.window.policy_snapshot["admission_policy"]["semantic_window_tokens"] == 15
     assert selected.window.policy_snapshot["compiled_domain"]["version"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_clarification_keeps_its_durable_assistant_question_as_evidence():
+    rows = [
+        _row(
+            1,
+            outcome="clarification",
+            assistant_id=10_001,
+            user_content="x",
+            assistant_content="x",
+        )
+    ]
+    admission = _admission(rows, target=2)
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [1, 10_001]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_failed_and_cancelled_exchanges_do_not_enter_semantic_evidence():
+    rows = [
+        _row(1, outcome="failed", user_content="x"),
+        _row(2, outcome="cancelled", user_content="x"),
+        _row(3, outcome="assistant_final", user_content="x", assistant_content="x"),
+    ]
+    admission = _admission(rows, target=2)
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [3, 10_003]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_user_only_exchange_remains_deliberate_user_evidence():
+    admission = _admission([_row(1, outcome="user_only", user_content="x")], target=1)
+
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=make_domain_config().compile(),
+    )
+
+    assert selected is not None
+    assert [member.message_id for member in selected.messages] == [1]
 
 
 @pytest.mark.unit
@@ -263,9 +324,14 @@ class _SemanticEpisodeStore:
         self.evidence_reads = []
         self.writes = []
         self.failures = []
+        self.context_snapshot = None
 
     async def get_active_project_semantic_window(self, **_kwargs):
-        return self.window
+        return (
+            None
+            if self.window.stage.value == "completed"
+            else self.window
+        )
 
     async def get_project_semantic_window_episode_result(self, _window_id, **_kwargs):
         return self.result
@@ -294,9 +360,94 @@ class _SemanticEpisodeStore:
         self.writes.append(kwargs)
         self.result = list(kwargs["episodes"])
         self.window = self.window.model_validate(
-            self.window.model_dump() | {"episode_result_recorded": True}
+            self.window.model_dump()
+            | {
+                "episode_result_recorded": True,
+                "attempt_count": 0,
+                "last_failure_stage": None,
+                "last_failure_code": None,
+                "last_failure_at_ms": None,
+                "last_error_summary": None,
+                "next_retry_at_ms": None,
+            }
         )
         return True
+
+    async def get_project_semantic_window_context_snapshot(self, _window_id, **_kwargs):
+        return self.context_snapshot
+
+    async def get_current_project_context_revision(self, **_kwargs):
+        return None
+
+    async def get_project_semantic_window_assistant_source_refs(self, _window_id, **_kwargs):
+        return []
+
+    async def commit_project_context_revision(self, **kwargs):
+        self.context_snapshot = ContextSnapshot(
+            revision_id=uuid4(),
+            project_id="project-1",
+            revision_number=1,
+            window_id=uuid4() if kwargs["window_id"] is None else kwargs["window_id"],
+            origin=ContextRevisionOrigin.CONVERSATION,
+            domain_version=self.window.domain_version,
+            content_hash=kwargs["materialization"].content_hash,
+            blocks=list(kwargs["materialization"].blocks),
+        )
+        return self.context_snapshot
+
+    async def advance_project_semantic_window_stage(self, **kwargs):
+        if kwargs["expected_stage"].value == "claimed":
+            stage = "context_committed"
+            context_revision_id = kwargs["context_revision_id"]
+        else:
+            assert kwargs["expected_stage"].value == "knowledge_committed"
+            assert kwargs["next_stage"].value == "completed"
+            stage = "completed"
+            context_revision_id = self.window.context_revision_id
+        self.window = self.window.model_validate(
+            self.window.model_dump()
+            | {
+                "stage": stage,
+                "context_revision_id": context_revision_id,
+                "attempt_count": 0,
+                "last_failure_stage": None,
+                "last_failure_code": None,
+                "last_failure_at_ms": None,
+                "last_error_summary": None,
+                "next_retry_at_ms": None,
+            }
+        )
+        return True
+
+    async def get_project_context_snapshot(self, _revision_id, **_kwargs):
+        return self.context_snapshot
+
+    async def get_project_context_revision_impact_block_ids(self, _revision_id, **_kwargs):
+        return frozenset()
+
+    async def get_project_context_block_supports(self, _block_ids, **_kwargs):
+        return {}
+
+    async def commit_project_semantic_knowledge(self, _build):
+        self.window = self.window.model_validate(
+            self.window.model_dump()
+            | {
+                "stage": "knowledge_committed",
+                "attempt_count": 0,
+                "last_failure_stage": None,
+                "last_failure_code": None,
+                "last_failure_at_ms": None,
+                "last_error_summary": None,
+                "next_retry_at_ms": None,
+            }
+        )
+        return SimpleNamespace(resumed=False, relationships_written=0)
+
+    async def get_project_semantic_window_committed_entity_ids(self, _window_id, **_kwargs):
+        return ()
+
+    async def enrich_project_semantic_window_episodes(self, **_kwargs):
+        return {"entities": 0, "relationships": 0}
 
     async def record_project_semantic_window_failure(self, **kwargs):
         self.failures.append(kwargs)
@@ -346,6 +497,72 @@ class _FailThenZeroEpisodeGenerator(_ZeroEpisodeGenerator):
         return SimpleNamespace(final_episodes=[])
 
 
+class _FailTwiceThenZeroEpisodeGenerator(_ZeroEpisodeGenerator):
+    async def generate(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) <= 2:
+            raise ConnectionError("temporary episode provider outage")
+        return SimpleNamespace(final_episodes=[])
+
+
+class _NoopContextUpdater:
+    async def update(self, **_kwargs):
+        return SimpleNamespace(materialization=None, edit_summary="No Context change")
+
+
+class _FailingContextUpdater:
+    def __init__(self):
+        self.calls = 0
+
+    async def update(self, **_kwargs):
+        self.calls += 1
+        raise ConnectionError("temporary Context provider outage")
+
+
+class _NoopProjection:
+    async def synchronize(self, **_kwargs):
+        return None
+
+
+class _UnexpectedBuilder:
+    async def build(self, _build):
+        raise AssertionError("empty Context impact must not build entities")
+
+
+class _UnexpectedRelationships:
+    async def extract(self, _build):
+        raise AssertionError("empty Context impact must not extract relationships")
+
+
+async def _publish_nothing(_entity_ids):
+    return None
+
+
+def _job(
+    admission,
+    store,
+    generator,
+    *,
+    settings,
+    capture_semantic_policy,
+    context_updater=None,
+    now_ms=None,
+):
+    return ProjectSemanticJob(
+        admission,
+        store,
+        generator,
+        settings=settings,
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=context_updater or _NoopContextUpdater(),
+        context_projection=_NoopProjection(),
+        context_entity_builder=_UnexpectedBuilder(),
+        context_relationship_extractor=_UnexpectedRelationships(),
+        publish_committed_entity_ids=_publish_nothing,
+        now_ms=now_ms,
+    )
+
+
 @pytest.mark.unit
 @pytest.mark.no_network
 async def test_project_semantic_job_records_zero_result_for_one_claimed_window():
@@ -364,11 +581,12 @@ async def test_project_semantic_job_records_zero_result_for_one_claimed_window()
         user_name="ada",
         project_id="project-1",
         domain=domain,
+        ingestion_policy=_policy(domain),
     )
     assert selected is not None
     store = _SemanticEpisodeStore(selected.window)
     generator = _ZeroEpisodeGenerator()
-    job = ProjectSemanticJob(
+    job = _job(
         admission,
         store,
         generator,
@@ -382,10 +600,13 @@ async def test_project_semantic_job_records_zero_result_for_one_claimed_window()
     result = await job.execute(context)
 
     assert result.success is True
-    assert "recorded 0 episodes" in result.summary
+    assert result.summary == (
+        "Semantic processor completed durable stages: "
+        "Episode -> Context -> Knowledge -> finalization"
+    )
     assert len(generator.calls) == 1
     assert len(store.writes) == 1
-    assert store.window.stage.value == "claimed"
+    assert store.window.stage.value == "completed"
     assert store.window.episode_result_recorded is True
     assert await job.should_run(context) is False
 
@@ -406,6 +627,7 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
         user_name="ada",
         project_id="project-1",
         domain=domain,
+        ingestion_policy=_policy(domain),
     )
     assert selected is not None
     store = _SemanticEpisodeStore(selected.window)
@@ -415,7 +637,7 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
     async def capture_semantic_policy():
         return _policy(domain)
 
-    job = ProjectSemanticJob(
+    job = _job(
         admission,
         store,
         generator,
@@ -453,6 +675,71 @@ async def test_project_semantic_episode_failure_retries_the_same_claimed_window(
 
 @pytest.mark.unit
 @pytest.mark.no_network
+async def test_successful_episode_checkpoint_resets_the_context_retry_budget():
+    admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
+    settings = IngestionSettings.model_validate(
+        {
+            "semantic_window_tokens": 1,
+            "semantic_window_retry": {
+                "max_attempts": 3,
+                "initial_backoff_seconds": 30,
+                "max_backoff_seconds": 300,
+            },
+        }
+    )
+    admission = SemanticWindowAdmission(
+        admission_store,
+        settings,
+        token_counter=lambda text: text.count("x"),
+    )
+    domain = make_domain_config().compile()
+    selected = await admission.select(
+        user_name="ada",
+        project_id="project-1",
+        domain=domain,
+        ingestion_policy=_policy(domain),
+    )
+    assert selected is not None
+    store = _SemanticEpisodeStore(selected.window)
+    generator = _FailTwiceThenZeroEpisodeGenerator()
+    context_updater = _FailingContextUpdater()
+    now = [1_000]
+
+    async def capture_semantic_policy():
+        return _policy(domain)
+
+    job = _job(
+        admission,
+        store,
+        generator,
+        settings=settings,
+        capture_semantic_policy=capture_semantic_policy,
+        context_updater=context_updater,
+        now_ms=lambda: now[0],
+    )
+    context = JobContext(user_name="ada", project_id="project-1")
+
+    assert (await job.execute(context)).success is False
+    now[0] = 31_000
+    assert (await job.execute(context)).success is False
+    now[0] = 91_000
+    context_failure = await job.execute(context)
+
+    assert context_failure.success is False
+    assert len(generator.calls) == 3
+    assert context_updater.calls == 1
+    assert [failure["failure_stage"] for failure in store.failures] == [
+        "episode_generation",
+        "episode_generation",
+        "context_update",
+    ]
+    assert store.window.attempt_count == 1
+    assert store.window.last_failure_stage == "context_update"
+    assert store.window.next_retry_at_ms == 121_000
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
     admission_store = RecordingStore([_row(1, user_content="x", assistant_content="x")])
     settings = IngestionSettings.model_validate(
@@ -475,6 +762,7 @@ async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
         user_name="ada",
         project_id="project-1",
         domain=domain,
+        ingestion_policy=_policy(domain),
     )
     assert selected is not None
     store = _SemanticEpisodeStore(selected.window)
@@ -483,7 +771,7 @@ async def test_explicit_retry_reuses_the_exhausted_window_without_reselection():
     async def capture_semantic_policy():
         return _policy(domain)
 
-    job = ProjectSemanticJob(
+    job = _job(
         admission,
         store,
         generator,

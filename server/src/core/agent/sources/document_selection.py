@@ -22,6 +22,7 @@ def build_document_selection_candidate(
     if not isinstance(excerpt, str):
         raise ValueError("resolved document selection has no excerpt")
     document_id = selection_context.get("document_id")
+    parse_snapshot_id = selection_context.get("parse_snapshot_id")
     source_project_id = selection_context.get("project_id")
     content_hash = selection_context.get("content_hash")
     relative_path = selection_context.get("relative_path")
@@ -31,6 +32,7 @@ def build_document_selection_candidate(
         isinstance(value, str) and value.strip()
         for value in (
             document_id,
+            parse_snapshot_id,
             source_project_id,
             content_hash,
             relative_path,
@@ -40,7 +42,7 @@ def build_document_selection_candidate(
     ):
         raise ValueError("resolved document selection is missing document metadata")
     source_kind = (
-        "pdf_document" if locator.get("kind") == "pdf_page" else "text_document"
+        "pdf_document" if locator.get("kind") == "layout_region" else "text_document"
     )
     metadata = {
         "document_name": document_name,
@@ -56,6 +58,7 @@ def build_document_selection_candidate(
             "session_id": session_id,
             "source_kind": source_kind,
             "document_id": document_id,
+            "parse_snapshot_id": parse_snapshot_id,
             "source_project_id": source_project_id,
             "content_hash": content_hash,
             "locator": dict(locator),

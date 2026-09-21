@@ -94,7 +94,6 @@ class ProjectRuntimeFactory:
             entities=entities,
             embedding_service=resources.embedding,
             knowledge_store=resources.knowledge_store,
-            postgres=resources.postgres,
             search_config={
                 **runtime_config.developer_settings.search.model_dump(),
                 **runtime_config.search.model_dump(),

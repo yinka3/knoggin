@@ -70,7 +70,6 @@ class AACReadContext:
             entities=entities,
             embedding_service=embedding_service,
             knowledge_store=knowledge_store,
-            postgres=postgres,
             search_config=search_config,
         )
         reader = DocumentReader(

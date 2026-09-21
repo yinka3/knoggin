@@ -921,6 +921,19 @@ async def test_semantic_commit_accepts_an_owned_empty_context_revision(
         next_stage=SemanticWindowStage.CONTEXT_COMMITTED,
         context_revision_id=context.revision_id,
     )
+    failed = await window_writer.record_failure(
+        window_id=window.window_id,
+        user_name="ada",
+        project_id="project-1",
+        expected_stage=SemanticWindowStage.CONTEXT_COMMITTED,
+        failure_stage="knowledge_reconciliation",
+        failure_code="ConnectionError",
+        error_summary="graph write unavailable",
+        failed_at_ms=1_000,
+        next_retry_at_ms=31_000,
+    )
+    assert failed is not None
+    assert failed.attempt_count == 1
 
     summary = await SemanticCommitWriter(real_postgres_client).commit(
         _empty_build(window.window_id, context)
@@ -929,9 +942,22 @@ async def test_semantic_commit_accepts_an_owned_empty_context_revision(
     assert summary.resumed is False
     assert summary.relationships_written == 0
     assert await real_postgres_client.fetch_one(
-        "SELECT stage FROM public.project_semantic_windows WHERE window_id = %s",
+        """
+        SELECT stage, attempt_count, last_failure_stage, last_failure_code,
+               last_failure_at_ms, last_error_summary, next_retry_at_ms
+        FROM public.project_semantic_windows
+        WHERE window_id = %s
+        """,
         (window.window_id,),
-    ) == {"stage": "knowledge_committed"}
+    ) == {
+        "stage": "knowledge_committed",
+        "attempt_count": 0,
+        "last_failure_stage": None,
+        "last_failure_code": None,
+        "last_failure_at_ms": None,
+        "last_error_summary": None,
+        "next_retry_at_ms": None,
+    }
 
 
 @pytest.mark.storage

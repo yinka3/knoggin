@@ -52,6 +52,7 @@ class Scheduler:
         self._job_runs: dict[str, dict[str, object]] = {}
         self._recent_outcomes: deque[dict[str, object]] = deque(maxlen=20)
         self._wake_event = asyncio.Event()
+        self._requested_jobs: set[str] = set()
 
     @property
     def running(self) -> bool:
@@ -82,6 +83,26 @@ class Scheduler:
 
         if not self._is_running or self._admissions_closed:
             return False
+        self._wake_event.set()
+        return True
+
+    def wake_job(self, job_name: str) -> bool:
+        """Prompt one registered job and retain the request while it runs.
+
+        The request is only an in-memory wake hint. The job still decides from
+        durable state whether work is due, and the normal polling cadence
+        remains the recovery path after a process restart or missed wake.
+        """
+
+        if not isinstance(job_name, str) or not job_name.strip():
+            raise ValueError("job_name must be a non-blank string")
+        if (
+            not self._is_running
+            or self._admissions_closed
+            or job_name not in self._jobs
+        ):
+            return False
+        self._requested_jobs.add(job_name)
         self._wake_event.set()
         return True
 
@@ -166,6 +187,7 @@ class Scheduler:
                 await asyncio.gather(*pending, return_exceptions=True)
 
         self._running_tasks.clear()
+        self._requested_jobs.clear()
         await self._safe_emit(self.project_id, "job", "scheduler_stopped", {})
         logger.info("Scheduler stopped")
 
@@ -215,12 +237,14 @@ class Scheduler:
             if not job.enabled:
                 return
 
+            requested = job_name in self._requested_jobs
             trigger_due = await job.should_run(ctx)
             cadence_due = False if trigger_due else self._is_cadence_due(job)
-            if not trigger_due and not cadence_due:
+            if not requested and not trigger_due and not cadence_due:
                 return
 
             policy = self._capture_job_policy()
+            self._requested_jobs.discard(job_name)
             task = asyncio.create_task(
                 self._execute_job(job, ctx, policy=policy),
                 name=f"job:{self.user_name}:{self.project_id}:{job_name}",
@@ -523,3 +547,5 @@ class Scheduler:
             self._finish_job_run(job_name, "cancelled")
         if self._running_tasks.get(job_name) is task:
             del self._running_tasks[job_name]
+        if self._is_running and self._requested_jobs:
+            self._wake_event.set()

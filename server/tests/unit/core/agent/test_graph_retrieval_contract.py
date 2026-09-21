@@ -6,11 +6,6 @@ from common.schema.evidence import EvidenceBundle
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 
-class _Postgres:
-    async def fetch_all(self, _query, _params):
-        return [{"session_id": "session-1"}]
-
-
 def _retrieval(store, *, readable_project_ids=None):
     class Entities:
         async def get_profile(self, entity_id):
@@ -25,7 +20,6 @@ def _retrieval(store, *, readable_project_ids=None):
         entities=Entities(),
         embedding_service=SimpleNamespace(),
         knowledge_store=store,
-        postgres=_Postgres(),
         search_config={"default_activity_hours": 72},
     )
 
@@ -89,7 +83,7 @@ async def test_connections_keep_stored_direction_when_selected_from_target():
     class Store:
         async def get_related_entities(self, entity_ids, **kwargs):
             assert entity_ids == [3]
-            assert kwargs == {"limit": 50, "visible_project_ids": ["project-1"]}
+            assert kwargs == {"limit": 40, "visible_project_ids": ["project-1"]}
             return [
                 {
                     "project_id": "project-1",

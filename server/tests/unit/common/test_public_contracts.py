@@ -3,7 +3,12 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from common.exceptions import DependencyError, ToolExecutionError
+from common.exceptions import (
+    DependencyError,
+    LLMBudgetExceededError,
+    ToolExecutionError,
+    WorkspaceConflictError,
+)
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
@@ -58,6 +63,14 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
         ).research_mode
         == "deep_research"
     )
+    assert (
+        StartRunRequest(
+            session_id="session-1",
+            query="hello",
+            idempotency_key="  retry-1  ",
+        ).idempotency_key
+        == "retry-1"
+    )
     selected_run = StartRunRequest(
         session_id="session-1",
         query="explain this",
@@ -66,6 +79,7 @@ def test_first_vertical_slice_dtos_are_separate_and_strict(source):
             "document_id": "document-1",
             "selection": {
                 "content_hash": "a" * 64,
+                "parse_snapshot_id": "snapshot-1",
                 "locator": {
                     "kind": "code_lines",
                     "start_line": 4,
@@ -128,6 +142,7 @@ def test_run_document_focus_rejects_server_owned_and_invalid_selection_fields():
                 "document_id": "document-1",
                 "selection": {
                     "content_hash": "G" * 64,
+                    "parse_snapshot_id": "snapshot-1",
                     "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
                 },
             },
@@ -142,6 +157,7 @@ def test_run_document_focus_rejects_server_owned_and_invalid_selection_fields():
                 "path_prefix": "src",
                 "selection": {
                     "content_hash": "a" * 64,
+                    "parse_snapshot_id": "snapshot-1",
                     "locator": {"kind": "text_lines", "start_line": 1, "end_line": 1},
                 },
             },
@@ -175,11 +191,20 @@ def test_public_errors_use_safe_stable_projection_and_drop_internal_details():
     assert error == PublicError(
         code="tool_failed",
         message="A tool could not complete the request.",
-        retryable=True,
+        retryable=False,
         request_id="request-1",
         run_id="run-1",
     )
     assert "secret-host" not in error.model_dump_json()
+    assert to_public_error(
+        ToolExecutionError("search_messages", "temporary outage", retryable=True)
+    ).retryable is True
+    assert to_public_error(LLMBudgetExceededError("secret budget details")).code == (
+        "llm_budget_exhausted"
+    )
+    assert to_public_error(WorkspaceConflictError("secret file name")).code == (
+        "workspace_conflict"
+    )
     assert to_public_error(ValueError("bad input")).code == "invalid_request"
     assert to_public_error(DependencyError("service password")).retryable is True
 

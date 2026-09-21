@@ -235,6 +235,7 @@ CREATE TABLE public.agents (
 CREATE TABLE public.document_chunks (
     chunk_id uuid NOT NULL,
     document_id uuid NOT NULL,
+    snapshot_id uuid NOT NULL,
     chunk_index integer NOT NULL,
     content text NOT NULL,
     relative_path text NOT NULL,
@@ -250,17 +251,27 @@ CREATE TABLE public.document_chunks (
     section_path text[],
     start_paragraph integer,
     end_paragraph integer,
+    layout_region jsonb,
     search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, ((((((content || ' '::text) || relative_path) || ' '::text) || COALESCE(symbol_name, ''::text)) || ' '::text) || COALESCE(language, ''::text)))) STORED,
     CONSTRAINT document_chunks_index_check CHECK ((chunk_index >= 0)),
     CONSTRAINT document_chunks_line_range_check CHECK ((((start_line IS NULL) AND (end_line IS NULL)) OR ((start_line >= 1) AND (end_line >= start_line)))),
     CONSTRAINT document_chunks_page_number_check CHECK (((page_number IS NULL) OR (page_number >= 1))),
     CONSTRAINT document_chunks_paragraph_range_check CHECK ((((start_paragraph IS NULL) AND (end_paragraph IS NULL)) OR ((start_paragraph >= 1) AND (end_paragraph >= start_paragraph)))),
-    CONSTRAINT document_chunks_row_range_check CHECK ((((start_row IS NULL) AND (end_row IS NULL)) OR ((start_row >= 1) AND (end_row >= start_row))))
+    CONSTRAINT document_chunks_row_range_check CHECK ((((start_row IS NULL) AND (end_row IS NULL)) OR ((start_row >= 1) AND (end_row >= start_row)))),
+    CONSTRAINT document_chunks_layout_region_check CHECK (((layout_region IS NULL) OR (jsonb_typeof(layout_region) = 'object'::text)))
 );
-CREATE TABLE public.document_extractions (
+CREATE TABLE public.document_parse_snapshots (
+    snapshot_id uuid NOT NULL,
     document_id uuid NOT NULL,
-    extracted_text text,
-    extracted_content_hash text
+    source_content_hash text NOT NULL,
+    parser_name text NOT NULL,
+    parser_version text NOT NULL,
+    parser_fingerprint text NOT NULL,
+    snapshot jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT document_parse_snapshots_hash_check CHECK ((source_content_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT document_parse_snapshots_parser_check CHECK (((btrim(parser_name) <> ''::text) AND (btrim(parser_version) <> ''::text) AND (parser_fingerprint ~ '^[0-9a-f]{64}$'::text))),
+    CONSTRAINT document_parse_snapshots_payload_check CHECK ((jsonb_typeof(snapshot) = 'object'::text))
 );
 CREATE TABLE public.embedding_configuration (
     singleton boolean PRIMARY KEY DEFAULT TRUE CHECK (singleton),
@@ -502,6 +513,7 @@ CREATE TABLE public.message_source_refs (
     message_id bigint NOT NULL,
     source_kind text NOT NULL,
     document_id uuid,
+    parse_snapshot_id uuid,
     source_project_id text,
     canonical_url text,
     source_message_id bigint,
@@ -521,7 +533,99 @@ CREATE TABLE public.message_source_refs (
     CONSTRAINT message_source_refs_kind_check CHECK ((source_kind = ANY (ARRAY['pdf_document'::text, 'text_document'::text, 'user_pasted_text'::text, 'web_search_result'::text, 'news_search_result'::text, 'web_page'::text, 'web_pdf'::text]))),
     CONSTRAINT message_source_refs_position_check CHECK ((result_position >= 0)),
     CONSTRAINT message_source_refs_source_project_shape_check CHECK ((((source_kind = ANY (ARRAY['pdf_document'::text, 'text_document'::text])) AND (source_project_id IS NOT NULL)) OR ((source_kind <> ALL (ARRAY['pdf_document'::text, 'text_document'::text])) AND (source_project_id IS NULL)))),
-    CONSTRAINT message_source_refs_source_shape_check CHECK ((((source_kind = 'pdf_document'::text) AND (document_id IS NOT NULL) AND (source_project_id IS NOT NULL) AND (canonical_url IS NULL) AND (source_message_id IS NULL) AND (((tool_call_id IS NOT NULL) AND (encounter_kind = ANY (ARRAY['document_search'::text, 'document_read'::text]))) OR ((tool_call_id IS NULL) AND (encounter_kind = 'document_selection'::text))) AND ((locator ->> 'kind'::text) = 'pdf_page'::text) AND (jsonb_typeof((locator -> 'page'::text)) = 'number'::text) AND ((locator ->> 'page'::text) ~ '^[1-9][0-9]*$'::text) AND (COALESCE((metadata ->> 'document_name'::text), ''::text) <> ''::text)) OR ((source_kind = 'text_document'::text) AND (document_id IS NOT NULL) AND (source_project_id IS NOT NULL) AND (canonical_url IS NULL) AND (source_message_id IS NULL) AND (((tool_call_id IS NOT NULL) AND (encounter_kind = ANY (ARRAY['document_search'::text, 'document_read'::text]))) OR ((tool_call_id IS NULL) AND (encounter_kind = 'document_selection'::text))) AND ((((locator ->> 'kind'::text) = ANY (ARRAY['text_lines'::text, 'code_lines'::text])) AND (jsonb_typeof((locator -> 'start_line'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_line'::text)) = 'number'::text) AND ((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint)) OR (((locator ->> 'kind'::text) = 'csv_rows'::text) AND (jsonb_typeof((locator -> 'start_row'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_row'::text)) = 'number'::text) AND ((locator ->> 'start_row'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_row'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_row'::text))::bigint >= ((locator ->> 'start_row'::text))::bigint)) OR (((locator ->> 'kind'::text) = 'docx_paragraphs'::text) AND (jsonb_typeof((locator -> 'start_paragraph'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_paragraph'::text)) = 'number'::text) AND ((locator ->> 'start_paragraph'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_paragraph'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_paragraph'::text))::bigint >= ((locator ->> 'start_paragraph'::text))::bigint))) AND (COALESCE((metadata ->> 'document_name'::text), ''::text) <> ''::text)) OR ((source_kind = 'user_pasted_text'::text) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (canonical_url IS NULL) AND (source_message_id IS NOT NULL) AND (tool_call_id IS NULL) AND (encounter_kind = 'user_pasted_text'::text) AND ((locator ->> 'kind'::text) = 'character_span'::text) AND (jsonb_typeof((locator -> 'start_char'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_char'::text)) = 'number'::text) AND ((locator ->> 'start_char'::text) ~ '^[0-9]+$'::text) AND ((locator ->> 'end_char'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_char'::text))::bigint > ((locator ->> 'start_char'::text))::bigint)) OR ((source_kind = ANY (ARRAY['web_search_result'::text, 'news_search_result'::text])) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (source_message_id IS NULL) AND (canonical_url ~ '^https?://[^[:space:]#]+$'::text) AND (tool_call_id IS NOT NULL) AND ((locator ->> 'kind'::text) = 'search_result'::text) AND (COALESCE((locator ->> 'provider'::text), ''::text) <> ''::text) AND (COALESCE((locator ->> 'query'::text), ''::text) <> ''::text) AND (jsonb_typeof((locator -> 'rank'::text)) = 'number'::text) AND ((locator ->> 'rank'::text) ~ '^[1-9][0-9]*$'::text) AND (COALESCE((metadata ->> 'title'::text), ''::text) <> ''::text) AND ((metadata -> 'discovery_snippet'::text) = 'true'::jsonb) AND (((source_kind = 'web_search_result'::text) AND (encounter_kind = 'web_search'::text)) OR ((source_kind = 'news_search_result'::text) AND (encounter_kind = 'news_search'::text)))) OR ((source_kind = 'web_page'::text) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (source_message_id IS NULL) AND (canonical_url ~ '^https?://[^[:space:]#]+$'::text) AND (tool_call_id IS NOT NULL) AND (encounter_kind = 'web_read'::text) AND ((locator ->> 'kind'::text) = 'text_lines'::text) AND (jsonb_typeof((locator -> 'start_line'::text)) = 'number'::text) AND (jsonb_typeof((locator -> 'end_line'::text)) = 'number'::text) AND ((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text) AND (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint) AND ((NOT (metadata ? 'title'::text)) OR (COALESCE((metadata ->> 'title'::text), ''::text) <> ''::text)) AND ((metadata -> 'discovery_snippet'::text) IS DISTINCT FROM 'true'::jsonb)) OR ((source_kind = 'web_pdf'::text) AND (document_id IS NULL) AND (source_project_id IS NULL) AND (source_message_id IS NULL) AND (canonical_url ~ '^https?://[^[:space:]#]+$'::text) AND (tool_call_id IS NOT NULL) AND (encounter_kind = 'web_read'::text) AND ((locator ->> 'kind'::text) = 'pdf_page'::text) AND (jsonb_typeof((locator -> 'page'::text)) = 'number'::text) AND ((locator ->> 'page'::text) ~ '^[1-9][0-9]*$'::text) AND ((NOT (metadata ? 'title'::text)) OR (COALESCE((metadata ->> 'title'::text), ''::text) <> ''::text)) AND ((metadata -> 'discovery_snippet'::text) IS DISTINCT FROM 'true'::jsonb))))
+    CONSTRAINT message_source_refs_snapshot_shape_check CHECK ((((source_kind = ANY (ARRAY['pdf_document'::text, 'text_document'::text])) AND (parse_snapshot_id IS NOT NULL)) OR ((source_kind <> ALL (ARRAY['pdf_document'::text, 'text_document'::text])) AND (parse_snapshot_id IS NULL)))),
+    CONSTRAINT message_source_refs_source_shape_check CHECK (
+        (
+            source_kind = 'pdf_document'
+            AND document_id IS NOT NULL
+            AND parse_snapshot_id IS NOT NULL
+            AND source_project_id IS NOT NULL
+            AND canonical_url IS NULL
+            AND source_message_id IS NULL
+            AND (
+                (tool_call_id IS NOT NULL AND encounter_kind IN ('document_search', 'document_read'))
+                OR (tool_call_id IS NULL AND encounter_kind = 'document_selection')
+            )
+            AND locator ->> 'kind' = 'layout_region'
+            AND jsonb_typeof(locator -> 'page') = 'number'
+            AND locator ->> 'page' ~ '^[1-9][0-9]*$'
+            AND locator ->> 'extraction_method' IN ('native_text', 'ocr', 'model_interpretation')
+            AND COALESCE(metadata ->> 'document_name', '') <> ''
+        )
+        OR (
+            source_kind = 'text_document'
+            AND document_id IS NOT NULL
+            AND parse_snapshot_id IS NOT NULL
+            AND source_project_id IS NOT NULL
+            AND canonical_url IS NULL
+            AND source_message_id IS NULL
+            AND (
+                (tool_call_id IS NOT NULL AND encounter_kind IN ('document_search', 'document_read'))
+                OR (tool_call_id IS NULL AND encounter_kind = 'document_selection')
+            )
+            AND locator ->> 'kind' IN ('text_lines', 'code_lines', 'csv_rows', 'layout_region')
+            AND COALESCE(metadata ->> 'document_name', '') <> ''
+        )
+        OR (
+            source_kind = 'user_pasted_text'
+            AND document_id IS NULL
+            AND parse_snapshot_id IS NULL
+            AND source_project_id IS NULL
+            AND canonical_url IS NULL
+            AND source_message_id IS NOT NULL
+            AND tool_call_id IS NULL
+            AND encounter_kind = 'user_pasted_text'
+            AND locator ->> 'kind' = 'character_span'
+        )
+        OR (
+            source_kind IN ('web_search_result', 'news_search_result')
+            AND document_id IS NULL
+            AND parse_snapshot_id IS NULL
+            AND source_project_id IS NULL
+            AND source_message_id IS NULL
+            AND canonical_url ~ '^https?://[^[:space:]#]+$'
+            AND tool_call_id IS NOT NULL
+            AND locator ->> 'kind' = 'search_result'
+            AND COALESCE(metadata ->> 'title', '') <> ''
+            AND metadata -> 'discovery_snippet' = 'true'::jsonb
+            AND (
+                (source_kind = 'web_search_result' AND encounter_kind = 'web_search')
+                OR (source_kind = 'news_search_result' AND encounter_kind = 'news_search')
+            )
+        )
+        OR (
+            source_kind = 'web_page'
+            AND document_id IS NULL
+            AND parse_snapshot_id IS NULL
+            AND source_project_id IS NULL
+            AND source_message_id IS NULL
+            AND canonical_url ~ '^https?://[^[:space:]#]+$'
+            AND tool_call_id IS NOT NULL
+            AND encounter_kind = 'web_read'
+            AND locator ->> 'kind' = 'text_lines'
+            AND (
+                NOT metadata ? 'title'
+                OR COALESCE(metadata ->> 'title', '') <> ''
+            )
+            AND metadata -> 'discovery_snippet' IS DISTINCT FROM 'true'::jsonb
+        )
+        OR (
+            source_kind = 'web_pdf'
+            AND document_id IS NULL
+            AND parse_snapshot_id IS NULL
+            AND source_project_id IS NULL
+            AND source_message_id IS NULL
+            AND canonical_url ~ '^https?://[^[:space:]#]+$'
+            AND tool_call_id IS NOT NULL
+            AND encounter_kind = 'web_read'
+            AND locator ->> 'kind' = 'pdf_page'
+            AND (
+                NOT metadata ? 'title'
+                OR COALESCE(metadata ->> 'title', '') <> ''
+            )
+            AND metadata -> 'discovery_snippet' IS DISTINCT FROM 'true'::jsonb
+        )
+    )
 );
 CREATE TABLE public.messages (
     user_name text NOT NULL,
@@ -597,7 +701,11 @@ CREATE TABLE public.project_documents (
     extension text DEFAULT ''::text NOT NULL,
     size_bytes bigint NOT NULL,
     content_hash text NOT NULL,
+    current_snapshot_id uuid,
     status text DEFAULT 'queued'::text NOT NULL,
+    index_attempt_count integer DEFAULT 0 NOT NULL,
+    next_index_retry_at timestamp with time zone,
+    last_index_failure_kind text,
     deleted_at timestamp with time zone,
     indexed_at timestamp with time zone,
     error_message text,
@@ -605,6 +713,8 @@ CREATE TABLE public.project_documents (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT project_documents_relative_path_size_check CHECK (((octet_length(relative_path) >= 1) AND (octet_length(relative_path) <= 2048))),
     CONSTRAINT project_documents_size_check CHECK ((size_bytes >= 0)),
+    CONSTRAINT project_documents_index_attempt_count_check CHECK ((index_attempt_count >= 0)),
+    CONSTRAINT project_documents_index_failure_kind_check CHECK (((last_index_failure_kind IS NULL) OR (last_index_failure_kind = ANY (ARRAY['transient_dependency'::text, 'invalid_content'::text])))),
     CONSTRAINT project_documents_status_check CHECK ((status = ANY (ARRAY['queued'::text, 'indexing'::text, 'indexed'::text, 'failed'::text, 'deleted'::text])))
 );
 CREATE TABLE public.project_file_cleanup_tasks (
@@ -880,11 +990,13 @@ ALTER TABLE ONLY public.agent_tool_audits
 ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_pkey PRIMARY KEY (agent_id);
 ALTER TABLE ONLY public.document_chunks
-    ADD CONSTRAINT document_chunks_document_index_unique UNIQUE (document_id, chunk_index);
+    ADD CONSTRAINT document_chunks_snapshot_index_unique UNIQUE (snapshot_id, chunk_index);
 ALTER TABLE ONLY public.document_chunks
     ADD CONSTRAINT document_chunks_pkey PRIMARY KEY (chunk_id);
-ALTER TABLE ONLY public.document_extractions
-    ADD CONSTRAINT document_extractions_pkey PRIMARY KEY (document_id);
+ALTER TABLE ONLY public.document_parse_snapshots
+    ADD CONSTRAINT document_parse_snapshots_pkey PRIMARY KEY (snapshot_id);
+ALTER TABLE ONLY public.document_parse_snapshots
+    ADD CONSTRAINT document_parse_snapshots_snapshot_document_unique UNIQUE (snapshot_id, document_id);
 ALTER TABLE public.entities
     ADD CONSTRAINT entities_canonical_name_nonblank_check CHECK ((btrim(canonical_name) <> ''::text));
 ALTER TABLE public.entities
@@ -948,30 +1060,40 @@ ALTER TABLE public.message_source_refs
 CASE (locator ->> 'kind'::text)
     WHEN 'text_lines'::text THEN
     CASE
-        WHEN (((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint)
+        WHEN (jsonb_typeof(locator -> 'start_line') = 'number' AND jsonb_typeof(locator -> 'end_line') = 'number' AND (locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text AND (locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text) THEN ((locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint)
         ELSE false
     END
     WHEN 'code_lines'::text THEN
     CASE
-        WHEN (((locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_line'::text))::bigint >= ((locator ->> 'start_line'::text))::bigint)
+        WHEN (jsonb_typeof(locator -> 'start_line') = 'number' AND jsonb_typeof(locator -> 'end_line') = 'number' AND (locator ->> 'start_line'::text) ~ '^[1-9][0-9]*$'::text AND (locator ->> 'end_line'::text) ~ '^[1-9][0-9]*$'::text) THEN ((locator ->> 'end_line')::bigint >= (locator ->> 'start_line')::bigint)
         ELSE false
     END
     WHEN 'csv_rows'::text THEN
     CASE
-        WHEN (((locator ->> 'start_row'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_row'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_row'::text))::bigint >= ((locator ->> 'start_row'::text))::bigint)
+        WHEN (jsonb_typeof(locator -> 'start_row') = 'number' AND jsonb_typeof(locator -> 'end_row') = 'number' AND (locator ->> 'start_row'::text) ~ '^[1-9][0-9]*$'::text AND (locator ->> 'end_row'::text) ~ '^[1-9][0-9]*$'::text) THEN ((locator ->> 'end_row')::bigint >= (locator ->> 'start_row')::bigint)
         ELSE false
     END
-    WHEN 'docx_paragraphs'::text THEN
+    WHEN 'layout_region'::text THEN
     CASE
-        WHEN (((locator ->> 'start_paragraph'::text) ~ '^[1-9][0-9]*$'::text) AND ((locator ->> 'end_paragraph'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_paragraph'::text))::bigint >= ((locator ->> 'start_paragraph'::text))::bigint)
+        WHEN (jsonb_typeof(locator -> 'page') = 'number' AND (locator ->> 'page'::text) ~ '^[1-9][0-9]*$'::text AND jsonb_typeof(locator -> 'element_type') = 'string' AND COALESCE(locator ->> 'element_type', '') <> '' AND locator ->> 'extraction_method' IN ('native_text', 'ocr', 'model_interpretation')) THEN true
+        ELSE false
+    END
+    WHEN 'pdf_page'::text THEN
+    CASE
+        WHEN (jsonb_typeof(locator -> 'page') = 'number' AND (locator ->> 'page'::text) ~ '^[1-9][0-9]*$'::text) THEN true
         ELSE false
     END
     WHEN 'character_span'::text THEN
     CASE
-        WHEN (((locator ->> 'start_char'::text) ~ '^[0-9]+$'::text) AND ((locator ->> 'end_char'::text) ~ '^[1-9][0-9]*$'::text)) THEN (((locator ->> 'end_char'::text))::bigint > ((locator ->> 'start_char'::text))::bigint)
+        WHEN (jsonb_typeof(locator -> 'start_char') = 'number' AND jsonb_typeof(locator -> 'end_char') = 'number' AND (locator ->> 'start_char'::text) ~ '^[0-9]+$'::text AND (locator ->> 'end_char'::text) ~ '^[1-9][0-9]*$'::text) THEN ((locator ->> 'end_char')::bigint > (locator ->> 'start_char')::bigint)
         ELSE false
     END
-    ELSE true
+    WHEN 'search_result'::text THEN
+    CASE
+        WHEN (jsonb_typeof(locator -> 'provider') = 'string' AND COALESCE(locator ->> 'provider', '') <> '' AND jsonb_typeof(locator -> 'query') = 'string' AND COALESCE(locator ->> 'query', '') <> '' AND jsonb_typeof(locator -> 'rank') = 'number' AND (locator ->> 'rank'::text) ~ '^[1-9][0-9]*$'::text) THEN true
+        ELSE false
+    END
+    ELSE false
 END);
 ALTER TABLE ONLY public.message_source_refs
     ADD CONSTRAINT message_source_refs_pkey PRIMARY KEY (source_ref_id);
@@ -1114,12 +1236,14 @@ CREATE INDEX project_semantic_windows_retry_idx ON public.project_semantic_windo
 CREATE INDEX project_artifacts_project_updated_idx ON public.project_artifacts USING btree (project_id, updated_at DESC);
 CREATE INDEX project_artifacts_session_updated_idx ON public.project_artifacts USING btree (session_id, updated_at DESC);
 CREATE INDEX project_documents_hash_idx ON public.project_documents USING btree (project_id, content_hash);
+CREATE INDEX project_documents_retry_idx ON public.project_documents USING btree (project_id, next_index_retry_at) WHERE ((status = ANY (ARRAY['queued'::text, 'failed'::text])) AND (next_index_retry_at IS NOT NULL));
 CREATE UNIQUE INDEX project_documents_live_path_idx ON public.project_documents USING btree (project_id, relative_path) WHERE (status <> 'deleted'::text);
 CREATE INDEX project_documents_project_idx ON public.project_documents USING btree (project_id, created_at DESC);
 CREATE INDEX project_file_cleanup_tasks_user_idx ON public.project_file_cleanup_tasks USING btree (user_name, created_at, project_id);
 CREATE INDEX project_entity_contexts_activity_idx ON public.project_entity_contexts USING btree (project_id, last_mentioned_ms DESC NULLS LAST);
 CREATE INDEX project_entity_contexts_entity_idx ON public.project_entity_contexts USING btree (user_name, entity_id);
 CREATE INDEX project_entity_contexts_topic_idx ON public.project_entity_contexts USING btree (project_id, topic);
+CREATE INDEX document_parse_snapshots_document_created_idx ON public.document_parse_snapshots USING btree (document_id, created_at DESC, snapshot_id DESC);
 CREATE INDEX relationship_observations_pattern_idx ON public.relationship_observations USING btree (project_id, user_name, interpretation_source, observed_relationship_label);
 CREATE INDEX relationship_observations_relationship_idx ON public.relationship_observations USING btree (relationship_id, project_id);
 CREATE INDEX relationship_observations_active_support_idx ON public.relationship_observations USING btree (project_id, relationship_id) WHERE (retired_at IS NULL);
@@ -1146,8 +1270,10 @@ ALTER TABLE ONLY public.agent_tool_audits
     ADD CONSTRAINT agent_tool_audits_project_fk FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.document_chunks
     ADD CONSTRAINT document_chunks_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.project_documents(document_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.document_extractions
-    ADD CONSTRAINT document_extractions_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.project_documents(document_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.document_chunks
+    ADD CONSTRAINT document_chunks_snapshot_document_fkey FOREIGN KEY (snapshot_id, document_id) REFERENCES public.document_parse_snapshots(snapshot_id, document_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.document_parse_snapshots
+    ADD CONSTRAINT document_parse_snapshots_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.project_documents(document_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_redirect_entity_fk FOREIGN KEY (redirect_entity_id) REFERENCES public.entities(entity_id) ON DELETE RESTRICT;
 ALTER TABLE ONLY public.entity_aliases
@@ -1266,6 +1392,8 @@ ALTER TABLE ONLY public.project_document_scan_settings
     ADD CONSTRAINT project_document_scan_settings_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_documents
     ADD CONSTRAINT project_documents_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(project_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_documents
+    ADD CONSTRAINT project_documents_current_snapshot_id_fkey FOREIGN KEY (current_snapshot_id) REFERENCES public.document_parse_snapshots(snapshot_id) ON DELETE SET NULL;
 ALTER TABLE ONLY public.project_entity_contexts
     ADD CONSTRAINT project_entity_contexts_entity_id_user_name_fkey FOREIGN KEY (entity_id, user_name) REFERENCES public.entities(entity_id, user_name) ON DELETE CASCADE;
 ALTER TABLE ONLY public.project_entity_contexts
