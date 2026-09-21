@@ -1,6 +1,6 @@
 # Knoggin Core Implementation Plan
 
-Status: Phases 1–3 complete. Phases 4–6 remain pending.
+Status: Follow-up fixes 1–4 are complete. Phase 6 still needs reproducible CI packaging and the deferred cached-model check.
 
 Based on [KNOGGIN_CORE_REVIEW.md](KNOGGIN_CORE_REVIEW.md) and the subsequent review of the current checkout. Initial code assessment: `ab817f4e8ba570c9e65b636f6604659b98d55664`. Recheck affected paths when starting each phase; the older revision named in the review is not the implementation baseline.
 
@@ -300,6 +300,89 @@ Remove obsolete contracts and verify the connected engine flows before treating 
 - Scope helpers trim and deduplicate canonical values. Removed the duplicate `project_documents` unique path index while retaining the original equivalent constraint.
 - Validation passed: 27 focused configuration, focus, scope, and Episode contracts; 23 active retrieval caller contracts; 12 orchestrator contracts; 1 real PostgreSQL Episode isolation contract; 2 fresh PostgreSQL/AGE schema-bootstrap contracts; 146 PostgreSQL-marked server tests; touched-path Ruff; source compilation; the architecture import check; and `git diff --check`.
 - Remaining validation: the full non-service server suite passed 469 tests through 74%, then spent more than four minutes in the pre-existing `test_cached_model_stack_concurrency_chunking_reload_and_classification` model smoke test without a result. The run was interrupted; Phase 6 remains unchecked until that test completes in a suitable model-runtime environment.
+
+## Follow-up fixes after completion review
+
+Review baseline: `9d398e8`. Implementation commits: `cec3291` and `9573226`. No long-running tests or full model-suite runs were used under the current user instruction. Deferred checks remain explicit below.
+
+### Fix 1 — Restore the focused runtime test baseline
+
+**Problem:** `test_context_assistant_turn_uses_canonical_message_sequence` fails because the shared `FakeScheduler` lacks the `wake_job` method now called by `ProjectRuntime`. This is a stale test double, not a reason to weaken production scheduling.
+
+**Files and work:**
+
+- `tests/fixtures/fakes.py`: implement the current targeted wake contract in `FakeScheduler`, including observable requested job names and appropriate running/stopped behavior.
+- `tests/fixtures/factories.py`: inspect project fixture setup and align initialization with the scheduler contract where needed.
+- `tests/unit/runtime/test_context_add.py`, `tests/unit/core/project/test_project_runtime.py`, and `tests/unit/runtime/test_scheduler_contract.py`: retain assertions about durable completion and meaningful wake behavior; repair only stale fixture assumptions.
+
+**Exit gate:** the reproduced failure and focused lifecycle/wake tests pass without suppressing exceptions or adding compatibility branches to production. Run bounded selections first so another fixture failure cannot turn into a long retry-heavy run.
+
+### Fix 2 — Make document-focused request identity stable
+
+**Problem:** the public adapter creates a fresh focus `created_at` timestamp on every request. The runtime hashes the whole internal focus, so identical public requests with the same idempotency key can conflict.
+
+**Files and work:**
+
+- `src/runtime/session_runtime.py`: fingerprint a canonical projection of caller-controlled focus inputs, excluding generated timestamps. Preserve distinctions for behavior, target, selected document, and version-bound selections.
+- `src/runtime/api_port.py`: trace focus resolution before acceptance. Ensure replay identity does not depend on a new timestamp or changing derived metadata; evaluate whether logical identity must be captured before resolving a selection against the current document version.
+- `tests/unit/runtime/test_api_port.py` and `test_context_add.py`: exercise the adapter-to-runtime path with repeated identical public requests, rather than reusing one already-created internal focus object.
+
+**Exit gate:** identical focused requests replay after completion, report in-progress while active, and remain interrupted after an unfinished prior run. Changed target, behavior, selection, or other execution inputs still conflict. Retrying a completed request must not rerun the model or fail solely because focus was resolved again later.
+
+### Fix 3 — Preserve terminal failure meaning during replay
+
+**Problem:** a budget-exhausted request originally returns `llm_budget_exhausted` with `retryable=False`, but replay returns generic `run_failed` with `retryable=True`. The durable outcome alone cannot reproduce the original error contract.
+
+**Files and work:**
+
+- `src/runtime/session_runtime.py`: capture a small, validated terminal error record and pass it to exchange closure; replay that record without executing the request again. Cover explicit errors, cancellation, and runtime failures.
+- `src/core/knowledge/db/writers/message_lifecycle_writer.py` and `src/core/knowledge/store.py`: persist the safe code and retryability atomically with closure. Prefer existing server-owned message metadata if it fits; do not create a separate failure ledger. Prevent caller metadata from supplying authoritative terminal errors.
+- `src/core/knowledge/db/readers/message_reader.py`: expose the durable error record in the existing exchange read contract.
+- `src/runtime/api_port.py` and relevant stream/public contracts: use consistent safe translation for original and replayed errors. Never persist or expose raw exception details as the public error message.
+- Runtime/API tests and `tests/contract/storage/test_message_lifecycle_real_postgres.py`: cover restart replay, budget exhaustion, workspace conflict, cancellation, generic failure, and closure rollback/idempotency.
+
+**Exit gate:** original and replayed terminal results agree on public error code and retryability. A duplicate never retries side effects. One small real-storage contract verifies atomic persistence; broad database or model lanes remain deferred.
+
+### Fix 4 — Correct mixed-page extraction provenance
+
+**Problem:** any native text on a PDF page currently labels all its regions as native text, including OCR-derived passages on that same page.
+
+**Files and work:**
+
+- `src/core/knowledge/documents/storage.py`: inspect the installed parser's per-cell/element provenance and preserve extraction method at the smallest reliable region boundary. Remove the page-wide native-text inference. If the parser cannot establish a method, represent that uncertainty explicitly instead of guessing.
+- `src/common/schema/source/locators.py`: extend method representation only if mixed or unknown provenance requires it; define its meaning clearly.
+- `src/core/knowledge/documents/service.py`: make page reads report a truthful aggregate method rather than choosing the first region's method.
+- Source-reference validation, chunk locator propagation, and their consumers: trace any changed method values through indexing, selection, and citation storage.
+- `tests/fixtures/documents.py` and document extraction/storage/runtime tests: add a small mixed PDF with a native heading and scanned body. Use independently known text and regions to establish expected behavior.
+
+**Exit gate:** native-only, OCR-only, and mixed pages keep truthful provenance through snapshot, retrieval, read, and source reference. Existing immutable snapshots and captured references are not silently rewritten. Mocked tests cover propagation; a real parser probe is required to establish parser fidelity, but defer it if it requires long model initialization.
+
+### Fix 5 — Finish evaluation evidence and readiness documentation
+
+**Files and work:**
+
+- Add a concise parser evaluation record under `server/reviews/`, with fixture descriptions, parser/version/configuration, commands, expected versus observed text/regions, failure behavior, and cold/warm runtime and peak-memory measurements when available. Separate previous reported probes from independently reproduced results. Do not claim measured resource suitability until measurements exist.
+- `KNOGGIN_CORE_IMPLEMENTATION_PLAN.md`: update each reopened phase only after its fix and exit checks pass. Correct the previous validation claim: the model smoke is not the only outstanding issue, and the recorded 469-test count does not substantiate the stated 74% progress.
+- Inspect `.github/workflows/server-tests.yml`, `scripts/check_architecture.py`, and their required configuration as a fresh-checkout dependency set. These currently exist as untracked work. Identify exactly what must be versioned for reproducible checks; preserve unrelated work and the user's deferred mypy cleanup. If a gate still depends on a deferred file, record that limitation.
+- Use this plan as the current completion record. `PROJECT_SEMANTIC_OPERATIONS.md` is absent in this checkout; avoid retaining a nonexistent document as evidence of operational readiness.
+
+**Exit gate:** status, test evidence, and remaining limitations agree. Focused tests, touched-path lint, architecture checks where available, and `git diff --check` pass. Any required parser/model evaluation that cannot run within the no-long-tests constraint stays explicitly pending.
+
+### Follow-up progress
+
+- [x] Fix 1 — Runtime fixture baseline
+- [x] Fix 2 — Stable focused-request identity
+- [x] Fix 3 — Durable terminal error replay
+- [x] Fix 4 — Accurate extraction provenance and document-index recovery
+- [ ] Fix 5 — Evaluation evidence complete; fresh-checkout CI packaging remains
+
+### Current validation and readiness limits
+
+- 166 focused runtime, API, document, and source-contract tests pass; touched-path Ruff and `git diff --check` pass.
+- One bounded real PostgreSQL contract passes and verifies that terminal error fields are written atomically and read back for replay.
+- `.github/workflows/server-tests.yml`, `server/scripts/check_architecture.py`, `server/mypy.ini`, and `server/MYPY_BASELINE.md` are an interdependent, currently untracked CI set. The workflow calls both server files directly, so committing only the workflow would fail on a fresh checkout. These files remain outside these commits to preserve the user's separate work and deferred mypy decision.
+- The architecture script passes in this working tree, but it is not yet a reproducible repository gate because the script and workflow are untracked.
+- A distributed 100-page Docling run completed cold and warm measurements, and a real page confirmed mixed native/OCR/model provenance. Contents-page recovery was verified against native PDF text while genuine tables stayed structured. The cached-model suite remains deferred.
 
 ## Execution and reporting rules
 
