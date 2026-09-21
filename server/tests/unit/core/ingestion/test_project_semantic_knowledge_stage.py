@@ -29,7 +29,7 @@ from common.schema.settings import (
 )
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.project_semantic_job import ProjectSemanticJob
-from infrastructure.job.base import JobContext
+from infrastructure.job.base import JobContext, JobResult
 
 
 def _domain():
@@ -418,6 +418,58 @@ async def test_success_without_a_durable_checkpoint_stops_the_drain():
     assert len(store.commit_calls) == 1
     assert store.window.stage is SemanticWindowStage.CONTEXT_COMMITTED
     assert store.enrich_calls == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_semantic_drain_yields_when_another_window_replaces_active_work():
+    class ReplacingStore(_Store):
+        async def commit_project_semantic_knowledge(self, build):
+            result = await super().commit_project_semantic_knowledge(build)
+            self.window = self.window.model_validate(
+                self.window.model_dump() | {"window_id": uuid4()}
+            )
+            return result
+
+    store = ReplacingStore()
+    job = _job(store, builder=_Builder(), relationships=_Relationships())
+
+    result = await job.execute(JobContext(user_name="ada", project_id="project-1"))
+
+    assert result.success
+    assert result.summary == "Semantic processor yielded after the active window changed"
+    assert len(store.commit_calls) == 1
+    assert store.enrich_calls == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_semantic_drain_stops_after_progress_when_no_next_stage_is_due(
+    monkeypatch,
+):
+    store = _Store()
+    job = _job(store, builder=_Builder(), relationships=_Relationships())
+
+    async def checkpoint(window, _ctx):
+        store.window = window.model_validate(
+            window.model_dump() | {"attempt_count": window.attempt_count + 1}
+        )
+        return JobResult(success=True, summary="checkpointed")
+
+    def next_stage(window):
+        if window.attempt_count == 0:
+            return "checkpoint", checkpoint
+        return None
+
+    monkeypatch.setattr(job, "_next_due_stage", next_stage)
+
+    result = await job._drain_window(
+        store.window,
+        JobContext(user_name="ada", project_id="project-1"),
+    )
+
+    assert result.success
+    assert result.summary == "Semantic processor stopped after durable stages: checkpoint"
 
 
 @pytest.mark.unit

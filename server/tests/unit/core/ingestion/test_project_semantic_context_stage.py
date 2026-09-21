@@ -375,6 +375,27 @@ def test_semantic_processor_rejects_a_missing_required_collaborator(missing):
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_semantic_processor_requires_an_entity_publication_callback():
+    async def capture_semantic_policy():
+        return _policy()
+
+    with pytest.raises(TypeError, match="publish_committed_entity_ids must be callable"):
+        ProjectSemanticJob(
+            _Admission(),
+            object(),
+            object(),
+            settings=IngestionSettings(semantic_window_tokens=1),
+            capture_semantic_policy=capture_semantic_policy,
+            context_updater=_NoopUpdater(),
+            context_projection=_NoopProjection(),
+            context_entity_builder=_UnexpectedBuilder(),
+            context_relationship_extractor=_UnexpectedRelationships(),
+            publish_committed_entity_ids=None,
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 async def test_context_stage_commits_then_checkpoints_even_if_file_projection_needs_repair():
     store = _ContextStore(_window())
     updater = _Updater()

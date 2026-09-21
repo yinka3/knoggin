@@ -172,6 +172,26 @@ async def test_entity_search_returns_stable_identity_and_project_contexts():
 
 
 @pytest.mark.no_network
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+async def test_connection_retrieval_rejects_invalid_limits_before_entity_lookup(limit):
+    class Entities:
+        async def get_profile(self, _entity_id):
+            raise AssertionError("invalid limits must fail before storage access")
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=Entities(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.get_connections(9, session_id="session-1", limit=limit)
+
+
+@pytest.mark.no_network
 async def test_hot_topic_context_hydrates_current_project_entity_mentions():
     class Store:
         def __init__(self):
