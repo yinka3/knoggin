@@ -6,6 +6,7 @@ from common.exceptions import ToolExecutionError
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.tools.registry import Tools, install_tool_runtime
 from core.knowledge.retrieval import KnowledgeRetrieval
+from tests.fixtures.agent_retrieval_scenarios import MESSAGE_RETRIEVAL_SCENARIOS
 
 
 @pytest.mark.no_network
@@ -50,6 +51,74 @@ async def test_message_context_uses_durable_storage():
 
     assert results[0]["session_id"] == "session-2"
     assert results[0]["message"] == "Durable project memory"
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "scenario",
+    MESSAGE_RETRIEVAL_SCENARIOS,
+    ids=lambda scenario: scenario.name,
+)
+async def test_message_search_fuses_lexical_and_semantic_episode_sources(scenario):
+    class Store:
+        async def get_visible_session_ids(self, **_kwargs):
+            return ["session-1", "session-2"]
+
+        async def search_messages_fts(self, _query, **_kwargs):
+            return list(scenario.lexical_hits)
+
+        async def search_messages_semantic(self, _embedding, **_kwargs):
+            return list(scenario.semantic_hits)
+
+        async def get_messages_by_ids(self, message_ids, **kwargs):
+            return [
+                {
+                    "id": message_id,
+                    "user_name": "ada",
+                    "session_id": kwargs["session_ids"][0],
+                    "role": "user",
+                    "content": f"evidence-{message_id}",
+                    "timestamp": 1_700_000_000_000,
+                }
+                for message_id in message_ids
+            ]
+
+        async def get_surrounding_messages(self, message_id, **kwargs):
+            return [
+                {
+                    "id": message_id,
+                    "role": "user",
+                    "content": f"evidence-{message_id}",
+                    "timestamp": 1_700_000_000_000,
+                    "session_id": kwargs["session_id"],
+                }
+            ]
+
+    class Embeddings:
+        async def encode_query(self, _query):
+            return [0.1] * 1024
+
+        async def rerank(self, _query, candidates):
+            return [float(len(candidates) - index) for index, _ in enumerate(candidates)]
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1", "project-2"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=Embeddings(),
+        knowledge_store=Store(),
+    )
+
+    results = await retrieval.search_messages(
+        scenario.query,
+        session_id="session-1",
+        limit=8,
+    )
+
+    assert tuple(int(result["id"].removeprefix("msg_")) for result in results) == (
+        scenario.expected_message_ids
+    )
 
 
 @pytest.mark.no_network

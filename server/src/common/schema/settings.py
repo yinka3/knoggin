@@ -117,6 +117,8 @@ class TextProcessorSettings(ConfigModel):
 
 class SearchSettings(ConfigModel):
     fts_limit: int = Field(50, ge=1)
+    semantic_message_limit: int = Field(50, ge=1)
+    semantic_message_threshold: float = Field(0.25, ge=0.0, le=1.0)
     rerank_candidates: int = Field(25, ge=1)
     default_message_limit: int = Field(8, ge=1)
     default_entity_limit: int = Field(5, ge=1)
