@@ -217,15 +217,21 @@ class _LLM:
 class _ScriptedLLM:
     extraction_model = "test-vp02"
 
-    def __init__(self, connections):
+    def __init__(self, connections, *, unknown_endpoints=()):
         self.connections = connections
+        self.unknown_endpoints = list(unknown_endpoints)
         self.system = None
         self.user = None
 
     async def generate_structured(self, *, response_model, system, user, **_kwargs):
         self.system = system
         self.user = user
-        return response_model.model_validate({"connections": self.connections})
+        return response_model.model_validate(
+            {
+                "connections": self.connections,
+                "unknown_endpoints": self.unknown_endpoints,
+            }
+        )
 
 
 @pytest.mark.unit
@@ -464,3 +470,46 @@ async def test_context_vp02_rejects_unknown_handles_blocks_and_self_relations():
         "invalid_context_connection_block",
         "self_context_connection",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_vp02_records_supported_unknown_endpoint_without_a_write():
+    first = _block("Alice works with Zephyr Dynamics.")
+    build = _build(first, _block("Delta is the selected company."))
+    llm = _ScriptedLLM(
+        [],
+        unknown_endpoints=[
+            {"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}
+        ],
+    )
+
+    writes = await ContextRelationshipExtractor(
+        user_name="ada", llm=llm, entities=_Entities()
+    ).extract(build)
+
+    assert writes == ()
+    assert [item.name for item in build.unknown_endpoint_diagnostics] == [
+        "Zephyr Dynamics"
+    ]
+    assert build.issues[-1].code == "unknown_relationship_endpoint"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_context_vp02_rejects_unsupported_unknown_endpoint_observation():
+    first = _block("Alice works with the selected vendor.")
+    build = _build(first, _block("Delta is the selected company."))
+    llm = _ScriptedLLM(
+        [],
+        unknown_endpoints=[
+            {"block_id": "b1", "name": "Imaginary Systems", "type": "Company"}
+        ],
+    )
+
+    await ContextRelationshipExtractor(
+        user_name="ada", llm=llm, entities=_Entities()
+    ).extract(build)
+
+    assert build.unknown_endpoint_diagnostics == ()
+    assert build.issues[-1].code == "unsupported_unknown_relationship_endpoint"

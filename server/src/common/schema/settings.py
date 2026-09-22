@@ -113,10 +113,13 @@ class JobSettings(ConfigModel):
 
 class TextProcessorSettings(ConfigModel):
     gliner_threshold: float = Field(0.85, ge=0.0, le=1.0)
+    llm_ner_mode: Literal["disabled", "fallback"] = "fallback"
 
 
 class SearchSettings(ConfigModel):
     fts_limit: int = Field(50, ge=1)
+    semantic_message_limit: int = Field(50, ge=1)
+    semantic_message_threshold: float = Field(0.25, ge=0.0, le=1.0)
     rerank_candidates: int = Field(25, ge=1)
     default_message_limit: int = Field(8, ge=1)
     default_entity_limit: int = Field(5, ge=1)
@@ -129,6 +132,7 @@ class EntityResolutionSettings(ConfigModel):
     generic_token_freq: int = Field(10, ge=1)
     candidate_fuzzy_threshold: int = Field(85, ge=50, le=100)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
+    resolution_margin: float = Field(0.10, ge=0.0, le=1.0)
     common_word_frequency_threshold: float = Field(1e-5, ge=0.0)
     sparse_context_verbs: List[str] = Field(
         default_factory=lambda: list(DEFAULT_SPARSE_CONTEXT_VERBS)

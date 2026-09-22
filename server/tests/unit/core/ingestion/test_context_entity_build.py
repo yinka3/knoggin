@@ -18,6 +18,7 @@ from common.schema.ingestion.contracts import (
     ContextBlockMention,
     ContextEntityResult,
     ProjectEntityClassification,
+    UnknownEndpointDiagnostic,
 )
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
@@ -197,9 +198,12 @@ def identity_domain():
     ).compile()
 
 
-def policy(compiled_domain):
+def policy(compiled_domain, *, llm_ner_mode="fallback"):
     return IngestionPolicy.capture(
-        text_processor=TextProcessorSettings(gliner_threshold=0.42),
+        text_processor=TextProcessorSettings(
+            gliner_threshold=0.42,
+            llm_ner_mode=llm_ner_mode,
+        ),
         entity_resolution=EntityResolutionSettings(),
         compiled_domain=compiled_domain,
     )
@@ -239,7 +243,47 @@ def build(*, blocks, compiled_domain, supports=None, message_texts=None, impact=
     )
 
 
-def processor(vp01):
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_context_ingestion_contracts_reject_unsupported_origin_and_block_identity():
+    block_id = uuid4()
+    with pytest.raises(ValueError, match="origin is unsupported"):
+        ContextBlockMention(
+            block_ids=(block_id,),
+            name="Acme",
+            entity_type="Company",
+            topic="Work",
+            origin="invented",
+        )
+
+    with pytest.raises(TypeError, match="block_id must be a UUID"):
+        UnknownEndpointDiagnostic(
+            block_id="not-a-uuid",
+            name="Acme",
+            entity_type="Company",
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_unknown_endpoint_diagnostics_require_typed_eligible_blocks():
+    compiled_domain = domain()
+    current = block("Acme is selected.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+
+    with pytest.raises(TypeError, match="must be typed"):
+        semantic_build.set_unknown_endpoint_diagnostics((object(),))
+    with pytest.raises(ValueError, match="eligible blocks"):
+        semantic_build.set_unknown_endpoint_diagnostics(
+            (
+                UnknownEndpointDiagnostic(
+                    block_id=uuid4(),
+                    name="Acme",
+                    entity_type="Company",
+                ),
+            )
+        )
+def processor(vp01, *, llm=None, llm_ner_mode="fallback"):
     async def no_profile(_entity_id):
         return None
 
@@ -249,11 +293,25 @@ def processor(vp01):
         get_profile=no_profile,
         vp01=vp01,
         spacy=EmptyNLP(),
-        settings=TextProcessorSettings(),
+        settings=TextProcessorSettings(llm_ner_mode=llm_ner_mode),
         model_work=InlineModelWork(),
+        llm=llm,
+        user_name="ada" if llm is not None else None,
     )
     result._build_phrase_matcher = lambda: (lambda _doc: [], {})
     return result
+
+
+class FakeEntityLLM:
+    extraction_model = "fake-extraction"
+
+    def __init__(self, mentions):
+        self.mentions = mentions
+        self.calls = []
+
+    async def generate_structured(self, *, response_model, **kwargs):
+        self.calls.append(kwargs)
+        return response_model.model_validate({"mentions": self.mentions})
 
 
 def resolver(*, knowledge_store=None, readable_project_ids=None):
@@ -503,6 +561,180 @@ async def test_context_mentions_preserve_distinct_same_type_occurrences():
     assert [
         (item.entity_type, item.source_start, item.source_end) for item in mentions
     ] == [("Person", 0, 4), ("Person", 9, 13)]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_llm_ner_fallback_is_skipped_when_normal_coverage_is_sufficient():
+    compiled_domain = domain()
+    current = block("Acme is the selected provider.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    llm = FakeEntityLLM([])
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Acme", label="company", start=0, end=4)]
+    )
+
+    mentions = await processor(vp01, llm=llm).extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [("Acme", "vp01")]
+    assert llm.calls == []
+    assert semantic_build.trace.fallbacks == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_llm_ner_fallback_recovers_a_literal_missed_entity():
+    compiled_domain = domain()
+    current = block("Zephyr Dynamics is the selected provider.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+
+    mentions = await processor(FakeVP01(), llm=llm).extract_context_mentions(
+        semantic_build
+    )
+
+    assert [
+        (item.name, item.origin, item.source_start, item.source_end)
+        for item in mentions
+    ] == [("Zephyr Dynamics", "llm_fallback", 0, 15)]
+    assert len(llm.calls) == 1
+    assert semantic_build.trace.llm_mentions_seen == 1
+    assert semantic_build.trace.llm_mentions_accepted == 1
+    assert semantic_build.trace.llm_mentions_rejected == 0
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_llm_ner_fallback_rejects_a_mention_without_literal_support():
+    compiled_domain = domain()
+    current = block("The selected provider will handle launch.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Imaginary Systems", "type": "Company"}]
+    )
+
+    mentions = await processor(FakeVP01(), llm=llm).extract_context_mentions(
+        semantic_build
+    )
+
+    assert mentions == []
+    assert semantic_build.trace.llm_mentions_rejected == 1
+    assert semantic_build.issues[-1].metadata == {"reason": "literal_support_missing"}
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_llm_ner_fallback_uses_known_alias_support_when_block_is_covered():
+    compiled_domain = domain()
+    current = block("Orion approved the selected vendor.")
+    semantic_build = build(
+        blocks=(current,),
+        compiled_domain=compiled_domain,
+        supports={current.block_id: (support(current.block_id, 91),)},
+        message_texts={91: "Acme signed the vendor agreement."},
+    )
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Acme", "type": "Company"}]
+    )
+    text_processor = processor(
+        FakeVP01(
+            [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+        ),
+        llm=llm,
+    )
+    text_processor.get_known_aliases = lambda: {"Acme": 701}
+
+    mentions = await text_processor.extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Orion", "vp01"),
+        ("Acme", "llm_fallback"),
+    ]
+    assert mentions[1].source_start is None
+    assert semantic_build.trace.fallbacks[-1]["trigger"] == (
+        "known_alias_missing_from_extraction"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_unknown_endpoint_diagnostic_triggers_one_targeted_fallback():
+    compiled_domain = domain()
+    current = block("Orion works with Zephyr Dynamics.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.set_unknown_endpoint_diagnostics(
+        (
+            UnknownEndpointDiagnostic(
+                block_id=current.block_id,
+                name="Zephyr Dynamics",
+                entity_type="Company",
+            ),
+        )
+    )
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+    vp01 = FakeVP01(
+        [VP01EntitySpan(text="Orion", label="company", start=0, end=5)]
+    )
+
+    mentions = await processor(vp01, llm=llm).extract_context_mentions(semantic_build)
+
+    assert [(item.name, item.origin) for item in mentions] == [
+        ("Orion", "vp01"),
+        ("Zephyr Dynamics", "llm_fallback"),
+    ]
+    assert len(llm.calls) == 1
+    assert semantic_build.trace.fallbacks[-1]["trigger"] == (
+        "unknown_relationship_endpoint"
+    )
+    assert "unknown_endpoint_observations" in llm.calls[0]["user"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_disabled_llm_ner_mode_preserves_the_normal_extraction_path():
+    compiled_domain = domain()
+    current = block("Zephyr Dynamics is the selected provider.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = policy(compiled_domain, llm_ner_mode="disabled")
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+
+    mentions = await processor(
+        FakeVP01(), llm=llm, llm_ner_mode="disabled"
+    ).extract_context_mentions(semantic_build)
+
+    assert mentions == []
+    assert llm.calls == []
+    assert semantic_build.trace.fallbacks == []
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_llm_fallback_mentions_use_the_normal_resolution_write_shape():
+    compiled_domain = domain()
+    current = block("Zephyr Dynamics is the selected provider.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    llm = FakeEntityLLM(
+        [{"block_id": "b1", "name": "Zephyr Dynamics", "type": "Company"}]
+    )
+    service = ContextEntityBuildService(
+        processor=processor(FakeVP01(), llm=llm),
+        resolver=resolver(),
+        allocate_entity_id=lambda: _async_value(703),
+    )
+
+    result = await service.build(semantic_build)
+
+    assert result.entity_ids == (703,)
+    assert result.new_entity_ids == frozenset({703})
+    assert result.pending_entity_writes[703].canonical_name == "Zephyr Dynamics"
+    assert result.pending_entity_writes[703].entity_type == "Company"
+    assert result.block_entity_associations[0].block_id == current.block_id
 
 
 @pytest.mark.unit
@@ -945,6 +1177,95 @@ async def test_foreign_identity_does_not_overwrite_a_conflicting_target_type():
     assert store.name_lookups == []
     assert store.profile_lookups == []
     assert entity_resolver.has_cached_entity(701) is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_ambiguous_alias_abstains_when_candidates_have_no_meaningful_lead():
+    compiled_domain = identity_domain()
+    current = block("Bob joined the project planning meeting.")
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Robert Chen",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+            {
+                "id": 702,
+                "user_name": "ada",
+                "canonical_name": "Bob Smith",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+        ]
+    )
+    mention = ContextBlockMention(
+        block_ids=(current.block_id,),
+        name="Bob",
+        entity_type="Person",
+        topic="Work",
+        origin="vp01",
+    )
+
+    resolution = await resolver(knowledge_store=store).resolve_context_block_mentions(
+        [mention],
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(703),
+    )
+
+    assert resolution["entity_ids"] == (703,)
+    assert resolution["new_entity_ids"] == frozenset({703})
+    assert resolution["identity_decisions"][0]["outcome"] == "abstained"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_ambiguous_alias_uses_explicit_context_name_to_select_owner():
+    compiled_domain = identity_domain()
+    current = block("Bob, whose full name is Robert Chen, joined the planning meeting.")
+    store = FakeKnowledgeStore(
+        [
+            {
+                "id": 701,
+                "user_name": "ada",
+                "canonical_name": "Robert Chen",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+            {
+                "id": 702,
+                "user_name": "ada",
+                "canonical_name": "Bob Smith",
+                "aliases": ["Bob"],
+                "contexts": [{"project_id": "project-1", "entity_type": "Person", "topic": "Work"}],
+            },
+        ]
+    )
+    mention = ContextBlockMention(
+        block_ids=(current.block_id,),
+        name="Bob",
+        entity_type="Person",
+        topic="Work",
+        origin="vp01",
+    )
+
+    resolution = await resolver(knowledge_store=store).resolve_context_block_mentions(
+        [mention],
+        block_text_by_id={current.block_id: current.markdown},
+        policy=policy(compiled_domain),
+        allocate_entity_id=lambda: _async_value(703),
+    )
+
+    assert resolution["entity_ids"] == (701,)
+    assert resolution["new_entity_ids"] == frozenset()
+    decision = resolution["identity_decisions"][0]
+    assert decision["outcome"] == "reused"
+    assert decision["candidate_id"] == 701
+    assert "context_name_support" in decision["signals"]
 
 
 @pytest.mark.unit

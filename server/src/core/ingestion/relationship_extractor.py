@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from common.conf.relationship_config import normalize_relationship
 from common.exceptions import LLMBudgetExceededError, LLMResponseError
 from common.schema.ingestion.contracts import (
     ContextRelationshipWrite,
+    UnknownEndpointDiagnostic,
     ValidationIssue,
 )
 from common.schema.ingestion.extraction import ContextRelationshipExtraction
@@ -188,6 +190,54 @@ class ContextRelationshipExtractor:
             raise LLMResponseError("Context VP-02 relationship extraction returned no result")
 
         build.trace.relationships_seen = len(result.connections)
+        diagnostics: dict[tuple[UUID, str, str], UnknownEndpointDiagnostic] = {}
+        blocks_by_id = {block.block_id: block for block in blocks}
+        for observation in result.unknown_endpoints:
+            block_id = local_blocks.get(observation.block_id)
+            entity_type = build.policy.domain.canonical_entity_type(observation.type)
+            if block_id is None or entity_type is None:
+                self._record_issue(
+                    build,
+                    code="invalid_unknown_relationship_endpoint",
+                    message="Unknown relationship endpoint has an invalid block or type",
+                    item_ref=observation.name,
+                )
+                continue
+            support_text = "\n".join(
+                build.message_text_by_id.get(support.message_id, "")
+                for support in build.block_supports.get(block_id, ())[:3]
+            )
+            expression = r"(?<!\w)" + r"\s+".join(
+                re.escape(part) for part in observation.name.split()
+            ) + r"(?!\w)"
+            if re.search(
+                expression, blocks_by_id[block_id].markdown, re.IGNORECASE
+            ) is None and re.search(expression, support_text, re.IGNORECASE) is None:
+                self._record_issue(
+                    build,
+                    code="unsupported_unknown_relationship_endpoint",
+                    message="Unknown relationship endpoint lacks literal source support",
+                    item_ref=observation.name,
+                    metadata={"block_id": observation.block_id},
+                )
+                continue
+            diagnostic = UnknownEndpointDiagnostic(
+                block_id=block_id,
+                name=observation.name,
+                entity_type=entity_type,
+            )
+            diagnostics[(block_id, observation.name.casefold(), entity_type)] = diagnostic
+            self._record_issue(
+                build,
+                code="unknown_relationship_endpoint",
+                message="Relationship evidence names an unresolved endpoint",
+                item_ref=observation.name,
+                metadata={
+                    "block_id": observation.block_id,
+                    "entity_type": entity_type,
+                },
+            )
+        build.set_unknown_endpoint_diagnostics(diagnostics.values())
         writes_by_identity: Dict[tuple[int, int, str], ContextRelationshipWrite] = {}
         for mention in result.connections:
             endpoint_a = valid_handles.get(mention.entity_a)

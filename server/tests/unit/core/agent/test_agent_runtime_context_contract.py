@@ -97,7 +97,8 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert "`search_entity`: Found 1 items" in message
     assert '`edit_brain`: {\n  "success": true,' in message
     assert '"section": "Project Context"' in message
-    assert "`episode_check`: No results found." in message
+    assert "`episode_check`: No results found on this retrieval surface." in message
+    assert "Simplify or paraphrase the query" in message
     assert (
         "`read_observation_evidence`: Loaded observation support. "
         "(See accumulated notebook below)"
@@ -178,6 +179,20 @@ def test_topic_context_without_messages_does_not_count_as_new_evidence():
     assert admission.changed is False
     assert admission.reason is None
     assert ctx.new_evidence_gathered is False
+
+
+@pytest.mark.no_network
+def test_build_user_message_explains_empty_specialized_tool_results():
+    message = build_user_message(
+        make_ctx(),
+        last_result=[
+            {"tool": "read_observation_evidence", "result": {"data": {}}},
+            {"tool": "load_topic_context", "result": {"data": []}},
+            {"tool": "custom_lookup", "result": {"data": None}},
+        ],
+    )
+
+    assert message.count("No results found on this retrieval surface") == 3
 
 
 @pytest.mark.no_network

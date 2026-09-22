@@ -6,6 +6,7 @@ from common.exceptions import ToolExecutionError
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.tools.registry import Tools, install_tool_runtime
 from core.knowledge.retrieval import KnowledgeRetrieval
+from tests.fixtures.agent_retrieval_scenarios import MESSAGE_RETRIEVAL_SCENARIOS
 
 
 @pytest.mark.no_network
@@ -50,6 +51,150 @@ async def test_message_context_uses_durable_storage():
 
     assert results[0]["session_id"] == "session-2"
     assert results[0]["message"] == "Durable project memory"
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "scenario",
+    MESSAGE_RETRIEVAL_SCENARIOS,
+    ids=lambda scenario: scenario.name,
+)
+async def test_message_search_fuses_lexical_and_semantic_episode_sources(scenario):
+    class Store:
+        async def get_visible_session_ids(self, **_kwargs):
+            return ["session-1", "session-2"]
+
+        async def search_messages_fts(self, _query, **_kwargs):
+            return list(scenario.lexical_hits)
+
+        async def search_messages_semantic(self, _embedding, **_kwargs):
+            return list(scenario.semantic_hits)
+
+        async def get_messages_by_ids(self, message_ids, **kwargs):
+            return [
+                {
+                    "id": message_id,
+                    "user_name": "ada",
+                    "session_id": kwargs["session_ids"][0],
+                    "role": "user",
+                    "content": f"evidence-{message_id}",
+                    "timestamp": 1_700_000_000_000,
+                }
+                for message_id in message_ids
+            ]
+
+        async def get_surrounding_messages(self, message_id, **kwargs):
+            return [
+                {
+                    "id": message_id,
+                    "role": "user",
+                    "content": f"evidence-{message_id}",
+                    "timestamp": 1_700_000_000_000,
+                    "session_id": kwargs["session_id"],
+                }
+            ]
+
+    class Embeddings:
+        async def encode_query(self, _query):
+            return [0.1] * 1024
+
+        async def rerank(self, _query, candidates):
+            return [float(len(candidates) - index) for index, _ in enumerate(candidates)]
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1", "project-2"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=Embeddings(),
+        knowledge_store=Store(),
+    )
+
+    results = await retrieval.search_messages(
+        scenario.query,
+        session_id="session-1",
+        limit=8,
+    )
+
+    assert tuple(int(result["id"].removeprefix("msg_")) for result in results) == (
+        scenario.expected_message_ids
+    )
+
+
+@pytest.mark.no_network
+async def test_message_search_keeps_all_candidates_when_reranker_is_incomplete():
+    class Store:
+        async def get_visible_session_ids(self, **_kwargs):
+            return ["session-1"]
+
+        async def search_messages_fts(self, _query, **_kwargs):
+            return [(1, 1.0, "session-1"), (2, 0.5, "session-1")]
+
+        async def search_messages_semantic(self, _embedding, **_kwargs):
+            return []
+
+        async def get_messages_by_ids(self, message_ids, **_kwargs):
+            return [
+                {
+                    "id": message_id,
+                    "session_id": "session-1",
+                    "content": f"evidence-{message_id}",
+                }
+                for message_id in message_ids
+            ]
+
+    class Embeddings:
+        async def encode_query(self, _query):
+            return [0.1] * 1024
+
+        async def rerank(self, _query, _candidates):
+            return [0.9]
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=Embeddings(),
+        knowledge_store=Store(),
+    )
+
+    results = await retrieval._search_messages("query", session_id="session-1", k=8)
+
+    assert [result[0] for result in results] == ["msg_1", "msg_2"]
+
+
+@pytest.mark.no_network
+async def test_message_search_propagates_lexical_storage_failure():
+    failure = RuntimeError("lexical storage unavailable")
+
+    class Store:
+        async def get_visible_session_ids(self, **_kwargs):
+            return ["session-1"]
+
+        async def search_messages_fts(self, _query, **_kwargs):
+            raise failure
+
+        async def search_messages_semantic(self, _embedding, **_kwargs):
+            return []
+
+    class Embeddings:
+        async def encode_query(self, _query):
+            return [0.1] * 1024
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=Embeddings(),
+        knowledge_store=Store(),
+    )
+
+    with pytest.raises(RuntimeError, match="lexical storage unavailable") as caught:
+        await retrieval._search_messages("query", session_id="session-1", k=8)
+
+    assert caught.value is failure
 
 
 @pytest.mark.no_network
@@ -100,6 +245,26 @@ async def test_entity_search_returns_stable_identity_and_project_contexts():
             ],
         }
     ]
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+async def test_connection_retrieval_rejects_invalid_limits_before_entity_lookup(limit):
+    class Entities:
+        async def get_profile(self, _entity_id):
+            raise AssertionError("invalid limits must fail before storage access")
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=Entities(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.get_connections(9, session_id="session-1", limit=limit)
 
 
 @pytest.mark.no_network

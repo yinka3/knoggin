@@ -426,25 +426,59 @@ class KnowledgeRetrieval:
         self, query: str, *, session_id: str, k: int
     ) -> List[Tuple[str, float, Optional[str]]]:
         fts_limit = self.search_cfg.get("fts_limit", 50)
+        semantic_limit = self.search_cfg.get("semantic_message_limit", fts_limit)
+        semantic_threshold = self.search_cfg.get("semantic_message_threshold", 0.25)
         rerank_candidates = self.search_cfg.get("rerank_candidates", 25)
         visible_sessions = await self.knowledge_store.get_visible_session_ids(
             user_name=self.user_name,
             visible_project_ids=self.readable_project_ids,
         )
-        fts_results = await self.knowledge_store.search_messages_fts(
-            query,
-            user_name=self.user_name,
-            session_ids=visible_sessions,
-            visible_project_ids=self.readable_project_ids,
-            limit=fts_limit,
-        )
-        max_fts = max([score for _, score, _ in fts_results], default=1.0) or 1.0
-        results = {
-            (result_session_id, self._format_message_id(message_id)): (
-                raw_score / max_fts if max_fts > 0 else 0.0,
-                result_session_id,
+        async def semantic_search():
+            query_embedding = await self.embedding_service.encode_query(query)
+            return await self.knowledge_store.search_messages_semantic(
+                query_embedding,
+                user_name=self.user_name,
+                session_ids=visible_sessions,
+                visible_project_ids=self.readable_project_ids,
+                limit=semantic_limit,
+                threshold=semantic_threshold,
             )
-            for message_id, raw_score, result_session_id in fts_results
+
+        lexical_result, semantic_result = await asyncio.gather(
+            self.knowledge_store.search_messages_fts(
+                query,
+                user_name=self.user_name,
+                session_ids=visible_sessions,
+                visible_project_ids=self.readable_project_ids,
+                limit=fts_limit,
+            ),
+            semantic_search(),
+            return_exceptions=True,
+        )
+        if isinstance(lexical_result, Exception):
+            raise lexical_result
+        fts_results = lexical_result
+        if isinstance(semantic_result, Exception):
+            logger.warning(
+                "Semantic message candidate search failed; using lexical candidates: {}",
+                semantic_result,
+            )
+            semantic_results = []
+        else:
+            semantic_results = semantic_result
+
+        channel_scores: dict[tuple[str, str], list[float]] = {}
+        for channel in (fts_results, semantic_results):
+            maximum = max((score for _, score, _ in channel), default=0.0)
+            if maximum <= 0:
+                continue
+            for message_id, raw_score, result_session_id in channel:
+                key = (result_session_id, self._format_message_id(message_id))
+                channel_scores.setdefault(key, []).append(float(raw_score) / maximum)
+
+        results = {
+            key: (min(1.0, max(scores) + 0.15 * min(scores)), key[0])
+            for key, scores in channel_scores.items()
         }
         if not results:
             return []
@@ -477,6 +511,10 @@ class KnowledgeRetrieval:
                         for result_session_id, message_key in candidate_keys
                     ],
                 )
+                if len(scores) != len(candidate_keys):
+                    raise ValueError(
+                        "Message reranker returned an unexpected score count"
+                    )
                 return [
                     (message_key, float(score), result_session_id)
                     for (result_session_id, message_key), score in sorted(

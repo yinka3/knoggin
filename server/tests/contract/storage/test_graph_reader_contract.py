@@ -142,6 +142,158 @@ async def test_recent_project_messages_uses_an_exclusive_cursor():
 
 
 @pytest.mark.storage
+@pytest.mark.no_network
+async def test_message_reader_short_circuits_empty_queries_without_sql():
+    client = RecordingPostgresClient()
+    reader = MessageReader(client)
+
+    assert await reader.search_fts(
+        "---",
+        user_name="ada",
+        session_ids=["session-1"],
+        visible_project_ids=["project-1"],
+    ) == []
+    assert await reader.search_fts(
+        "release",
+        user_name="ada",
+        session_ids=[],
+        visible_project_ids=["project-1"],
+    ) == []
+    assert await reader.get_messages_by_ids(
+        [],
+        user_name="ada",
+        session_ids=["session-1"],
+        visible_project_ids=["project-1"],
+    ) == []
+    assert await reader.get_recent_project_messages("ada", "project-1", limit=0) == []
+    assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_user_exchange_normalizes_json_and_terminal_error_metadata():
+    client = RecordingPostgresClient(
+        fetch_one_results=[
+            {
+                "user_message_id": "7",
+                "exchange_state": "closed",
+                "exchange_outcome": "failed",
+                "user_metadata": '{"terminal_error":{"code":"run_failed","retryable":true}}',
+                "assistant_message_id": None,
+                "assistant_content": None,
+                "assistant_metadata": "not-json",
+                "source_ref_ids": ["source-2", "source-1"],
+            }
+        ]
+    )
+
+    exchange = await MessageReader(client).get_user_agent_exchange(
+        7,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert exchange is not None
+    assert exchange.user_message_id == 7
+    assert exchange.assistant_metadata == {}
+    assert exchange.source_ref_ids == ("source-2", "source-1")
+    assert exchange.terminal_error == {"code": "run_failed", "retryable": True}
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_user_exchange_discards_invalid_user_metadata():
+    client = RecordingPostgresClient(
+        fetch_one_results=[
+            {
+                "user_message_id": 7,
+                "exchange_state": "open",
+                "exchange_outcome": None,
+                "user_metadata": "not-json",
+                "assistant_message_id": None,
+                "assistant_content": None,
+                "assistant_metadata": [],
+                "source_ref_ids": None,
+            }
+        ]
+    )
+
+    exchange = await MessageReader(client).get_user_agent_exchange(
+        7,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert exchange is not None
+    assert exchange.assistant_metadata == {}
+    assert exchange.source_ref_ids == ()
+    assert exchange.terminal_error is None
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+def test_message_rows_strip_database_string_wrappers_and_keep_timestamps():
+    reader = MessageReader(RecordingPostgresClient())
+    parsed = reader._parse_message_row(
+        {
+            "id": "7",
+            "user_name": '"ada"',
+            "session_id": '"session-1"',
+            "role": '"user"',
+            "content": '"hello"',
+            "timestamp": 123,
+        },
+    )
+
+    assert parsed == {
+        "id": 7,
+        "user_name": "ada",
+        "session_id": "session-1",
+        "role": "user",
+        "content": "hello",
+        "timestamp": 123,
+    }
+    assert reader._clean_string(123) == 123
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_surrounding_messages_stop_when_target_is_not_visible():
+    client = RecordingPostgresClient(fetch_all_results=[[]])
+
+    assert await MessageReader(client).get_surrounding_messages(
+        7,
+        user_name="ada",
+        session_id="session-1",
+        visible_project_ids=["project-1"],
+    ) == []
+    assert len(client.calls) == 1
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_user_exchange_rejects_invalid_message_ids_before_sql():
+    reader = MessageReader(RecordingPostgresClient())
+
+    with pytest.raises(ValueError, match="integer"):
+        await reader.get_user_agent_exchange(
+            True,
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+        )
+    with pytest.raises(ValueError, match="positive"):
+        await reader.get_user_agent_exchange(
+            0,
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+        )
+
+
+@pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
 async def test_surrounding_messages_do_not_repeat_same_timestamp_rows(

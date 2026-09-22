@@ -387,6 +387,44 @@ async def test_runtime_port_projects_stable_terminal_and_tool_failure_codes(port
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("internal_code", "public_code", "message", "retryable"),
+    [
+        (
+            "workspace_conflict",
+            "workspace_conflict",
+            "The workspace changed before the request could be applied.",
+            False,
+        ),
+        ("provider_secret", "run_failed", "The response could not be completed or saved.", True),
+    ],
+)
+async def test_runtime_port_sanitizes_other_terminal_failures(
+    port, internal_code, public_code, message, retryable
+):
+    application, runtime, _ = port
+
+    class FailureSession(FakeSession):
+        async def _events(self):
+            yield {"event": "error", "data": {"code": internal_code}}
+
+    runtime.sessions.session = FailureSession()
+    events = [
+        event
+        async for event in application.run_stream(
+            user_name="ada",
+            request=StartRunRequest(session_id="session-1", query="Update notes"),
+        )
+    ]
+
+    failure = validate_public_stream(events, require_terminal=True)[-1]
+    assert failure.error.code == public_code
+    assert failure.error.message == message
+    assert failure.error.retryable is retryable
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_runtime_port_rejects_other_user_and_missing_session(port):
     application, _, _ = port
 

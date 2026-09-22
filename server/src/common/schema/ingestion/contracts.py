@@ -45,6 +45,7 @@ class ExtractionTrace(BaseModel):
     user_relationships_accepted: int = 0
     user_relationships_rejected: int = 0
     fallbacks: List[Dict[str, str]] = Field(default_factory=list)
+    identity_decisions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def normalize_relationship_type(value: object) -> str:
@@ -299,7 +300,7 @@ class ContextBlockMention:
     name: str
     entity_type: str
     topic: str
-    origin: Literal["known_alias", "vp01"]
+    origin: Literal["known_alias", "vp01", "llm_fallback"]
     literal_message_ids: tuple[int, ...] = ()
     source_start: int | None = None
     source_end: int | None = None
@@ -326,7 +327,7 @@ class ContextBlockMention:
             "topic",
             _require_nonblank_text(self.topic, "ContextBlockMention.topic"),
         )
-        if self.origin not in {"known_alias", "vp01"}:
+        if self.origin not in {"known_alias", "vp01", "llm_fallback"}:
             raise ValueError("ContextBlockMention origin is unsupported")
         message_ids = tuple(
             _require_positive_id(
@@ -372,6 +373,31 @@ class ContextBlockEntityAssociation:
             "mention_text",
             _require_nonblank_text(
                 self.mention_text, "ContextBlockEntityAssociation.mention_text"
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UnknownEndpointDiagnostic:
+    """Validated relationship endpoint observation that cannot write state."""
+
+    block_id: UUID
+    name: str
+    entity_type: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.block_id, UUID):
+            raise TypeError("UnknownEndpointDiagnostic.block_id must be a UUID")
+        object.__setattr__(
+            self,
+            "name",
+            _require_nonblank_text(self.name, "UnknownEndpointDiagnostic.name"),
+        )
+        object.__setattr__(
+            self,
+            "entity_type",
+            _require_nonblank_text(
+                self.entity_type, "UnknownEndpointDiagnostic.entity_type"
             ),
         )
 

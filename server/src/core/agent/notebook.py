@@ -1122,6 +1122,12 @@ class RunNotebook:
             or reference in self._entity_pages
         )
 
+    def validates_research_reference(self, reference: str) -> bool:
+        """Accept admitted evidence references but reject discovery-only snippets."""
+
+        section = self._ref_section(reference)
+        return section != "web_discoveries" and self._known_reference(reference)
+
     def _dependency_references(self, section: str, item: dict[str, Any]) -> set[str]:
         dependencies: set[str] = set()
         for reference in item.get("evidence_refs", []):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from enum import Enum
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -25,6 +26,7 @@ from core.ingestion.policy import IngestionPolicy
 from core.knowledge.context.models import (
     ContextMaterialization,
     ContextProjectionConflictError,
+    ContextUserEditSynchronizationError,
 )
 from core.knowledge.context.render import (
     _BLOCK_MARKER_PREFIX,
@@ -57,6 +59,26 @@ class ContextProjectionResult:
     snapshot: ContextSnapshot | None
     changed: bool
     reconciliation_window_id: UUID | None = None
+
+
+class ContextSynchronizationStatus(str, Enum):
+    """Whether Context synchronization permits new conversation admission."""
+
+    SYNCED = "synced"
+    PROJECTION_PENDING = "projection_pending"
+    USER_EDIT_BLOCKED = "user_edit_blocked"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSynchronizationOutcome:
+    """Processor-facing result of one Context synchronization attempt."""
+
+    status: ContextSynchronizationStatus
+    projection: ContextProjectionResult | None = None
+
+    @property
+    def allows_semantic_admission(self) -> bool:
+        return self.status is not ContextSynchronizationStatus.USER_EDIT_BLOCKED
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +198,7 @@ class ContextProjection:
             if state is None or state.current_revision_id is None:
                 if self._read_file_or_none() is None or not allow_user_edit:
                     return ContextProjectionResult(snapshot=None, changed=False)
-                return await self.import_user_edit(
+                return await self._import_detected_user_edit(
                     user_name=user_name,
                     project_id=project_id,
                     ingestion_policy=ingestion_policy,
@@ -190,17 +212,32 @@ class ContextProjection:
                 raise RuntimeError("current Context revision cannot be materialized")
             raw = self._read_file_or_none()
             generated_hash = _hash(render_context_markdown(snapshot, domain).encode("utf-8"))
+            raw_hash = None if raw is None else _hash(raw)
             if (
                 allow_user_edit
                 and raw is not None
-                and _hash(raw) != generated_hash
+                and raw_hash != generated_hash
                 and state.projection_revision_id == snapshot.revision_id
                 and state.projection_hash == generated_hash
             ):
-                return await self.import_user_edit(
+                return await self._import_detected_user_edit(
                     user_name=user_name,
                     project_id=project_id,
                     ingestion_policy=ingestion_policy,
+                )
+            known_stale_hashes = {
+                value
+                for value in (state.projection_hash, state.projection_pending_hash)
+                if value is not None
+            }
+            if (
+                allow_user_edit
+                and raw_hash is not None
+                and raw_hash != generated_hash
+                and raw_hash not in known_stale_hashes
+            ):
+                raise ContextUserEditSynchronizationError(
+                    "CONTEXT.md contains unresolved user edits based on stale Context"
                 )
             return await self.reconcile(
                 user_name=user_name,
@@ -227,6 +264,28 @@ class ContextProjection:
                 exc=exc,
             )
             raise
+
+    async def _import_detected_user_edit(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        ingestion_policy: IngestionPolicy,
+    ) -> ContextProjectionResult:
+        """Import a detected human edit while retaining its admission meaning."""
+
+        try:
+            return await self.import_user_edit(
+                user_name=user_name,
+                project_id=project_id,
+                ingestion_policy=ingestion_policy,
+            )
+        except ContextUserEditSynchronizationError:
+            raise
+        except Exception as exc:
+            raise ContextUserEditSynchronizationError(
+                "CONTEXT.md user edits could not be safely imported"
+            ) from exc
 
     async def import_user_edit(
         self,

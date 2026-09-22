@@ -31,6 +31,16 @@ def _web_tool(handler) -> SearchTools:
     return tool
 
 
+class _ValueErrorStream(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        if False:
+            yield b""
+        raise ValueError("invalid response stream")
+
+    async def aclose(self):
+        return None
+
+
 def _pdf_bytes(*pages: tuple[str, ...]) -> bytes:
     """Build a tiny text PDF fixture without adding a test-only dependency."""
 
@@ -223,6 +233,42 @@ async def test_read_web_page_marks_transport_timeouts_retryable():
         await tool._web_page_client.aclose()
 
     assert error.value.retryable is True
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("handler", "message", "retryable"),
+    [
+        (
+            lambda request: (_ for _ in ()).throw(
+                httpx.ConnectError("connection refused", request=request)
+            ),
+            "webpage request failed",
+            True,
+        ),
+        (
+            lambda request: httpx.Response(
+                200,
+                headers={"content-type": "text/plain"},
+                stream=_ValueErrorStream(),
+                request=request,
+            ),
+            "webpage request failed",
+            False,
+        ),
+    ],
+)
+async def test_read_web_page_normalizes_transport_and_stream_failures(
+    handler, message, retryable
+):
+    tool = _web_tool(handler)
+    try:
+        with pytest.raises(ToolExecutionError, match=message) as captured:
+            await tool.read_web_page("https://example.test/report")
+    finally:
+        await tool._web_page_client.aclose()
+
+    assert captured.value.retryable is retryable
 
 
 @pytest.mark.no_network

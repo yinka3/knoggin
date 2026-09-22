@@ -1,3 +1,5 @@
+import hashlib
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -14,8 +16,17 @@ from common.schema.context import (
     ContextSnapshot,
     ContextSupportKind,
 )
-from core.knowledge.context.models import ContextProjectionConflictError
-from core.knowledge.context.projection import _materialize_human_edit, _parse_markdown
+from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from core.ingestion.policy import IngestionPolicy
+from core.knowledge.context.models import (
+    ContextProjectionConflictError,
+    ContextUserEditSynchronizationError,
+)
+from core.knowledge.context.projection import (
+    ContextProjection,
+    _materialize_human_edit,
+    _parse_markdown,
+)
 from core.knowledge.context.render import (
     apply_context_edits,
     context_block_hash,
@@ -54,6 +65,120 @@ def _snapshot(*blocks: ContextBlockRecord) -> ContextSnapshot:
         content_hash="a" * 64,
         blocks=list(blocks),
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_detected_user_edit_failure_keeps_its_admission_meaning():
+    snapshot = _snapshot()
+    domain = _domain()
+    generated = render_context_markdown(snapshot, domain).encode()
+    failures = []
+
+    class Reader:
+        async def get_projection_state(self, **_kwargs):
+            return SimpleNamespace(
+                current_revision_id=snapshot.revision_id,
+                projection_revision_id=snapshot.revision_id,
+                projection_hash=hashlib.sha256(generated).hexdigest(),
+                projection_pending_hash=None,
+            )
+
+        async def get_snapshot(self, *_args, **_kwargs):
+            return snapshot
+
+    class Writer:
+        async def ensure_context(self, **_kwargs):
+            return None
+
+        async def record_projection_failure(self, **kwargs):
+            failures.append(kwargs)
+
+    class Filesystem:
+        def read_bytes(self, _path):
+            return b"not a valid Context document"
+
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    projection = ContextProjection(
+        reader=Reader(),
+        writer=Writer(),
+        filesystem=Filesystem(),
+    )
+
+    with pytest.raises(ContextUserEditSynchronizationError) as caught:
+        await projection.synchronize(
+            user_name="ada",
+            project_id="project-1",
+            ingestion_policy=policy,
+            allow_user_edit=True,
+        )
+
+    assert isinstance(caught.value.__cause__, ContextProjectionConflictError)
+    assert failures[0]["failure_code"] == "ContextUserEditSynchronizationError"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_known_stale_projection_is_repaired_without_user_edit_blocking():
+    snapshot = _snapshot()
+    domain = _domain()
+    stale = b"previous generated projection"
+    writes = []
+
+    class Reader:
+        async def get_projection_state(self, **_kwargs):
+            return SimpleNamespace(
+                current_revision_id=snapshot.revision_id,
+                projection_revision_id=uuid4(),
+                projection_hash=hashlib.sha256(stale).hexdigest(),
+                projection_pending_hash=None,
+            )
+
+        async def get_snapshot(self, *_args, **_kwargs):
+            return snapshot
+
+    class Writer:
+        async def ensure_context(self, **_kwargs):
+            return None
+
+        async def record_projection(self, **_kwargs):
+            return True
+
+        async def record_projection_failure(self, **_kwargs):
+            raise AssertionError("known stale projection repair must not fail")
+
+    class Filesystem:
+        def read_bytes(self, _path):
+            return stale
+
+        def write_bytes(self, path, content, **kwargs):
+            writes.append((path, content, kwargs))
+
+    policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+    )
+    projection = ContextProjection(
+        reader=Reader(),
+        writer=Writer(),
+        filesystem=Filesystem(),
+    )
+
+    result = await projection.synchronize(
+        user_name="ada",
+        project_id="project-1",
+        ingestion_policy=policy,
+        allow_user_edit=True,
+    )
+
+    assert result.changed is True
+    assert writes[0][0] == "CONTEXT.md"
+    assert writes[0][2]["expected_content_hash"] == hashlib.sha256(stale).hexdigest()
 
 
 @pytest.mark.unit

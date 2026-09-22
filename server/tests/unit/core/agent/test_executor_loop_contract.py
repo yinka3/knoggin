@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.exceptions import LLMBudgetExceededError, LLMProviderError
+from common.exceptions import (
+    LLMBudgetExceededError,
+    LLMProviderError,
+    ToolExecutionError,
+)
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.research import resolve_research_profile
 from core.agent.executor import AgentExecutor
@@ -198,6 +202,7 @@ async def test_research_mode_loads_briefing_before_the_first_step(monkeypatch):
         limits=AgentRunLimits(max_attempts=1, max_calls=1),
         research_profile=resolve_research_profile("research"),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
     counts = install_counted_project_briefing(monkeypatch, executor)
 
@@ -1052,6 +1057,7 @@ async def test_research_modes_reject_ungrounded_terminal_answers(mode):
         limits=AgentRunLimits(max_attempts=2, max_calls=1),
         research_profile=resolve_research_profile(mode),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     events = [event async for event in executor._execute_run()]
@@ -1101,7 +1107,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Draft from the read passage."}',
+                    '{"content": "Draft from the read passage.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "The exact notebook reference was not retained."}]}',
                     "submit-draft",
                 ),
                 completed_event(),
@@ -1109,7 +1115,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Final answer from the read passage."}',
+                    '{"content": "Final answer from the read passage.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "The exact notebook reference was not retained."}]}',
                     "submit-final",
                 ),
                 completed_event(),
@@ -1120,6 +1126,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
         limits=AgentRunLimits(max_attempts=4, max_calls=2),
         research_profile=resolve_research_profile("research"),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
     dispatched = []
 
@@ -1215,6 +1222,7 @@ async def test_research_fallback_summarizes_grounded_evidence(monkeypatch):
         limits=AgentRunLimits(max_attempts=1, max_calls=1),
         research_profile=resolve_research_profile("research"),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     async def grounded_result(*_args):
@@ -1276,7 +1284,7 @@ async def test_research_accepts_validated_supplied_evidence_without_dispatch(
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Answer from supplied evidence."}',
+                    '{"content": "Answer from supplied evidence.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "Evidence was supplied outside the run notebook."}]}',
                     "submit-supplied",
                 ),
                 completed_event(),
@@ -1288,6 +1296,7 @@ async def test_research_accepts_validated_supplied_evidence_without_dispatch(
         research_profile=resolve_research_profile("research"),
         initial_source_candidates=_validated_initial_source_candidates(source_kind),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     events = [event async for event in executor._execute_run()]
@@ -1305,6 +1314,84 @@ async def test_research_accepts_validated_supplied_evidence_without_dispatch(
 
 
 @pytest.mark.no_network
+async def test_research_plan_is_frozen_before_completion():
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "set_research_plan",
+                    '{"subquestions": ["What changed?", "Why did it change?"]}',
+                    "set-plan",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "submit_answer",
+                    '{"content": "Incomplete answer.", "research_coverage": '
+                    '[{"subquestion": "What changed?", "supporting_references": [], '
+                    '"unresolved_gap": "Supplied evidence was outside the notebook."}]}',
+                    "submit-incomplete",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=2, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+        initial_source_candidates=_validated_initial_source_candidates("pasted_text"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "error"
+    assert run.research_subquestions == ("What changed?", "Why did it change?")
+    assert {
+        schema["function"]["name"] for schema in llm.calls[0]["tools"]
+    } == {"request_clarification", "set_research_plan"}
+    assert "set_research_plan" not in {
+        schema["function"]["name"] for schema in llm.calls[1]["tools"]
+    }
+
+
+@pytest.mark.no_network
+async def test_invalid_research_plan_is_rejected_before_investigation():
+    llm = ScriptedLLM(
+        [
+            [
+                tool_call_event(
+                    "set_research_plan",
+                    '{"subquestions": []}',
+                    "invalid-plan",
+                ),
+                completed_event(),
+            ],
+            [
+                tool_call_event(
+                    "request_clarification",
+                    '{"question": "What should the research focus on?"}',
+                    "clarify-plan",
+                ),
+                completed_event(),
+            ],
+        ]
+    )
+    run = make_run(
+        limits=AgentRunLimits(max_attempts=2, max_calls=1),
+        research_profile=resolve_research_profile("research"),
+    )
+    executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
+
+    events = [event async for event in executor._execute_run()]
+
+    assert events[-1]["event"] == "clarification"
+    assert run.research_subquestions == ()
+    assert "requires 1-12 non-empty" in llm.calls[1]["user"]
+
+
+@pytest.mark.no_network
 async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatch):
     llm = ScriptedLLM(
         [
@@ -1319,7 +1406,7 @@ async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatc
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Evidence is sufficient after review."}',
+                    '{"content": "Evidence is sufficient after review.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "Final notebook reference selection remains."}]}',
                     "submit-gap-review",
                 ),
                 completed_event(),
@@ -1327,7 +1414,7 @@ async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatc
             [
                 tool_call_event(
                     "submit_answer",
-                    '{"content": "Final deep-research answer."}',
+                    '{"content": "Final deep-research answer.", "research_coverage": [{"subquestion": "What changed?", "supporting_references": [], "unresolved_gap": "No material gap remains beyond the cited answer."}]}',
                     "submit-synthesis",
                 ),
                 completed_event(),
@@ -1338,6 +1425,7 @@ async def test_deep_research_performs_one_gap_review_before_synthesis(monkeypatc
         limits=AgentRunLimits(max_attempts=2, max_calls=1),
         research_profile=resolve_research_profile("deep_research"),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
     dispatched = []
 
@@ -2023,3 +2111,243 @@ async def test_executor_no_response_terminal_state_emits_error():
     assert run.final_content is None
     assert run.sealed is True
     assert run.released is True
+
+
+@pytest.mark.no_network
+async def test_parallel_safe_reads_overlap_and_preserve_request_order(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+    entered = 0
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def controlled_read(_tools, name, args):
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            both_entered.set()
+        await release.wait()
+        return {"data": [{"id": args["query"], "message": name}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", controlled_read)
+    results = []
+    events = []
+
+    async def consume():
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "first"}, call_id="first-call"),
+                ToolCall("search_messages", {"query": "second"}, call_id="second-call"),
+            ],
+            results,
+        ):
+            events.append(event)
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(both_entered.wait(), timeout=1)
+    release.set()
+    await task
+
+    assert [event["data"]["call_id"] for event in events] == [
+        "first-call",
+        "second-call",
+        "first-call",
+        "second-call",
+    ]
+    assert [result["result"]["data"][0]["id"] for result in results] == [
+        "first",
+        "second",
+    ]
+
+
+@pytest.mark.no_network
+async def test_one_parallel_read_failure_keeps_sibling_success(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+
+    async def mixed_result(_tools, _name, args):
+        if args["query"] == "broken":
+            raise ToolExecutionError("search_messages", "one read failed")
+        return {"data": [{"id": "kept", "message": "usable"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", mixed_result)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "broken"}, call_id="bad"),
+                ToolCall("search_messages", {"query": "working"}, call_id="good"),
+            ],
+            results,
+        )
+    ]
+
+    assert [event["event"] for event in events] == [
+        "tool_start",
+        "tool_start",
+        "tool_error",
+        "tool_end",
+    ]
+    assert results[0]["error"] == "Tool 'search_messages' failed: one read failed"
+    assert results[1]["result"]["data"][0]["id"] == "kept"
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("failure", "expected_error", "retryable"),
+    [
+        (TimeoutError(), "Tool execution timed out", True),
+        (RuntimeError("private failure"), "Internal tool failure", False),
+    ],
+)
+async def test_parallel_read_normalizes_timeout_and_internal_failures(
+    monkeypatch, failure, expected_error, retryable
+):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+
+    async def mixed_result(_tools, _name, args):
+        if args["query"] == "broken":
+            raise failure
+        return {"data": [{"id": "kept", "message": "usable"}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", mixed_result)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "broken"}, call_id="bad"),
+                ToolCall("search_messages", {"query": "working"}, call_id="good"),
+            ],
+            results,
+        )
+    ]
+
+    assert events[2]["event"] == "tool_error"
+    assert events[2]["data"]["error"].startswith(expected_error)
+    assert events[2]["data"]["retryable"] is retryable
+    assert results[1]["result"]["data"][0]["id"] == "kept"
+
+
+@pytest.mark.no_network
+async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
+    run = make_run(
+        limits=AgentRunLimits(
+            max_attempts=1,
+            max_calls=4,
+            max_accumulated_messages=1,
+        )
+    )
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+
+    async def result_for_query(_tools, name, args):
+        return {"data": [{"id": args["query"], "message": name}]}
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", result_for_query)
+    results = []
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "first"}, call_id="first"),
+                ToolCall("search_messages", {"query": "second"}, call_id="second"),
+            ],
+            results,
+        )
+    ]
+
+    assert events[-1]["event"] == "tool_end"
+    assert "exceeds the evidence capacity" in events[-1]["data"]["result"]
+    admission = results[-1]["result"]["notebook_admission"]
+    assert admission["accepted"] is False
+    assert admission["reason"] == "capacity"
+    assert [item["id"] for item in run.notebook.section_items("messages")] == [
+        "first"
+    ]
+
+
+@pytest.mark.no_network
+async def test_parallel_batch_cancellation_awaits_every_child(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+    entered = asyncio.Event()
+    active = 0
+    finished = 0
+
+    async def blocked_read(_tools, _name, _args):
+        nonlocal active, finished
+        active += 1
+        if active == 2:
+            entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            finished += 1
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", blocked_read)
+
+    async def consume():
+        async for _ in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "first"}, call_id="first"),
+                ToolCall("search_messages", {"query": "second"}, call_id="second"),
+            ],
+            [],
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished == 2
+
+
+@pytest.mark.no_network
+async def test_parallel_batch_propagates_process_level_failures_and_cleans_up(
+    monkeypatch,
+):
+    class FatalToolFailure(BaseException):
+        pass
+
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+    sibling_started = asyncio.Event()
+    release_failure = asyncio.Event()
+    sibling_finished = False
+
+    async def fatal_and_blocked(_tools, _name, args):
+        nonlocal sibling_finished
+        if args["query"] == "fatal":
+            await sibling_started.wait()
+            await release_failure.wait()
+            raise FatalToolFailure()
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            sibling_finished = True
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", fatal_and_blocked)
+
+    async def consume():
+        async for _ in executor._execute_tools(
+            [
+                ToolCall("search_messages", {"query": "fatal"}, call_id="fatal"),
+                ToolCall("search_messages", {"query": "blocked"}, call_id="blocked"),
+            ],
+            [],
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(sibling_started.wait(), timeout=1)
+    release_failure.set()
+    with pytest.raises(FatalToolFailure):
+        await task
+
+    assert sibling_finished is True

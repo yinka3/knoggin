@@ -78,6 +78,82 @@ def test_pdf_extraction_preserves_captured_page_boundaries(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_layout_region_locator_preserves_optional_coordinates_and_text_offsets():
+    locator = LayoutRegion(
+        page_number=3,
+        element_type="table",
+        extraction_method="ocr",
+        bbox=(10.0, 20.0, 110.0, 80.0),
+        text_start=4,
+        text_end=24,
+    ).as_locator()
+
+    assert locator["bbox"] == {
+        "left": 10.0,
+        "bottom": 20.0,
+        "right": 110.0,
+        "top": 80.0,
+    }
+    assert locator["text_start"] == 4
+    assert locator["text_end"] == 24
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("LocalEntryNotFoundError: missing cache", "models are not installed"),
+        ("malformed package", "could not parse"),
+    ],
+)
+def test_docling_parse_failures_distinguish_missing_models_from_bad_content(
+    monkeypatch, detail, expected
+):
+    class FailingConverter:
+        def convert(self, _stream):
+            raise RuntimeError(detail)
+
+    monkeypatch.setattr(storage, "_docling_converter", lambda: FailingConverter())
+
+    with pytest.raises((RuntimeError, ValueError), match=expected):
+        storage._parse_with_docling(b"document", ".pdf")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_docling_region_projection_ignores_malformed_provenance():
+    structure = {
+        "pages": {"1": {}, "invalid": {}},
+        "texts": [
+            "not-an-entry",
+            {"label": "text", "prov": "not-a-list"},
+            {"label": "text", "charspan": [-1, 2], "prov": [None]},
+            {
+                "label": "text",
+                "prov": [
+                    {"page_no": 0, "bbox": {}},
+                    {
+                        "page_no": 1,
+                        "bbox": {"l": "bad", "b": 0, "r": 10, "t": 20},
+                    },
+                ],
+            },
+        ],
+    }
+
+    regions = storage._regions_from_docling_structure(structure, native_regions={1: ()})
+
+    assert storage._page_numbers(structure) == [1]
+    assert len(regions[1]) == 1
+    assert regions[1][0].extraction_method == "ocr"
+    assert regions[1][0].bbox is None
+    assert regions[1][0].text_start is None
+    assert regions[1][0].text_end is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_mixed_pdf_page_classifies_regions_from_native_cell_bounds():
     structure = {
         "texts": [

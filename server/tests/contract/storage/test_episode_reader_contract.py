@@ -223,6 +223,42 @@ async def test_project_episode_source_messages_require_current_project_visibilit
 
 
 @pytest.mark.storage
+@pytest.mark.no_network
+async def test_project_episode_queries_short_circuit_empty_inputs_and_reject_bad_scores():
+    client = RecordingPostgresClient()
+    reader = EpisodeReader(client)
+
+    assert await reader.get_recent_project_episodes(
+        user_name="ada", project_id="project-1", limit=0
+    ) == []
+    assert await reader.search_project_episodes(
+        "   ", user_name="ada", project_id="project-1", limit=3
+    ) == []
+    assert await reader.search_project_episodes(
+        "history", user_name="ada", project_id="project-1", limit=0
+    ) == []
+    assert await reader.search_project_episodes_by_embedding(
+        [0.1], user_name="ada", project_id="project-1", limit=0
+    ) == []
+    assert await reader.get_project_episodes_for_entities(
+        [], user_name="ada", project_id="project-1", limit=3
+    ) == []
+    assert await reader.get_project_episodes_for_entities(
+        [1], user_name="ada", project_id="project-1", limit=0
+    ) == []
+    with pytest.raises(ValueError, match="score_threshold"):
+        await reader.search_project_episodes_by_embedding(
+            [0.1],
+            user_name="ada",
+            project_id="project-1",
+            limit=1,
+            score_threshold=1.1,
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.requires_pgvector
 @pytest.mark.no_network

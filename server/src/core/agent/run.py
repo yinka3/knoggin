@@ -354,8 +354,10 @@ class AgentRun:
     attempt_count: int = 0
     synthesis_attempt_count: int = 0
     deep_research_gap_review_count: int = 0
+    research_subquestions: Tuple[str, ...] = ()
     consecutive_errors: int = 0
     consecutive_empty_results: int = 0
+    empty_retrieval_signatures: Set[Tuple[str, str]] = field(default_factory=set)
     tools_used: List[str] = field(default_factory=list)
     previous_calls: Set[Tuple[str, str]] = field(default_factory=set)
     last_error: Optional[str] = None
@@ -551,6 +553,80 @@ class AgentRun:
             self.initial_source_candidates or self.notebook.has_admitted_evidence()
         )
 
+    def set_research_plan(self, subquestions: object) -> str | None:
+        """Freeze the material questions that final research must cover."""
+
+        if self.research_profile.mode == "normal":
+            return "A research plan is only valid in a research mode."
+        if self.research_subquestions:
+            return "The research plan has already been set."
+        if (
+            not isinstance(subquestions, list)
+            or not subquestions
+            or len(subquestions) > 12
+            or any(not isinstance(item, str) or not item.strip() for item in subquestions)
+        ):
+            return "A research plan requires 1-12 non-empty material subquestions."
+        normalized = tuple(" ".join(item.split()) for item in subquestions)
+        if len({item.casefold() for item in normalized}) != len(normalized):
+            return "Research plan subquestions must be unique."
+        self.research_subquestions = normalized
+        return None
+
+    def validate_research_coverage(self, coverage: object) -> str | None:
+        """Validate material research questions against admitted notebook evidence."""
+
+        if self.research_profile.mode == "normal":
+            return None
+        if not self.research_subquestions:
+            return "Research completion requires a plan set before investigation."
+        if not isinstance(coverage, list) or not coverage or len(coverage) > 12:
+            return "Research completion requires 1-12 material subquestions."
+        covered_questions: set[str] = set()
+        for item in coverage:
+            if not isinstance(item, dict):
+                return "Each research coverage entry must be an object."
+            question = item.get("subquestion")
+            references = item.get("supporting_references")
+            gap = item.get("unresolved_gap")
+            if not isinstance(question, str) or not question.strip():
+                return "Each research coverage entry requires a subquestion."
+            normalized_question = " ".join(question.split()).casefold()
+            if normalized_question in covered_questions:
+                return "Research coverage subquestions must be unique."
+            covered_questions.add(normalized_question)
+            if not isinstance(references, list) or any(
+                not isinstance(reference, str) for reference in references
+            ):
+                return "Research supporting_references must be notebook references."
+            if not references and (not isinstance(gap, str) or not gap.strip()):
+                return "Every material subquestion needs evidence or an unresolved gap."
+            invalid = [
+                reference
+                for reference in references
+                if not self.notebook.validates_research_reference(reference)
+            ]
+            if invalid:
+                return (
+                    "Research coverage contains unknown or discovery-only references: "
+                    + ", ".join(invalid[:3])
+                )
+        expected_questions = {
+            question.casefold() for question in self.research_subquestions
+        }
+        if covered_questions != expected_questions:
+            missing = [
+                question
+                for question in self.research_subquestions
+                if question.casefold() not in covered_questions
+            ]
+            if missing:
+                return "Research coverage is missing planned subquestions: " + ", ".join(
+                    missing[:3]
+                )
+            return "Research coverage contains subquestions outside the frozen plan."
+        return None
+
     def needs_deep_research_gap_review(self) -> bool:
         """Whether the deep-research second-look checkpoint remains due."""
 
@@ -648,18 +724,30 @@ class AgentRun:
         self.new_evidence_gathered = self.new_evidence_gathered or apply_result.changed
         return apply_result
 
-    def record_empty_result(self) -> bool:
+    def record_empty_result(self, calls: List[Tuple[str, Dict]] | None = None) -> bool:
         """Record an empty tool turn and report whether replanning is due."""
 
         self._require_active()
         self.consecutive_empty_results += 1
+        repeated_surface = False
+        for tool_name, args in calls or []:
+            query = args.get("query")
+            if not isinstance(query, str):
+                continue
+            normalized = " ".join(re.findall(r"[a-z0-9]+", query.casefold()))
+            signature = (tool_name, normalized)
+            repeated_surface = repeated_surface or signature in self.empty_retrieval_signatures
+            self.empty_retrieval_signatures.add(signature)
         return (
+            repeated_surface
+            or
             self.consecutive_empty_results >= self.limits.empty_result_replan_threshold
         )
 
     def clear_empty_results(self) -> None:
         self._require_active()
         self.consecutive_empty_results = 0
+        self.empty_retrieval_signatures.clear()
 
     def request_project_briefing_transition(self) -> bool:
         """Request the one deferred Project load after a fast-path tool turn."""

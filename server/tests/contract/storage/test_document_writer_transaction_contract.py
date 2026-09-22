@@ -99,3 +99,34 @@ async def test_document_writer_rejects_mismatched_chunk_embedding_lists():
         )
 
     assert client.transaction_count == 0
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"failure_kind": "unknown"}, "failure_kind"),
+        ({"max_attempts": 0}, "retry policy"),
+        ({"retry_backoff_seconds": 0}, "retry policy"),
+        ({"updated_at": "not-a-time"}, "ISO timestamp"),
+    ],
+)
+async def test_document_failure_record_rejects_invalid_retry_policy(kwargs, message):
+    client = TransactionOnlyClient()
+    writer = DocumentWriter(client, "project-1")
+    arguments = {
+        "document_id": "document-1",
+        "error_message": "parser failed",
+        "failure_kind": "transient_dependency",
+        "retryable": True,
+        "max_attempts": 3,
+        "retry_backoff_seconds": 5,
+        "updated_at": "2026-09-21T12:00:00+00:00",
+    }
+    arguments.update(kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        await writer.record_index_failure(**arguments)
+
+    assert client.transaction_count == 0

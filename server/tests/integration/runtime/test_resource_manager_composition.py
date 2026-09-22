@@ -5,6 +5,7 @@ import os
 
 import pytest
 
+from core.ingestion import vp01
 from infrastructure.model_work import ModelWorkPriority
 from runtime.resources import RuntimeResources
 
@@ -51,11 +52,12 @@ async def real_resource_manager(monkeypatch):
         ),
         revision_env="KNOGGIN_SEMANTIC_SMOKE_RERANKER_REVISION",
     )
-    _local_snapshot(
+    vp01_model = _local_snapshot(
         huggingface_hub,
         os.environ.get("KNOGGIN_VP01_MODEL", "fastino/gliner2.5-base-v1"),
         revision_env="KNOGGIN_VP01_REVISION",
     )
+    monkeypatch.setattr(vp01, "GLINER25_ENGLISH_MODEL", vp01_model)
 
     monkeypatch.setenv(
         "DATABASE_URL",

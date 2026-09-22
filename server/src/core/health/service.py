@@ -243,7 +243,7 @@ class RuntimeHealthService:
 
         warnings: list[str] = []
         project = self._project_state(project_id)
-        semantic_job = getattr(project, "project_semantic_job", None)
+        semantic_processor = getattr(project, "project_semantic_processor", None)
         scheduler_snapshot = self._component_snapshot(
             getattr(project, "scheduler", None),
             "health_snapshot",
@@ -272,7 +272,7 @@ class RuntimeHealthService:
 
         oldest_age = queue_details.get("oldest_pending_age_seconds")
         scheduler_state = scheduler_snapshot.get("state")
-        if semantic_job is None:
+        if semantic_processor is None:
             scheduler_state = "not_registered"
         if scheduler_state == "stopped" or self._nonnegative_int(
             scheduler_snapshot.get("stalled_jobs")
@@ -348,8 +348,8 @@ class RuntimeHealthService:
             activity=activity,
             summary=summary,
             details={
-                "semantic_job": {
-                    "registered": semantic_job is not None,
+                "semantic_processor": {
+                    "registered": semantic_processor is not None,
                     "scheduler": scheduler_snapshot,
                 },
                 "semantic_windows": {

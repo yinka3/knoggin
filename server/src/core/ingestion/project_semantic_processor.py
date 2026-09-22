@@ -21,8 +21,15 @@ from core.ingestion.context_entity_build import ContextEntityBuildService
 from core.ingestion.policy import IngestionPolicy
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
-from core.knowledge.context.models import ContextMaterialization
-from core.knowledge.context.projection import ContextProjection, ContextProjectionResult
+from core.knowledge.context.models import (
+    ContextMaterialization,
+    ContextUserEditSynchronizationError,
+)
+from core.knowledge.context.projection import (
+    ContextProjection,
+    ContextSynchronizationOutcome,
+    ContextSynchronizationStatus,
+)
 from core.knowledge.context.render import context_document_hash
 from core.knowledge.context.updater import ContextUpdater
 from core.knowledge.episodes.generator import EpisodeGenerator
@@ -128,7 +135,7 @@ class SemanticEpisodeStore(Protocol):
     ) -> SemanticWindowRecord | None: ...
 
 
-class ProjectSemanticJob(BaseJob):
+class ProjectSemanticProcessor(BaseJob):
     """Drain one durable project semantic window through its checkpoints.
 
     The scheduler supplies bounded execution and periodic recovery. Once this
@@ -157,7 +164,7 @@ class ProjectSemanticJob(BaseJob):
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         if not callable(capture_semantic_policy):
-            raise TypeError("ProjectSemanticJob requires a semantic policy callback")
+            raise TypeError("ProjectSemanticProcessor requires a semantic policy callback")
         required_collaborators = {
             "context_updater": context_updater,
             "context_projection": context_projection,
@@ -170,12 +177,12 @@ class ProjectSemanticJob(BaseJob):
         ]
         if missing:
             raise TypeError(
-                "ProjectSemanticJob requires " + ", ".join(missing)
+                "ProjectSemanticProcessor requires " + ", ".join(missing)
             )
         if not callable(publish_committed_entity_ids):
             raise TypeError("publish_committed_entity_ids must be callable")
         if not isinstance(settings, IngestionSettings):
-            raise TypeError("ProjectSemanticJob requires IngestionSettings")
+            raise TypeError("ProjectSemanticProcessor requires IngestionSettings")
         self.admission = admission
         self.knowledge_store = knowledge_store
         self.episode_generator = episode_generator
@@ -226,11 +233,19 @@ class ProjectSemanticJob(BaseJob):
         policy: IngestionPolicy | None = None
         if window is None:
             policy = await self._capture_semantic_policy()
-            await self.synchronize_context_file(
+            synchronization = await self.synchronize_context_file(
                 ctx,
                 allow_user_edit=True,
                 ingestion_policy=policy,
             )
+            if not synchronization.allows_semantic_admission:
+                return JobResult(
+                    success=True,
+                    summary=(
+                        "Semantic admission deferred while CONTEXT.md user edits "
+                        "await synchronization"
+                    ),
+                )
             window = await self.knowledge_store.get_active_project_semantic_window(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
@@ -336,20 +351,31 @@ class ProjectSemanticJob(BaseJob):
         *,
         allow_user_edit: bool,
         ingestion_policy: IngestionPolicy | None = None,
-    ) -> ContextProjectionResult | None:
+    ) -> ContextSynchronizationOutcome:
         """Run the sole project-owned Context file synchronization boundary."""
 
         try:
             policy = ingestion_policy or await self._capture_semantic_policy()
-            return await self._context_projection.synchronize(
+            projection = await self._context_projection.synchronize(
                 user_name=ctx.user_name,
                 project_id=ctx.project_id,
                 ingestion_policy=policy,
                 allow_user_edit=allow_user_edit,
             )
+            return ContextSynchronizationOutcome(
+                status=ContextSynchronizationStatus.SYNCED,
+                projection=projection,
+            )
+        except ContextUserEditSynchronizationError as exc:
+            logger.warning("Context user-edit synchronization is blocked: {}", exc)
+            return ContextSynchronizationOutcome(
+                status=ContextSynchronizationStatus.USER_EDIT_BLOCKED,
+            )
         except Exception as exc:
             logger.warning("Context file synchronization is pending repair: {}", exc)
-            return None
+            return ContextSynchronizationOutcome(
+                status=ContextSynchronizationStatus.PROJECTION_PENDING,
+            )
 
     async def _execute_episode_stage(
         self, window: SemanticWindowRecord, ctx: JobContext
@@ -625,6 +651,9 @@ class ProjectSemanticJob(BaseJob):
             if build.impact_block_ids:
                 await self._context_entity_builder.build(build)
                 await self._context_relationship_extractor.extract(build)
+                if build.unknown_endpoint_diagnostics:
+                    await self._context_entity_builder.build(build)
+                    await self._context_relationship_extractor.extract(build)
             else:
                 build.set_empty_knowledge_result()
             summary = await self.knowledge_store.commit_project_semantic_knowledge(build)

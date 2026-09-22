@@ -5,6 +5,9 @@ from jinja2 import StrictUndefined, UndefinedError
 
 from core.agent.notebook import RunNotebook
 from core.agent.notebook_renderer import (
+    _passage_text,
+    _result_locator,
+    _source_continuation,
     notebook_environment,
     render_notebook,
 )
@@ -249,3 +252,46 @@ def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
         "continuation: the displayed passage is clipped; reread a narrower "
         "range or use a targeted query."
     ) in rendered
+
+
+def test_notebook_renderer_handles_missing_passages_and_available_continuations():
+    notebook = RunNotebook()
+    notebook.apply(
+        "read_document",
+        {
+            "data": [
+                {
+                    "document_id": "doc_empty",
+                    "document_name": "empty.md",
+                    "content": None,
+                    "locator": {"kind": "csv_rows", "start_row": 2, "end_row": 4},
+                    "has_more": True,
+                },
+                {
+                    "document_id": "doc_pdf",
+                    "document_name": "report.pdf",
+                    "content": "A bounded PDF passage.",
+                    "locator": {"kind": "layout_region", "page": 3},
+                },
+            ]
+        },
+    )
+
+    rendered = render_notebook(notebook)
+
+    assert "None" not in rendered
+    assert "[rows 2-4]" in rendered
+    assert "[page 3]" in rendered
+    assert (
+        "continuation: more source text is available; reread a narrower range "
+        "or use a targeted query."
+    ) in rendered
+
+
+def test_notebook_renderer_defensively_formats_optional_source_metadata():
+    assert _passage_text(None) == ("", False)
+    assert _result_locator({"page_number": 7}) == "page 7"
+    assert _result_locator({"locator": {"kind": "search_result", "rank": 2}}) == (
+        "search result 2"
+    )
+    assert _source_continuation({}, display_clipped=False) == ""

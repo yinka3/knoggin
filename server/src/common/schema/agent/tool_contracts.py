@@ -770,6 +770,30 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "set_research_plan",
+            "description": (
+                "Set the material subquestions for this research run before "
+                "gathering evidence. Call this once, by itself, in the planning phase."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subquestions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "items": {"type": "string", "minLength": 1},
+                    }
+                },
+                "required": ["subquestions"],
+                "additionalProperties": False,
+            },
+            "tags": ["core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_answer",
             "description": "Submit your final synthesized answer to the user. You MUST call this tool when you are finished gathering evidence and are ready to respond.",
             "parameters": {
@@ -809,6 +833,29 @@ TOOL_SCHEMAS = [
                         },
                         "required": ["title", "blocks"],
                         "additionalProperties": False,
+                    },
+                    "research_coverage": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "description": (
+                            "Required in research modes: evidence or a gap for every "
+                            "subquestion, using the exact text from set_research_plan."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subquestion": {"type": "string", "minLength": 1},
+                                "supporting_references": {
+                                    "type": "array",
+                                    "maxItems": 12,
+                                    "items": {"type": "string", "minLength": 1},
+                                },
+                                "unresolved_gap": {"type": "string", "minLength": 1},
+                            },
+                            "required": ["subquestion", "supporting_references"],
+                            "additionalProperties": False,
+                        },
                     },
                 },
                 "required": ["content"],
@@ -1338,7 +1385,7 @@ def get_filtered_schemas(
 
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
-        if name in ("request_clarification", "submit_answer"):
+        if name in ("request_clarification", "set_research_plan", "submit_answer"):
             filtered.append(schema)
             continue
 

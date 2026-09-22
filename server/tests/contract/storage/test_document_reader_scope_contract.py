@@ -66,6 +66,24 @@ async def _insert_document_snapshot(
 
 
 @pytest.mark.storage
+@pytest.mark.no_network
+def test_document_snapshot_normalization_decodes_json_and_ids():
+    normalized = DocumentReader._normalize_snapshot(
+        {
+            "snapshot_id": uuid4(),
+            "document_id": uuid4(),
+            "current_snapshot_id": uuid4(),
+            "snapshot": '{"text":"stored"}',
+        }
+    )
+
+    assert isinstance(normalized["snapshot_id"], str)
+    assert isinstance(normalized["document_id"], str)
+    assert isinstance(normalized["current_snapshot_id"], str)
+    assert normalized["snapshot"] == {"text": "stored"}
+
+
+@pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
 async def test_current_parse_snapshot_follows_readable_project_scope(

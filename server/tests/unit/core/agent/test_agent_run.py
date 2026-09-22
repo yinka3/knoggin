@@ -312,6 +312,152 @@ def test_agent_run_requires_read_content_after_document_or_web_discovery():
 
 
 @pytest.mark.no_network
+def test_research_coverage_requires_each_material_part_to_have_evidence_or_a_gap():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["What changed?", "Why did it change?"]) is None
+    applied = run.accumulate_tool_result(
+        "search_messages",
+        {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
+    )
+    reference = applied.references[0]
+
+    assert run.validate_research_coverage(
+        [
+            {
+                "subquestion": "What changed?",
+                "supporting_references": [reference],
+            },
+            {
+                "subquestion": "Why did it change?",
+                "supporting_references": [],
+                "unresolved_gap": "The available evidence does not explain why.",
+            },
+        ]
+    ) is None
+    assert "needs evidence or an unresolved gap" in run.validate_research_coverage(
+        [
+            {
+                "subquestion": "Why did it change?",
+                "supporting_references": [],
+            }
+        ]
+    )
+
+    assert "missing planned subquestions" in run.validate_research_coverage(
+        [
+            {
+                "subquestion": "What changed?",
+                "supporting_references": [reference],
+            }
+        ]
+    )
+
+
+@pytest.mark.no_network
+def test_research_coverage_rejects_discovery_only_and_unknown_references():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["What changed?"]) is None
+    discovery = run.accumulate_tool_result(
+        "web_search",
+        {"data": [{"title": "Result", "url": "https://example.test", "snippet": "Lead"}]},
+    ).references[0]
+
+    for reference in (discovery, "message:missing"):
+        error = run.validate_research_coverage(
+            [
+                {
+                    "subquestion": "What changed?",
+                    "supporting_references": [reference],
+                }
+            ]
+        )
+        assert "unknown or discovery-only" in error
+
+
+@pytest.mark.no_network
+def test_research_plan_rejects_invalid_lifecycle_and_question_sets():
+    normal = make_run()
+    assert "only valid" in normal.set_research_plan(["What changed?"])
+
+    research = make_run(research_profile=resolve_research_profile("research"))
+    for invalid in (None, [], [""], ["question"] * 13):
+        assert "requires 1-12" in research.set_research_plan(invalid)
+    assert "unique" in research.set_research_plan(["Question?", " question? "])
+    assert research.set_research_plan(["  What   changed?  "]) is None
+    assert research.research_subquestions == ("What changed?",)
+    assert "already been set" in research.set_research_plan(["Another question?"])
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("coverage", "expected_error"),
+    [
+        (None, "requires a plan"),
+        ([], "requires 1-12"),
+        (["not-an-object"], "must be an object"),
+        (
+            [{"subquestion": "", "supporting_references": []}],
+            "requires a subquestion",
+        ),
+        (
+            [
+                {
+                    "subquestion": "What changed?",
+                    "supporting_references": [],
+                    "unresolved_gap": "unknown",
+                },
+                {
+                    "subquestion": " what changed? ",
+                    "supporting_references": [],
+                    "unresolved_gap": "unknown",
+                },
+            ],
+            "must be unique",
+        ),
+        (
+            [{"subquestion": "What changed?", "supporting_references": "bad"}],
+            "must be notebook references",
+        ),
+    ],
+)
+def test_research_coverage_rejects_malformed_contracts(coverage, expected_error):
+    run = make_run(research_profile=resolve_research_profile("research"))
+    if coverage is not None:
+        assert run.set_research_plan(["What changed?"]) is None
+
+    assert expected_error in run.validate_research_coverage(coverage)
+
+
+@pytest.mark.no_network
+def test_research_coverage_rejects_questions_outside_frozen_plan():
+    run = make_run(research_profile=resolve_research_profile("research"))
+    assert run.set_research_plan(["What changed?"]) is None
+
+    error = run.validate_research_coverage(
+        [
+            {
+                "subquestion": question,
+                "supporting_references": [],
+                "unresolved_gap": "Evidence is unavailable.",
+            }
+            for question in ("What changed?", "Who approved it?")
+        ]
+    )
+
+    assert "outside the frozen plan" in error
+
+
+@pytest.mark.no_network
+def test_cosmetically_repeated_empty_query_forces_early_replan():
+    run = make_run(
+        limits=AgentRunLimits(empty_result_replan_threshold=3),
+    )
+
+    assert run.record_empty_result([("search_messages", {"query": "Project Alpha?"})]) is False
+    assert run.record_empty_result([("search_messages", {"query": " project   alpha "})]) is True
+
+
+@pytest.mark.no_network
 def test_deep_research_gap_review_is_due_once_after_grounded_evidence():
     run = make_run(research_profile=resolve_research_profile("deep_research"))
 
@@ -409,7 +555,12 @@ class CompletingLLM:
                 "calls": [
                     {
                         "name": "submit_answer",
-                        "arguments": '{"content": "Done"}',
+                        "arguments": (
+                            '{"content": "Done", "research_coverage": ['
+                            '{"subquestion": "What changed?", '
+                            '"supporting_references": [], '
+                            '"unresolved_gap": "No notebook evidence was needed."}]}'
+                        ),
                         "id": "submit-1",
                     }
                 ],
@@ -494,6 +645,7 @@ async def test_research_profile_supplies_default_report_artifact_at_synthesis():
             agent_run_id="run-1",
         ),
     )
+    assert run.set_research_plan(["What changed?"]) is None
     executor = AgentExecutor(
         run,
         CompletingLLM(),

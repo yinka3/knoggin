@@ -178,6 +178,7 @@ class EntityResolver:
             project_classifications: Dict[int, ProjectEntityClassification] = {}
             resolved_mentions: list[ResolvedContextBlockMention] = []
             associations: list[ContextBlockEntityAssociation] = []
+            identity_decisions: list[dict[str, Any]] = []
 
             candidate_snapshot: EntityCandidateSnapshot | None = None
             candidate_entries: list[Optional[Tuple[str, Any]]] = []
@@ -203,6 +204,7 @@ class EntityResolver:
                 if entry[0] == "candidates":
                     if candidate_snapshot is None:
                         raise RuntimeError("Context candidate snapshot is unavailable")
+                    ranked = []
                     for candidate in entry[1]:
                         candidate_id = candidate.entity_id
                         profile = candidate_snapshot.get_profile(candidate_id)
@@ -216,13 +218,9 @@ class EntityResolver:
                             if profile
                             else "missing_profile"
                         )
-                        if (
-                            candidate.score < policy.resolution_threshold
-                            or profile is None
-                            or not self.is_profile_visible(profile)
-                        ):
+                        if profile is None or not self.is_profile_visible(profile):
                             continue
-                        if self.should_accept_candidate(
+                        signals, decision_score = self._identity_decision_signals(
                             mention.name,
                             mention.entity_type,
                             mention.topic,
@@ -233,17 +231,60 @@ class EntityResolver:
                             compatibility=compatibility,
                             candidate=candidate,
                             candidate_snapshot=candidate_snapshot,
+                        )
+                        ranked.append(
+                            (decision_score, candidate_id, profile, candidate, signals)
+                        )
+                    ranked.sort(key=lambda item: (-item[0], item[1]))
+                    winner = ranked[0] if ranked else None
+                    runner_up_score = ranked[1][0] if len(ranked) > 1 else None
+                    accepted = bool(
+                        winner
+                        and winner[3].score >= policy.resolution_threshold
+                        and self.should_accept_candidate(
+                            mention.name,
+                            mention.entity_type,
+                            mention.topic,
+                            support_text,
+                            winner[2],
+                            winner[1],
+                            policy=policy,
+                            compatibility=self.schema_compatibility(
+                                mention.entity_type,
+                                mention.topic,
+                                winner[2],
+                                policy,
+                            ),
+                            candidate=winner[3],
+                            candidate_snapshot=candidate_snapshot,
+                        )
+                        and (
+                            winner[3].has_direct_name_evidence
+                            or runner_up_score is None
+                            or winner[0] - runner_up_score >= policy.resolution_margin
+                        )
+                    )
+                    identity_decisions.append(
+                        {
+                            "mention": mention.name,
+                            "candidate_id": winner[1] if winner else None,
+                            "score": winner[0] if winner else None,
+                            "runner_up_score": runner_up_score,
+                            "signals": sorted(winner[4]) if winner else [],
+                            "outcome": "reused" if accepted else "abstained",
+                        }
+                    )
+                    if accepted and winner is not None:
+                        candidate_id, profile = winner[1], winner[2]
+                        classification = self._classification_for_resolution(
+                            candidate_id,
+                            mention,
+                            profile,
+                        )
+                        if not self._classification_conflicts(
+                            project_classifications,
+                            classification,
                         ):
-                            classification = self._classification_for_resolution(
-                                candidate_id,
-                                mention,
-                                profile,
-                            )
-                            if self._classification_conflicts(
-                                project_classifications,
-                                classification,
-                            ):
-                                continue
                             entity_id = candidate_id
                             selected_profile = profile
                             new_aliases = self._new_aliases_for_selected_entity(
@@ -256,7 +297,6 @@ class EntityResolver:
                                 alias_updates.setdefault(candidate_id, []).extend(
                                     new_aliases
                                 )
-                            break
 
                 if entity_id is None:
                     for pending_id in pending_ids_by_surface.get(surface_key, []):
@@ -338,7 +378,56 @@ class EntityResolver:
                 "project_classifications": project_classifications,
                 "resolved_mentions": tuple(resolved_mentions),
                 "block_entity_associations": unique_associations,
+                "identity_decisions": tuple(identity_decisions),
             }
+
+    def _identity_decision_signals(
+        self,
+        name: str,
+        mention_type: str,
+        mention_topic: str,
+        support_text: str,
+        profile: EntityProfile,
+        candidate_id: int,
+        *,
+        policy: IngestionPolicy,
+        compatibility: str,
+        candidate: EntityCandidate,
+        candidate_snapshot: EntityCandidateSnapshot,
+    ) -> tuple[set[str], float]:
+        """Return deterministic evidence and a score used only for comparison."""
+
+        mention = self._candidate_search_key(name)
+        owners = candidate_snapshot.get_entity_ids_for_name(mention)
+        canonical = self._candidate_search_key(profile.canonical_name)
+        signals: set[str] = set()
+        score = candidate.score * 0.70
+        if len(owners) == 1 and mention == canonical:
+            signals.add("unique_canonical_name")
+            score += 0.30
+        elif len(owners) == 1 and mention in candidate_snapshot.get_mentions(candidate_id):
+            signals.add("unique_alias")
+            score += 0.25
+        elif len(owners) > 1:
+            signals.add("ambiguous_alias")
+        if compatibility == "compatible":
+            signals.add("compatible_type")
+            score += 0.08
+        corroborating_names = {
+            value
+            for value in candidate_snapshot.get_mentions(candidate_id)
+            if value != mention and len(value) > 2
+        }
+        normalized_support = " ".join(support_text.split()).casefold()
+        if any(value in normalized_support for value in corroborating_names):
+            signals.add("context_name_support")
+            score += 0.18
+        elif self._has_rich_context(name, support_text, policy):
+            signals.add("context_support")
+            score += 0.03
+        if "fuzzy" in candidate.signals:
+            signals.add("fuzzy_similarity")
+        return signals, min(score, 1.5)
 
     def _classification_for_resolution(
         self,
@@ -468,10 +557,19 @@ class EntityResolver:
         compatibility = compatibility or self.schema_compatibility(
             mention_type, mention_topic, profile, policy
         )
-        if compatibility == "incompatible" or (
-            candidate is not None and "ambiguous_alias" in candidate.signals
-        ):
+        if compatibility == "incompatible":
             return False
+
+        if candidate is not None and "ambiguous_alias" in candidate.signals:
+            corroborating_names = {
+                value
+                for value in candidate_snapshot.get_mentions(candidate_id)
+                if value != self._candidate_search_key(name) and len(value) > 2
+            }
+            normalized_text = " ".join(message_text.split()).casefold()
+            return compatibility == "compatible" and any(
+                value in normalized_text for value in corroborating_names
+            )
 
         evidence = self._name_evidence_level(
             name,

@@ -389,6 +389,35 @@ async def test_reader_marks_a_deleted_document_source_historical():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_reader_marks_a_snapshot_hash_mismatch_unavailable():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(
+        fetch_all_results=[
+            [
+                persisted_row(
+                    candidate,
+                    document_status="indexed",
+                    document_content_hash=candidate.content_hash,
+                    document_current_snapshot_id=candidate.parse_snapshot_id,
+                    snapshot_id=candidate.parse_snapshot_id,
+                    snapshot_content_hash="f" * 64,
+                )
+            ]
+        ]
+    )
+
+    references = await SourceReferenceReader(client).get_message_source_refs(
+        101,
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert references[0].source_status == "unavailable"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_reader_marks_a_replaced_document_version_historical():
     candidate = document_candidate()
     client = RecordingPostgresClient(

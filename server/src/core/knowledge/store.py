@@ -1405,6 +1405,25 @@ class KnowledgeStore:
             limit=limit,
         )
 
+    async def search_messages_semantic(
+        self,
+        query_embedding: List[float],
+        *,
+        user_name: str,
+        session_ids: List[str],
+        visible_project_ids: List[str],
+        limit: int = 50,
+        threshold: float = 0.25,
+    ) -> List[Tuple[int, float, str]]:
+        return await self._message_reader.search_semantic_episode_sources(
+            query_embedding,
+            user_name=user_name,
+            session_ids=session_ids,
+            visible_project_ids=visible_project_ids,
+            limit=limit,
+            threshold=threshold,
+        )
+
     async def search_entity(
         self,
         query: str,

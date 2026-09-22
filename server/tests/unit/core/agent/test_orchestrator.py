@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.conf.domain_config import DomainConfig
+from common.exceptions import LLMBudgetExceededError, WorkspaceConflictError
 from common.schema.agent.identity import AgentConfig
 from core.agent.orchestrator import AgentOrchestrator
 from core.agent.services.agent_manager import AgentManager
@@ -360,6 +361,68 @@ async def test_orchestrator_hides_unexpected_error_details(monkeypatch):
             },
         }
     ]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("error", "expected_data"),
+    [
+        (
+            LLMBudgetExceededError("private provider budget details"),
+            {
+                "message": "The model budget is exhausted.",
+                "code": "llm_budget_exhausted",
+                "retryable": False,
+            },
+        ),
+        (
+            WorkspaceConflictError("private revision details"),
+            {
+                "message": "The workspace changed before the request could be applied.",
+                "code": "workspace_conflict",
+                "retryable": False,
+            },
+        ),
+    ],
+)
+async def test_orchestrator_translates_expected_runtime_failures(
+    monkeypatch, error, expected_data
+):
+    context = FakeSession()
+    tools = FakeTools()
+    context.resources.postgres.upsert_agent(
+        AgentConfig(
+            id="agent-1", name="Researcher", persona="Careful", is_default=True
+        )
+    )
+
+    class FailingExecutor(FakeExecutor):
+        async def execute(self, **kwargs):
+            self.execute_kwargs = kwargs
+            if False:
+                yield FAKE_RESPONSE_EVENT
+            raise error
+
+    monkeypatch.setattr("core.agent.orchestrator.AgentExecutor", FailingExecutor)
+
+    async def fake_bootstrap_services(*_args):
+        return tools
+
+    monkeypatch.setattr(
+        AgentOrchestrator, "_bootstrap_services", fake_bootstrap_services
+    )
+
+    events = [
+        event
+        async for event in make_orchestrator(context).run_stream(
+            user_query="hello",
+            context=context,
+        )
+    ]
+
+    assert events == [{"event": "error", "data": expected_data}]
+    assert tools.closed is True
 
 
 @pytest.mark.runtime

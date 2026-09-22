@@ -89,6 +89,6 @@ class SessionRuntimeFactory:
 
     async def _launch(self, ctx: SessionRuntime):
         """Confirm the project-owned semantic owner is available."""
-        if ctx.project.project_semantic_job is None:
+        if ctx.project.project_semantic_processor is None:
             raise RuntimeError("project semantic job is not registered")
         logger.info(f"System launched successfully for session {ctx.session_id}")

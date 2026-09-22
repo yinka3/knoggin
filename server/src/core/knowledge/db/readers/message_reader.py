@@ -153,6 +153,89 @@ class MessageReader:
         except Exception as exc:
             self._raise_storage_read("search_fts", exc)
 
+    async def search_semantic_episode_sources(
+        self,
+        query_embedding: list[float],
+        *,
+        user_name: str,
+        session_ids: list[str],
+        visible_project_ids: list[str],
+        limit: int = 50,
+        threshold: float = 0.25,
+    ) -> list[tuple[int, float, str]]:
+        """Return messages nominated by semantically matching source Episodes.
+
+        Episode vectors are a rebuildable semantic projection over their exact
+        canonical source-message membership. Messages without an Episode remain
+        available through lexical search.
+        """
+
+        user_name = require_scope_value(
+            user_name,
+            "user_name",
+            "search_semantic_episode_sources",
+        )
+        visible_project_ids = require_visible_project_ids(
+            visible_project_ids,
+            "search_semantic_episode_sources",
+        )
+        if not session_ids or not query_embedding or limit <= 0:
+            return []
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("semantic message threshold must be between 0 and 1")
+
+        vector = json.dumps(query_embedding)
+        try:
+            rows = await self.client.fetch_all(
+                """
+                SELECT source.message_id,
+                       source.session_id,
+                       MAX(source.similarity) AS score
+                FROM (
+                    SELECT membership.message_id,
+                           membership.session_id,
+                           1 - (episode.embedding <=> %s::vector) AS similarity
+                    FROM public.episodes AS episode
+                    JOIN public.episode_messages AS membership
+                      ON membership.episode_id = episode.episode_id
+                     AND membership.project_id = episode.project_id
+                    JOIN public.messages AS message
+                      ON message.message_id = membership.message_id
+                     AND message.project_id = membership.project_id
+                     AND message.session_id = membership.session_id
+                    JOIN public.sessions AS session
+                      ON session.session_id = message.session_id
+                     AND session.project_id = message.project_id
+                     AND session.user_name = message.user_name
+                    WHERE episode.embedding IS NOT NULL
+                      AND message.user_name = %s
+                      AND message.session_id = ANY(%s)
+                      AND message.project_id = ANY(%s)
+                      AND message.lifecycle_state = 'sealed'
+                      AND session.status = 'open'
+                      AND 1 - (episode.embedding <=> %s::vector) >= %s
+                ) AS source
+                GROUP BY source.message_id, source.session_id
+                ORDER BY score DESC, source.message_id ASC
+                LIMIT %s
+                """,
+                (
+                    vector,
+                    user_name,
+                    session_ids,
+                    visible_project_ids,
+                    vector,
+                    threshold,
+                    limit,
+                ),
+            )
+        except Exception as exc:
+            self._raise_storage_read("search_semantic_episode_sources", exc)
+        return [
+            (int(row["message_id"]), float(row["score"]), str(row["session_id"]))
+            for row in rows
+        ]
+
     async def get_user_agent_exchange(
         self,
         user_message_id: int,

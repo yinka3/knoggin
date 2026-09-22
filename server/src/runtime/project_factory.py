@@ -13,7 +13,7 @@ from common.scoping import (
     require_visible_project_ids,
 )
 from core.ingestion.context_entity_build import ContextEntityBuildService
-from core.ingestion.project_semantic_job import ProjectSemanticJob
+from core.ingestion.project_semantic_processor import ProjectSemanticProcessor
 from core.ingestion.relationship_extractor import ContextRelationshipExtractor
 from core.ingestion.semantic_window_admission import SemanticWindowAdmission
 from core.ingestion.text_processor import TextProcessor
@@ -112,6 +112,8 @@ class ProjectRuntimeFactory:
                 settings=self.dev_settings.nlp_pipeline,
                 model_work=resources.model_work,
                 get_vp01=resources.get_vp01,
+                llm=resources.llm_service,
+                user_name=self.user_name,
             ),
         )
         scheduler = Scheduler(
@@ -138,17 +140,17 @@ class ProjectRuntimeFactory:
             background_work=resources.background_work,
             get_vp01=resources.get_vp01,
         )
-        project_semantic_job = self._create_project_semantic_job(
+        project_semantic_processor = self._create_project_semantic_processor(
             runtime, resources=resources
         )
-        runtime.project_semantic_job = project_semantic_job
+        runtime.project_semantic_processor = project_semantic_processor
         conflict_discovery_job = self._create_conflict_discovery_job(
             resources=resources
         )
         runtime.conflict_discovery_job = conflict_discovery_job
 
         try:
-            await project_semantic_job.synchronize_context_file(
+            await project_semantic_processor.synchronize_context_file(
                 JobContext(user_name=self.user_name, project_id=project_id),
                 allow_user_edit=True,
             )
@@ -157,7 +159,7 @@ class ProjectRuntimeFactory:
                 runtime,
                 entities=entities,
                 processor=text_processor,
-                project_semantic_job=project_semantic_job,
+                project_semantic_processor=project_semantic_processor,
                 conflict_discovery_job=conflict_discovery_job,
                 resources=resources,
             )
@@ -224,12 +226,12 @@ class ProjectRuntimeFactory:
                 f"entity ID {IDENTITY_ENTITY_ID}"
             )
 
-    def _create_project_semantic_job(
+    def _create_project_semantic_processor(
         self,
         runtime: ProjectRuntime,
         *,
         resources: ReadyRuntimeResources | None = None,
-    ) -> ProjectSemanticJob:
+    ) -> ProjectSemanticProcessor:
         resources = resources or cast(ReadyRuntimeResources, self.resources)
         token_counter = getattr(resources.llm_service, "count_tokens", None)
         if not callable(token_counter):
@@ -254,7 +256,7 @@ class ProjectRuntimeFactory:
             writer=ProjectContextWriter(resources.postgres),
             filesystem=context_filesystem,
         )
-        return ProjectSemanticJob(
+        return ProjectSemanticProcessor(
             admission,
             resources.knowledge_store,
             episode_generator,
@@ -295,7 +297,7 @@ class ProjectRuntimeFactory:
         *,
         entities: EntityResolver,
         processor: TextProcessor,
-        project_semantic_job: ProjectSemanticJob | None = None,
+        project_semantic_processor: ProjectSemanticProcessor | None = None,
         conflict_discovery_job: ConflictDiscoveryJob | None = None,
         resources: ReadyRuntimeResources | None = None,
     ) -> None:
@@ -317,17 +319,17 @@ class ProjectRuntimeFactory:
                 "developer_settings.nlp_pipeline",
             )
         )
-        if project_semantic_job is not None:
-            scheduler.register(project_semantic_job)
+        if project_semantic_processor is not None:
+            scheduler.register(project_semantic_processor)
             runtime.add_config_unsubscriber(
                 config_manager.subscribe(
-                    project_semantic_job.update_settings,
+                    project_semantic_processor.update_settings,
                     "developer_settings.ingestion",
                 )
             )
             runtime.add_config_unsubscriber(
                 config_manager.subscribe(
-                    project_semantic_job.update_episode_settings,
+                    project_semantic_processor.update_episode_settings,
                     "developer_settings.jobs.episode",
                 )
             )

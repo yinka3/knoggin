@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from common.exceptions import ToolExecutionError
 from common.schema.document import (
     DocumentSelection,
     FolderScanSettings,
@@ -1705,6 +1706,109 @@ async def test_indexer_recovery_requeues_interrupted_document_indexing(document_
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_indexer_admission_continues_after_one_document_fails(
+    document_harness, monkeypatch
+):
+    service, _ = document_harness
+    attempted = []
+
+    async def pending_documents(*, due_at, limit):
+        assert due_at
+        assert limit == 2
+        return [{"document_id": "failed"}, {"document_id": "accepted"}]
+
+    async def schedule(*, document_id):
+        attempted.append(document_id)
+        if document_id == "failed":
+            raise RuntimeError("durable failure already recorded")
+
+    monkeypatch.setattr(
+        service.indexer._reader,
+        "list_documents_for_index_recovery",
+        pending_documents,
+    )
+    monkeypatch.setattr(service.indexer, "schedule_document_index", schedule)
+
+    submitted = await service.indexer._admit_durable_work(2)
+
+    assert submitted == 2
+    assert attempted == ["failed", "accepted"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reindex_document_publishes_a_fresh_snapshot(document_harness):
+    service, postgres = document_harness
+    uploaded = await service.add_document(
+        content=b"alpha beta gamma",
+        original_name="notes.md",
+    )
+    first = await service.index_document(document_id=uploaded["document_id"])
+
+    second = await service.reindex_document(document_id=uploaded["document_id"])
+
+    assert second["status"] == "indexed"
+    assert second["current_snapshot_id"] != first["current_snapshot_id"]
+    assert len(postgres.parse_snapshots) == 2
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (ToolExecutionError("document", "temporary", retryable=True), ("transient_dependency", True)),
+        (ToolExecutionError("document", "invalid", retryable=False), ("invalid_content", False)),
+        (TimeoutError(), ("transient_dependency", True)),
+        (ValueError("bad document"), ("invalid_content", False)),
+    ],
+)
+def test_index_failure_classification_controls_durable_retry(error, expected):
+    from core.knowledge.documents.indexer import DocumentIndexer
+
+    assert DocumentIndexer._classify_index_failure(error) == expected
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_read_document_rejects_missing_or_invalid_parse_snapshots(document_harness):
+    service, postgres = document_harness
+    uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
+
+    with pytest.raises(RuntimeError, match="has not been indexed"):
+        await service.read_document(document_id=uploaded["document_id"])
+
+    indexed = await service.index_document(document_id=uploaded["document_id"])
+    postgres.parse_snapshots[indexed["current_snapshot_id"]]["snapshot"] = {"text": 7}
+    with pytest.raises(RuntimeError, match="snapshot is invalid"):
+        await service.read_document(document_id=uploaded["document_id"])
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_read_document_rejects_page_selection_for_text_files(document_harness):
+    service, _ = document_harness
+    uploaded = await service.add_document(content=b"alpha", original_name="notes.txt")
+    await service.index_document(document_id=uploaded["document_id"])
+
+    with pytest.raises(ValueError, match="only supported for PDF"):
+        await service.read_document(document_id=uploaded["document_id"], page_number=1)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_snapshot_page_requires_page_data_and_a_readable_requested_page():
+    with pytest.raises(ValueError, match="no page data"):
+        DocumentService._snapshot_page({}, 1)
+    with pytest.raises(ValueError, match="exceeds document page count"):
+        DocumentService._snapshot_page(
+            {"pages": [{"page_number": 1, "text": "first"}]},
+            2,
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_indexer_start_drains_more_than_one_recovery_batch(document_harness):
     service, postgres = document_harness
     for index in range(17):
@@ -1840,6 +1944,32 @@ async def test_document_service_search_embeds_query_with_project_scope(
         ["project-1"],
     )
     assert params[-1] == 3
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_document_search_exposes_stored_layout_region_as_locator(document_harness):
+    service, postgres = document_harness
+    locator = {
+        "kind": "layout_region",
+        "page": 2,
+        "element_type": "table",
+    }
+    postgres.search_results = [
+        {
+            "document_id": UUID("a785ecfe-b738-4a43-9e6d-bbdc3f831b20"),
+            "snapshot_id": UUID("b785ecfe-b738-4a43-9e6d-bbdc3f831b20"),
+            "original_name": "report.pdf",
+            "content": "table contents",
+            "score": Decimal("0.9"),
+            "layout_region": json.dumps(locator),
+        }
+    ]
+
+    results = await service.search("table")
+
+    assert results[0]["locator"] == locator
+    assert results[0]["snapshot_id"] == "b785ecfe-b738-4a43-9e6d-bbdc3f831b20"
 
 
 @pytest.mark.storage

@@ -9,7 +9,7 @@ from common.schema.agent.tool_contracts import (
 )
 from core.agent.tool_runtime import execute_tool
 from core.agent.tools.memory import MemoryTools
-from core.agent.tools.registry import get_tool_definition
+from core.agent.tools.registry import build_tool_runtime, get_tool_definition
 
 
 class DispatchTools:
@@ -204,6 +204,34 @@ def test_read_web_page_registry_definition_matches_schema_and_default_limit():
         "read_web_page",
         ("url", "start_line", "max_lines", "query", "page_number"),
     )
+    assert definition.parallel_safe is False
+
+
+@pytest.mark.no_network
+def test_only_explicit_stateless_retrieval_tools_are_parallel_safe():
+    assert get_tool_definition("search_messages").parallel_safe is True
+    assert get_tool_definition("search_entity").parallel_safe is True
+    assert get_tool_definition("episode_check").parallel_safe is True
+    assert get_tool_definition("search_documents").parallel_safe is True
+    assert get_tool_definition("read_web_page").parallel_safe is False
+    assert get_tool_definition("edit_brain").parallel_safe is False
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("invalid_limit", [0, True, "4"])
+def test_tool_runtime_rejects_invalid_graph_result_limits(invalid_limit):
+    with pytest.raises(ValueError, match="max_graph_results must be a positive integer"):
+        build_tool_runtime(
+            enabled_tools=None,
+            additional_schemas=(),
+            user_name="ada",
+            agent_id="agent-1",
+            project_id="project-1",
+            audit_project_id=None,
+            session_id="session-1",
+            run_id="run-1",
+            max_graph_results=invalid_limit,
+        )
 
 
 @pytest.mark.no_network

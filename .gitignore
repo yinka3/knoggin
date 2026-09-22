@@ -103,6 +103,8 @@ data/
 /doc_testing/parser_evaluation/
 /server/*_IMPLEMENTATION_PLAN.md
 /server/*_REVIEW.md
+/server/AGENT_RETRIEVAL_EVALUATION.md
+/server/MYPY_BASELINE.md
 /server/reviews/*.md
 
 # IDEs and Editors
