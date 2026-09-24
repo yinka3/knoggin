@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from loguru import logger
 
@@ -13,6 +14,7 @@ from core.agent.orchestrator import AgentOrchestrator
 from core.agent.services.agent_manager import AgentManager
 from core.community.runtime import AACRuntime
 from core.health.service import RuntimeHealthService
+from core.knowledge.documents import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager
 from core.session.session_manager import SessionManager
 from runtime.resources import RuntimeResources
@@ -39,6 +41,7 @@ class ApplicationShutdownError(RuntimeError):
 class ApplicationRuntime:
     """The root owner of shared resources, projects, sessions, and health."""
 
+    config_manager: ConfigManager
     resources: RuntimeResources
     projects: ProjectManager
     sessions: SessionManager
@@ -69,10 +72,12 @@ class ApplicationRuntime:
         cls,
         *,
         user_name: str,
+        config_dir: str | Path,
         num_workers: int | None = None,
     ) -> "ApplicationRuntime":
         """Build the canonical runtime whose shutdown owns every live layer."""
 
+        config_manager = ConfigManager.initialize(config_dir)
         resources = await RuntimeResources.create(num_workers=num_workers)
         try:
             knowledge_store = resources.knowledge_store
@@ -80,9 +85,18 @@ class ApplicationRuntime:
                 raise RuntimeError("Runtime resources did not initialize KnowledgeStore")
             await knowledge_store.ensure_identity_entity(
                 user_name,
-                ConfigManager.get().config.user_aliases,
+                config_manager.config.user_aliases,
             )
-            projects = ProjectManager(resources=resources, user_name=user_name)
+            projects = ProjectManager(
+                resources=resources,
+                user_name=user_name,
+                filesystem_factory=ProjectFilesystemFactory(
+                    config_manager.resolve_path(
+                        config_manager.config.developer_settings.documents.project_library_root
+                    )
+                ),
+                config_manager=config_manager,
+            )
             await projects.start()
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
@@ -105,6 +119,7 @@ class ApplicationRuntime:
             )
             await aac_runtime.start()
             return cls(
+                config_manager=config_manager,
                 resources=resources,
                 projects=projects,
                 sessions=sessions,

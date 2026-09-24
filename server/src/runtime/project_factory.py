@@ -50,14 +50,19 @@ class ProjectRuntimeFactory:
         resources: RuntimeResources,
         user_name: str,
         maintenance_service: ProjectMaintenanceService | None = None,
+        config_manager: ConfigManager | None = None,
     ) -> None:
         self.resources = resources
         self.user_name = user_name
         self._maintenance_service = maintenance_service
+        self._config_manager = config_manager
 
     @property
     def dev_settings(self):
-        return ConfigManager.get().config.developer_settings
+        return self._config().config.developer_settings
+
+    def _config(self) -> ConfigManager:
+        return self._config_manager or ConfigManager.get()
 
     async def create(
         self,
@@ -86,7 +91,7 @@ class ProjectRuntimeFactory:
         )
         await self._verify_user_entity(entities)
 
-        runtime_config = ConfigManager.get().config
+        runtime_config = self._config().config
         retrieval = KnowledgeRetrieval(
             project_id=project_id,
             readable_project_ids=readable_project_ids,
@@ -177,8 +182,11 @@ class ProjectRuntimeFactory:
         resources: ReadyRuntimeResources | None = None,
     ) -> DocumentService:
         resources = resources or cast(ReadyRuntimeResources, self.resources)
-        runtime_config = ConfigManager.get().config
+        runtime_config = self._config().config
         document_settings = runtime_config.developer_settings.documents
+        filesystem_factory = ProjectFilesystemFactory(
+            self._config().resolve_path(document_settings.project_library_root)
+        )
         reader = DocumentReader(
             resources.postgres,
             project_id,
@@ -193,9 +201,7 @@ class ProjectRuntimeFactory:
             policy=DocumentIndexPolicy.capture(),
             blocking_runner=asyncio.to_thread,
             background_work=resources.background_work,
-            filesystem=ProjectFilesystemFactory(
-                document_settings.project_library_root
-            ).for_project(project_id),
+            filesystem=filesystem_factory.for_project(project_id),
         )
         document_service = DocumentService(
             project_id=project_id,
@@ -209,9 +215,7 @@ class ProjectRuntimeFactory:
             blocking_runner=asyncio.to_thread,
             document_rerank_enabled=document_settings.rerank_enabled,
             document_rerank_candidates=document_settings.rerank_candidates,
-            filesystem_factory=ProjectFilesystemFactory(
-                document_settings.project_library_root
-            ),
+            filesystem_factory=filesystem_factory,
             reconciliation_interval_seconds=(
                 runtime_config.developer_settings.jobs.document_indexing.reconciliation_interval_seconds
             ),
@@ -249,7 +253,9 @@ class ProjectRuntimeFactory:
             embedding_service=resources.embedding,
         )
         context_filesystem = ProjectFilesystemFactory(
-            ConfigManager.get().config.developer_settings.documents.project_library_root
+            self._config().resolve_path(
+                self.dev_settings.documents.project_library_root
+            )
         ).for_project(runtime.project_id)
         context_projection = ContextProjection(
             reader=ProjectContextReader(resources.postgres),
@@ -302,7 +308,7 @@ class ProjectRuntimeFactory:
         resources: ReadyRuntimeResources | None = None,
     ) -> None:
         scheduler = runtime.scheduler
-        config_manager = ConfigManager.get()
+        config_manager = self._config()
 
         def update_entity_resolution(settings):
             entities.update_settings(settings)

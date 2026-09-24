@@ -86,13 +86,13 @@ class ProjectManager:
         user_name: str,
         *,
         filesystem_factory: ProjectFilesystemFactory | None = None,
+        config_manager: ConfigManager | None = None,
     ):
         self.resources = resources
         self.user_name = user_name
         self.pg = resources.postgres
-        self._filesystem_factory = filesystem_factory or ProjectFilesystemFactory(
-            ConfigManager.get().config.developer_settings.documents.project_library_root
-        )
+        self._filesystem_factory = filesystem_factory
+        self._config_manager = config_manager
         self._project_deletion_writer = ProjectDeletionWriter(self.pg)
         self.active_projects: Dict[str, ProjectRuntime] = {}
         self._project_leases: Dict[str, set[str]] = {}
@@ -107,6 +107,7 @@ class ProjectManager:
             resources=resources,
             user_name=user_name,
             maintenance_service=self.maintenance_service,
+            config_manager=config_manager,
         )
         # Entity identity maintenance is user-global and must not be tied to a
         # loaded ProjectRuntime.  ProjectManager exposes the application-owned
@@ -247,6 +248,8 @@ class ProjectManager:
     async def _finish_project_file_cleanup(self, project_id: str) -> str:
         """Remove one owned directory and clear its durable retry task."""
 
+        if self._filesystem_factory is None:
+            raise RuntimeError("Project filesystem is not configured")
         try:
             await asyncio.to_thread(
                 self._filesystem_factory.remove_project_directory,
@@ -305,6 +308,8 @@ class ProjectManager:
             VALUES (%(user_name)s, %(project_id)s, %(readable)s)
         """
         project_file_content = build_project_markdown(name, description).encode("utf-8")
+        if self._filesystem_factory is None:
+            raise RuntimeError("Project filesystem is not configured")
         filesystem = self._filesystem_factory.for_project(project_id)
         await asyncio.to_thread(
             filesystem.write_bytes,

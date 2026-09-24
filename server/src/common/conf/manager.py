@@ -14,8 +14,6 @@ from common.schema.agent.tool_names import get_configurable_tool_names
 from common.schema.settings import RootConfig
 from common.utils.core_utils import safe_update
 
-CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
-CONFIG_FILE_YAML = CONFIG_DIR / "knoggin.yml"
 CONFIG_FILE_NOTICE = (
     "# This configuration file is managed by Knoggin.\n"
     "# Manual edits may be overwritten by the app.\n\n"
@@ -40,9 +38,12 @@ class ConfigManager:
     _instance: Optional["ConfigManager"] = None
     _lock = threading.Lock()
 
-    def __init__(self):
+    def __init__(self, config_dir: Path):
         if ConfigManager._instance is not None:
             raise Exception("ConfigManager is a singleton. Use ConfigManager.get()")
+
+        self.config_dir = config_dir.expanduser().resolve()
+        self.config_file = self.config_dir / "knoggin.yml"
 
         self.config: RootConfig = RootConfig()
         self.subscribers: List[Dict[str, Any]] = []
@@ -51,11 +52,36 @@ class ConfigManager:
         self.load()
 
     @classmethod
+    def initialize(cls, config_dir: str | Path) -> "ConfigManager":
+        """Initialize the process-wide configuration bus at one explicit path."""
+
+        resolved = Path(config_dir).expanduser().resolve()
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls(resolved)
+            elif cls._instance.config_dir != resolved:
+                raise RuntimeError(
+                    "ConfigManager is already initialized for "
+                    f"{cls._instance.config_dir}; cannot switch to {resolved}"
+                )
+        return cls._instance
+
+    @classmethod
     def get(cls) -> "ConfigManager":
         with cls._lock:
             if cls._instance is None:
-                cls._instance = cls()
-        return cls._instance
+                raise RuntimeError(
+                    "ConfigManager has not been initialized with a configuration directory"
+                )
+            return cls._instance
+
+    def resolve_path(self, configured_path: str | Path) -> Path:
+        """Resolve one config-owned path independently of the process cwd."""
+
+        path = Path(configured_path).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        return (self.config_dir / path).resolve()
 
     def load(self):
         """Loads configuration from YAML."""
@@ -64,10 +90,10 @@ class ConfigManager:
         validate_prompt_library()
         data = None
         load_failed = False
-        config_exists = CONFIG_FILE_YAML.exists()
+        config_exists = self.config_file.exists()
         if config_exists:
             try:
-                with open(CONFIG_FILE_YAML, "r") as f:
+                with self.config_file.open("r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
             except Exception as exc:
                 load_failed = True
@@ -107,20 +133,20 @@ class ConfigManager:
     def save(self) -> bool:
         """Saves current Pydantic RootConfig to the YAML file."""
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            self.config_dir.mkdir(parents=True, exist_ok=True)
             # Use model_dump(mode="json") to get YAML-compatible primitive types (e.g. str dates)
             data = self.config.model_dump(mode="json")
 
             old_umask = os.umask(0o177)
             try:
-                fd, temp_path = tempfile.mkstemp(dir=CONFIG_DIR, text=True)
+                fd, temp_path = tempfile.mkstemp(dir=self.config_dir, text=True)
                 try:
                     with os.fdopen(fd, "w") as f:
                         f.write(CONFIG_FILE_NOTICE)
                         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-                    os.replace(temp_path, CONFIG_FILE_YAML)
+                    Path(temp_path).replace(self.config_file)
                 except Exception as write_err:
-                    os.unlink(temp_path)
+                    Path(temp_path).unlink()
                     raise write_err
             finally:
                 os.umask(old_umask)

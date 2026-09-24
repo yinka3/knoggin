@@ -1,5 +1,6 @@
 """Failure-stage cleanup contracts for runtime resource composition."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -148,6 +149,8 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     config_manager = SimpleNamespace(
         config=config,
         subscribe=lambda *_args, **_kwargs: lambda: None,
+        resolve_path=lambda configured_path: Path("/tmp/knoggin-config")
+        / configured_path,
     )
     monkeypatch.setenv("DATABASE_URL", "postgresql://example")
     monkeypatch.setenv("KNOGGIN_GPU", "false")

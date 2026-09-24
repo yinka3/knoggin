@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 import pytest
 
 from common.conf.manager import ConfigManager, deep_merge
@@ -8,19 +6,17 @@ from common.schema.settings import LLMSettings, RootConfig
 
 
 @pytest.fixture
-def mock_config_paths(tmp_path):
-    yaml_path = tmp_path / "knoggin.yml"
-    with patch("common.conf.manager.CONFIG_DIR", tmp_path), \
-         patch("common.conf.manager.CONFIG_FILE_YAML", yaml_path):
-        yield {"yaml": yaml_path, "dir": tmp_path}
-
-
-@pytest.fixture
 def reset_config_manager():
     """Ensure ConfigManager is reset before and after test."""
     ConfigManager._instance = None
     yield
     ConfigManager._instance = None
+
+
+@pytest.fixture
+def mock_config_paths(tmp_path, reset_config_manager):
+    manager = ConfigManager.initialize(tmp_path)
+    return {"yaml": tmp_path / "knoggin.yml", "dir": tmp_path, "manager": manager}
 
 
 @pytest.mark.unit
@@ -53,6 +49,44 @@ def test_config_manager_loads_defaults_when_files_missing(mock_config_paths, res
 
     # It should have saved the default config to YAML
     assert mock_config_paths["yaml"].exists()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_config_manager_reuses_only_the_same_explicit_directory(
+    mock_config_paths, tmp_path
+):
+    manager = mock_config_paths["manager"]
+
+    assert ConfigManager.initialize(mock_config_paths["dir"] / ".") is manager
+    with pytest.raises(RuntimeError, match="already initialized"):
+        ConfigManager.initialize(tmp_path / "different")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_config_manager_requires_initialization(reset_config_manager):
+    with pytest.raises(RuntimeError, match="has not been initialized"):
+        ConfigManager.get()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_config_writes_do_not_follow_the_process_working_directory(
+    mock_config_paths, tmp_path, monkeypatch
+):
+    manager = mock_config_paths["manager"]
+    other_working_directory = tmp_path / "elsewhere"
+    other_working_directory.mkdir()
+    monkeypatch.chdir(other_working_directory)
+
+    assert manager.update_settings({"user_aliases": ["Ada"]}) is True
+
+    assert mock_config_paths["yaml"].exists()
+    assert not (other_working_directory / "config" / "knoggin.yml").exists()
+    assert manager.resolve_path("data/projects") == (
+        mock_config_paths["dir"] / "data" / "projects"
+    ).resolve()
 
 
 @pytest.mark.unit

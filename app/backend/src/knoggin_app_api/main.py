@@ -33,7 +33,8 @@ from .runs import RunManager
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     knoggin = await Knoggin.start(
-        user_name=os.environ.get("KNOGGIN_USER_NAME", "local")
+        user_name=os.environ.get("KNOGGIN_USER_NAME", "local"),
+        config_dir=os.environ.get("KNOGGIN_CONFIG_DIR"),
     )
     app.state.knoggin = knoggin
     app.state.runs = RunManager(knoggin)

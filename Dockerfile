@@ -44,6 +44,7 @@ RUN mkdir -p /app/config /app/data/files
 # Use the virtual environment created by uv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/server/src"
+ENV KNOGGIN_CONFIG_DIR="/app/config"
 
 # server currently ships as an engine package. An API entry point should
 # be supplied by the embedding application rather than this image.

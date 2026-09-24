@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from common.schema.document import DocumentFocus as EngineDocumentFocus
@@ -32,10 +34,17 @@ class Knoggin:
         cls,
         *,
         user_name: str,
+        config_dir: str | os.PathLike[str] | None = None,
         num_workers: Optional[int] = None,
     ) -> "Knoggin":
+        resolved_config_dir = (
+            Path(config_dir).expanduser()
+            if config_dir is not None
+            else _default_config_dir()
+        )
         runtime = await ApplicationRuntime.start(
             user_name=user_name,
+            config_dir=resolved_config_dir,
             num_workers=num_workers,
         )
         return cls(runtime)
@@ -118,6 +127,16 @@ class Knoggin:
             return
         self._closed = True
         await self.runtime.shutdown()
+
+
+def _default_config_dir() -> Path:
+    configured = os.environ.get("KNOGGIN_CONFIG_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    xdg_root = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_root:
+        return Path(xdg_root).expanduser() / "knoggin"
+    return Path.home() / ".config" / "knoggin"
 
 
 async def _resolve_document_focus(
