@@ -20,6 +20,14 @@ CONFIG_FILE_NOTICE = (
 )
 
 
+class ConfigurationLoadError(RuntimeError):
+    """Raised when the configured YAML file cannot safely initialize runtime."""
+
+
+class ConfigurationPersistenceError(RuntimeError):
+    """Raised when initial configuration cannot be persisted."""
+
+
 def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively merge updates into source dict."""
     for key, value in updates.items():
@@ -49,7 +57,7 @@ class ConfigManager:
         self.subscribers: List[Dict[str, Any]] = []
         self._async_lock = asyncio.Lock()
 
-        self.load()
+        self.load(require_valid=True)
 
     @classmethod
     def initialize(cls, config_dir: str | Path) -> "ConfigManager":
@@ -83,7 +91,7 @@ class ConfigManager:
             return path.resolve()
         return (self.config_dir / path).resolve()
 
-    def load(self):
+    def load(self, *, require_valid: bool = False) -> bool:
         """Loads configuration from YAML."""
         from common.utils.prompt_loader import validate_prompt_library
 
@@ -97,13 +105,13 @@ class ConfigManager:
                     data = yaml.safe_load(f)
             except Exception as exc:
                 load_failed = True
-                logger.error(
-                    "Failed to load knoggin.yml; keeping the active "
-                    f"configuration: {exc}"
-                )
+                message = f"Failed to load {self.config_file}: {exc}"
+                if require_valid:
+                    raise ConfigurationLoadError(message) from exc
+                logger.error(f"{message}; keeping the active configuration")
 
         if load_failed:
-            return
+            return False
         if data:
             try:
                 new_config = RootConfig(**data)
@@ -115,27 +123,34 @@ class ConfigManager:
                     f"{error['msg']}"
                     for error in exc.errors(include_url=False)
                 )
-                logger.error(
-                    "Configuration validation failed; keeping the active "
-                    f"configuration: {errors}"
-                )
+                message = f"Configuration validation failed for {self.config_file}: {errors}"
+                if require_valid:
+                    raise ConfigurationLoadError(message) from exc
+                logger.error(f"{message}; keeping the active configuration")
+                return False
             except Exception as exc:
-                logger.error(
-                    "Configuration load failed; keeping the active "
-                    f"configuration: {exc}"
-                )
+                if isinstance(exc, ConfigurationLoadError):
+                    raise
+                message = f"Configuration load failed for {self.config_file}: {exc}"
+                if require_valid:
+                    raise ConfigurationLoadError(message) from exc
+                logger.error(f"{message}; keeping the active configuration")
+                return False
         else:
             self.config = RootConfig()
 
-        if not config_exists:
-            self.save()
+        if not config_exists and not self.save():
+            raise ConfigurationPersistenceError(
+                f"Failed to create initial configuration at {self.config_file}"
+            )
+        return True
 
-    def save(self) -> bool:
+    def save(self, config: RootConfig | None = None) -> bool:
         """Saves current Pydantic RootConfig to the YAML file."""
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
             # Use model_dump(mode="json") to get YAML-compatible primitive types (e.g. str dates)
-            data = self.config.model_dump(mode="json")
+            data = (config or self.config).model_dump(mode="json")
 
             old_umask = os.umask(0o177)
             try:
@@ -146,7 +161,7 @@ class ConfigManager:
                         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
                     Path(temp_path).replace(self.config_file)
                 except Exception as write_err:
-                    Path(temp_path).unlink()
+                    Path(temp_path).unlink(missing_ok=True)
                     raise write_err
             finally:
                 os.umask(old_umask)
@@ -215,8 +230,10 @@ class ConfigManager:
             return False
 
         old_config = self.config
+        if not self.save(new_config):
+            logger.error("Configuration update was not applied because persistence failed")
+            return False
         self.config = new_config
-        self.save()
 
         logger.info("Applying hot-reload of runtime settings via ConfigManager...")
 

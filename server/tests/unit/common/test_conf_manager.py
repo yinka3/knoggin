@@ -1,6 +1,11 @@
 import pytest
 
-from common.conf.manager import ConfigManager, deep_merge
+from common.conf.manager import (
+    ConfigManager,
+    ConfigurationLoadError,
+    ConfigurationPersistenceError,
+    deep_merge,
+)
 from common.schema.agent.settings import AgentLimitSettings
 from common.schema.settings import LLMSettings, RootConfig
 
@@ -147,10 +152,51 @@ def test_failed_config_reload_keeps_the_previous_valid_config(
     invalid_source = "llm:\n  agent_modell: typo\n"
     mock_config_paths["yaml"].write_text(invalid_source, encoding="utf-8")
 
-    mgr.load()
+    assert mgr.load() is False
 
     assert mgr.config.llm.agent_model == "known-good"
     assert mock_config_paths["yaml"].read_text(encoding="utf-8") == invalid_source
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_invalid_existing_config_prevents_initialization(tmp_path, reset_config_manager):
+    config_file = tmp_path / "knoggin.yml"
+    config_file.write_text("llm:\n  agent_modell: typo\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationLoadError, match="agent_modell"):
+        ConfigManager.initialize(tmp_path)
+
+    assert ConfigManager._instance is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_initial_config_write_failure_prevents_initialization(
+    tmp_path, reset_config_manager, monkeypatch
+):
+    monkeypatch.setattr(ConfigManager, "save", lambda self, config=None: False)
+
+    with pytest.raises(ConfigurationPersistenceError, match="initial configuration"):
+        ConfigManager.initialize(tmp_path)
+
+    assert ConfigManager._instance is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_failed_update_write_preserves_active_config_and_subscribers(
+    mock_config_paths, monkeypatch
+):
+    manager = mock_config_paths["manager"]
+    received = []
+    manager.subscribe(received.append, "user_aliases")
+    previous = manager.config
+    monkeypatch.setattr(manager, "save", lambda config=None: False)
+
+    assert manager.update_settings({"user_aliases": ["Ada"]}) is False
+    assert manager.config is previous
+    assert received == [[]]
 
 
 @pytest.mark.unit
