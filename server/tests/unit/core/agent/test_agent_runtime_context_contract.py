@@ -369,7 +369,9 @@ def test_notebook_skips_non_source_search_status_items():
         },
     )
 
-    assert [item["url"] for item in ctx.notebook.model_view()["sources"]] == [
+    assert [
+        item["url"] for item in ctx.notebook.section_items("web_discoveries")
+    ] == [
         "https://example.test/source"
     ]
 
@@ -391,7 +393,9 @@ def test_rollover_evidence_preserves_sources_and_summary_references():
 
     assert ctx.notebook.summary.text == "Condensed source evidence"
     assert rollover.generation == 2
-    assert [item["title"] for item in ctx.notebook.model_view()["sources"]] == [
+    assert [
+        item["title"] for item in ctx.notebook.section_items("web_discoveries")
+    ] == [
         f"Source {index}" for index in range(6)
     ]
     assert ctx.notebook.summary.references
@@ -530,7 +534,7 @@ def test_notebook_dedupes_without_blind_tail_trimming():
             ]
         },
     )
-    ctx.accumulate_tool_result(
+    admission = ctx.accumulate_tool_result(
         "search_messages",
         {
             "data": [
@@ -544,11 +548,11 @@ def test_notebook_dedupes_without_blind_tail_trimming():
         },
     )
 
-    messages = ctx.notebook.model_view()["messages"]
+    messages = ctx.notebook.section_items("messages")
     assert [msg["id"] for msg in messages] == ["msg_1", "msg_2"]
     assert messages[0]["score"] == 1.0
-    assert ctx.notebook.last_apply_result.accepted is False
-    assert ctx.notebook.last_apply_result.reason == "capacity"
+    assert admission.accepted is False
+    assert admission.reason == "capacity"
 
 
 @pytest.mark.no_network
@@ -704,21 +708,20 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     assert [
-        (msg["id"], msg.get("source_type"), msg["message"])
-        for msg in ctx.notebook.model_view()["messages"]
+        (msg["id"], msg["message"])
+        for msg in ctx.notebook.section_items("messages")
+    ] == [("msg_17", "Ada reviewed the testing plan.")]
+    assert [
+        (document["document_id"], document["chunk_index"], document["content"])
+        for document in ctx.notebook.section_items("documents")
     ] == [
-        ("msg_17", None, "Ada reviewed the testing plan."),
-        ("document:file-1:2", "document", "profile plan"),
-        (
-            "document:file-1:lines:10-12",
-            "document",
-            "10: exact content",
-        ),
+        ("file-1", 2, "profile plan"),
+        ("file-1", "lines:10-12", "10: exact content"),
     ]
     rendered = build_evidence_context(ctx)
     assert "Activities:" in rendered
     assert "ACT1 E1 Ada at 1700000000000 (evidence: M1)" in rendered
-    assert ctx.notebook.model_view()["sources"] == [
+    assert list(ctx.notebook.section_items("web_discoveries")) == [
         {
             "title": "Example A",
             "url": "https://example.test/a",
@@ -758,7 +761,6 @@ def test_notebook_rejects_oversized_buckets_atomically():
     assert admission.accepted is False
     assert admission.changed is False
     assert admission.reason == "capacity"
-    assert ctx.notebook.last_apply_result == admission
 
 
 @pytest.mark.no_network

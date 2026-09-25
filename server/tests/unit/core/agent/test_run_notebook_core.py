@@ -37,6 +37,20 @@ def test_notebook_deduplicates_entities_and_creates_reference_pages_and_hints():
     assert notebook.as_dict()["knowledge"]["entities"]["entity:25"]["id"] == 25
 
 
+def test_notebook_public_views_cannot_mutate_canonical_state():
+    notebook = RunNotebook()
+    notebook.apply("search_entity", {"data": [{"id": 25, "canonical_name": "Grace"}]})
+    notebook.apply("edit_brain", {"data": {"success": True}})
+
+    pages = notebook.entity_pages
+    actions = notebook.actions
+    pages["entity:25"]["relationship_refs"].append("relationship:fake")
+    actions[0]["result"]["success"] = False
+
+    assert notebook.entity_pages["entity:25"]["relationship_refs"] == []
+    assert notebook.actions[0]["result"]["success"] is True
+
+
 def test_notebook_shares_relationship_evidence_across_retrieval_surfaces():
     notebook = RunNotebook()
     message = {
@@ -72,9 +86,7 @@ def test_notebook_shares_relationship_evidence_across_retrieval_surfaces():
     assert notebook.entity_pages["entity:24"]["evidence_refs"] == [
         "message:project-a:session-a:msg_7"
     ]
-    assert notebook.model_view()["graph"][0]["evidence"][0]["message"] == (
-        "Sarah joined Acme."
-    )
+    assert notebook.section_items("messages")[0]["message"] == "Sarah joined Acme."
 
 
 def test_notebook_retains_only_complete_activity_and_its_entity_dependency():
@@ -174,7 +186,7 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
     assert [item["episode_id"] for item in notebook.section_items("episodes")] == [
         "ep-1"
     ]
-    assert notebook.model_view()["episodes"][0]["resolution"] == "semantic"
+    assert notebook.section_items("episodes")[0]["resolution"] == "semantic"
     assert [item["id"] for item in notebook.section_items("messages")] == ["msg_8"]
     assert [
         item["chunk_index"] for item in notebook.section_items("documents")
@@ -185,6 +197,7 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
 def test_notebook_compiles_independent_evidence_and_render_capacities():
     capacity = NotebookCapacity.from_limits(
         AgentRunLimits(
+            max_accumulated_paths=9,
             max_accumulated_messages=2,
             max_accumulated_documents=3,
             max_accumulated_web_discoveries=4,
@@ -198,6 +211,8 @@ def test_notebook_compiles_independent_evidence_and_render_capacities():
 
     assert capacity.max_messages == 2
     assert capacity.max_activities == 2
+    assert capacity.max_paths == 9
+    assert capacity.max_observation_supports == 9
     assert capacity.max_documents == 3
     assert capacity.max_web_discoveries == 4
     assert capacity.max_web_reads == 5

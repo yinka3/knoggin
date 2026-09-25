@@ -78,4 +78,3 @@ async def test_executor_accumulates_raw_result_before_model_localization(monkeyp
         "real-episode-id"
     )
     assert results[0]["result"]["data"]["results"][0]["episodes"][0]["episode_id"] == "ep_1"
-    assert run.notebook.last_applied_references == ("episode:real-episode-id",)

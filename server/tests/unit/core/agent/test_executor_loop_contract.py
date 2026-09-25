@@ -1581,7 +1581,7 @@ async def test_executor_replans_after_mixed_terminal_batch_without_dispatch(
     assert events[-1]["event"] == "clarification"
     assert dispatched == []
     assert run.call_count == 0
-    assert run.tools_used == []
+    assert run.tool_call_counts == {}
     assert len(llm.calls) == 2
     assert all("CURRENT EXECUTION PHASE: PLAN" in call["system"] for call in llm.calls)
     assert "Terminal protocol tools must be called alone." in llm.calls[1]["user"]
@@ -1754,7 +1754,7 @@ async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
         schema["function"]["name"] for schema in llm.calls[0]["tools"]
     ]
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
-    messages = run.notebook.model_view()["messages"]
+    messages = run.notebook.section_items("messages")
     assert messages[0]["id"] == "msg_7"
     assert messages[0]["context"][0]["content"] == ("The offer changes compensation.")
 
@@ -1796,7 +1796,7 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     assert errors[1]["data"]["error"] == "Call limit reached for search_messages"
     assert run.call_count == 2
     assert run.tool_call_counts == {"search_messages": 2}
-    assert [item["id"] for item in run.notebook.model_view()["messages"]] == [
+    assert [item["id"] for item in run.notebook.section_items("messages")] == [
         "one",
         "two",
     ]

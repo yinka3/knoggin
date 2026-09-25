@@ -13,11 +13,8 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlsplit
-
-NotebookAudience = Literal["system", "agent"]
-
 
 _KNOWLEDGE_SECTIONS = (
     "entities",
@@ -92,9 +89,7 @@ class NotebookCapacity:
             max_messages=_positive_limit(limits, "max_accumulated_messages", 30),
             max_documents=_positive_limit(limits, "max_accumulated_documents", 30),
             max_observation_supports=_positive_limit(
-                limits,
-                "max_accumulated_observation_supports",
-                _positive_limit(limits, "max_accumulated_paths", 8),
+                limits, "max_accumulated_paths", 8
             ),
             max_web_discoveries=_positive_limit(
                 limits, "max_accumulated_web_discoveries", 12
@@ -171,7 +166,6 @@ class RunNotebook:
         self.summary = NotebookSummary()
         self._last_applied_references: tuple[str, ...] = ()
         self._contribution_history: list[tuple[str, tuple[str, ...]]] = []
-        self._last_apply_result = NotebookApplyResult(False)
 
     def __deepcopy__(self, memo: dict[int, Any]) -> "RunNotebook":
         """Copy state without cloning the live model tokenizer or service."""
@@ -190,7 +184,6 @@ class RunNotebook:
         clone.summary = deepcopy(self.summary, memo)
         clone._last_applied_references = self._last_applied_references
         clone._contribution_history = deepcopy(self._contribution_history, memo)
-        clone._last_apply_result = self._last_apply_result
         return clone
 
     def section_items(self, section: str) -> tuple[dict[str, Any], ...]:
@@ -202,19 +195,11 @@ class RunNotebook:
 
     @property
     def entity_pages(self) -> dict[str, dict[str, Any]]:
-        return self._entity_pages
+        return deepcopy(self._entity_pages)
 
     @property
     def actions(self) -> list[dict[str, Any]]:
-        return list(self._actions.values())
-
-    @property
-    def last_applied_references(self) -> tuple[str, ...]:
-        return self._last_applied_references
-
-    @property
-    def last_apply_result(self) -> NotebookApplyResult:
-        return self._last_apply_result
+        return deepcopy(list(self._actions.values()))
 
     def set_token_counter(self, token_counter: Callable[[str], int] | None) -> None:
         """Install the active model tokenizer without making it notebook state."""
@@ -293,21 +278,8 @@ class RunNotebook:
             "render_tokens": token_count,
         }
 
-    def capacity_state(self) -> str:
-        return str(self.capacity_report()["status"])
-
     def _section_values(self, section: str) -> list[dict[str, Any]]:
         return [self._records[section][key] for key in self._orders[section]]
-
-    def section_reference(self, section: str, item: dict[str, Any]) -> str:
-        """Return the canonical reference used for one section record."""
-
-        return self._reference_for_section(section, item)
-
-    def is_last_applied(self, section: str, item: dict[str, Any]) -> bool:
-        return (
-            self._reference_for_section(section, item) in self._last_applied_references
-        )
 
     def _reference_for_section(self, section: str, item: dict[str, Any]) -> str:
         if section == "entities":
@@ -683,37 +655,6 @@ class RunNotebook:
         if hint not in self.possible_next_steps:
             self.possible_next_steps.append(hint)
 
-    def record_agent_hint(
-        self,
-        tool: str,
-        arguments: dict[str, Any],
-        reason: str,
-    ) -> dict[str, Any]:
-        """Record a short operational hint, never hidden chain-of-thought."""
-
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("agent hint reason must be non-blank")
-        reason = " ".join(reason.split())
-        if len(reason) > 240:
-            raise ValueError("agent hint reason must be at most 240 characters")
-        hint = {
-            "audience": "agent",
-            "tool": str(tool),
-            "arguments": deepcopy(arguments),
-            "reason": reason,
-        }
-        previous_steps = self.possible_next_steps
-        self.possible_next_steps = [
-            item
-            for item in self.possible_next_steps
-            if not (item.get("audience") == "agent" and item.get("tool") == tool)
-        ]
-        self.possible_next_steps.append(hint)
-        if not self._fits_capacity():
-            self.possible_next_steps = previous_steps
-            raise ValueError("notebook next-step guidance exceeds capacity")
-        return hint
-
     def set_summary(
         self, text: str | None, references: list[str] | tuple[str, ...] = ()
     ) -> None:
@@ -727,119 +668,6 @@ class RunNotebook:
         if not self._fits_capacity():
             self.summary = previous_summary
             raise ValueError("notebook summary exceeds capacity")
-
-    @staticmethod
-    def _model_message(item: dict[str, Any]) -> dict[str, Any]:
-        """Expose one canonical message in the formatter's compact shape."""
-
-        value = deepcopy(item)
-        if isinstance(value.get("context"), list):
-            return value
-        content = value.get("message", value.get("content", ""))
-        value.setdefault("message", content)
-        value.setdefault("score", 0.5)
-        value["context"] = [
-            {
-                "role": value.get("role", "assistant"),
-                "timestamp": value.get("timestamp", ""),
-                "content": content,
-                "is_hit": True,
-            }
-        ]
-        return value
-
-    def _messages_for_refs(self, references: object) -> list[dict[str, Any]]:
-        if not isinstance(references, list):
-            return []
-        values = []
-        for reference in references:
-            if isinstance(reference, str) and reference in self._records["messages"]:
-                values.append(self._model_message(self._records["messages"][reference]))
-        return values
-
-    def model_view(self) -> dict[str, Any]:
-        """Build a bounded, formatter-friendly view without changing state."""
-
-        relationships = []
-        for item in self._section_values("relationships"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            relationships.append(value)
-
-        activities = []
-        for item in self._section_values("activities"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            activities.append(value)
-
-        paths = []
-        for item in self._section_values("paths"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            paths.append(value)
-
-        episodes = []
-        for item in self._section_values("episodes"):
-            value = deepcopy(item)
-            value["evidence"] = self._messages_for_refs(value.get("evidence_refs"))
-            episodes.append(
-                {
-                    "resolution": value.pop("resolution", "unknown"),
-                    "results": [value],
-                }
-            )
-
-        documents = self._section_values("documents")
-        document_messages = []
-        for document in documents:
-            content = document.get("content", "")
-            document_messages.append(
-                {
-                    "id": (
-                        f"document:{document.get('document_id', 'document')}:"
-                        f"{document.get('chunk_index', 0)}"
-                    ),
-                    "document_id": document.get("document_id", "document"),
-                    "chunk_index": document.get("chunk_index", 0),
-                    "content": content,
-                    "message": content,
-                    "role": "document",
-                    "score": document.get("score", 0.5),
-                    "source_type": "document",
-                    "source": document.get("document_name", "uploaded document"),
-                    "context": [
-                        {
-                            "role": "document",
-                            "timestamp": document.get(
-                                "document_name", "uploaded document"
-                            ),
-                            "content": content,
-                            "is_hit": True,
-                        }
-                    ],
-                }
-            )
-
-        return {
-            "profiles": [deepcopy(item) for item in self._section_values("entities")],
-            "entity_pages": deepcopy(self._entity_pages),
-            "graph": relationships,
-            "activities": activities,
-            "paths": paths,
-            "episodes": episodes,
-            "messages": [
-                self._model_message(item) for item in self._section_values("messages")
-            ]
-            + document_messages,
-            "sources": [
-                deepcopy(item) for item in self._section_values("web_discoveries")
-            ]
-            + [deepcopy(item) for item in self._section_values("web_reads")],
-            "documents": [deepcopy(item) for item in documents],
-            "actions": self.actions,
-            "possible_next_steps": deepcopy(self.possible_next_steps),
-            "summary": self.summary.as_dict(),
-        }
 
     def _apply_unchecked(
         self, tool_name: str, result: dict[str, Any]
@@ -1032,20 +860,17 @@ class RunNotebook:
         self.summary = candidate.summary
         self._last_applied_references = candidate._last_applied_references
         self._contribution_history = candidate._contribution_history
-        self._last_apply_result = candidate._last_apply_result
 
     def apply(self, tool_name: str, result: dict[str, Any]) -> NotebookApplyResult:
         """Apply one result atomically, rolling over once when it does not fit."""
 
         if not isinstance(result, dict) or result.get("error"):
             self._last_applied_references = ()
-            self._last_apply_result = NotebookApplyResult(False)
-            return self._last_apply_result
+            return NotebookApplyResult(False)
         data = result.get("data")
         if data is None or data == [] or data == {}:
             self._last_applied_references = ()
-            self._last_apply_result = NotebookApplyResult(False)
-            return self._last_apply_result
+            return NotebookApplyResult(False)
 
         before = self.fingerprint()
         candidate = deepcopy(self)
@@ -1054,7 +879,6 @@ class RunNotebook:
             applied = NotebookApplyResult(
                 before != candidate.fingerprint(), applied.references
             )
-            candidate._last_apply_result = applied
             self._adopt_from(candidate)
             return applied
 
@@ -1063,13 +887,12 @@ class RunNotebook:
             rollover = rolled.rollover()
         except ValueError:
             self._last_applied_references = ()
-            self._last_apply_result = NotebookApplyResult(
+            return NotebookApplyResult(
                 False,
                 (),
                 False,
                 "capacity",
             )
-            return self._last_apply_result
         retried = rolled._apply_unchecked(tool_name, result)
         if retried.references and rolled._fits_capacity():
             applied = NotebookApplyResult(
@@ -1078,18 +901,16 @@ class RunNotebook:
                 True,
                 f"rolled_over:{rollover.generation}",
             )
-            rolled._last_apply_result = applied
             self._adopt_from(rolled)
             return applied
 
         self._last_applied_references = ()
-        self._last_apply_result = NotebookApplyResult(
+        return NotebookApplyResult(
             False,
             (),
             False,
             "capacity",
         )
-        return self._last_apply_result
 
     @staticmethod
     def _ref_section(reference: str) -> str | None:
@@ -1305,8 +1126,7 @@ class RunNotebook:
         self.possible_next_steps = [
             hint
             for hint in self.possible_next_steps
-            if hint.get("audience") == "agent"
-            or any(
+            if any(
                 isinstance(ref, str) and ref in retained
                 for ref in hint.get("references", [])
             )
@@ -1341,43 +1161,11 @@ class RunNotebook:
         self.set_summary(normalized_summary, summary_references)
         self._contribution_history = [("rollover", tuple(retained))]
         self._last_applied_references = ()
-        self._last_apply_result = NotebookApplyResult(False)
         return NotebookRolloverResult(
             self.generation,
             tuple(ref for section in _ALL_SECTIONS for ref in self._orders[section]),
             tuple(self.summary.references),
         )
-
-    def references_for_result(
-        self,
-        tool_name: str,
-        result: dict[str, Any],
-        *,
-        local_references: dict[str, str] | None = None,
-    ) -> tuple[str, ...]:
-        """Preview the references admitted by a result without mutating state."""
-
-        preview = deepcopy(self)
-        candidate = deepcopy(result)
-        if local_references:
-            candidate = self._restore_local_references(candidate, local_references)
-        return preview.apply(tool_name, candidate).references
-
-    @staticmethod
-    def _restore_local_references(value: Any, local_references: dict[str, str]):
-        if isinstance(value, str):
-            return local_references.get(value, value)
-        if isinstance(value, list):
-            return [
-                RunNotebook._restore_local_references(item, local_references)
-                for item in value
-            ]
-        if isinstance(value, dict):
-            return {
-                key: RunNotebook._restore_local_references(item, local_references)
-                for key, item in value.items()
-            }
-        return value
 
     def render(self) -> str:
         """Render this notebook for a model-facing prompt view."""
@@ -1496,4 +1284,3 @@ class RunNotebook:
         self.summary = NotebookSummary()
         self._last_applied_references = ()
         self._contribution_history.clear()
-        self._last_apply_result = NotebookApplyResult(False)

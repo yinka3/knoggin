@@ -38,16 +38,12 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
             }
         },
     )
-    notebook.record_agent_hint(
-        "get_connections", {"entity_id": 24}, "inspect the relationship neighborhood"
-    )
     before = deepcopy(notebook.as_dict())
 
     rendered = render_notebook(notebook)
 
     assert "E1 Sarah Johnson" in rendered
     assert "ep_epsecr: Changed" in rendered
-    assert '"entity_id": 24' in rendered
     assert '"episode_id": "ep_epsecr"' in rendered
     assert "ep-secret" not in rendered
     assert "project-a" not in rendered
