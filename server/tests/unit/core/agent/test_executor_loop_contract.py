@@ -189,7 +189,7 @@ async def test_research_mode_loads_briefing_before_the_first_step(monkeypatch):
         [
             [
                 tool_call_event(
-                    "search_messages",
+                    "search_knowledge_messages",
                     '{"query": "source"}',
                     "search-1",
                 ),
@@ -377,7 +377,7 @@ async def test_adaptive_tool_followup_loads_cached_briefing_once(monkeypatch):
         [
             [
                 tool_call_event(
-                    "search_messages",
+                    "search_knowledge_messages",
                     '{"query": "scope"}',
                     "search-1",
                 ),
@@ -488,7 +488,7 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
         [
             [
                 tool_call_event(
-                    "search_messages",
+                    "search_knowledge_messages",
                     '{"query": "profile", "limit": 3}',
                     "call-1",
                 ),
@@ -496,7 +496,7 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
             ],
             [
                 tool_call_event(
-                    "get_recent_activity",
+                    "get_entity_recent_activity",
                     '{"entity_name": "Knoggin", "hours": 24}',
                     "call-2",
                 ),
@@ -524,7 +524,7 @@ async def test_executor_loop_accumulates_context_across_reasoning_attempts(
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     async def fake_execute(_tools, name, _args):
-        if name == "search_messages":
+        if name == "search_knowledge_messages":
             return {
                 "data": [
                     {
@@ -614,7 +614,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
         [
             [
                 tool_call_event(
-                    "episode_check",
+                    "search_episodes",
                     '{"query": "launch history"}',
                     "episode-a",
                 ),
@@ -622,7 +622,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
             ],
             [
                 tool_call_event(
-                    "search_messages",
+                    "search_knowledge_messages",
                     '{"query": "launch decision"}',
                     "message-b",
                 ),
@@ -674,7 +674,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     async def fake_execute(_tools, name, _args):
-        if name == "episode_check":
+        if name == "search_episodes":
             return {
                 "data": {
                     "resolution": "exact",
@@ -693,7 +693,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
                     ],
                 }
             }
-        if name == "search_messages":
+        if name == "search_knowledge_messages":
             return {"data": [{"id": "message-b", "message": "MESSAGE_B"}]}
         if name == "find_relationship_path":
             return {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]}
@@ -757,7 +757,7 @@ async def test_final_synthesis_receives_episode_reversal_chronology(monkeypatch)
         [
             [
                 tool_call_event(
-                    "episode_check",
+                    "search_episodes",
                     '{"query": "current deployment policy"}',
                     "episodes-1",
                 ),
@@ -785,7 +785,7 @@ async def test_final_synthesis_receives_episode_reversal_chronology(monkeypatch)
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     async def episode_reversal(_tools, name, _args):
-        assert name == "episode_check"
+        assert name == "search_episodes"
         return {
             "data": {
                 "resolution": "exact",
@@ -992,7 +992,7 @@ async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
     llm = ScriptedLLM(
         [
             [
-                tool_call_event("search_messages", '{"query": "missing"}', "search-1"),
+                tool_call_event("search_knowledge_messages", '{"query": "missing"}', "search-1"),
                 completed_event(),
             ],
             [
@@ -1210,7 +1210,7 @@ async def test_research_fallback_summarizes_grounded_evidence(monkeypatch):
         [
             [
                 tool_call_event(
-                    "search_messages",
+                    "search_knowledge_messages",
                     '{"query": "release"}',
                     "search-release",
                 ),
@@ -1484,7 +1484,7 @@ async def test_executor_reserves_one_synthesis_attempt_after_normal_budget(
         [
             [
                 tool_call_event(
-                    "search_messages",
+                    "search_knowledge_messages",
                     '{"query": "profile", "limit": 3}',
                     "search-1",
                 ),
@@ -1547,7 +1547,7 @@ async def test_executor_replans_after_mixed_terminal_batch_without_dispatch(
                             "submit-mixed",
                         ),
                         (
-                            "search_messages",
+                            "search_knowledge_messages",
                             f'{{"query": "{secret}"}}',
                             "search-mixed",
                         ),
@@ -1622,7 +1622,7 @@ async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypa
         [
             [
                 tool_call_event(
-                    "search_messages",
+                    "search_knowledge_messages",
                     '{"query": "profile", "limit": 3}',
                     "search-1",
                 ),
@@ -1664,7 +1664,7 @@ async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypa
 
     async def fake_execute(_tools, name, args):
         dispatched.append((name, args))
-        if name == "search_messages":
+        if name == "search_knowledge_messages":
             return {
                 "data": [
                     {
@@ -1683,8 +1683,8 @@ async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypa
     assert events[-1]["event"] == "clarification"
     assert [
         event["data"]["tool"] for event in events if event["event"] == "tool_start"
-    ] == ["search_messages"]
-    assert dispatched == [("search_messages", {"query": "profile", "limit": 3})]
+    ] == ["search_knowledge_messages"]
+    assert dispatched == [("search_knowledge_messages", {"query": "profile", "limit": 3})]
     assert run.call_count == 1
     assert len(llm.calls) == 4
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[2]["system"]
@@ -1703,7 +1703,7 @@ async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
         [
             [
                 tool_call_event(
-                    "load_topic_context",
+                    "load_project_topic_context",
                     '{"topics": ["Work", "Finance"]}',
                     "topics-1",
                 ),
@@ -1750,7 +1750,7 @@ async def test_topic_context_evidence_triggers_final_synthesis(monkeypatch):
     events = [event async for event in executor._execute_run()]
 
     assert events[-1]["data"]["content"] == "Final answer."
-    assert "load_topic_context" in [
+    assert "load_project_topic_context" in [
         schema["function"]["name"] for schema in llm.calls[0]["tools"]
     ]
     assert "CURRENT EXECUTION PHASE: SYNTHESIZE" in llm.calls[-1]["system"]
@@ -1766,7 +1766,7 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     run = make_run(
         limits=AgentRunLimits(
             max_calls=4,
-            tool_limits=(("search_messages", 2),),
+            tool_limits=(("search_knowledge_messages", 2),),
         )
     )
     executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace())
@@ -1781,10 +1781,10 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
         event
         async for event in executor._execute_tools(
             [
-                ToolCall("search_messages", {"query": "one"}, call_id="one"),
-                ToolCall("search_messages", {"query": "one"}, call_id="dup"),
-                ToolCall("search_messages", {"query": "two"}, call_id="two"),
-                ToolCall("search_messages", {"query": "three"}, call_id="three"),
+                ToolCall("search_knowledge_messages", {"query": "one"}, call_id="one"),
+                ToolCall("search_knowledge_messages", {"query": "one"}, call_id="dup"),
+                ToolCall("search_knowledge_messages", {"query": "two"}, call_id="two"),
+                ToolCall("search_knowledge_messages", {"query": "three"}, call_id="three"),
             ],
             results,
         )
@@ -1793,9 +1793,11 @@ async def test_executor_loop_enforces_duplicate_tool_and_global_limits(
     errors = [event for event in events if event["event"] == "tool_error"]
     assert len(errors) == 2
     assert errors[0]["data"]["error"] == "Duplicate call skipped"
-    assert errors[1]["data"]["error"] == "Call limit reached for search_messages"
+    assert errors[1]["data"]["error"] == (
+        "Call limit reached for search_knowledge_messages"
+    )
     assert run.call_count == 2
-    assert run.tool_call_counts == {"search_messages": 2}
+    assert run.tool_call_counts == {"search_knowledge_messages": 2}
     assert [item["id"] for item in run.notebook.section_items("messages")] == [
         "one",
         "two",
@@ -1807,7 +1809,7 @@ async def test_fallback_summary_uses_all_canonical_evidence_categories():
     llm = ScriptedLLM([])
     run = make_run()
     run.notebook.apply(
-        "episode_check",
+        "search_episodes",
         {
             "data": {
                 "resolution": "direct",
@@ -1865,11 +1867,11 @@ async def test_compaction_token_count_matches_post_compaction_context(monkeypatc
     llm = ScriptedLLM([])
     run = make_run()
     run.notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m1", "message": "A retained message"}]},
     )
     run.notebook.apply(
-        "search_entity",
+        "search_knowledge_entities",
         {"data": [{"id": "p1", "canonical_name": "Ada"}]},
     )
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
@@ -1896,26 +1898,26 @@ async def test_executor_loop_recovers_from_invalid_arguments_and_tool_exceptions
 
     async def fake_execute(_tools, name, _args):
         calls.append(name)
-        if name == "search_messages":
+        if name == "search_knowledge_messages":
             raise RuntimeError("backend exploded")
         return {"data": [{"id": "ok", "message": "usable"}]}
 
     monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
 
     invalid = executor._parse_tool_calls(
-        [{"name": "search_messages", "arguments": "{bad", "id": "bad"}],
+        [{"name": "search_knowledge_messages", "arguments": "{bad", "id": "bad"}],
         "",
     )[0]
     results = []
     events = [
         event
         async for event in executor._execute_tools(
-            [invalid, ToolCall("search_entity", {"query": "Ada"}, call_id="ok")],
+            [invalid, ToolCall("search_knowledge_entities", {"query": "Ada"}, call_id="ok")],
             results,
         )
     ]
 
-    assert calls == ["search_entity"]
+    assert calls == ["search_knowledge_entities"]
     assert [event["event"] for event in events] == [
         "tool_start",
         "tool_error",
@@ -1930,7 +1932,7 @@ async def test_executor_loop_recovers_from_invalid_arguments_and_tool_exceptions
     error_events = [
         event
         async for event in executor._execute_tools(
-            [ToolCall("search_messages", {"query": "explode"}, call_id="err")],
+            [ToolCall("search_knowledge_messages", {"query": "explode"}, call_id="err")],
             error_results,
         )
     ]
@@ -1958,7 +1960,7 @@ async def test_executor_loop_timeout_keeps_run_scoped_tool_references(
     events = [
         event
         async for event in executor._execute_tools(
-            [ToolCall("search_messages", {"query": "slow"}, call_id="slow")],
+            [ToolCall("search_knowledge_messages", {"query": "slow"}, call_id="slow")],
             [],
         )
     ]
@@ -1986,7 +1988,7 @@ async def test_executor_cancellation_keeps_run_scoped_tool_references(monkeypatc
         return [
             event
             async for event in executor._execute_tools(
-                [ToolCall("search_messages", {"query": "cancel"}, call_id="cancel")],
+                [ToolCall("search_knowledge_messages", {"query": "cancel"}, call_id="cancel")],
                 [],
             )
         ]
@@ -2136,8 +2138,8 @@ async def test_parallel_safe_reads_overlap_and_preserve_request_order(monkeypatc
     async def consume():
         async for event in executor._execute_tools(
             [
-                ToolCall("search_messages", {"query": "first"}, call_id="first-call"),
-                ToolCall("search_messages", {"query": "second"}, call_id="second-call"),
+                ToolCall("search_knowledge_messages", {"query": "first"}, call_id="first-call"),
+                ToolCall("search_knowledge_messages", {"query": "second"}, call_id="second-call"),
             ],
             results,
         ):
@@ -2167,7 +2169,7 @@ async def test_one_parallel_read_failure_keeps_sibling_success(monkeypatch):
 
     async def mixed_result(_tools, _name, args):
         if args["query"] == "broken":
-            raise ToolExecutionError("search_messages", "one read failed")
+            raise ToolExecutionError("search_knowledge_messages", "one read failed")
         return {"data": [{"id": "kept", "message": "usable"}]}
 
     monkeypatch.setattr("core.agent.executor.execute_tool", mixed_result)
@@ -2176,8 +2178,8 @@ async def test_one_parallel_read_failure_keeps_sibling_success(monkeypatch):
         event
         async for event in executor._execute_tools(
             [
-                ToolCall("search_messages", {"query": "broken"}, call_id="bad"),
-                ToolCall("search_messages", {"query": "working"}, call_id="good"),
+                ToolCall("search_knowledge_messages", {"query": "broken"}, call_id="bad"),
+                ToolCall("search_knowledge_messages", {"query": "working"}, call_id="good"),
             ],
             results,
         )
@@ -2189,7 +2191,9 @@ async def test_one_parallel_read_failure_keeps_sibling_success(monkeypatch):
         "tool_error",
         "tool_end",
     ]
-    assert results[0]["error"] == "Tool 'search_messages' failed: one read failed"
+    assert results[0]["error"] == (
+        "Tool 'search_knowledge_messages' failed: one read failed"
+    )
     assert results[1]["result"]["data"][0]["id"] == "kept"
 
 
@@ -2218,8 +2222,8 @@ async def test_parallel_read_normalizes_timeout_and_internal_failures(
         event
         async for event in executor._execute_tools(
             [
-                ToolCall("search_messages", {"query": "broken"}, call_id="bad"),
-                ToolCall("search_messages", {"query": "working"}, call_id="good"),
+                ToolCall("search_knowledge_messages", {"query": "broken"}, call_id="bad"),
+                ToolCall("search_knowledge_messages", {"query": "working"}, call_id="good"),
             ],
             results,
         )
@@ -2251,8 +2255,8 @@ async def test_parallel_read_reports_notebook_capacity_rejection(monkeypatch):
         event
         async for event in executor._execute_tools(
             [
-                ToolCall("search_messages", {"query": "first"}, call_id="first"),
-                ToolCall("search_messages", {"query": "second"}, call_id="second"),
+                ToolCall("search_knowledge_messages", {"query": "first"}, call_id="first"),
+                ToolCall("search_knowledge_messages", {"query": "second"}, call_id="second"),
             ],
             results,
         )
@@ -2291,8 +2295,8 @@ async def test_parallel_batch_cancellation_awaits_every_child(monkeypatch):
     async def consume():
         async for _ in executor._execute_tools(
             [
-                ToolCall("search_messages", {"query": "first"}, call_id="first"),
-                ToolCall("search_messages", {"query": "second"}, call_id="second"),
+                ToolCall("search_knowledge_messages", {"query": "first"}, call_id="first"),
+                ToolCall("search_knowledge_messages", {"query": "second"}, call_id="second"),
             ],
             [],
         ):
@@ -2337,8 +2341,8 @@ async def test_parallel_batch_propagates_process_level_failures_and_cleans_up(
     async def consume():
         async for _ in executor._execute_tools(
             [
-                ToolCall("search_messages", {"query": "fatal"}, call_id="fatal"),
-                ToolCall("search_messages", {"query": "blocked"}, call_id="blocked"),
+                ToolCall("search_knowledge_messages", {"query": "fatal"}, call_id="fatal"),
+                ToolCall("search_knowledge_messages", {"query": "blocked"}, call_id="blocked"),
             ],
             [],
         ):

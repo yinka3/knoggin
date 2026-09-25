@@ -20,12 +20,12 @@ def test_empty_notebook_renders_a_stable_minimal_view():
 def test_previous_notebook_page_is_hidden_until_requested():
     notebook = RunNotebook()
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m1", "message": "older evidence"}]},
     )
     notebook.rollover()
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m2", "message": "current evidence"}]},
     )
 
@@ -46,7 +46,7 @@ def test_previous_notebook_page_is_hidden_until_requested():
 def test_notebook_renderer_is_strict_localized_and_read_only():
     notebook = RunNotebook()
     notebook.apply(
-        "search_entity",
+        "search_knowledge_entities",
         {
             "data": [
                 {"id": 24, "canonical_name": "Sarah Johnson", "project_id": "project-a"}
@@ -54,7 +54,7 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
         },
     )
     notebook.apply(
-        "episode_check",
+        "search_episodes",
         {
             "data": {
                 "resolution": "semantic",
@@ -84,7 +84,7 @@ def test_notebook_renderer_is_strict_localized_and_read_only():
 def test_notebook_renderer_preserves_cross_project_records_without_duplicate_ids():
     notebook = RunNotebook()
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {
             "data": [
                 {"id": "msg-1", "project_id": "project-a", "message": "A"},
@@ -163,11 +163,11 @@ def test_path_observation_handles_are_retained_and_expand_only_on_demand():
 
     assert "Paths:" in initial
     assert "(support: O1)" in initial
-    assert "read_observation_evidence" in initial
+    assert "read_relationship_observation_evidence" in initial
     assert "Observation support (expanded on demand):" not in initial
     assert "Ada joined Acme." not in initial
 
-    notebook.apply("read_observation_evidence", {"data": bundle})
+    notebook.apply("read_relationship_observation_evidence", {"data": bundle})
     expanded = render_notebook(notebook)
 
     assert "Observation support (expanded on demand):" in expanded
@@ -182,7 +182,7 @@ def test_notebook_renderer_keeps_long_text_evidence_and_source_continuations():
     notebook = RunNotebook()
     leading_context = "introductory context " * 24
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {
             "data": [
                 {

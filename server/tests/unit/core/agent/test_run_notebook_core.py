@@ -6,7 +6,7 @@ def test_notebook_deduplicates_entities_and_creates_reference_pages_and_hints():
     notebook = RunNotebook(limits=AgentRunLimits(max_accumulated_profiles=2))
 
     first = notebook.apply(
-        "search_entity",
+        "search_knowledge_entities",
         {
             "data": [
                 {"id": 24, "canonical_name": "Sarah Johnson"},
@@ -29,17 +29,17 @@ def test_notebook_deduplicates_entities_and_creates_reference_pages_and_hints():
         "evidence_refs": [],
     }
     assert [hint["tool"] for hint in notebook.possible_next_steps] == [
-        "get_connections",
-        "episode_check",
-        "get_connections",
-        "episode_check",
+        "get_entity_relationships",
+        "search_episodes",
+        "get_entity_relationships",
+        "search_episodes",
     ]
     assert notebook.as_dict()["knowledge"]["entities"]["entity:25"]["id"] == 25
 
 
 def test_notebook_public_views_cannot_mutate_canonical_state():
     notebook = RunNotebook()
-    notebook.apply("search_entity", {"data": [{"id": 25, "canonical_name": "Grace"}]})
+    notebook.apply("search_knowledge_entities", {"data": [{"id": 25, "canonical_name": "Grace"}]})
     notebook.apply("edit_brain", {"data": {"success": True}})
 
     pages = notebook.entity_pages
@@ -61,9 +61,9 @@ def test_notebook_shares_relationship_evidence_across_retrieval_surfaces():
         "role": "user",
     }
 
-    notebook.apply("search_messages", {"data": [message]})
+    notebook.apply("search_knowledge_messages", {"data": [message]})
     notebook.apply(
-        "get_connections",
+        "get_entity_relationships",
         {
             "data": [
                 {
@@ -93,7 +93,7 @@ def test_notebook_retains_only_complete_activity_and_its_entity_dependency():
     notebook = RunNotebook()
 
     admission = notebook.apply(
-        "get_recent_activity",
+        "get_entity_recent_activity",
         {
             "data": [
                 {"error": "unavailable", "entity_id": 1, "time": 1},
@@ -149,7 +149,7 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
         )
     )
     notebook.apply(
-        "episode_check",
+        "search_episodes",
         {
             "data": {
                 "resolution": "semantic",
@@ -169,7 +169,7 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
         },
     )
     notebook.apply(
-        "episode_check",
+        "search_episodes",
         {"data": [{"id": "msg_8", "message": "No episode was stored."}]},
     )
     notebook.apply(
@@ -253,13 +253,13 @@ def test_notebook_capacity_rejects_an_oversized_result_atomically():
     )
 
     first = notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m1", "message": "first"}]},
     )
     before = notebook.as_dict()
 
     rejected = notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m2", "message": "second"}]},
     )
 
@@ -283,7 +283,7 @@ def test_notebook_rollover_keeps_dependencies_and_resolvable_summary_refs():
         )
     )
     notebook.apply(
-        "get_connections",
+        "get_entity_relationships",
         {
             "data": [
                 {
@@ -325,7 +325,7 @@ def test_notebook_hard_token_rail_is_measured_with_injected_counter():
     before = notebook.as_dict()
 
     result = notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m1", "message": "one two three four five"}]},
     )
 
@@ -345,7 +345,7 @@ def test_repeated_rollover_retains_episode_and_path_neighborhood():
         )
     )
     notebook.apply(
-        "episode_check",
+        "search_episodes",
         {
             "data": {
                 "results": [
@@ -397,7 +397,7 @@ def test_rollover_keeps_only_the_immediately_previous_page():
         capacity=NotebookCapacity(max_messages=10, max_render_tokens=1000)
     )
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m1", "message": "first page evidence"}]},
     )
 
@@ -410,7 +410,7 @@ def test_rollover_keeps_only_the_immediately_previous_page():
     assert notebook.show_previous_page is False
 
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m2", "message": "second page evidence"}]},
     )
     notebook.rollover()
@@ -428,12 +428,12 @@ def test_token_overflow_automatically_retains_the_completed_page():
     )
     for index in range(4):
         assert notebook.apply(
-            "search_messages",
+            "search_knowledge_messages",
             {"data": [{"id": f"m{index}", "message": f"[payload] {index}"}]},
         ).accepted
 
     admission = notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m4", "message": "[payload] 4"}]},
     )
     previous = notebook.previous_page
@@ -453,7 +453,7 @@ def test_rollover_discards_older_inactive_contributions():
     )
     for index in range(4):
         assert notebook.apply(
-            "search_messages",
+            "search_knowledge_messages",
             {"data": [{"id": f"m{index}", "message": f"message {index}"}]},
         ).accepted
 

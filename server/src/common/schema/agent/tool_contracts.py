@@ -73,11 +73,11 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_entity",
+            "name": "search_knowledge_entities",
             "description": (
                 "Discover entity identities, stable entity IDs, aliases, and project contexts. "
                 "Use the returned entity ID for connections, activity, paths, or an exact Episode follow-up. "
-                "For remembered history, decisions, or developments, use episode_check first."
+                "For remembered history, decisions, or developments, use search_episodes first."
             ),
             "parameters": {
                 "type": "object",
@@ -101,9 +101,9 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_connections",
+            "name": "get_entity_relationships",
             "description": (
-                "Retrieve the observed relationship network for an entity ID returned by search_entity, "
+                "Retrieve the observed relationship network for an entity ID returned by search_knowledge_entities, "
                 "including durable endpoint IDs, project attribution, observation metadata, and supporting messages. "
                 "Use it after discovery when relationship details are needed."
             ),
@@ -112,7 +112,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "entity_id": {
                         "type": "integer",
-                        "description": "Stable entity ID returned by search_entity.",
+                        "description": "Stable entity ID returned by search_knowledge_entities.",
                     },
                 },
                 "required": ["entity_id"],
@@ -123,7 +123,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "load_topic_context",
+            "name": "load_project_topic_context",
             "description": (
                 "Load compact entity and supporting-message context for one or "
                 "more active project topics. Use this when the user's question "
@@ -176,7 +176,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_observation_evidence",
+            "name": "read_relationship_observation_evidence",
             "description": (
                 "Expand the bounded durable support for one relationship observation "
                 "shown by a path result. Use this when an observation handle needs "
@@ -201,7 +201,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_messages",
+            "name": "search_knowledge_messages",
             "description": (
                 "Search durable messages using bounded lexical and semantic recall "
                 "with reranking and surrounding context. Use it for exact wording, "
@@ -230,7 +230,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_recent_activity",
+            "name": "get_entity_recent_activity",
             "description": (
                 "Checks for updates or interactions involving an entity within a specific timeframe. "
                 "Use for queries like 'What's the status of X?', 'Have I talked about Y lately?', or 'Catch me up on Z'."
@@ -240,7 +240,7 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "entity_id": {
                         "type": "integer",
-                        "description": "Stable entity ID returned by search_entity",
+                        "description": "Stable entity ID returned by search_knowledge_entities",
                     },
                     "hours": {
                         "type": "integer",
@@ -304,10 +304,10 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "episode_check",
+            "name": "search_episodes",
             "description": (
                 "Retrieve contextual episodic memory about a specific entity, including "
-                "compact summaries and provenance references. Use read_episode when the "
+                "compact summaries and provenance references. Use read_episode_messages when the "
                 "original source messages are needed. Results are contextual memory, not "
                 "atomic claims."
             ),
@@ -332,7 +332,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_episode",
+            "name": "read_episode_messages",
             "description": (
                 "Expand a retrieved episode into all of its original source messages. "
                 "Use this to verify, quote, or reconcile an episode's details."
@@ -344,7 +344,7 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": (
                             "The episode ID (for example ep_a3f91c) returned "
-                            "by episode_check or read_recent_episodes."
+                            "by search_episodes or read_recent_episodes."
                         ),
                     }
                 },

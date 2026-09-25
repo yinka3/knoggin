@@ -61,15 +61,15 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
         return "No results", 0
 
     if tool_name in (
-        "get_connections",
-        "get_recent_activity",
-        "search_messages",
-        "search_entity",
+        "get_entity_relationships",
+        "get_entity_recent_activity",
+        "search_knowledge_messages",
+        "search_knowledge_entities",
     ):
         count = len(data) if isinstance(data, list) else 0
         return f"Found {count} results", count
 
-    if tool_name == "load_topic_context":
+    if tool_name == "load_project_topic_context":
         if not isinstance(data, dict) or not data:
             return "No topic context found", 0
         message_count = sum(
@@ -88,12 +88,12 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0
 
-    if tool_name == "read_observation_evidence":
+    if tool_name == "read_relationship_observation_evidence":
         if isinstance(data, dict) and data.get("subject"):
             return "Loaded observation support", 1
         return "No observation support found", 0
 
-    if tool_name in ("episode_check", "read_recent_episodes"):
+    if tool_name in ("search_episodes", "read_recent_episodes"):
         if isinstance(data, dict):
             res_type = data.get("resolution", "unknown")
             results = data.get("results", [])

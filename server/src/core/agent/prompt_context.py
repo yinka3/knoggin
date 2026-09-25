@@ -67,7 +67,7 @@ def build_user_message(
                         "request before trying again."
                     )
                 msg += f"- `{tool}`: {message}\n"
-            elif tool in ("episode_check", "read_recent_episodes"):
+            elif tool in ("search_episodes", "read_recent_episodes"):
                 result_groups = (
                     data.get("results", []) if isinstance(data, dict) else []
                 )
@@ -84,12 +84,12 @@ def build_user_message(
                 else:
                     msg += _empty_retrieval_guidance(tool)
             elif tool in (
-                "search_messages",
-                "search_entity",
-                "get_connections",
-                "get_recent_activity",
+                "search_knowledge_messages",
+                "search_knowledge_entities",
+                "get_entity_relationships",
+                "get_entity_recent_activity",
                 "find_relationship_path",
-                "read_episode",
+                "read_episode_messages",
                 "search_documents",
                 "read_document",
                 "web_search",
@@ -104,7 +104,7 @@ def build_user_message(
                     )
                 else:
                     msg += _empty_retrieval_guidance(tool)
-            elif tool == "read_observation_evidence":
+            elif tool == "read_relationship_observation_evidence":
                 if isinstance(data, dict) and data.get("subject"):
                     msg += (
                         f"- `{tool}`: Loaded observation support. "
@@ -112,7 +112,7 @@ def build_user_message(
                     )
                 else:
                     msg += _empty_retrieval_guidance(tool)
-            elif tool == "load_topic_context":
+            elif tool == "load_project_topic_context":
                 topic_context = data if isinstance(data, dict) else {}
                 if topic_context:
                     msg += (
@@ -136,10 +136,10 @@ def build_user_message(
 
 def _empty_retrieval_guidance(tool: str) -> str:
     alternatives = {
-        "episode_check": "messages, entities, or documents",
+        "search_episodes": "messages, entities, or documents",
         "read_recent_episodes": "messages or recent activity",
-        "search_messages": "Episodes, entities, or documents",
-        "search_entity": "messages, Episodes, or documents",
+        "search_knowledge_messages": "Episodes, entities, or documents",
+        "search_knowledge_entities": "messages, Episodes, or documents",
         "search_documents": "messages, Episodes, or entities",
         "web_search": "a simpler query, synonyms, or project sources",
         "news_search": "a broader date range, synonyms, or web search",

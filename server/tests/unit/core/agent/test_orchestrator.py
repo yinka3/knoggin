@@ -51,7 +51,7 @@ class FakeLimits:
     max_accumulated_summary_chars = 2000
     max_notebook_render_tokens = 5000
     max_consecutive_errors = 2
-    tool_limit_overrides = {"search_entity": 4}
+    tool_limit_overrides = {"search_knowledge_entities": 4}
 
 
 class FakeConfig:
@@ -146,7 +146,7 @@ async def test_orchestrator_resolves_durable_agent_identity():
         persona="Careful",
         model="model-a",
         temperature=0.3,
-        enabled_tools=["search_entity"],
+        enabled_tools=["search_knowledge_entities"],
     )
     context.resources.postgres.upsert_agent(agent)
 
@@ -235,7 +235,7 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
         model="agent-model",
         temperature=0.25,
         brain="Use memory",
-        enabled_tools=["episode_check"],
+        enabled_tools=["search_episodes"],
     )
     context.resources.postgres.upsert_agent(agent)
 
@@ -264,12 +264,12 @@ async def test_orchestrator_stream_builds_context_and_forwards_effective_agent_c
     assert executor.ctx.history == [{"role": "user", "content": "prior"}]
     assert executor.ctx.limits.max_calls == 9
     assert executor.ctx.limits.tool_timeout == 1.5
-    assert executor.ctx.limits.get_tool_limit("search_entity") == 4
+    assert executor.ctx.limits.get_tool_limit("search_knowledge_entities") == 4
     assert not hasattr(executor.ctx, "active_topics")
     assert executor.ctx.model == "agent-model"
     assert executor.ctx.temperature == 0.25
     assert "Use memory" in executor.ctx.brain
-    assert executor.ctx.enabled_tools == ("episode_check",)
+    assert executor.ctx.enabled_tools == ("search_episodes",)
     assert executor.ctx.project_briefing.mode == "adaptive"
     assert executor.ctx.project_briefing.initial_reason is None
     assert executor.execute_kwargs == {"user_timezone": None}
@@ -292,7 +292,7 @@ async def test_orchestrator_resolves_request_then_session_then_agent_config(
             name="Researcher",
             persona="Careful",
             model="agent-model",
-            enabled_tools=["episode_check"],
+            enabled_tools=["search_episodes"],
             is_default=True,
         )
     )

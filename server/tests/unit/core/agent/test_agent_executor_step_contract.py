@@ -53,7 +53,7 @@ def make_executor(llm, *, research_profile=None):
         model="test-model",
         temperature=0.2,
         brain="Use citations",
-        enabled_tools=["search_messages"],
+        enabled_tools=["search_knowledge_messages"],
         research_profile=research_profile,
     )
     tools = SimpleNamespace(document_service=None)
@@ -174,12 +174,12 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
                 "content": "Authoritative tool reasoning.",
                 "calls": [
                     {
-                        "name": "search_messages",
+                        "name": "search_knowledge_messages",
                         "arguments": '{"query": "profile behavior", "limit": 3}',
                         "id": "call-1",
                     },
                     {
-                        "name": "get_recent_activity",
+                        "name": "get_entity_recent_activity",
                         "arguments": '{"entity_name": "Knoggin", "hours": "24",}',
                         "id": "call-2",
                     },
@@ -240,7 +240,7 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
         events[2]["data"]["calls"],
         events[2]["data"]["content"],
     )
-    assert [call.name for call in calls] == ["search_messages", "get_recent_activity"]
+    assert [call.name for call in calls] == ["search_knowledge_messages", "get_entity_recent_activity"]
     assert calls[0].args == {"query": "profile behavior", "limit": 3}
     assert calls[0].thinking == "Authoritative tool reasoning."
     assert calls[0].call_id == "call-1"
@@ -252,9 +252,9 @@ async def test_step_forwards_standard_stream_events(monkeypatch):
     assert llm_call["temperature"] == 0.2
     assert llm_call["reasoning"] == "high"
     tool_names = [schema["function"]["name"] for schema in llm_call["tools"]]
-    assert "search_messages" in tool_names
+    assert "search_knowledge_messages" in tool_names
     assert "submit_answer" in tool_names
-    assert "search_entity" not in tool_names
+    assert "search_knowledge_entities" not in tool_names
 
     _, prompt_kwargs = prompt_calls[0]
     assert prompt_kwargs["documents_context"] == "- file.md"
@@ -273,7 +273,7 @@ async def test_step_forwards_selected_research_profile_to_prompt(monkeypatch):
                     "content": "Research first.",
                     "calls": [
                         {
-                            "name": "search_messages",
+                            "name": "search_knowledge_messages",
                             "arguments": '{"query": "profile"}',
                             "id": "research-call",
                         }
@@ -330,7 +330,7 @@ async def test_step_marks_invalid_arguments_without_retaining_raw_input():
     tool_call = executor._parse_tool_calls(
         [
             {
-                "name": "search_messages",
+                "name": "search_knowledge_messages",
                 "arguments": "{not json",
                 "id": "call-bad",
             }
@@ -348,7 +348,7 @@ async def test_step_marks_invalid_arguments_without_retaining_raw_input():
     [
         (
             _AgentPhase.PLAN,
-            ToolCall("search_messages", {"query": "profile"}),
+            ToolCall("search_knowledge_messages", {"query": "profile"}),
             None,
         ),
         (
@@ -358,7 +358,7 @@ async def test_step_marks_invalid_arguments_without_retaining_raw_input():
         ),
         (
             _AgentPhase.SYNTHESIZE,
-            ToolCall("search_messages", {"query": "profile"}),
+            ToolCall("search_knowledge_messages", {"query": "profile"}),
             "Returned tool is not allowed during SYNTHESIZE.",
         ),
         (
@@ -368,7 +368,7 @@ async def test_step_marks_invalid_arguments_without_retaining_raw_input():
         ),
         (
             _AgentPhase.PLAN,
-            ToolCall("search_messages", {"_parse_error": True}),
+            ToolCall("search_knowledge_messages", {"_parse_error": True}),
             "Returned tool call contains invalid arguments.",
         ),
     ],
@@ -389,7 +389,7 @@ def test_executor_validates_returned_calls_against_current_phase(
     [
         [
             ToolCall("submit_answer", {"content": "Final answer."}),
-            ToolCall("search_messages", {"query": "profile"}),
+            ToolCall("search_knowledge_messages", {"query": "profile"}),
         ],
         [
             ToolCall("submit_answer", {"content": "Final answer."}),

@@ -551,7 +551,7 @@ class RunNotebook:
         episode_id = value.get("episode_id", value.get("id"))
         if isinstance(episode_id, (str, int)) and str(episode_id).strip():
             self._add_system_hint(
-                "read_episode",
+                "read_episode_messages",
                 {"episode_id": episode_id},
                 "when message-level detail is needed",
                 [ref],
@@ -636,7 +636,7 @@ class RunNotebook:
         ref = self._upsert("paths", value)
         for observation_id, observation_ref in zip(observation_ids, observation_refs):
             self._add_system_hint(
-                "read_observation_evidence",
+                "read_relationship_observation_evidence",
                 {"observation_id": observation_id},
                 "when this path's durable support needs inspection",
                 [ref, observation_ref],
@@ -718,29 +718,29 @@ class RunNotebook:
             return NotebookApplyResult(False)
 
         references: list[str] = []
-        if tool_name == "search_entity":
+        if tool_name == "search_knowledge_entities":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_entity(item))
             for ref in dict.fromkeys(references):
                 entity_id = ref.removeprefix("entity:")
                 self._add_system_hint(
-                    "get_connections",
+                    "get_entity_relationships",
                     {"entity_id": int(entity_id) if entity_id.isdigit() else entity_id},
                     "when more relationship detail is needed",
                     [ref],
                 )
                 self._add_system_hint(
-                    "episode_check",
+                    "search_episodes",
                     {"entity_id": int(entity_id) if entity_id.isdigit() else entity_id},
                     "when history or developments are needed",
                     [ref],
                 )
-        elif tool_name == "search_messages":
+        elif tool_name == "search_knowledge_messages":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_message(item))
-        elif tool_name == "get_connections":
+        elif tool_name == "get_entity_relationships":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict) and (
                     {"source", "target"}.issubset(item)
@@ -750,7 +750,7 @@ class RunNotebook:
                     }.issubset(item)
                 ):
                     references.append(self._add_relationship(item))
-        elif tool_name == "get_recent_activity":
+        elif tool_name == "get_entity_recent_activity":
             for item in data if isinstance(data, list) else []:
                 if (
                     isinstance(item, dict)
@@ -763,9 +763,9 @@ class RunNotebook:
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_path(item))
-        elif tool_name == "read_observation_evidence" and isinstance(data, dict):
+        elif tool_name == "read_relationship_observation_evidence" and isinstance(data, dict):
             references.append(self._add_observation_support(data))
-        elif tool_name in {"episode_check", "read_recent_episodes"}:
+        elif tool_name in {"search_episodes", "read_recent_episodes"}:
             groups = data.get("results", []) if isinstance(data, dict) else []
             resolution = data.get("resolution") if isinstance(data, dict) else None
             for group in groups if isinstance(groups, list) else []:
@@ -803,7 +803,7 @@ class RunNotebook:
                         references.append(self._add_episode(item))
                     elif item.get("id") is not None or item.get("message") is not None:
                         references.append(self._add_message(item))
-        elif tool_name == "read_episode":
+        elif tool_name == "read_episode_messages":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_message(item))
@@ -844,7 +844,7 @@ class RunNotebook:
                     ref = self._add_source("web_reads", item)
                     if ref:
                         references.append(ref)
-        elif tool_name == "load_topic_context":
+        elif tool_name == "load_project_topic_context":
             for topic_data in data.values() if isinstance(data, dict) else []:
                 if not isinstance(topic_data, dict):
                     continue

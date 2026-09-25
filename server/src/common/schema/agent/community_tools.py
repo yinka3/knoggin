@@ -1,14 +1,14 @@
 """Community-agent tool contracts and default tool policy."""
 
 AAC_READ_TOOL_NAMES = [
-    "search_entity",
+    "search_knowledge_entities",
     "find_relationship_path",
-    "episode_check",
-    "read_episode",
+    "search_episodes",
+    "read_episode_messages",
     "read_recent_episodes",
-    "get_connections",
-    "get_recent_activity",
-    "search_messages",
+    "get_entity_relationships",
+    "get_entity_recent_activity",
+    "search_knowledge_messages",
     "search_documents",
     "read_document",
     "list_documents",

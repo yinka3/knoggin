@@ -56,19 +56,19 @@ async def test_agent_manager_create_update_and_lookup_preserves_config(manager):
         brain="Use sources",
         model="test-model",
         temperature=0.2,
-        enabled_tools=["search_entity"],
+        enabled_tools=["search_knowledge_entities"],
     )
     updated = await agent_manager.update_agent(
         created.id,
         model="new-model",
         temperature=0.4,
-        enabled_tools=["episode_check"],
+        enabled_tools=["search_episodes"],
     )
     fetched = await agent_manager.get_agent_by_name("researcher")
 
     assert updated.model == "new-model"
     assert updated.temperature == 0.4
-    assert updated.enabled_tools == ["episode_check"]
+    assert updated.enabled_tools == ["search_episodes"]
     assert fetched.id == created.id
     create_snapshot_write = next(
         call
@@ -142,7 +142,7 @@ async def test_agent_manager_distinguishes_omitted_and_explicit_nullable_updates
         name="Researcher",
         persona="Careful",
         model="test-model",
-        enabled_tools=["search_entity"],
+        enabled_tools=["search_knowledge_entities"],
     )
 
     unchanged = await agent_manager.update_agent(created.id)
@@ -154,7 +154,7 @@ async def test_agent_manager_distinguishes_omitted_and_explicit_nullable_updates
     disabled = await agent_manager.update_agent(created.id, enabled_tools=[])
 
     assert unchanged.model == "test-model"
-    assert unchanged.enabled_tools == ["search_entity"]
+    assert unchanged.enabled_tools == ["search_knowledge_entities"]
     assert inherited.model is None
     assert inherited.enabled_tools is None
     assert disabled.enabled_tools == []
@@ -328,7 +328,12 @@ async def test_agent_manager_rejects_stale_full_brain_replacement():
         ("  ", 0.7, 1, None),
         ("Analyst", math.nan, 1, None),
         ("Analyst", 0.7, 0, None),
-        ("Analyst", 0.7, 1, ["search_entity", " SEARCH_ENTITY "]),
+        (
+            "Analyst",
+            0.7,
+            1,
+            ["search_knowledge_entities", " SEARCH_KNOWLEDGE_ENTITIES "],
+        ),
     ],
 )
 def test_agent_config_rejects_invalid_domain_values(

@@ -130,7 +130,7 @@ def _is_local_reference_resolution_error(message: str) -> bool:
 
 
 def _local_reference_type(tool_name: str) -> str:
-    if tool_name in {"read_episode", "propose_entity_merge"}:
+    if tool_name in {"read_episode_messages", "propose_entity_merge"}:
         return "episode"
     if tool_name in {"get_document_info", "read_document"}:
         return "document"

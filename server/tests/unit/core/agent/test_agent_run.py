@@ -53,7 +53,7 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
         model="run-model",
         temperature=0.2,
         brain="Use evidence.",
-        enabled_tools=["search_messages"],
+        enabled_tools=["search_knowledge_messages"],
         additional_tool_schemas=[
             next(
                 schema
@@ -71,10 +71,10 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
     assert run.model == "run-model"
     assert run.temperature == 0.2
     assert run.brain == "Use evidence."
-    assert run.enabled_tools == ("search_messages",)
+    assert run.enabled_tools == ("search_knowledge_messages",)
     assert run.additional_tool_schemas[0]["function"]["name"] == "search_insights"
     assert run.tool_runtime.permissions.allowed_tools >= {
-        "search_messages",
+        "search_knowledge_messages",
         "request_clarification",
         "submit_answer",
         "search_insights",
@@ -198,7 +198,7 @@ def test_research_profile_scales_existing_run_budget_without_new_executor():
         max_attempts=5,
         max_accumulated_web_discoveries=6,
         max_accumulated_web_reads=5,
-        tool_limits=(("search_messages", 2),),
+        tool_limits=(("search_knowledge_messages", 2),),
     )
     scaled = limits.for_research_profile(profile)
     run = make_run(
@@ -211,7 +211,7 @@ def test_research_profile_scales_existing_run_budget_without_new_executor():
     assert run.limits.max_attempts == 15
     assert run.limits.max_accumulated_web_discoveries == 18
     assert run.limits.max_accumulated_web_reads == 15
-    assert run.limits.get_tool_limit("search_messages") == 6
+    assert run.limits.get_tool_limit("search_knowledge_messages") == 6
 
 
 @pytest.mark.no_network
@@ -221,14 +221,14 @@ def test_agent_run_enforces_attempt_and_tool_call_invariants():
     assert run.begin_attempt() is True
     assert run.begin_attempt() is True
     assert run.begin_attempt() is False
-    assert run.can_call_tool("search_messages", {"query": "Ada"})
+    assert run.can_call_tool("search_knowledge_messages", {"query": "Ada"})
 
-    run.record_tool_call("search_messages", {"query": "Ada"})
+    run.record_tool_call("search_knowledge_messages", {"query": "Ada"})
 
     assert run.call_count == 1
-    assert not run.can_call_tool("search_messages", {"query": "Ada"})
+    assert not run.can_call_tool("search_knowledge_messages", {"query": "Ada"})
     with pytest.raises(ValueError, match="not permitted"):
-        run.record_tool_call("search_messages", {"query": "Ada"})
+        run.record_tool_call("search_knowledge_messages", {"query": "Ada"})
 
 
 @pytest.mark.no_network
@@ -241,7 +241,7 @@ def test_agent_run_distinguishes_grounded_evidence_from_actions_and_validates_in
     assert run.has_grounded_investigation_evidence() is False
 
     run.notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
     )
 
@@ -316,7 +316,7 @@ def test_research_coverage_requires_each_material_part_to_have_evidence_or_a_gap
     run = make_run(research_profile=resolve_research_profile("research"))
     assert run.set_research_plan(["What changed?", "Why did it change?"]) is None
     applied = run.accumulate_tool_result(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
     )
     reference = applied.references[0]
@@ -453,8 +453,8 @@ def test_cosmetically_repeated_empty_query_forces_early_replan():
         limits=AgentRunLimits(empty_result_replan_threshold=3),
     )
 
-    assert run.record_empty_result([("search_messages", {"query": "Project Alpha?"})]) is False
-    assert run.record_empty_result([("search_messages", {"query": " project   alpha "})]) is True
+    assert run.record_empty_result([("search_knowledge_messages", {"query": "Project Alpha?"})]) is False
+    assert run.record_empty_result([("search_knowledge_messages", {"query": " project   alpha "})]) is True
 
 
 @pytest.mark.no_network
@@ -463,7 +463,7 @@ def test_deep_research_gap_review_is_due_once_after_grounded_evidence():
 
     assert run.needs_deep_research_gap_review() is False
     run.notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "message-1", "message": "Grounded evidence."}]},
     )
 
@@ -477,19 +477,19 @@ def test_deep_research_gap_review_is_due_once_after_grounded_evidence():
 
 @pytest.mark.no_network
 def test_agent_run_snapshots_tool_runtime_once_at_construction():
-    run = make_run(enabled_tools=["search_messages"])
+    run = make_run(enabled_tools=["search_knowledge_messages"])
     runtime = run.tool_runtime
 
-    run.enabled_tools = ("search_entity",)
+    run.enabled_tools = ("search_knowledge_entities",)
     run.additional_tool_schemas = ()
 
     assert run.tool_runtime is runtime
     assert runtime.permissions.allowed_tools >= {
-        "search_messages",
+        "search_knowledge_messages",
         "request_clarification",
         "submit_answer",
     }
-    assert "search_entity" not in runtime.permissions.allowed_tools
+    assert "search_knowledge_entities" not in runtime.permissions.allowed_tools
 
 
 @pytest.mark.no_network

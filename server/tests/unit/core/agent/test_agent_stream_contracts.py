@@ -21,7 +21,7 @@ USAGE = {
         {
             "event": "tool_start",
             "data": {
-                "tool": "search_messages",
+                "tool": "search_knowledge_messages",
                 "args": {"query": "roadmap"},
                 "thinking": None,
                 "call_id": "call-1",
@@ -30,7 +30,7 @@ USAGE = {
         {
             "event": "tool_end",
             "data": {
-                "tool": "search_messages",
+                "tool": "search_knowledge_messages",
                 "result": "Found 1 result",
                 "call_id": "call-1",
             },
@@ -38,7 +38,7 @@ USAGE = {
         {
             "event": "tool_error",
             "data": {
-                "tool": "search_messages",
+                "tool": "search_knowledge_messages",
                 "error": "Timed out",
                 "call_id": "call-1",
             },
@@ -76,7 +76,7 @@ def test_engine_stream_boundary_rejects_malformed_or_uncorrelated_events():
         validate_agent_execution_event(
             {
                 "event": "tool_error",
-                "data": {"tool": "search_messages", "error": "Timed out"},
+                "data": {"tool": "search_knowledge_messages", "error": "Timed out"},
             }
         )
 

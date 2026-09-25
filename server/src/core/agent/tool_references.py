@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 # Numeric entity and message IDs stay numeric; they are already concise and
 # should not be forced through this UUID lookup.
 _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
-    "episode_check": {"episode_id": "ep"},
+    "search_episodes": {"episode_id": "ep"},
     "read_recent_episodes": {"episode_id": "ep"},
     "list_documents": {"document_id": "doc"},
     "get_document_info": {"document_id": "doc"},
@@ -30,7 +30,7 @@ _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
 }
 
 _TOOL_ARGUMENT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
-    "read_episode": {"episode_id": "ep"},
+    "read_episode_messages": {"episode_id": "ep"},
     "get_document_info": {"document_id": "doc"},
     "read_document": {"document_id": "doc"},
     "propose_entity_merge": {

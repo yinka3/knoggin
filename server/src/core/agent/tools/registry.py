@@ -48,7 +48,7 @@ _HEALTH_RUNTIME_INSTRUCTION = (
 )
 
 _TOPIC_CONTEXT_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: load_topic_context retrieves compact supporting context for "
+    "[SYSTEM NOTICE: load_project_topic_context retrieves compact supporting context for "
     "listed active topics. Use it when a topic is materially relevant and deeper "
     "context is needed; do not use it as a substitute for targeted entity, "
     "episode, document, or web retrieval.]"
@@ -61,12 +61,12 @@ _PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION = (
 )
 
 _EPISODE_CHECK_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: Use episode_check for remembered history, decisions, or "
+    "[SYSTEM NOTICE: Use search_episodes for remembered history, decisions, or "
     "developments. It returns compact, evidence-backed summaries; inspect the "
     "returned provenance when exact or sensitive detail matters.]"
 )
 _READ_EPISODE_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: Use read_episode with an episode handle returned in this "
+    "[SYSTEM NOTICE: Use read_episode_messages with an episode handle returned in this "
     "run when exact wording or complete supporting detail matters.]"
 )
 _RECENT_EPISODES_RUNTIME_INSTRUCTION = (
@@ -74,19 +74,19 @@ _RECENT_EPISODES_RUNTIME_INSTRUCTION = (
     "when the user gives no topic or episode handle.]"
 )
 _ENTITY_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: Use search_entity to discover stable entity IDs and scoped "
+    "[SYSTEM NOTICE: Use search_knowledge_entities to discover stable entity IDs and scoped "
     "profiles before an ID-based follow-up.]"
 )
 _CONNECTIONS_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: get_connections returns observed relationship evidence, not "
+    "[SYSTEM NOTICE: get_entity_relationships returns observed relationship evidence, not "
     "an unqualified current-state claim. Preserve its qualifications and support.]"
 )
 _ACTIVITY_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: get_recent_activity is for bounded temporal questions such "
+    "[SYSTEM NOTICE: get_entity_recent_activity is for bounded temporal questions such "
     "as recent changes or activity in a stated time window.]"
 )
 _MESSAGE_SEARCH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: search_messages is raw durable-text retrieval. Use it when "
+    "[SYSTEM NOTICE: search_knowledge_messages is raw durable-text retrieval. Use it when "
     "structured memory is insufficient, then assess the returned context.]"
 )
 _PATH_RUNTIME_INSTRUCTION = (
@@ -94,7 +94,7 @@ _PATH_RUNTIME_INSTRUCTION = (
     "observation support as historical evidence rather than a current-state claim.]"
 )
 _OBSERVATION_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: read_observation_evidence expands one returned observation "
+    "[SYSTEM NOTICE: read_relationship_observation_evidence expands one returned observation "
     "handle when its historical support needs verification.]"
 )
 _WEB_SEARCH_RUNTIME_INSTRUCTION = (
@@ -188,19 +188,19 @@ TOOL_DEFINITIONS = {
         default_limit=1,
         runtime_instruction=_HEALTH_RUNTIME_INSTRUCTION,
     ),
-    "search_entity": _definition(
-        "search_entity",
+    "search_knowledge_entities": _definition(
+        "search_knowledge_entities",
         default_limit=8,
         runtime_instruction=_ENTITY_RUNTIME_INSTRUCTION,
         parallel_safe=True,
     ),
-    "load_topic_context": _definition(
-        "load_topic_context",
+    "load_project_topic_context": _definition(
+        "load_project_topic_context",
         default_limit=2,
         runtime_instruction=_TOPIC_CONTEXT_RUNTIME_INSTRUCTION,
     ),
-    "get_connections": _definition(
-        "get_connections",
+    "get_entity_relationships": _definition(
+        "get_entity_relationships",
         default_limit=8,
         runtime_instruction=_CONNECTIONS_RUNTIME_INSTRUCTION,
     ),
@@ -209,19 +209,19 @@ TOOL_DEFINITIONS = {
         default_limit=8,
         runtime_instruction=_PATH_RUNTIME_INSTRUCTION,
     ),
-    "read_observation_evidence": _definition(
-        "read_observation_evidence",
+    "read_relationship_observation_evidence": _definition(
+        "read_relationship_observation_evidence",
         default_limit=4,
         runtime_instruction=_OBSERVATION_RUNTIME_INSTRUCTION,
     ),
-    "search_messages": _definition(
-        "search_messages",
+    "search_knowledge_messages": _definition(
+        "search_knowledge_messages",
         default_limit=6,
         runtime_instruction=_MESSAGE_SEARCH_RUNTIME_INSTRUCTION,
         parallel_safe=True,
     ),
-    "get_recent_activity": _definition(
-        "get_recent_activity",
+    "get_entity_recent_activity": _definition(
+        "get_entity_recent_activity",
         default_limit=8,
         runtime_instruction=_ACTIVITY_RUNTIME_INSTRUCTION,
     ),
@@ -234,14 +234,14 @@ TOOL_DEFINITIONS = {
         default_limit=4,
         runtime_instruction=_PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION,
     ),
-    "episode_check": _definition(
-        "episode_check",
+    "search_episodes": _definition(
+        "search_episodes",
         default_limit=6,
         runtime_instruction=_EPISODE_CHECK_RUNTIME_INSTRUCTION,
         parallel_safe=True,
     ),
-    "read_episode": _definition(
-        "read_episode",
+    "read_episode_messages": _definition(
+        "read_episode_messages",
         default_limit=4,
         runtime_instruction=_READ_EPISODE_RUNTIME_INSTRUCTION,
     ),
@@ -671,32 +671,32 @@ class Tools(
     # Internal-memory tools are formatting/argument adapters only. Retrieval
     # policy, ranking, and evidence expansion live in the
     # project-scoped KnowledgeRetrieval service.
-    async def search_messages(self, query: str, limit: int = None):
+    async def search_knowledge_messages(self, query: str, limit: int = None):
         return await self.knowledge_retrieval.search_messages(
             query, session_id=self.session_id, limit=limit
         )
 
-    async def search_entity(self, query: str, limit: int = None):
+    async def search_knowledge_entities(self, query: str, limit: int = None):
         return await self.knowledge_retrieval.search_entities(query, limit=limit)
 
-    async def get_connections(self, entity_id: int):
+    async def get_entity_relationships(self, entity_id: int):
         return await self.knowledge_retrieval.get_connections(
             entity_id,
             session_id=self.session_id,
             limit=self.max_graph_results,
         )
 
-    async def get_recent_activity(self, entity_id: int, hours: int = None):
+    async def get_entity_recent_activity(self, entity_id: int, hours: int = None):
         return await self.knowledge_retrieval.get_recent_activity(
             entity_id, session_id=self.session_id, hours=hours
         )
 
-    async def episode_check(self, query: str, entity_id: Optional[int] = None):
+    async def search_episodes(self, query: str, entity_id: Optional[int] = None):
         return await self.knowledge_retrieval.episode_check(
             query, session_id=self.session_id, entity_id=entity_id
         )
 
-    async def read_episode(self, episode_id: str):
+    async def read_episode_messages(self, episode_id: str):
         return await self.knowledge_retrieval.read_episode(
             episode_id, session_id=self.session_id
         )
@@ -712,17 +712,17 @@ class Tools(
             entity_a_id, entity_b_id, session_id=self.session_id
         )
 
-    async def read_observation_evidence(self, observation_id: int):
+    async def read_relationship_observation_evidence(self, observation_id: int):
         return await self.knowledge_retrieval.read_observation_evidence(
             observation_id
         )
 
-    async def load_topic_context(self, topics: list[str]) -> dict:
+    async def load_project_topic_context(self, topics: list[str]) -> dict:
         """Load full bounded context for validated active project topics."""
 
         if self.compiled_domain is None:
             raise ToolExecutionError(
-                "load_topic_context",
+                "load_project_topic_context",
                 "Topic context is unavailable because this run has no project domain.",
             )
 
@@ -737,7 +737,7 @@ class Tools(
 
         if invalid_topics:
             raise ToolExecutionError(
-                "load_topic_context",
+                "load_project_topic_context",
                 "Unknown or inactive topic(s): " + ", ".join(invalid_topics),
             )
 

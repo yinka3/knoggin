@@ -17,35 +17,35 @@ class DispatchTools:
     def __init__(self):
         self.calls = []
 
-    async def search_messages(self, query, limit=None):
-        self.calls.append(("search_messages", query, limit))
+    async def search_knowledge_messages(self, query, limit=None):
+        self.calls.append(("search_knowledge_messages", query, limit))
         return [{"id": "msg_1"}]
 
-    async def search_entity(self, query, limit=None):
-        self.calls.append(("search_entity", query, limit))
+    async def search_knowledge_entities(self, query, limit=None):
+        self.calls.append(("search_knowledge_entities", query, limit))
         return [{"id": 1, "query": query}]
 
-    async def load_topic_context(self, topics):
-        self.calls.append(("load_topic_context", topics))
+    async def load_project_topic_context(self, topics):
+        self.calls.append(("load_project_topic_context", topics))
         return {
             topic: {"entities": [{"name": topic}], "messages": []}
             for topic in topics
         }
 
-    async def get_recent_activity(self, entity_id, hours=None):
-        self.calls.append(("get_recent_activity", entity_id, hours))
+    async def get_entity_recent_activity(self, entity_id, hours=None):
+        self.calls.append(("get_entity_recent_activity", entity_id, hours))
         return [{"entity_id": entity_id}]
 
-    async def episode_check(self, query, entity_id=None):
-        self.calls.append(("episode_check", query, entity_id))
+    async def search_episodes(self, query, entity_id=None):
+        self.calls.append(("search_episodes", query, entity_id))
         return {"resolution": "exact"}
 
-    async def read_episode(self, episode_id):
-        self.calls.append(("read_episode", episode_id))
+    async def read_episode_messages(self, episode_id):
+        self.calls.append(("read_episode_messages", episode_id))
         return [{"id": episode_id}]
 
-    async def read_observation_evidence(self, observation_id):
-        self.calls.append(("read_observation_evidence", observation_id))
+    async def read_relationship_observation_evidence(self, observation_id):
+        self.calls.append(("read_relationship_observation_evidence", observation_id))
         return {
             "subject": {
                 "kind": "relationship_observation",
@@ -87,22 +87,22 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
 
     result = await execute_tool(
         tools,
-        "search_messages",
+        "search_knowledge_messages",
         {"query": 1234, "limit": "5"},
     )
     activity = await execute_tool(
         tools,
-        "get_recent_activity",
+        "get_entity_recent_activity",
         {"entity_id": "7", "hours": "48"},
     )
     entity = await execute_tool(
         tools,
-        "search_entity",
+        "search_knowledge_entities",
         {"query": 99, "limit": "2"},
     )
     topic_context = await execute_tool(
         tools,
-        "load_topic_context",
+        "load_project_topic_context",
         {"topics": ["Work", "Finance"]},
     )
     file_content = await execute_tool(
@@ -127,17 +127,17 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     )
     episode = await execute_tool(
         tools,
-        "episode_check",
+        "search_episodes",
         {"query": "What changed?", "entity_id": "7"},
     )
     expanded_episode = await execute_tool(
         tools,
-        "read_episode",
+        "read_episode_messages",
         {"episode_id": 42},
     )
     observation = await execute_tool(
         tools,
-        "read_observation_evidence",
+        "read_relationship_observation_evidence",
         {"observation_id": "17"},
     )
 
@@ -173,10 +173,10 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         }
     }
     assert tools.calls == [
-        ("search_messages", "1234", 5),
-        ("get_recent_activity", 7, 48),
-        ("search_entity", "99", 2),
-        ("load_topic_context", ["Work", "Finance"]),
+        ("search_knowledge_messages", "1234", 5),
+        ("get_entity_recent_activity", 7, 48),
+        ("search_knowledge_entities", "99", 2),
+        ("load_project_topic_context", ["Work", "Finance"]),
         ("read_document", "file-1", None, 2, 4),
         ("read_web_page", "https://example.test/report", 2, 5, None, None),
         (
@@ -188,9 +188,9 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
             None,
         ),
         ("read_web_page", "https://example.test/report.pdf", None, 150, None, 2),
-        ("episode_check", "What changed?", 7),
-        ("read_episode", "42"),
-        ("read_observation_evidence", 17),
+        ("search_episodes", "What changed?", 7),
+        ("read_episode_messages", "42"),
+        ("read_relationship_observation_evidence", 17),
     ]
 
 
@@ -198,7 +198,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
 async def test_previous_notebook_page_tool_toggles_model_visibility():
     notebook = RunNotebook()
     notebook.apply(
-        "search_messages",
+        "search_knowledge_messages",
         {"data": [{"id": "m1", "message": "older evidence"}]},
     )
     notebook.rollover()
@@ -230,9 +230,9 @@ def test_read_web_page_registry_definition_matches_schema_and_default_limit():
 
 @pytest.mark.no_network
 def test_only_explicit_stateless_retrieval_tools_are_parallel_safe():
-    assert get_tool_definition("search_messages").parallel_safe is True
-    assert get_tool_definition("search_entity").parallel_safe is True
-    assert get_tool_definition("episode_check").parallel_safe is True
+    assert get_tool_definition("search_knowledge_messages").parallel_safe is True
+    assert get_tool_definition("search_knowledge_entities").parallel_safe is True
+    assert get_tool_definition("search_episodes").parallel_safe is True
     assert get_tool_definition("search_documents").parallel_safe is True
     assert get_tool_definition("read_web_page").parallel_safe is False
     assert get_tool_definition("edit_brain").parallel_safe is False
@@ -257,9 +257,9 @@ def test_tool_runtime_rejects_invalid_graph_result_limits(invalid_limit):
 
 @pytest.mark.no_network
 def test_entity_search_schema_routes_memory_questions_to_episode_check_first():
-    description = TOOL_SCHEMAS_BY_NAME["search_entity"]["function"]["description"]
+    description = TOOL_SCHEMAS_BY_NAME["search_knowledge_entities"]["function"]["description"]
 
-    assert "episode_check first" in description
+    assert "search_episodes first" in description
     assert "starting point for almost every query" not in description
 
 
