@@ -1020,7 +1020,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_files",
+            "name": "list_project_files",
             "description": (
                 "List bounded metadata for files in the current project's "
                 "local project folder. This is project-scoped and does not expose "
@@ -1050,7 +1050,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_file",
+            "name": "read_project_file",
             "description": (
                 "Read a bounded line and character slice from one file in the "
                 "current project's local folder. PROJECT.md is readable "
@@ -1093,7 +1093,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "create_file",
+            "name": "create_project_file",
             "description": (
                 "Create a non-empty bounded artifact in the current project's "
                 "local project folder. Ordinary agent tools cannot create or edit "
@@ -1124,7 +1124,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "update_file",
+            "name": "update_project_file",
             "description": (
                 "Replace a project file using optimistic "
                 "concurrency. The supplied SHA-256 content hash must still be "
@@ -1162,7 +1162,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "append_file",
+            "name": "append_project_file",
             "description": (
                 "Append bounded UTF-8 content to a project file "
                 "using an expected SHA-256 content hash. PROJECT.md and controlled "
@@ -1199,7 +1199,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "move_file",
+            "name": "move_project_file",
             "description": "Move one non-reserved current-project file to an unused relative path using its current SHA-256 hash.",
             "parameters": {
                 "type": "object",
@@ -1217,7 +1217,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_file",
+            "name": "delete_project_file",
             "description": "Delete one non-reserved current-project file only when its SHA-256 hash is current.",
             "parameters": {
                 "type": "object",
@@ -1234,7 +1234,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "create_folder",
+            "name": "create_project_folder",
             "description": "Create an empty directory inside the current project's local folder.",
             "parameters": {
                 "type": "object",
@@ -1279,12 +1279,12 @@ _TOOL_CAPABILITIES = {
     "restore_agent_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
-    "create_file": REVERSIBLE_WRITE_CAPABILITY,
-    "update_file": REVERSIBLE_WRITE_CAPABILITY,
-    "append_file": REVERSIBLE_WRITE_CAPABILITY,
-    "move_file": REVERSIBLE_WRITE_CAPABILITY,
-    "delete_file": REVERSIBLE_WRITE_CAPABILITY,
-    "create_folder": REVERSIBLE_WRITE_CAPABILITY,
+    "create_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "update_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "append_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "move_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "delete_project_file": REVERSIBLE_WRITE_CAPABILITY,
+    "create_project_folder": REVERSIBLE_WRITE_CAPABILITY,
 }
 
 for _schema in TOOL_SCHEMAS:

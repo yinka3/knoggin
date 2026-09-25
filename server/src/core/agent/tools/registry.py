@@ -303,23 +303,23 @@ TOOL_DEFINITIONS = {
     "check_graph_health": _definition("check_graph_health"),
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
-    "list_files": _definition("list_files", default_limit=4),
-    "read_file": _definition("read_file", default_limit=4),
-    "create_file": _definition(
-        "create_file",
+    "list_project_files": _definition("list_project_files", default_limit=4),
+    "read_project_file": _definition("read_project_file", default_limit=4),
+    "create_project_file": _definition(
+        "create_project_file",
         default_limit=2,
     ),
-    "update_file": _definition(
-        "update_file",
+    "update_project_file": _definition(
+        "update_project_file",
         default_limit=2,
     ),
-    "append_file": _definition(
-        "append_file",
+    "append_project_file": _definition(
+        "append_project_file",
         default_limit=2,
     ),
-    "move_file": _definition("move_file", default_limit=2),
-    "delete_file": _definition("delete_file", default_limit=2),
-    "create_folder": _definition("create_folder", default_limit=2),
+    "move_project_file": _definition("move_project_file", default_limit=2),
+    "delete_project_file": _definition("delete_project_file", default_limit=2),
+    "create_project_folder": _definition("create_project_folder", default_limit=2),
     "save_insight": _definition("save_insight", default_limit=4),
     "spawn_specialist": _definition("spawn_specialist", default_limit=2),
     "search_insights": _definition("search_insights", default_limit=4),

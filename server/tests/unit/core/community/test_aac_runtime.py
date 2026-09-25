@@ -399,9 +399,9 @@ async def test_aac_participants_cannot_reexpose_project_tools_from_agent_setting
         "Careful",
         enabled_tools=[
             "search_project_documents",
-            "create_file",
-            "update_file",
-            "append_file",
+            "create_project_file",
+            "update_project_file",
+            "append_project_file",
         ],
     )
     context = await AACReadContext.create(
@@ -444,7 +444,7 @@ async def test_aac_participants_cannot_reexpose_project_tools_from_agent_setting
     }
     assert "search_project_documents" in visible_tools
     assert {
-        "create_file",
-        "update_file",
-        "append_file",
+        "create_project_file",
+        "update_project_file",
+        "append_project_file",
     }.isdisjoint(visible_tools)

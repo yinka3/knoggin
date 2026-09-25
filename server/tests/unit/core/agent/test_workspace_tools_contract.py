@@ -64,16 +64,16 @@ async def test_project_file_tools_forward_bounded_project_scoped_operations():
     tools = ProjectFileHarness(service)
     expected_hash = "b" * 64
 
-    assert await tools.list_files(path_prefix="docs", limit=3)
-    await tools.read_file(
+    assert await tools.list_project_files(path_prefix="docs", limit=3)
+    await tools.read_project_file(
         "docs/notes.md",
         start_line=2,
         end_line=4,
         max_characters=100,
     )
-    await tools.create_file("docs/new.md", "new")
-    await tools.update_file("docs/new.md", "replacement", expected_hash)
-    await tools.append_file("docs/new.md", "more", expected_hash)
+    await tools.create_project_file("docs/new.md", "new")
+    await tools.update_project_file("docs/new.md", "replacement", expected_hash)
+    await tools.append_project_file("docs/new.md", "more", expected_hash)
 
     assert service.calls == [
         ("list", "docs", 3),
@@ -103,7 +103,7 @@ async def test_registered_evidence_document_cannot_bypass_provenance_aware_read(
     tools = ProjectFileHarness(service)
 
     with pytest.raises(ToolExecutionError, match="read_project_document"):
-        await tools.read_file("docs/evidence.md")
+        await tools.read_project_file("docs/evidence.md")
 
     assert service.calls == [("document_info", "docs/evidence.md", None)]
 
@@ -113,16 +113,16 @@ async def test_project_markdown_is_readable_but_protected_from_ordinary_writes()
     service = FakeDocumentService()
     tools = ProjectFileHarness(service)
 
-    await tools.read_file("PROJECT.md")
+    await tools.read_project_file("PROJECT.md")
     assert service.calls[0][0] == "read"
 
     for method in (
-        tools.create_file,
-        tools.update_file,
-        tools.append_file,
+        tools.create_project_file,
+        tools.update_project_file,
+        tools.append_project_file,
     ):
         with pytest.raises(PermissionError, match="PROJECT.md"):
-            if method.__name__ == "create_file":
+            if method.__name__ == "create_project_file":
                 await method("project.md", "content")
             else:
                 await method(".\\PROJECT.md", "content", "a" * 64)
@@ -130,9 +130,9 @@ async def test_project_markdown_is_readable_but_protected_from_ordinary_writes()
     assert len(service.calls) == 1
 
     with pytest.raises(ValueError, match="must not escape"):
-        await tools.create_file("../outside.md", "content")
+        await tools.create_project_file("../outside.md", "content")
     with pytest.raises(ValueError, match="must not escape"):
-        await tools.list_files(path_prefix="../outside")
+        await tools.list_project_files(path_prefix="../outside")
 
 
 @pytest.mark.no_network
@@ -142,7 +142,7 @@ async def test_project_file_writes_require_authorization_and_are_audited():
     with pytest.raises(ToolExecutionError, match="authorization context"):
         await execute_tool(
             ProjectFileHarness(service),
-            "create_file",
+            "create_project_file",
             {"path": "notes.md", "content": "hello"},
         )
 
@@ -157,7 +157,7 @@ async def test_project_file_writes_require_authorization_and_are_audited():
     tools = ProjectFileHarness(service)
     tools.postgres = postgres
     tools.active_tool_schemas = {
-        "create_file": TOOL_SCHEMAS_BY_NAME["create_file"]
+        "create_project_file": TOOL_SCHEMAS_BY_NAME["create_project_file"]
     }
     tools.tool_authorization = ToolPermissions(
         user_name="user",
@@ -166,13 +166,13 @@ async def test_project_file_writes_require_authorization_and_are_audited():
         audit_project_id="project",
         session_id="session",
         run_id="run",
-        allowed_tools=frozenset({"create_file"}),
+        allowed_tools=frozenset({"create_project_file"}),
         allowed_capabilities=frozenset({REVERSIBLE_WRITE_CAPABILITY}),
     )
 
     result = await execute_tool(
         tools,
-        "create_file",
+        "create_project_file",
         {"path": "notes.md", "content": "hello"},
     )
 
@@ -185,17 +185,17 @@ async def test_project_file_writes_require_authorization_and_are_audited():
 @pytest.mark.no_network
 async def test_project_file_schema_registry_limits_and_bounds():
     expected = {
-        "list_files",
-        "read_file",
-        "create_file",
-        "update_file",
-        "append_file",
-        "move_file",
-        "delete_file",
-        "create_folder",
+        "list_project_files",
+        "read_project_file",
+        "create_project_file",
+        "update_project_file",
+        "append_project_file",
+        "move_project_file",
+        "delete_project_file",
+        "create_project_folder",
     }
     assert expected <= set(TOOL_SCHEMAS_BY_NAME)
-    for name in expected - {"list_files", "read_file"}:
+    for name in expected - {"list_project_files", "read_project_file"}:
         assert (
             get_schema_capability(TOOL_SCHEMAS_BY_NAME[name])
             == REVERSIBLE_WRITE_CAPABILITY
@@ -203,17 +203,17 @@ async def test_project_file_schema_registry_limits_and_bounds():
 
     limits = get_default_tool_limits()
     assert {name: limits[name] for name in expected} == {
-        "list_files": 4,
-        "read_file": 4,
-        "create_file": 2,
-        "update_file": 2,
-        "append_file": 2,
-        "move_file": 2,
-        "delete_file": 2,
-        "create_folder": 2,
+        "list_project_files": 4,
+        "read_project_file": 4,
+        "create_project_file": 2,
+        "update_project_file": 2,
+        "append_project_file": 2,
+        "move_project_file": 2,
+        "delete_project_file": 2,
+        "create_project_folder": 2,
     }
 
-    schema = TOOL_SCHEMAS_BY_NAME["create_file"]
+    schema = TOOL_SCHEMAS_BY_NAME["create_project_file"]
     assert (
         validate_tool_arguments(
             schema,

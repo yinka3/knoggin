@@ -36,11 +36,11 @@ _ACTION_TOOLS = frozenset(
     {
         "edit_agent_brain",
         "restore_agent_brain_section",
-        "create_file",
-        "update_file",
-        "append_file",
-        "move_file",
-        "delete_file",
+        "create_project_file",
+        "update_project_file",
+        "append_project_file",
+        "move_project_file",
+        "delete_project_file",
         "report_relationship_conflict",
         "propose_entity_merge",
     }

@@ -51,7 +51,7 @@ class ProjectFileTools:
         message = "No project document service with local-file access is available"
         return [{"error": message}] if list_result else {"error": message}
 
-    async def list_files(
+    async def list_project_files(
         self,
         path_prefix: Optional[str] = None,
         limit: int = PROJECT_FILE_TOOL_MAX_LIST_LIMIT,
@@ -79,7 +79,7 @@ class ProjectFileTools:
             limit=limit,
         )
 
-    async def read_file(
+    async def read_project_file(
         self,
         path: str,
         start_line: int = 1,
@@ -102,7 +102,7 @@ class ProjectFileTools:
                 document = None
             except ValueError as exc:
                 raise ToolExecutionError(
-                    "read_file",
+                    "read_project_file",
                     "This path has ambiguous managed-document identity; use "
                     "read_project_document with a document_id instead.",
                 ) from exc
@@ -112,7 +112,7 @@ class ProjectFileTools:
                 or document.get("project_id") == active_project_id
             ):
                 raise ToolExecutionError(
-                    "read_file",
+                    "read_project_file",
                     "This path is a registered evidence document. Use "
                     "read_project_document so the passage keeps source provenance.",
                 )
@@ -144,7 +144,7 @@ class ProjectFileTools:
             max_characters=max_characters,
         )
 
-    async def create_file(self, path: str, content: str) -> Dict:
+    async def create_project_file(self, path: str, content: str) -> Dict:
         if self.document_service is None:
             return self._files_unavailable()
         return await self.document_service.create_project_file(
@@ -152,7 +152,7 @@ class ProjectFileTools:
             _validate_content(content),
         )
 
-    async def update_file(
+    async def update_project_file(
         self,
         path: str,
         content: str,
@@ -166,7 +166,7 @@ class ProjectFileTools:
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def append_file(
+    async def append_project_file(
         self,
         path: str,
         content: str,
@@ -180,7 +180,7 @@ class ProjectFileTools:
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def move_file(
+    async def move_project_file(
         self,
         source_path: str,
         destination_path: str,
@@ -194,7 +194,7 @@ class ProjectFileTools:
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def delete_file(self, path: str, expected_content_hash: str) -> Dict:
+    async def delete_project_file(self, path: str, expected_content_hash: str) -> Dict:
         if self.document_service is None:
             return self._files_unavailable()
         return await self.document_service.delete_project_file(
@@ -202,7 +202,7 @@ class ProjectFileTools:
             expected_content_hash=_validate_content_hash(expected_content_hash),
         )
 
-    async def create_folder(self, path: str) -> Dict:
+    async def create_project_folder(self, path: str) -> Dict:
         if self.document_service is None:
             return self._files_unavailable()
         return await self.document_service.create_project_folder(_editable_path(path))
