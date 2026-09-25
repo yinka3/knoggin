@@ -62,9 +62,7 @@ async def test_recent_activity_uses_stable_id_and_message_evidence():
             ]
 
     store = Store()
-    result = await _retrieval(store).get_recent_activity(
-        2, session_id="session-1", hours=0
-    )
+    result = await _retrieval(store).get_recent_activity(2, session_id="session-1")
 
     assert store.calls == [
         (

@@ -686,7 +686,7 @@ class Tools(
             limit=self.max_graph_results,
         )
 
-    async def get_recent_activity(self, entity_id: int, hours: int = 24):
+    async def get_recent_activity(self, entity_id: int, hours: int = None):
         return await self.knowledge_retrieval.get_recent_activity(
             entity_id, session_id=self.session_id, hours=hours
         )

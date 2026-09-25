@@ -84,10 +84,12 @@ TOOL_SCHEMAS = [
                 "properties": {
                     "query": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Name of the person, project, place, or concept.",
                     },
                     "limit": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Max results (default 5)",
                     },
                 },
@@ -201,21 +203,22 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "search_messages",
             "description": (
-                "A fallback tool for raw keyword recall. "
-                "It searches exact words in the chat logs. "
-                "Use this ONLY when: 1) The user asks for a direct quote ('What exactly did I say?'), "
-                "2) You need to find a specific date/time, or "
-                "3) Both search_entity and episode_check failed to find the concept."
+                "Search durable messages using bounded lexical and semantic recall "
+                "with reranking and surrounding context. Use it for exact wording, "
+                "dates, or relevant raw discussion when structured entities and "
+                "episodes are insufficient."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "Keywords or phrase to search for",
                     },
                     "limit": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Max results (default 8)",
                     },
                 },
@@ -241,6 +244,7 @@ TOOL_SCHEMAS = [
                     },
                     "hours": {
                         "type": "integer",
+                        "minimum": 1,
                         "description": "Hours to look back (e.g., 24 for daily, 168 for weekly).",
                     },
                 },
@@ -316,6 +320,7 @@ TOOL_SCHEMAS = [
                     },
                     "query": {
                         "type": "string",
+                        "minLength": 1,
                         "description": "A natural language hint describing what you're looking for.",
                     },
                 },
@@ -353,8 +358,8 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "read_recent_episodes",
             "description": (
-                "Return the most recent episode summaries by source chronology in the current "
-                "conversation without searching or requiring an episode ID. Use for "
+                "Return the most recent episode summaries by source chronology from "
+                "readable project memory without searching or requiring an episode ID. Use for "
                 "requests such as 'what was the last episode?' or 'show the last few memories'."
             ),
             "parameters": {

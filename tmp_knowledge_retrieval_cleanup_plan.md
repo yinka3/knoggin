@@ -53,8 +53,8 @@ Classification: scope correctness. Priority: high.
 
 `search_messages()` validates `session_id`, while graph/activity, episode, and topic-context methods accept it without the same boundary check even when it is used for hydration or telemetry.
 
-- [ ] Decide whether every public method accepting `session_id` should validate it consistently.
-- [ ] Add parameterized direct-call tests if this invariant is adopted.
+- [x] Validate every public retrieval method that accepts `session_id` consistently.
+- [ ] Add broader parameterized direct-call coverage if this boundary changes again.
 
 Classification: contract hardening. Priority: medium.
 
@@ -71,8 +71,8 @@ Classification: performance follow-up. Priority: low-medium.
 
 `episode_check()` strips its query, but message/entity searches accept blank strings and rely on downstream behavior.
 
-- [ ] Decide whether blank direct/internal queries should return no results or raise `ValueError`.
-- [ ] Express the same minimum-length rule in tool schemas.
+- [x] Reject blank direct/internal queries with `ValueError`.
+- [x] Express the same minimum-length rule in tool schemas.
 
 Classification: contract hardening. Priority: low-medium.
 
@@ -128,19 +128,19 @@ This is a behavior decision and should be a separate commit from mechanical batc
 
 ## Phase 4 — Fix Model-Facing Retrieval Contracts
 
-- [ ] Describe `search_messages` as bounded hybrid durable-message retrieval rather than exact-keyword-only search.
-- [ ] Describe `read_recent_episodes` as readable project memory, not only the current conversation.
-- [ ] Add `minimum: 1` to positive `limit` and `hours` schema fields.
-- [ ] Add useful string length constraints for retrieval queries.
+- [x] Describe `search_messages` as bounded hybrid durable-message retrieval rather than exact-keyword-only search.
+- [x] Describe `read_recent_episodes` as readable project memory, not only the current conversation.
+- [x] Add `minimum: 1` to positive `limit` and `hours` schema fields.
+- [x] Add useful string length constraints for retrieval queries.
 - [ ] Verify presentation overrides cannot weaken these canonical constraints.
 
 ## Phase 5 — Validate Direct Retrieval Inputs
 
-- [ ] Replace falsy defaults with explicit `None` handling.
-- [ ] Validate message/entity limits as positive non-boolean integers.
-- [ ] Validate activity hours as a positive non-boolean integer.
-- [ ] Ensure `read_recent_episodes` rejects booleans as limits.
-- [ ] Apply consistent session/query validation decided above.
+- [x] Replace falsy defaults with explicit `None` handling.
+- [x] Validate message/entity limits as positive non-boolean integers.
+- [x] Validate activity hours as a positive non-boolean integer.
+- [x] Ensure `read_recent_episodes` rejects booleans as limits through the shared validator.
+- [x] Apply consistent session/query validation decided above.
 
 ## Phase 6 — Clarify Search Configuration Ownership
 

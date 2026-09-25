@@ -268,6 +268,68 @@ async def test_connection_retrieval_rejects_invalid_limits_before_entity_lookup(
 
 
 @pytest.mark.no_network
+@pytest.mark.parametrize("hours", [0, -1, True, 1.5])
+async def test_activity_retrieval_rejects_invalid_hours_before_entity_lookup(hours):
+    class Entities:
+        async def get_profile(self, _entity_id):
+            raise AssertionError("invalid hours must fail before entity lookup")
+
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=Entities(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.get_recent_activity(
+            9, session_id="session-1", hours=hours
+        )
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+async def test_message_and_entity_search_reject_invalid_limits(limit):
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.search_messages(
+            "query", session_id="session-1", limit=limit
+        )
+    with pytest.raises(ValueError, match="positive integer"):
+        await retrieval.search_entities("query", limit=limit)
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("query", ["", "   ", None])
+async def test_message_entity_and_episode_search_reject_blank_queries(query):
+    retrieval = KnowledgeRetrieval(
+        project_id="project-1",
+        readable_project_ids=["project-1"],
+        user_name="ada",
+        entities=SimpleNamespace(),
+        embedding_service=SimpleNamespace(),
+        knowledge_store=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="non-blank string"):
+        await retrieval.search_messages(query, session_id="session-1")
+    with pytest.raises(ValueError, match="non-blank string"):
+        await retrieval.search_entities(query)
+    with pytest.raises(ValueError, match="non-blank string"):
+        await retrieval.episode_check(query, session_id="session-1")
+
+
+@pytest.mark.no_network
 async def test_hot_topic_context_hydrates_current_project_entity_mentions():
     class Store:
         def __init__(self):

@@ -67,7 +67,12 @@ class KnowledgeRetrieval:
         session_id = require_scope_value(
             session_id, "session_id", "KnowledgeRetrieval.search_messages"
         )
-        limit = limit or self.search_cfg.get("default_message_limit", 8)
+        query = self._require_query(query, "search_messages")
+        limit = self._positive_int(
+            limit,
+            "search_messages limit",
+            default=self.search_cfg.get("default_message_limit", 8),
+        )
         results = await self._search_messages(query, session_id=session_id, k=limit)
         if not results:
             return []
@@ -122,7 +127,12 @@ class KnowledgeRetrieval:
         limit: Optional[int] = None,
     ) -> List[Dict]:
         """Discover visible entities before requesting a stable-ID follow-up."""
-        limit = limit or self.search_cfg.get("default_entity_limit", 5)
+        query = self._require_query(query, "search_entities")
+        limit = self._positive_int(
+            limit,
+            "search_entities limit",
+            default=self.search_cfg.get("default_entity_limit", 5),
+        )
         results = await self.knowledge_store.search_entity(
             query,
             visible_project_ids=self.readable_project_ids,
@@ -137,8 +147,10 @@ class KnowledgeRetrieval:
         session_id: str,
         limit: int = 40,
     ) -> List[Dict]:
-        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
-            raise ValueError("get_connections limit must be a positive integer")
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.get_connections"
+        )
+        limit = self._positive_int(limit, "get_connections limit")
         if await self.entities.get_profile(entity_id) is None:
             return [{"error": f"Entity not found: '{entity_id}'"}]
 
@@ -150,11 +162,18 @@ class KnowledgeRetrieval:
         return await self._hydrate_result_evidence(results, session_id=session_id)
 
     async def get_recent_activity(
-        self, entity_id: int, *, session_id: str, hours: int = 24
+        self, entity_id: int, *, session_id: str, hours: Optional[int] = None
     ) -> List[Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.get_recent_activity"
+        )
+        hours = self._positive_int(
+            hours,
+            "get_recent_activity hours",
+            default=self.search_cfg.get("default_activity_hours", 24),
+        )
         if await self.entities.get_profile(entity_id) is None:
             return [{"error": f"Entity not found: '{entity_id}'"}]
-        hours = hours or self.search_cfg.get("default_activity_hours", 24)
         results = await self.knowledge_store.get_recent_activity(
             entity_id,
             hours=hours,
@@ -170,7 +189,10 @@ class KnowledgeRetrieval:
         entity_id: Optional[int] = None,
     ) -> Dict:
         """Retrieve episodes, then fall back to raw durable messages."""
-        query = query.strip()
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.episode_check"
+        )
+        query = self._require_query(query, "episode_check")
         started_at = perf_counter()
 
         if entity_id is not None:
@@ -296,6 +318,9 @@ class KnowledgeRetrieval:
         return {"resolution": "fallback", "results": fallback}
 
     async def read_episode(self, episode_id: str, *, session_id: str) -> List[Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.read_episode"
+        )
         episode = await self.knowledge_store.get_project_episode(
             episode_id,
             user_name=self.user_name,
@@ -328,8 +353,10 @@ class KnowledgeRetrieval:
         return [self._as_message_evidence(source) for source in sources]
 
     async def read_recent_episodes(self, *, session_id: str, limit: int = 2) -> Dict:
-        if limit <= 0:
-            raise ValueError("read_recent_episodes limit must be positive")
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.read_recent_episodes"
+        )
+        limit = self._positive_int(limit, "read_recent_episodes limit")
         effective_limit = min(limit, DEFAULT_EPISODE_RETRIEVAL_LIMIT)
         started_at = perf_counter()
         episodes = await self.knowledge_store.get_recent_project_episodes(
@@ -361,6 +388,9 @@ class KnowledgeRetrieval:
     async def find_path(
         self, entity_a_id: int, entity_b_id: int, *, session_id: str
     ) -> List[Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.find_path"
+        )
         entity_a = await self.entities.get_profile(entity_a_id)
         entity_b = await self.entities.get_profile(entity_b_id)
         if entity_a is None and entity_b is None:
@@ -409,6 +439,9 @@ class KnowledgeRetrieval:
     async def get_hot_topic_context(
         self, hot_topics: List[str], *, session_id: str
     ) -> Dict[str, Dict]:
+        session_id = require_scope_value(
+            session_id, "session_id", "KnowledgeRetrieval.get_hot_topic_context"
+        )
         if not hot_topics:
             return {}
         raw = await self.knowledge_store.get_hot_topic_context_with_messages(
@@ -890,6 +923,19 @@ class KnowledgeRetrieval:
     @staticmethod
     def _format_message_id(message_id: Any) -> str:
         return message_id if isinstance(message_id, str) else f"msg_{message_id}"
+
+    @staticmethod
+    def _positive_int(value: Any, name: str, *, default: Any = None) -> int:
+        value = default if value is None else value
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _require_query(value: Any, operation: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{operation} query must be a non-blank string")
+        return value.strip()
 
     @staticmethod
     def _parse_message_ref_id(raw_id: Any) -> int:
