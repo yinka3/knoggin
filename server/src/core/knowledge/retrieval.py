@@ -350,7 +350,10 @@ class KnowledgeRetrieval:
                 ),
             },
         )
-        return [self._as_message_evidence(source) for source in sources]
+        return [
+            self._as_message_evidence(source, fallback_session_id=session_id)
+            for source in sources
+        ]
 
     async def read_recent_episodes(self, *, session_id: str, limit: int = 2) -> Dict:
         session_id = require_scope_value(
@@ -599,26 +602,16 @@ class KnowledgeRetrieval:
                 visible_project_ids=self.readable_project_ids,
             )
             for message in durable:
-                timestamp = message.get("timestamp")
-                rendered_timestamp = (
-                    datetime.fromtimestamp(timestamp / 1000.0, timezone.utc).isoformat()
-                    if isinstance(timestamp, (int, float))
-                    else ""
-                )
                 key = (
                     str(message.get("user_name") or user_name),
                     str(message.get("session_id") or reference_session_id),
                     int(message["id"]),
                 )
-                hydrated = {
-                    "id": f"msg_{message['id']}",
-                    "user_name": message.get("user_name") or user_name,
-                    "session_id": message.get("session_id") or reference_session_id,
-                    "message": message["content"],
-                    "timestamp": rendered_timestamp,
-                }
-                if message.get("role") is not None:
-                    hydrated["role"] = message["role"]
+                hydrated = self._format_durable_message(
+                    message,
+                    fallback_user_name=user_name,
+                    fallback_session_id=reference_session_id,
+                )
                 for index in requested_indexes.get(key, ()):
                     results_by_idx[index] = dict(hydrated)
         return [results_by_idx[index] for index in sorted(results_by_idx)]
@@ -773,22 +766,24 @@ class KnowledgeRetrieval:
             target_total=target_total,
             discoverable_only=True,
         )
-        return [
-            {
-                "role": message["role"],
-                "timestamp": (
-                    datetime.fromtimestamp(
-                        message["timestamp"] / 1000.0, timezone.utc
-                    ).isoformat()
-                    if isinstance(message.get("timestamp"), (int, float))
-                    else ""
-                ),
-                "content": message["content"],
-                "id": f"msg_{message['id']}",
-                "is_hit": message["id"] == message_id,
-            }
-            for message in messages
-        ]
+        context = []
+        for message in messages:
+            normalized = self._format_durable_message(
+                message,
+                fallback_user_name=self.user_name,
+                fallback_session_id=session_id,
+            )
+            context.append(
+                {
+                    "role": normalized["role"],
+                    "timestamp": normalized["timestamp"],
+                    "content": normalized["message"],
+                    "id": normalized["id"],
+                    "is_hit": self._parse_message_ref_id(normalized["id"])
+                    == message_id,
+                }
+            )
+        return context
 
     def _normalize_evidence_ref(self, ref: Any, *, session_id: str) -> Optional[Dict]:
         if isinstance(ref, dict):
@@ -953,28 +948,52 @@ class KnowledgeRetrieval:
             for episode in episodes
         )
 
-    @staticmethod
-    def _as_message_evidence(source: Dict) -> Dict:
+    def _as_message_evidence(
+        self, source: Dict, *, fallback_session_id: str
+    ) -> Dict:
+        message = self._format_durable_message(
+            source,
+            fallback_user_name=self.user_name,
+            fallback_session_id=fallback_session_id,
+        )
+        message["score"] = 1.0
+        message["context"] = [
+            {
+                "role": message["role"],
+                "timestamp": message["timestamp"],
+                "content": message["message"],
+                "id": message["id"],
+                "is_hit": True,
+            }
+        ]
+        return message
+
+    @classmethod
+    def _format_durable_message(
+        cls,
+        source: Dict,
+        *,
+        fallback_user_name: str,
+        fallback_session_id: str,
+    ) -> Dict:
+        raw_id = source.get("message_id", source.get("id"))
+        message_id = cls._parse_message_ref_id(raw_id)
+        timestamp = source.get("timestamp_ms", source.get("timestamp"))
+        if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+            rendered_timestamp = datetime.fromtimestamp(
+                timestamp / 1000.0, timezone.utc
+            ).isoformat()
+        elif isinstance(timestamp, datetime):
+            rendered_timestamp = timestamp.isoformat()
+        elif isinstance(timestamp, str):
+            rendered_timestamp = timestamp
+        else:
+            rendered_timestamp = ""
         return {
-            "id": source.get("message_id"),
-            "message_id": source.get("message_id"),
-            "message": source.get("content", ""),
-            "content": source.get("content", ""),
-            "role": source.get("role", "assistant"),
-            "timestamp_ms": source.get("timestamp_ms"),
-            "attached_at": (
-                source["attached_at"].isoformat()
-                if source.get("attached_at")
-                and hasattr(source["attached_at"], "isoformat")
-                else source.get("attached_at")
-            ),
-            "score": 1.0,
-            "context": [
-                {
-                    "role": source.get("role", "assistant"),
-                    "timestamp": source.get("timestamp_ms", ""),
-                    "content": source.get("content", ""),
-                    "is_hit": True,
-                }
-            ],
+            "id": cls._format_message_id(message_id),
+            "user_name": source.get("user_name") or fallback_user_name,
+            "session_id": source.get("session_id") or fallback_session_id,
+            "role": source.get("role") or "assistant",
+            "message": source.get("content", source.get("message", "")),
+            "timestamp": rendered_timestamp,
         }

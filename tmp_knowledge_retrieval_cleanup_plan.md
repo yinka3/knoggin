@@ -103,9 +103,9 @@ The canonical record should consistently carry:
 - one ISO timestamp representation;
 - context/hit metadata only where the retrieval surface needs it.
 
-- [ ] Confirm Notebook reference identity remains stable across retrieval surfaces.
-- [ ] Add a test showing one durable message receives the same ID/session identity through search and episode expansion.
-- [ ] Remove duplicate `message`/`content` and numeric/string ID disagreement where downstream contracts allow it.
+- [x] Confirm Notebook reference identity remains stable across retrieval surfaces.
+- [x] Add a test showing one durable message receives the same ID/session identity through hydration and episode expansion.
+- [x] Remove duplicate `message`/`content` and numeric/string ID disagreement from episode expansion.
 
 ## Phase 3 — Choose One Path Observation Expansion Model
 

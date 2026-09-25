@@ -389,9 +389,10 @@ async def test_hot_topic_context_hydrates_current_project_entity_mentions():
             "messages": [
                 {
                     "id": "msg_7",
-                    "user_name": "ada",
-                    "session_id": "session-1",
-                    "message": "Identity evidence",
+                        "user_name": "ada",
+                        "session_id": "session-1",
+                        "role": "assistant",
+                        "message": "Identity evidence",
                     "timestamp": "2023-11-14T22:13:20+00:00",
                 }
             ],
