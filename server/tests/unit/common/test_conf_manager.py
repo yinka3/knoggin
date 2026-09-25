@@ -143,6 +143,17 @@ def test_root_config_rejects_unknown_top_level_and_nested_keys():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_root_config_excludes_retired_identity_metadata():
+    serialized = RootConfig().model_dump()
+
+    assert "user_name" not in serialized
+    assert "configured_at" not in serialized
+    with pytest.raises(ValueError, match="user_name"):
+        RootConfig.model_validate({"user_name": "stale"})
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_failed_config_reload_keeps_the_previous_valid_config(
     mock_config_paths,
     reset_config_manager,

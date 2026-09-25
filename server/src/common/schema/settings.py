@@ -218,9 +218,7 @@ class DeveloperSettings(ConfigModel):
 
 
 class RootConfig(ConfigModel):
-    user_name: str = Field("")
     user_aliases: List[str] = Field(default_factory=list)
-    configured_at: Optional[str] = None
     llm: LLMSettings = Field(default_factory=LLMSettings)
     search: SearchAPIKeySettings = Field(default_factory=SearchAPIKeySettings)
     developer_settings: DeveloperSettings = Field(default_factory=DeveloperSettings)
