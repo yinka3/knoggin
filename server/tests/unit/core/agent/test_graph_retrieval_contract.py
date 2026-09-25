@@ -116,6 +116,103 @@ async def test_connections_keep_stored_direction_when_selected_from_target():
 
 
 @pytest.mark.no_network
+async def test_result_hydration_batches_messages_without_mutating_store_results():
+    class Store:
+        def __init__(self):
+            self.message_calls = []
+            self.results = [
+                {
+                    "relationship_id": "r1",
+                    "evidence_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 7,
+                        }
+                    ],
+                },
+                {
+                    "relationship_id": "r2",
+                    "evidence_refs": [
+                        {
+                            "user_name": "ada",
+                            "session_id": "session-1",
+                            "message_id": 8,
+                        }
+                    ],
+                },
+            ]
+
+        async def get_related_entities(self, _entity_ids, **_kwargs):
+            return self.results
+
+        async def get_messages_by_ids(self, message_ids, **kwargs):
+            self.message_calls.append((message_ids, kwargs))
+            return [
+                {
+                    "id": message_id,
+                    "user_name": "ada",
+                    "session_id": "session-1",
+                    "content": f"evidence-{message_id}",
+                }
+                for message_id in message_ids
+            ]
+
+    store = Store()
+    result = await _retrieval(store).get_connections(3, session_id="session-1")
+
+    assert len(store.message_calls) == 1
+    assert store.message_calls[0][0] == [7, 8]
+    assert [item["evidence"][0]["id"] for item in result] == ["msg_7", "msg_8"]
+    assert all("evidence_refs" in item for item in store.results)
+
+
+@pytest.mark.no_network
+async def test_failed_result_hydration_leaves_store_results_unchanged():
+    original = {
+        "relationship_id": "r1",
+        "evidence_refs": [
+            {
+                "user_name": "ada",
+                "session_id": "session-1",
+                "message_id": 7,
+            }
+        ],
+    }
+
+    class Store:
+        async def get_messages_by_ids(self, _message_ids, **_kwargs):
+            raise RuntimeError("storage unavailable")
+
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        await _retrieval(Store())._hydrate_result_evidence(
+            [original], session_id="session-1"
+        )
+
+    assert original["evidence_refs"][0]["message_id"] == 7
+    assert "evidence" not in original
+
+
+@pytest.mark.no_network
+async def test_message_evidence_rejects_a_different_user_scope():
+    class Store:
+        async def get_messages_by_ids(self, _message_ids, **_kwargs):
+            raise AssertionError("mismatched user refs must fail before storage")
+
+    with pytest.raises(ValueError, match="outside retrieval user scope"):
+        await _retrieval(Store())._hydrate_evidence(
+            [
+                {
+                    "user_name": "grace",
+                    "session_id": "session-1",
+                    "message_id": 7,
+                }
+            ],
+            session_id="session-1",
+        )
+
+
+@pytest.mark.no_network
 async def test_path_returns_canonical_direction_and_project_attribution():
     class Store:
         def __init__(self):

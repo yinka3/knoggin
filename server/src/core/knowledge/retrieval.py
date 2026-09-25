@@ -8,6 +8,7 @@ those remain separate product surfaces.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
@@ -559,7 +560,7 @@ class KnowledgeRetrieval:
         results_by_idx: Dict[int, Dict] = {}
         for (user_name, reference_session_id), items in grouped.items():
             durable = await self.knowledge_store.get_messages_by_ids(
-                [item["message_id"] for item in items],
+                list(dict.fromkeys(item["message_id"] for item in items)),
                 user_name=user_name,
                 session_ids=[reference_session_id],
                 visible_project_ids=self.readable_project_ids,
@@ -578,8 +579,8 @@ class KnowledgeRetrieval:
                 )
                 hydrated = {
                     "id": f"msg_{message['id']}",
-                    "user_name": message.get("user_name"),
-                    "session_id": message.get("session_id"),
+                    "user_name": message.get("user_name") or user_name,
+                    "session_id": message.get("session_id") or reference_session_id,
                     "message": message["content"],
                     "timestamp": rendered_timestamp,
                 }
@@ -597,9 +598,11 @@ class KnowledgeRetrieval:
     ) -> List[Dict]:
         """Hydrate message and observation support without changing its meaning."""
 
+        detached_results = [deepcopy(result) for result in results]
         message_refs_by_result: list[list] = []
         observation_refs_by_result: list[list[dict]] = []
-        for result in results:
+        all_message_refs: list = []
+        for result in detached_results:
             refs = result.pop("evidence_refs", None)
             if refs is None:
                 refs = result.pop("evidence_ids", [])
@@ -607,22 +610,38 @@ class KnowledgeRetrieval:
                 result.pop("evidence_ids", None)
             message_refs, observation_refs = self._split_evidence_refs(refs)
             message_refs_by_result.append(message_refs)
+            all_message_refs.extend(message_refs)
             observation_refs_by_result.append(observation_refs)
 
-        observation_bundles = await self._hydrate_observation_evidence(
-            observation_refs_by_result
+        hydrated_messages, observation_bundles = await asyncio.gather(
+            self._hydrate_evidence(all_message_refs, session_id=session_id),
+            self._hydrate_observation_evidence(observation_refs_by_result),
         )
+        messages_by_key = {
+            self._message_evidence_key(message): message
+            for message in hydrated_messages
+        }
         for result, message_refs, bundles in zip(
-            results,
+            detached_results,
             message_refs_by_result,
             observation_bundles,
         ):
-            messages = await self._hydrate_evidence(
-                message_refs,
-                session_id=session_id,
-            )
+            messages = []
+            for ref in message_refs:
+                normalized = self._normalize_evidence_ref(ref, session_id=session_id)
+                if normalized is None:
+                    continue
+                message = messages_by_key.get(
+                    (
+                        normalized["user_name"],
+                        normalized["session_id"],
+                        normalized["message_id"],
+                    )
+                )
+                if message is not None:
+                    messages.append(deepcopy(message))
             result["evidence"] = [*messages, *bundles]
-        return results
+        return detached_results
 
     def _split_evidence_refs(self, refs: Any) -> tuple[list, list[dict]]:
         if not isinstance(refs, list):
@@ -749,6 +768,8 @@ class KnowledgeRetrieval:
             reference_session_id = session_id
         if raw_id is None or not user_name or not reference_session_id:
             return None
+        if user_name != self.user_name:
+            raise ValueError("message evidence is outside retrieval user scope")
         try:
             message_id = self._parse_message_ref_id(raw_id)
         except (TypeError, ValueError, IndexError):
@@ -759,6 +780,14 @@ class KnowledgeRetrieval:
             "message_id": message_id,
             "key": self._format_message_id(message_id),
         }
+
+    @staticmethod
+    def _message_evidence_key(message: Dict) -> tuple[str, str, int]:
+        return (
+            str(message.get("user_name") or ""),
+            str(message.get("session_id") or ""),
+            KnowledgeRetrieval._parse_message_ref_id(message.get("id")),
+        )
 
     async def _serialize_episodes(
         self,

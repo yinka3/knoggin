@@ -31,9 +31,9 @@ Preserve:
 
 If message or observation hydration fails, the caller's objects are left partially transformed. It also assumes every storage reader returns disposable dictionaries rather than shared/cached values.
 
-- [ ] Build detached result dictionaries before removing internal reference fields.
-- [ ] Preserve atomic behavior: either return fully hydrated detached results or raise without changing inputs.
-- [ ] Add a regression test covering hydration failure and input preservation.
+- [x] Build detached result dictionaries before removing internal reference fields.
+- [x] Preserve atomic behavior: either return fully hydrated detached results or raise without changing inputs.
+- [x] Add a regression test covering hydration failure and input preservation.
 
 Classification: correctness and boundary hardening. Priority: high.
 
@@ -43,9 +43,9 @@ Observation refs explicitly reject a `user_name` different from `self.user_name`
 
 Even in the local single-user product, the project-scoped retrieval boundary should not let stored/reflected input choose a different identity scope.
 
-- [ ] Reject mismatched message-ref users, or always use the service-owned user scope.
-- [ ] Keep readable-project/session enforcement in the durable storage call.
-- [ ] Add a mismatched-user regression test.
+- [x] Reject mismatched message-ref users.
+- [x] Keep readable-project/session enforcement in the durable storage call.
+- [x] Add a mismatched-user regression test.
 
 Classification: scope correctness. Priority: high.
 
@@ -78,12 +78,12 @@ Classification: contract hardening. Priority: low-medium.
 
 ## Phase 1 — Make Hydration Detached and Batched
 
-- [ ] Refactor `_hydrate_result_evidence()` to work on detached copies.
-- [ ] Collect all message refs across the result set.
-- [ ] Hydrate the combined refs once through `_hydrate_evidence()`.
-- [ ] Map hydrated messages back to their owning results without changing order.
-- [ ] Keep observation hydration bounded and preserve the external result shape.
-- [ ] Test duplicate refs, mixed message/observation refs, empty refs, and failure atomicity.
+- [x] Refactor `_hydrate_result_evidence()` to work on detached copies.
+- [x] Collect all message refs across the result set.
+- [x] Hydrate the combined refs once through `_hydrate_evidence()`.
+- [x] Map hydrated messages back to their owning results without changing order.
+- [x] Keep observation hydration bounded and preserve the external result shape.
+- [x] Test batching, input preservation, and failure atomicity; existing graph tests cover mixed/empty observation cases.
 
 ## Phase 2 — Canonicalize Durable Message Evidence
 
