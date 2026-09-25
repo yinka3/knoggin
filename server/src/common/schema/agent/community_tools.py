@@ -2,7 +2,7 @@
 
 AAC_READ_TOOL_NAMES = [
     "search_entity",
-    "find_path",
+    "find_relationship_path",
     "episode_check",
     "read_episode",
     "read_recent_episodes",

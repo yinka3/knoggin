@@ -83,7 +83,7 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             len(data),
         )
 
-    if tool_name == "find_path":
+    if tool_name == "find_relationship_path":
         if data:
             return f"Path found: {len(data)} hops", len(data)
         return "No path", 0

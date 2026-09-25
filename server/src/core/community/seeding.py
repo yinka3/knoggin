@@ -57,7 +57,7 @@ class AACSeeder:
         tool_limits=(
             ("search_entity", 2),
             ("get_connections", 2),
-            ("find_path", 2),
+            ("find_relationship_path", 2),
             ("search_messages", 2),
             ("episode_check", 2),
             ("read_episode", 2),

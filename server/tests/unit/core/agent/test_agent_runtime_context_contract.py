@@ -593,11 +593,11 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "find_path",
+        "find_relationship_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
     ctx.accumulate_tool_result(
-        "find_path",
+        "find_relationship_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]},
     )
     episode_result = {
@@ -780,8 +780,8 @@ def test_notebook_ignores_errors_and_empty_results():
     [
         ("search_messages", {"data": [{"id": 1}, {"id": 2}]}, ("Found 2 results", 2)),
         ("search_entity", {"data": []}, ("Found 0 results", 0)),
-        ("find_path", {"data": [{"hop": 1}]}, ("Path found: 1 hops", 1)),
-        ("find_path", {"data": []}, ("No path", 0)),
+        ("find_relationship_path", {"data": [{"hop": 1}]}, ("Path found: 1 hops", 1)),
+        ("find_relationship_path", {"data": []}, ("No path", 0)),
         (
             "read_observation_evidence",
             {"data": {"subject": {"identifier": "17"}}},

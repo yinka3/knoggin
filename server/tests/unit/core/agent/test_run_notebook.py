@@ -141,7 +141,7 @@ def test_path_observation_handles_are_retained_and_expand_only_on_demand():
     }
 
     notebook.apply(
-        "find_path",
+        "find_relationship_path",
         {
             "data": [
                 {

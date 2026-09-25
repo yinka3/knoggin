@@ -53,7 +53,7 @@ class AACRuntime:
             {
                 "search_entity": 4,
                 "get_connections": 3,
-                "find_path": 3,
+                "find_relationship_path": 3,
                 "get_recent_activity": 3,
                 "search_messages": 3,
                 "episode_check": 4,

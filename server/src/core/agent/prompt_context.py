@@ -88,7 +88,7 @@ def build_user_message(
                 "search_entity",
                 "get_connections",
                 "get_recent_activity",
-                "find_path",
+                "find_relationship_path",
                 "read_episode",
                 "search_documents",
                 "read_document",

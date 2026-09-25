@@ -257,7 +257,9 @@ async def test_path_returns_canonical_direction_and_project_attribution():
             return (_observation_bundle(17), _missing_observation_bundle(18))
 
     store = Store()
-    result = await _retrieval(store).find_path(3, 2, session_id="session-1")
+    result = await _retrieval(store).find_relationship_path(
+        3, 2, session_id="session-1"
+    )
 
     assert result[0]["source"] == "Ade"
     assert result[0]["target"] == "Acme"

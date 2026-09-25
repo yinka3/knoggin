@@ -364,7 +364,7 @@ def test_repeated_rollover_retains_episode_and_path_neighborhood():
         },
     )
     notebook.apply(
-        "find_path",
+        "find_relationship_path",
         {
             "data": [
                 {

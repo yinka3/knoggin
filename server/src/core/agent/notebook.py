@@ -759,7 +759,7 @@ class RunNotebook:
                     and item.get("time") is not None
                 ):
                     references.append(self._add_activity(item))
-        elif tool_name == "find_path":
+        elif tool_name == "find_relationship_path":
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
                     references.append(self._add_path(item))

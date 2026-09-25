@@ -156,7 +156,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "find_path",
+            "name": "find_relationship_path",
             "description": (
                 "Investigates the narrative link between two specific entities. "
                 "It doesn't just check if they know each other; it traces the 'chain of custody' (e.g., A knows B, who knows C). "

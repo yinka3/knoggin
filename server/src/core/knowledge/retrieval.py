@@ -388,11 +388,11 @@ class KnowledgeRetrieval:
             ],
         }
 
-    async def find_path(
+    async def find_relationship_path(
         self, entity_a_id: int, entity_b_id: int, *, session_id: str
     ) -> List[Dict]:
         session_id = require_scope_value(
-            session_id, "session_id", "KnowledgeRetrieval.find_path"
+            session_id, "session_id", "KnowledgeRetrieval.find_relationship_path"
         )
         entity_a = await self.entities.get_profile(entity_a_id)
         entity_b = await self.entities.get_profile(entity_b_id)

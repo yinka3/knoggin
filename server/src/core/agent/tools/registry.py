@@ -90,7 +90,7 @@ _MESSAGE_SEARCH_RUNTIME_INSTRUCTION = (
     "structured memory is insufficient, then assess the returned context.]"
 )
 _PATH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: find_path traces a bounded relationship path. Treat its "
+    "[SYSTEM NOTICE: find_relationship_path traces a bounded relationship path. Treat its "
     "observation support as historical evidence rather than a current-state claim.]"
 )
 _OBSERVATION_RUNTIME_INSTRUCTION = (
@@ -204,8 +204,8 @@ TOOL_DEFINITIONS = {
         default_limit=8,
         runtime_instruction=_CONNECTIONS_RUNTIME_INSTRUCTION,
     ),
-    "find_path": _definition(
-        "find_path",
+    "find_relationship_path": _definition(
+        "find_relationship_path",
         default_limit=8,
         runtime_instruction=_PATH_RUNTIME_INSTRUCTION,
     ),
@@ -707,8 +707,8 @@ class Tools(
             limit=limit,
         )
 
-    async def find_path(self, entity_a_id: int, entity_b_id: int):
-        return await self.knowledge_retrieval.find_path(
+    async def find_relationship_path(self, entity_a_id: int, entity_b_id: int):
+        return await self.knowledge_retrieval.find_relationship_path(
             entity_a_id, entity_b_id, session_id=self.session_id
         )
 

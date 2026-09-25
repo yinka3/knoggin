@@ -134,6 +134,13 @@ This is a behavior decision and should be a separate commit from mechanical batc
 - [x] Add useful string length constraints for retrieval queries.
 - [ ] Verify presentation overrides cannot weaken these canonical constraints.
 
+### Make the relationship-path tool name explicit
+
+- [x] Rename the model-facing `find_path` tool to `find_relationship_path`.
+- [x] Rename the project retrieval method to match.
+- [x] Keep the lower graph-store/reader method as `find_path`, where graph context is already explicit.
+- [x] Update Agent, Community/AAC, notebook, prompt, and test contracts together.
+
 ## Phase 5 — Validate Direct Retrieval Inputs
 
 - [x] Replace falsy defaults with explicit `None` handling.

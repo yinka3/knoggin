@@ -630,7 +630,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
             ],
             [
                 tool_call_event(
-                    "find_path",
+                    "find_relationship_path",
                     '{"entity_a": "Ada", "entity_b": "Knoggin"}',
                     "path-c",
                 ),
@@ -695,7 +695,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
             }
         if name == "search_messages":
             return {"data": [{"id": "message-b", "message": "MESSAGE_B"}]}
-        if name == "find_path":
+        if name == "find_relationship_path":
             return {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]}
         if name == "read_document":
             return {
@@ -1821,7 +1821,7 @@ async def test_fallback_summary_uses_all_canonical_evidence_categories():
         },
     )
     run.notebook.apply(
-        "find_path",
+        "find_relationship_path",
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin", "step": 0}]},
     )
     run.notebook.apply(
