@@ -392,6 +392,61 @@ def test_repeated_rollover_retains_episode_and_path_neighborhood():
     assert "path:path-1" in snapshot["knowledge"]["paths"]
 
 
+def test_rollover_keeps_only_the_immediately_previous_page():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(max_messages=10, max_render_tokens=1000)
+    )
+    notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m1", "message": "first page evidence"}]},
+    )
+
+    notebook.rollover()
+    first_previous = notebook.previous_page
+
+    assert first_previous is not None
+    assert first_previous.generation == 1
+    assert first_previous.previous_page is None
+    assert notebook.show_previous_page is False
+
+    notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m2", "message": "second page evidence"}]},
+    )
+    notebook.rollover()
+    second_previous = notebook.previous_page
+
+    assert second_previous is not None
+    assert second_previous.generation == 2
+    assert second_previous.previous_page is None
+
+
+def test_token_overflow_automatically_retains_the_completed_page():
+    notebook = RunNotebook(
+        capacity=NotebookCapacity(max_messages=10, max_render_tokens=4),
+        token_counter=lambda rendered: rendered.count("[payload]"),
+    )
+    for index in range(4):
+        assert notebook.apply(
+            "search_messages",
+            {"data": [{"id": f"m{index}", "message": f"[payload] {index}"}]},
+        ).accepted
+
+    admission = notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m4", "message": "[payload] 4"}]},
+    )
+    previous = notebook.previous_page
+
+    assert admission.accepted is True
+    assert admission.reason == "rolled_over:2"
+    assert notebook.generation == 2
+    assert previous is not None
+    assert previous.generation == 1
+    assert len(previous.section_items("messages")) == 4
+    assert notebook.show_previous_page is False
+
+
 def test_rollover_discards_older_inactive_contributions():
     notebook = RunNotebook(
         capacity=NotebookCapacity(max_messages=10, max_render_tokens=1000)

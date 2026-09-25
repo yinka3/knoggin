@@ -164,6 +164,8 @@ class RunNotebook:
         self._actions: dict[str, dict[str, Any]] = {}
         self.possible_next_steps: list[dict[str, Any]] = []
         self.summary = NotebookSummary()
+        self._previous_page: RunNotebook | None = None
+        self.show_previous_page = False
         self._last_applied_references: tuple[str, ...] = ()
         self._contribution_history: list[tuple[str, tuple[str, ...]]] = []
 
@@ -182,6 +184,8 @@ class RunNotebook:
         clone._actions = deepcopy(self._actions, memo)
         clone.possible_next_steps = deepcopy(self.possible_next_steps, memo)
         clone.summary = deepcopy(self.summary, memo)
+        clone._previous_page = deepcopy(self._previous_page, memo)
+        clone.show_previous_page = self.show_previous_page
         clone._last_applied_references = self._last_applied_references
         clone._contribution_history = deepcopy(self._contribution_history, memo)
         return clone
@@ -200,6 +204,20 @@ class RunNotebook:
     @property
     def actions(self) -> list[dict[str, Any]]:
         return deepcopy(list(self._actions.values()))
+
+    @property
+    def previous_page(self) -> RunNotebook | None:
+        """Return a detached copy of the one retained prior generation."""
+
+        return deepcopy(self._previous_page)
+
+    def set_previous_page_visibility(self, show: bool = False) -> bool:
+        """Choose whether model-facing rendering includes the retained page."""
+
+        if not isinstance(show, bool):
+            raise TypeError("show must be a boolean")
+        self.show_previous_page = bool(show and self._previous_page is not None)
+        return self.show_previous_page
 
     def set_token_counter(self, token_counter: Callable[[str], int] | None) -> None:
         """Install the active model tokenizer without making it notebook state."""
@@ -233,7 +251,7 @@ class RunNotebook:
         }
 
     def _render_token_count(self) -> int:
-        rendered = self.render()
+        rendered = self.render(show_previous=False)
         if self._token_counter is not None:
             return max(0, int(self._token_counter(rendered)))
         return len(rendered.split())
@@ -858,6 +876,8 @@ class RunNotebook:
         self._actions = candidate._actions
         self.possible_next_steps = candidate.possible_next_steps
         self.summary = candidate.summary
+        self._previous_page = candidate._previous_page
+        self.show_previous_page = candidate.show_previous_page
         self._last_applied_references = candidate._last_applied_references
         self._contribution_history = candidate._contribution_history
 
@@ -1065,6 +1085,9 @@ class RunNotebook:
 
         if recent_contributions < 1:
             raise ValueError("recent_contributions must be positive")
+        previous_page = deepcopy(self)
+        previous_page._previous_page = None
+        previous_page.show_previous_page = False
         retained = self._bounded_retained_references(
             self._retain_references(active_references, recent_contributions)
         )
@@ -1159,6 +1182,8 @@ class RunNotebook:
                 normalized_summary[: self.capacity.max_summary_chars - 1] + "…"
             )
         self.set_summary(normalized_summary, summary_references)
+        self._previous_page = previous_page
+        self.show_previous_page = False
         self._contribution_history = [("rollover", tuple(retained))]
         self._last_applied_references = ()
         return NotebookRolloverResult(
@@ -1167,12 +1192,12 @@ class RunNotebook:
             tuple(self.summary.references),
         )
 
-    def render(self) -> str:
+    def render(self, *, show_previous: bool | None = None) -> str:
         """Render this notebook for a model-facing prompt view."""
 
         from core.agent.notebook_renderer import render_notebook
 
-        return render_notebook(self)
+        return render_notebook(self, show_previous=show_previous)
 
     def has_any(self) -> bool:
         return bool(
@@ -1282,5 +1307,7 @@ class RunNotebook:
         self._actions.clear()
         self.possible_next_steps.clear()
         self.summary = NotebookSummary()
+        self._previous_page = None
+        self.show_previous_page = False
         self._last_applied_references = ()
         self._contribution_history.clear()

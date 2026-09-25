@@ -7,9 +7,10 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS_BY_NAME,
     get_filtered_schemas,
 )
+from core.agent.notebook import RunNotebook
 from core.agent.tool_runtime import execute_tool
 from core.agent.tools.memory import MemoryTools
-from core.agent.tools.registry import build_tool_runtime, get_tool_definition
+from core.agent.tools.registry import Tools, build_tool_runtime, get_tool_definition
 
 
 class DispatchTools:
@@ -191,6 +192,26 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         ("read_episode", "42"),
         ("read_observation_evidence", 17),
     ]
+
+
+@pytest.mark.no_network
+async def test_previous_notebook_page_tool_toggles_model_visibility():
+    notebook = RunNotebook()
+    notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m1", "message": "older evidence"}]},
+    )
+    notebook.rollover()
+    tools = object.__new__(Tools)
+    tools.run_notebook = notebook
+
+    shown = await execute_tool(tools, "show_previous_notebook_page", {"show": True})
+    hidden = await execute_tool(
+        tools, "show_previous_notebook_page", {"show": False}
+    )
+
+    assert shown == {"data": {"available": True, "show_previous": True}}
+    assert hidden == {"data": {"available": True, "show_previous": False}}
 
 
 @pytest.mark.no_network

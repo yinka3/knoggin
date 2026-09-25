@@ -17,6 +17,32 @@ def test_empty_notebook_renders_a_stable_minimal_view():
     assert render_notebook(RunNotebook()) == "RUN NOTEBOOK"
 
 
+def test_previous_notebook_page_is_hidden_until_requested():
+    notebook = RunNotebook()
+    notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m1", "message": "older evidence"}]},
+    )
+    notebook.rollover()
+    notebook.apply(
+        "search_messages",
+        {"data": [{"id": "m2", "message": "current evidence"}]},
+    )
+
+    hidden = render_notebook(notebook)
+    notebook.set_previous_page_visibility(True)
+    visible = render_notebook(notebook)
+    notebook.set_previous_page_visibility(False)
+
+    assert "PREVIOUS NOTEBOOK PAGE" not in hidden
+    assert "CURRENT NOTEBOOK PAGE" not in hidden
+    assert "PREVIOUS NOTEBOOK PAGE" in visible
+    assert "CURRENT NOTEBOOK PAGE" in visible
+    assert "older evidence" in visible
+    assert "current evidence" in visible
+    assert "PREVIOUS NOTEBOOK PAGE" not in render_notebook(notebook)
+
+
 def test_notebook_renderer_is_strict_localized_and_read_only():
     notebook = RunNotebook()
     notebook.apply(

@@ -169,6 +169,7 @@ class AgentExecutor:
             ctx.tool_runtime,
             ctx.short_uuid_references,
         )
+        tools.run_notebook = ctx.notebook
         for candidate in ctx.initial_source_candidates:
             ctx.record_source(candidate)
 

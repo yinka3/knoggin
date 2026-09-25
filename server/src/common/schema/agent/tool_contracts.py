@@ -252,6 +252,32 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "show_previous_notebook_page",
+            "description": (
+                "Show or hide the immediately previous notebook page in model "
+                "context. Use this when the current handoff indicates that older "
+                "evidence may be useful. Only one previous page is available."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "show": {
+                        "type": "boolean",
+                        "description": (
+                            "Whether to show the previous page. Defaults to false."
+                        ),
+                        "default": False,
+                    }
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            "tags": ["core"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "request_clarification",
             "description": (
                 "Use this tool ONLY when the user's request is completely ambiguous and you cannot resolve it yourself. "
@@ -1385,7 +1411,12 @@ def get_filtered_schemas(
 
     for schema in TOOL_SCHEMAS:
         name = schema["function"]["name"]
-        if name in ("request_clarification", "set_research_plan", "submit_answer"):
+        if name in (
+            "request_clarification",
+            "set_research_plan",
+            "show_previous_notebook_page",
+            "submit_answer",
+        ):
             filtered.append(schema)
             continue
 

@@ -54,6 +54,12 @@ _TOPIC_CONTEXT_RUNTIME_INSTRUCTION = (
     "episode, document, or web retrieval.]"
 )
 
+_PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION = (
+    "[SYSTEM NOTICE: The notebook may retain one previous page after rollover. "
+    "Use show_previous_notebook_page only when the current handoff lacks needed "
+    "detail, and hide it again when that older context is no longer useful.]"
+)
+
 _EPISODE_CHECK_RUNTIME_INSTRUCTION = (
     "[SYSTEM NOTICE: Use episode_check for remembered history, decisions, or "
     "developments. It returns compact, evidence-backed summaries; inspect the "
@@ -222,6 +228,11 @@ TOOL_DEFINITIONS = {
     "request_clarification": _definition(
         "request_clarification",
         executor_protocol=True,
+    ),
+    "show_previous_notebook_page": _definition(
+        "show_previous_notebook_page",
+        default_limit=4,
+        runtime_instruction=_PREVIOUS_NOTEBOOK_PAGE_RUNTIME_INSTRUCTION,
     ),
     "episode_check": _definition(
         "episode_check",
@@ -645,6 +656,7 @@ class Tools(
         self.active_tool_schemas: Dict[str, dict] = {}
         self.max_graph_results = 40
         self.short_uuid_references: Dict[str, str] = {}
+        self.run_notebook = None
         self.health_service = health_service
         # Global entity maintenance is application-owned. Read-only/community
         # tool compositions intentionally leave it unavailable rather than
@@ -733,6 +745,20 @@ class Tools(
             normalized_topics,
             session_id=self.session_id,
         )
+
+    async def show_previous_notebook_page(self, show: bool = False) -> dict:
+        """Toggle the one retained notebook page for subsequent model turns."""
+
+        if self.run_notebook is None:
+            raise ToolExecutionError(
+                "show_previous_notebook_page",
+                "The run notebook is unavailable.",
+            )
+        visible = self.run_notebook.set_previous_page_visibility(show)
+        return {
+            "available": self.run_notebook.previous_page is not None,
+            "show_previous": visible,
+        }
 
     async def get_document_manifest(self):
         """Get indexed documents for prompt context."""

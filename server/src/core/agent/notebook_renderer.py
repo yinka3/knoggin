@@ -659,6 +659,7 @@ def render_notebook(
     notebook: RunNotebook,
     *,
     local_uuid_references: Mapping[str, str] | None = None,
+    show_previous: bool | None = None,
     template: str = NOTEBOOK_TEMPLATE,
     environment_factory: Callable[[], Environment] = notebook_environment,
 ) -> str:
@@ -667,7 +668,7 @@ def render_notebook(
     if not isinstance(notebook, RunNotebook):
         raise TypeError("render_notebook expects a RunNotebook")
     environment = environment_factory()
-    return (
+    current = (
         environment.from_string(template)
         .render(
             **_render_context(
@@ -677,6 +678,19 @@ def render_notebook(
         )
         .strip()
     )
+    should_show_previous = (
+        notebook.show_previous_page if show_previous is None else show_previous
+    )
+    if not should_show_previous or notebook._previous_page is None:
+        return current
+    previous = render_notebook(
+        notebook._previous_page,
+        local_uuid_references=local_uuid_references,
+        show_previous=False,
+        template=template,
+        environment_factory=environment_factory,
+    )
+    return f"PREVIOUS NOTEBOOK PAGE\n{previous}\n\nCURRENT NOTEBOOK PAGE\n{current}"
 
 
 __all__ = [
