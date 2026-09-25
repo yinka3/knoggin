@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 
+from core.knowledge.documents import ProjectFilesystemFactory
 from core.project.project_manager import ProjectManager
 from tests.fixtures.factories import make_domain_config
 
@@ -37,8 +38,12 @@ async def _remove_scope_insert_failure(client):
     await client.execute("DROP FUNCTION IF EXISTS fail_project_scope_insert()")
 
 
-def _manager(client) -> ProjectManager:
-    return ProjectManager(SimpleNamespace(postgres=client), user_name="ada")
+def _manager(client, *, filesystem_factory=None) -> ProjectManager:
+    return ProjectManager(
+        SimpleNamespace(postgres=client),
+        user_name="ada",
+        filesystem_factory=filesystem_factory,
+    )
 
 
 @pytest.mark.storage
@@ -48,9 +53,13 @@ def _manager(client) -> ProjectManager:
 async def test_project_creation_rolls_back_when_scope_insert_fails(
     real_postgres_client,
     monkeypatch,
+    tmp_path,
 ):
     project_id = "project-creation-atomicity"
-    manager = _manager(real_postgres_client)
+    manager = _manager(
+        real_postgres_client,
+        filesystem_factory=ProjectFilesystemFactory(tmp_path / "projects"),
+    )
     monkeypatch.setattr(
         "core.project.project_manager.uuid.uuid4",
         lambda: project_id,

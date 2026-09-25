@@ -102,7 +102,7 @@ class ApplicationRuntime:
             await agent_manager.ensure_default_agent()
             agent_orchestrator = AgentOrchestrator(
                 agent_manager,
-                config_provider=ConfigManager,
+                config_manager=config_manager,
                 entity_maintenance_service=projects.entity_maintenance_service,
             )
             sessions = SessionManager(

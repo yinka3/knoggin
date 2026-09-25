@@ -3,9 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from common.conf.manager import ConfigManager
 from common.schema.agent.identity import AgentConfig
+from common.schema.agent.settings import AgentLimitSettings
 from common.schema.public import StartRunRequest, validate_public_stream
+from common.schema.settings import DeveloperSettings, IngestionSettings, RootConfig
 from core.agent.orchestrator import AgentOrchestrator
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
 from core.knowledge.documents import storage as document_storage
@@ -282,17 +283,16 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         embedding=embedding,
         llm_service=llm,
     )
+    runtime_config = RootConfig(
+        developer_settings=DeveloperSettings(
+            limits=AgentLimitSettings(conversation_context_turns=100),
+            ingestion=IngestionSettings(message_edit_window_seconds=1),
+        )
+    )
     monkeypatch.setattr(
         Session,
         "current_config",
-        property(
-            lambda self: SimpleNamespace(
-                developer_settings=SimpleNamespace(
-                    limits=SimpleNamespace(conversation_context_turns=100),
-                    ingestion=SimpleNamespace(message_edit_window_seconds=1),
-                )
-            )
-        ),
+        property(lambda self: runtime_config),
     )
 
     documents = DocumentService(
@@ -354,7 +354,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     )
     context.agent_orchestrator = AgentOrchestrator(
         _StaticAgentManager(agent),
-        config_provider=ConfigManager,
+        config_manager=SimpleNamespace(config=runtime_config),
     )
     application = ApplicationRuntimePort(
         SimpleNamespace(
