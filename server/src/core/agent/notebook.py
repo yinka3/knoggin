@@ -599,6 +599,18 @@ class RunNotebook:
             retained_evidence = []
             for evidence in raw_evidence:
                 observation_id = self._observation_id_from_bundle(evidence)
+                if (
+                    observation_id is None
+                    and isinstance(evidence, dict)
+                    and evidence.get("kind") == "relationship_observation"
+                ):
+                    candidate = evidence.get("observation_id")
+                    if (
+                        isinstance(candidate, int)
+                        and not isinstance(candidate, bool)
+                        and candidate > 0
+                    ):
+                        observation_id = candidate
                 if observation_id is None:
                     retained_evidence.append(evidence)
                 elif observation_id not in observation_ids:

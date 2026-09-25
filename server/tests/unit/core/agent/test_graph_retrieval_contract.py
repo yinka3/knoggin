@@ -262,29 +262,20 @@ async def test_path_returns_canonical_direction_and_project_attribution():
     assert result[0]["source"] == "Ade"
     assert result[0]["target"] == "Acme"
     assert result[0]["project_id"] == "project-1"
-    assert store.evidence_calls == [
-        ([17, 18], {"user_name": "ada", "project_id": "project-1"})
-    ]
+    assert store.evidence_calls == []
     evidence = result[0]["evidence"]
-    assert [item["subject"]["identifier"] for item in evidence] == ["17", "18"]
-    evidence = evidence[0]
-    assert evidence["subject"] == {
-        "kind": "relationship_observation",
-        "identifier": "17",
-    }
-    assert [node["pointer"]["kind"] for node in evidence["nodes"]] == [
-        "relationship_observation",
-        "context_block",
-        "message",
-        "source_reference",
+    assert evidence == [
+        {
+            "kind": "relationship_observation",
+            "observation_id": 17,
+            "project_id": "project-1",
+        },
+        {
+            "kind": "relationship_observation",
+            "observation_id": 18,
+            "project_id": "project-1",
+        },
     ]
-    assert evidence["nodes"][0]["status"] == "active"
-    evidence = result[0]["evidence"][1]
-    assert evidence["subject"] == {
-        "kind": "relationship_observation",
-        "identifier": "18",
-    }
-    assert evidence["nodes"][0]["status"] == "missing"
 
 
 @pytest.mark.no_network

@@ -147,7 +147,13 @@ def test_path_observation_handles_are_retained_and_expand_only_on_demand():
                 {
                     "entity_a": "Ada",
                     "entity_b": "Acme",
-                    "evidence": [bundle],
+                    "evidence": [
+                        {
+                            "kind": "relationship_observation",
+                            "observation_id": 17,
+                            "project_id": "project-1",
+                        }
+                    ],
                 }
             ]
         },

@@ -411,7 +411,11 @@ class KnowledgeRetrieval:
             max_depth=4,
             visible_project_ids=self.readable_project_ids,
         )
-        return await self._hydrate_result_evidence(path, session_id=session_id)
+        return await self._hydrate_result_evidence(
+            path,
+            session_id=session_id,
+            expand_observations=False,
+        )
 
     async def read_observation_evidence(self, observation_id: int) -> Dict:
         """Expand one path observation through the scoped evidence traversal."""
@@ -621,6 +625,7 @@ class KnowledgeRetrieval:
         results: List[Dict],
         *,
         session_id: str,
+        expand_observations: bool = True,
     ) -> List[Dict]:
         """Hydrate message and observation support without changing its meaning."""
 
@@ -639,10 +644,16 @@ class KnowledgeRetrieval:
             all_message_refs.extend(message_refs)
             observation_refs_by_result.append(observation_refs)
 
-        hydrated_messages, observation_bundles = await asyncio.gather(
-            self._hydrate_evidence(all_message_refs, session_id=session_id),
-            self._hydrate_observation_evidence(observation_refs_by_result),
-        )
+        if expand_observations:
+            hydrated_messages, observation_bundles = await asyncio.gather(
+                self._hydrate_evidence(all_message_refs, session_id=session_id),
+                self._hydrate_observation_evidence(observation_refs_by_result),
+            )
+        else:
+            hydrated_messages = await self._hydrate_evidence(
+                all_message_refs, session_id=session_id
+            )
+            observation_bundles = observation_refs_by_result
         messages_by_key = {
             self._message_evidence_key(message): message
             for message in hydrated_messages
@@ -694,7 +705,11 @@ class KnowledgeRetrieval:
             or user_name != self.user_name
         ):
             raise ValueError("relationship observation evidence is outside read scope")
-        return {"observation_id": observation_id, "project_id": project_id}
+        return {
+            "kind": "relationship_observation",
+            "observation_id": observation_id,
+            "project_id": project_id,
+        }
 
     async def _hydrate_observation_evidence(
         self,

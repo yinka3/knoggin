@@ -119,10 +119,10 @@ read_observation_evidence
 → full bounded evidence bundle on demand
 ```
 
-- [ ] Verify the notebook can admit compact path observation handles without eager bundles.
-- [ ] Update `find_path()` to avoid eager observation expansion if the notebook contract supports it.
-- [ ] Keep message evidence hydration if path results can also contain direct message refs.
-- [ ] Update graph retrieval, notebook, and tool-description tests together.
+- [x] Verify the notebook can admit compact path observation handles without eager bundles.
+- [x] Update `find_path()` to avoid eager observation expansion.
+- [x] Keep message evidence hydration if path results also contain direct message refs.
+- [x] Update graph retrieval and notebook tests together.
 
 This is a behavior decision and should be a separate commit from mechanical batching.
 
