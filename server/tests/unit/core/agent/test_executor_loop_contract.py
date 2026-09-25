@@ -638,7 +638,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
             ],
             [
                 tool_call_event(
-                    "read_document",
+                    "read_project_document",
                     '{"document_id": "doc-d"}',
                     "document-d",
                 ),
@@ -697,7 +697,7 @@ async def test_final_synthesis_receives_each_admitted_evidence_kind(monkeypatch)
             return {"data": [{"id": "message-b", "message": "MESSAGE_B"}]}
         if name == "find_relationship_path":
             return {"data": [{"entity_a": "Ada", "entity_b": "Knoggin"}]}
-        if name == "read_document":
+        if name == "read_project_document":
             return {
                 "data": [
                     {
@@ -842,7 +842,7 @@ async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
         [
             [
                 tool_call_event(
-                    "web_search",
+                    "search_web",
                     '{"query": "wide release history"}',
                     "wide-1",
                 ),
@@ -850,7 +850,7 @@ async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
             ],
             [
                 tool_call_event(
-                    "web_search",
+                    "search_web",
                     '{"query": "narrow release history"}',
                     "narrow-2",
                 ),
@@ -956,7 +956,7 @@ async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
     assert rejection == {
         "event": "tool_end",
         "data": {
-            "tool": "web_search",
+            "tool": "search_web",
             "result": (
                 "Result was not added to the run notebook because it exceeds the "
                 "evidence capacity. Try a narrower query or read a smaller document "
@@ -971,8 +971,8 @@ async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
     assert "Found 2 items" not in llm.calls[1]["user"]
     assert "CURRENT EXECUTION PHASE: PLAN" in llm.calls[1]["system"]
     assert calls == [
-        ("web_search", {"query": "wide release history"}),
-        ("web_search", {"query": "narrow release history"}),
+        ("search_web", {"query": "wide release history"}),
+        ("search_web", {"query": "narrow release history"}),
     ]
     assert [candidate.tool_call_id for candidate in run.source_candidates] == [
         "narrow-2"
@@ -1085,7 +1085,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
     llm = ScriptedLLM(
         [
             [
-                tool_call_event("list_documents", "{}", "list-documents"),
+                tool_call_event("list_project_documents", "{}", "list-documents"),
                 completed_event(),
             ],
             [
@@ -1098,7 +1098,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
             ],
             [
                 tool_call_event(
-                    "read_document",
+                    "read_project_document",
                     '{"document_id": "document-1"}',
                     "read-document",
                 ),
@@ -1132,7 +1132,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
 
     async def document_results(_tools, name, args):
         dispatched.append((name, args))
-        if name == "list_documents":
+        if name == "list_project_documents":
             return {
                 "data": [
                     {
@@ -1141,7 +1141,7 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
                     }
                 ]
             }
-        if name == "read_document":
+        if name == "read_project_document":
             return {
                 "data": [
                     {
@@ -1161,8 +1161,8 @@ async def test_research_requires_read_content_after_document_listing(monkeypatch
     assert events[-1]["data"]["content"] == "Final answer from the read passage."
     assert events[-1]["data"]["artifact"]["kind"] == "research_brief"
     assert dispatched == [
-        ("list_documents", {}),
-        ("read_document", {"document_id": "document-1"}),
+        ("list_project_documents", {}),
+        ("read_project_document", {"document_id": "document-1"}),
     ]
     assert len(llm.calls) == 5
     assert (
@@ -1827,7 +1827,7 @@ async def test_fallback_summary_uses_all_canonical_evidence_categories():
         {"data": [{"entity_a": "Ada", "entity_b": "Knoggin", "step": 0}]},
     )
     run.notebook.apply(
-        "web_search",
+        "search_web",
         {
             "data": [
                 {

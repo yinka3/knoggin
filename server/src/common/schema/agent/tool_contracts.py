@@ -526,7 +526,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_documents",
+            "name": "list_project_documents",
             "description": (
                 "List documents visible in the current project context. Use this "
                 "to discover document IDs, paths, indexing "
@@ -561,7 +561,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "get_document_info",
+            "name": "get_project_document_info",
             "description": (
                 "Get metadata for one visible document. Provide exactly one of "
                 "document_id or relative_path; use document_id when paths are "
@@ -580,7 +580,7 @@ TOOL_SCHEMAS = [
                     },
                     "relative_path": {
                         "type": "string",
-                        "description": "The exact path shown by list_documents.",
+                        "description": "The exact path shown by list_project_documents.",
                     },
                     "use_focus": {
                         "type": "boolean",
@@ -595,7 +595,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_document",
+            "name": "read_project_document",
             "description": (
                 "Read a bounded line range from one visible document. Provide "
                 "exactly one of document_id or relative_path. PDF and DOCX "
@@ -614,7 +614,7 @@ TOOL_SCHEMAS = [
                     },
                     "relative_path": {
                         "type": "string",
-                        "description": "The exact path shown by list_documents.",
+                        "description": "The exact path shown by list_project_documents.",
                     },
                     "page_number": {
                         "type": "integer",
@@ -644,7 +644,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_documents",
+            "name": "search_project_documents",
             "description": (
                 "Search indexed documents visible in the current project context."
             ),
@@ -689,7 +689,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "web_search",
+            "name": "search_web",
             "description": ("Search the live internet for information."),
             "parameters": {
                 "type": "object",
@@ -716,7 +716,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "news_search",
+            "name": "search_news",
             "description": ("Search for recent news articles."),
             "parameters": {
                 "type": "object",
@@ -1056,7 +1056,7 @@ TOOL_SCHEMAS = [
                 "current project's local folder. PROJECT.md is readable "
                 "but remains user-owned; controlled CONTEXT.md is unavailable "
                 "through ordinary workspace tools. Registered evidence documents "
-                "must be read with read_document so source provenance is retained."
+                "must be read with read_project_document so source provenance is retained."
             ),
             "parameters": {
                 "type": "object",

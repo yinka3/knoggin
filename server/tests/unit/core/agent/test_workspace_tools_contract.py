@@ -102,7 +102,7 @@ async def test_registered_evidence_document_cannot_bypass_provenance_aware_read(
     }
     tools = ProjectFileHarness(service)
 
-    with pytest.raises(ToolExecutionError, match="read_document"):
+    with pytest.raises(ToolExecutionError, match="read_project_document"):
         await tools.read_file("docs/evidence.md")
 
     assert service.calls == [("document_info", "docs/evidence.md", None)]

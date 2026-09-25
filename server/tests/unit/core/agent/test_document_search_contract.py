@@ -80,7 +80,7 @@ class ReadOnlyDocumentService:
         path_prefix=None,
         limit=50,
     ):
-        self.calls.append(("list_documents", path_prefix, limit))
+        self.calls.append(("list_project_documents", path_prefix, limit))
         return [
             {
                 "document_id": "file-1",
@@ -95,7 +95,7 @@ class ReadOnlyDocumentService:
         document_id=None,
         relative_path=None,
     ):
-        self.calls.append(("get_document_info", document_id, relative_path))
+        self.calls.append(("get_project_document_info", document_id, relative_path))
         return {
             "document_id": document_id or "file-1",
             "relative_path": relative_path or "docs/notes.md",
@@ -110,7 +110,7 @@ class ReadOnlyDocumentService:
         end_line=None,
     ):
         self.calls.append(
-            ("read_document", document_id, relative_path, start_line, end_line)
+            ("read_project_document", document_id, relative_path, start_line, end_line)
         )
         return self.read_result or {
             "document_id": document_id or "file-1",
@@ -249,15 +249,15 @@ def test_document_tool_schemas_expose_path_filters_without_folder_handles():
     }
 
     assert {
-        "list_documents",
-        "search_documents",
+        "list_project_documents",
+        "search_project_documents",
     }.issubset(schemas)
-    assert set(schemas["list_documents"]["parameters"]["properties"]) == {
+    assert set(schemas["list_project_documents"]["parameters"]["properties"]) == {
         "path_prefix",
         "limit",
         "use_focus",
     }
-    assert set(schemas["search_documents"]["parameters"]["properties"]) == {
+    assert set(schemas["search_project_documents"]["parameters"]["properties"]) == {
         "query",
         "document_name",
         "relative_path",
@@ -268,18 +268,18 @@ def test_document_tool_schemas_expose_path_filters_without_folder_handles():
 
 
 @pytest.mark.no_network
-async def test_search_documents_reports_project_empty_state():
+async def test_search_project_documents_reports_project_empty_state():
     tools = SearchTools()
     tools.document_service = EmptyDocumentService()
     tools.session_id = "session-1"
 
-    assert await tools.search_documents("alpha") == [
+    assert await tools.search_project_documents("alpha") == [
         {"error": "No indexed documents available in this project"}
     ]
 
 
 @pytest.mark.no_network
-async def test_search_documents_passes_session_and_exact_path_filter():
+async def test_search_project_documents_passes_session_and_exact_path_filter():
     document_service = SearchableDocumentService(
         [
             {
@@ -294,7 +294,7 @@ async def test_search_documents_passes_session_and_exact_path_filter():
     tools.document_service = document_service
     tools.session_id = "session-1"
 
-    results = await tools.search_documents(
+    results = await tools.search_project_documents(
         "alpha",
         document_name="docs/notes.md",
         limit=4,
@@ -313,7 +313,7 @@ async def test_search_documents_passes_session_and_exact_path_filter():
 
 
 @pytest.mark.no_network
-async def test_search_documents_rejects_ambiguous_document_names():
+async def test_search_project_documents_rejects_ambiguous_document_names():
     document_service = SearchableDocumentService(
         [
             {
@@ -334,7 +334,7 @@ async def test_search_documents_rejects_ambiguous_document_names():
     tools.document_service = document_service
     tools.session_id = "session-1"
 
-    result = await tools.search_documents("alpha", document_name="notes.md")
+    result = await tools.search_project_documents("alpha", document_name="notes.md")
 
     assert "ambiguous" in result[0]["error"]
     assert document_service.search_calls == []
@@ -347,12 +347,12 @@ async def test_read_only_document_tools_pass_session_scope_and_bounds():
     tools.document_service = document_service
     tools.session_id = "session-1"
 
-    documents = await tools.list_documents(
+    documents = await tools.list_project_documents(
         path_prefix="docs",
         limit=10,
     )
-    info = await tools.get_document_info(document_id="file-1")
-    content = await tools.read_document(
+    info = await tools.get_project_document_info(document_id="file-1")
+    content = await tools.read_project_document(
         relative_path="docs/notes.md",
         start_line=2,
         end_line=3,
@@ -363,13 +363,13 @@ async def test_read_only_document_tools_pass_session_scope_and_bounds():
     assert content[0]["content"] == "2: alpha\n3: beta"
     assert document_service.calls == [
         (
-            "list_documents",
+            "list_project_documents",
             "docs",
             10,
         ),
-        ("get_document_info", "file-1", None),
+        ("get_project_document_info", "file-1", None),
         (
-            "read_document",
+            "read_project_document",
             None,
             "docs/notes.md",
             2,
@@ -379,13 +379,13 @@ async def test_read_only_document_tools_pass_session_scope_and_bounds():
 
 
 @pytest.mark.no_network
-async def test_list_documents_validates_limit():
+async def test_list_project_documents_validates_limit():
     tools = SearchTools()
     tools.document_service = ReadOnlyDocumentService()
     tools.session_id = "session-1"
 
     with pytest.raises(ValueError, match="between 1 and 100"):
-        await tools.list_documents(limit=0)
+        await tools.list_project_documents(limit=0)
 
 
 @pytest.mark.no_network
@@ -410,7 +410,7 @@ async def test_folder_read_tools_have_no_legacy_boundaries():
 
 
 @pytest.mark.no_network
-async def test_search_documents_passes_path_prefix_filters():
+async def test_search_project_documents_passes_path_prefix_filters():
     document_service = SearchableDocumentService(
         [
             {
@@ -425,7 +425,7 @@ async def test_search_documents_passes_path_prefix_filters():
     tools.document_service = document_service
     tools.session_id = "session-1"
 
-    await tools.search_documents(
+    await tools.search_project_documents(
         "alpha",
         path_prefix="docs",
     )
@@ -442,27 +442,27 @@ async def test_search_documents_passes_path_prefix_filters():
 
 
 @pytest.mark.no_network
-async def test_search_documents_rejects_conflicting_exact_and_prefix_filters():
+async def test_search_project_documents_rejects_conflicting_exact_and_prefix_filters():
     tools = SearchTools()
     tools.document_service = SearchableDocumentService([])
     tools.session_id = "session-1"
 
     with pytest.raises(ValueError, match="mutually exclusive"):
-        await tools.search_documents(
+        await tools.search_project_documents(
             "alpha",
             document_name="notes.md",
             relative_path="docs/notes.md",
         )
 
     with pytest.raises(ValueError, match="path_prefix"):
-        await tools.search_documents(
+        await tools.search_project_documents(
             "alpha",
             relative_path="docs/notes.md",
             path_prefix="docs",
         )
 
     with pytest.raises(ValueError, match="between 1 and 50"):
-        await tools.search_documents("alpha", limit=0)
+        await tools.search_project_documents("alpha", limit=0)
 
 
 @pytest.mark.no_network
@@ -486,9 +486,9 @@ async def test_exact_document_focus_defaults_reads_and_search():
     }
     tools.session_id = "session-1"
 
-    documents = await tools.list_documents()
-    await tools.search_documents("alpha")
-    await tools.search_documents("alpha", use_focus=False)
+    documents = await tools.list_project_documents()
+    await tools.search_project_documents("alpha")
+    await tools.search_project_documents("alpha", use_focus=False)
 
     assert [item["document_id"] for item in documents] == ["file-1"]
     assert document_service.search_calls[0]["document_filter"] == "file-1"
@@ -507,12 +507,12 @@ async def test_exact_document_focus_defaults_info_and_content_reads():
     }
     tools.session_id = "session-1"
 
-    await tools.get_document_info()
-    await tools.read_document()
+    await tools.get_project_document_info()
+    await tools.read_project_document()
 
     assert document_service.calls == [
-        ("get_document_info", "file-1", None),
-        ("read_document", "file-1", None, 1, None),
+        ("get_project_document_info", "file-1", None),
+        ("read_project_document", "file-1", None, 1, None),
     ]
 
 
@@ -529,14 +529,14 @@ async def test_request_document_focus_cannot_be_bypassed_by_tool_arguments():
     }
     tools.session_id = "session-1"
 
-    await tools.read_document(document_id="file-1", use_focus=False)
+    await tools.read_project_document(document_id="file-1", use_focus=False)
     with pytest.raises(ValueError, match="restricted to the selected document"):
-        await tools.read_document(document_id="file-2", use_focus=False)
+        await tools.read_project_document(document_id="file-2", use_focus=False)
     with pytest.raises(ValueError, match="restricted to the selected document"):
-        await tools.read_document(relative_path="docs/other.md")
+        await tools.read_project_document(relative_path="docs/other.md")
 
     assert document_service.calls == [
-        ("read_document", "file-1", None, 1, None),
+        ("read_project_document", "file-1", None, 1, None),
     ]
 
 
@@ -569,19 +569,19 @@ async def test_request_document_focus_forces_search_to_the_selected_document():
     tools.session_id = "session-1"
 
     with pytest.raises(ValueError, match="restricted to the selected document"):
-        await tools.search_documents(
+        await tools.search_project_documents(
             "alpha",
             relative_path="docs/other.md",
             use_focus=False,
         )
 
-    await tools.search_documents("alpha", use_focus=False)
+    await tools.search_project_documents("alpha", use_focus=False)
 
     assert document_service.search_calls[0]["document_filter"] == "file-1"
 
 
 @pytest.mark.no_network
-async def test_search_documents_adds_source_context_from_the_stored_chunk():
+async def test_search_project_documents_adds_source_context_from_the_stored_chunk():
     content_hash = "a" * 64
     stored_chunk = {
         "document_id": "file-1",
@@ -618,7 +618,7 @@ async def test_search_documents_adds_source_context_from_the_stored_chunk():
     tools.document_service = document_service
     tools.session_id = "session-1"
 
-    results = await tools.search_documents("revenue")
+    results = await tools.search_project_documents("revenue")
 
     assert results[0]["content"] == stored_chunk["content"]
     assert results[0]["source_context"] == {
@@ -651,7 +651,7 @@ async def test_search_documents_adds_source_context_from_the_stored_chunk():
 
 
 @pytest.mark.no_network
-async def test_read_document_adds_source_context_from_the_returned_read_range():
+async def test_read_project_document_adds_source_context_from_the_returned_read_range():
     content_hash = "b" * 64
     read_result = {
         "document_id": "file-1",
@@ -675,7 +675,7 @@ async def test_read_document_adds_source_context_from_the_returned_read_range():
     tools.document_service = ReadOnlyDocumentService(read_result=read_result)
     tools.session_id = "session-1"
 
-    results = await tools.read_document(document_id="file-1", start_line=3, end_line=4)
+    results = await tools.read_project_document(document_id="file-1", start_line=3, end_line=4)
 
     assert results[0]["source_context"] == {
         "source_kind": "text_document",
@@ -720,15 +720,15 @@ async def test_request_document_selection_defaults_reads_to_the_selected_range()
         },
     }
 
-    await tools.read_document()
+    await tools.read_project_document()
 
     assert tools.document_service.calls == [
-        ("read_document", "file-1", None, 3, 4)
+        ("read_project_document", "file-1", None, 3, 4)
     ]
 
-    await tools.read_document(start_line=8, end_line=9)
+    await tools.read_project_document(start_line=8, end_line=9)
     assert tools.document_service.calls[-1] == (
-        "read_document",
+        "read_project_document",
         "file-1",
         None,
         8,
@@ -737,7 +737,7 @@ async def test_request_document_selection_defaults_reads_to_the_selected_range()
 
 
 @pytest.mark.no_network
-async def test_search_documents_adds_docling_markdown_source_context():
+async def test_search_project_documents_adds_docling_markdown_source_context():
     content_hash = "d" * 64
     stored_chunk = {
         "document_id": "file-1",
@@ -799,7 +799,7 @@ async def test_search_documents_adds_docling_markdown_source_context():
         ),
     ],
 )
-def test_search_documents_adds_exact_source_context_for_each_text_strategy(
+def test_search_project_documents_adds_exact_source_context_for_each_text_strategy(
     extension,
     locator,
     expected_source_kind,
@@ -903,12 +903,12 @@ async def test_subtree_focus_defaults_filters_and_explicit_values_override():
     }
     tools.session_id = "session-1"
 
-    await tools.list_documents()
-    await tools.list_documents(path_prefix="docs")
-    await tools.list_documents(use_focus=False)
+    await tools.list_project_documents()
+    await tools.list_project_documents(path_prefix="docs")
+    await tools.list_project_documents(use_focus=False)
 
     assert document_service.calls == [
-        ("list_documents", "src", 50),
-        ("list_documents", "docs", 50),
-        ("list_documents", None, 50),
+        ("list_project_documents", "src", 50),
+        ("list_project_documents", "docs", 50),
+        ("list_project_documents", None, 50),
     ]

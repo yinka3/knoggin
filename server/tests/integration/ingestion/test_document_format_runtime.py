@@ -43,7 +43,7 @@ class _DeterministicDocumentAgentLLM:
     def __init__(self):
         self.steps = [
             (
-                "search_documents",
+                "search_project_documents",
                 '{"query": "violet launch phrase", "limit": 1}',
                 "document-search-1",
             ),
@@ -350,7 +350,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
             "communication_signature": "clear",
             "productive_flaw": "overexplains",
         },
-        enabled_tools=["search_documents"],
+        enabled_tools=["search_project_documents"],
     )
     context.agent_orchestrator = AgentOrchestrator(
         _StaticAgentManager(agent),
@@ -370,7 +370,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
             request=StartRunRequest(
                 session_id=scope["session_id"],
                 query="What is the violet launch phrase?",
-                enabled_tools=["search_documents"],
+                enabled_tools=["search_project_documents"],
             ),
         )
     ]
@@ -380,7 +380,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     assert not [event for event in public_events if event.type == "run.failed"]
     assert any(
         event.type == "tool.completed"
-        and event.tool_name == "search_documents"
+        and event.tool_name == "search_project_documents"
         and event.succeeded
         for event in public_events
     )

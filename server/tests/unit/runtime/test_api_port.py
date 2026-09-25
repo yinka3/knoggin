@@ -55,7 +55,7 @@ class FakeSession:
     project_id = "project-1"
     model = "test-model"
     agent_id = "agent-1"
-    enabled_tools = ["web_search"]
+    enabled_tools = ["search_web"]
 
     def __init__(self):
         self.run_calls: list[dict] = []
@@ -66,7 +66,7 @@ class FakeSession:
         return self._events()
 
     async def _events(self):
-        yield {"event": "tool_start", "data": {"tool": "web_search"}}
+        yield {"event": "tool_start", "data": {"tool": "search_web"}}
         yield {"event": "token", "data": {"content": "Answer"}}
         yield {
             "event": "response",

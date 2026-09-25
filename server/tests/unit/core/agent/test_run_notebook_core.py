@@ -173,7 +173,7 @@ def test_notebook_accepts_episode_groups_fallback_messages_and_document_ranges()
         {"data": [{"id": "msg_8", "message": "No episode was stored."}]},
     )
     notebook.apply(
-        "search_documents",
+        "search_project_documents",
         {
             "data": [
                 {"document_id": "doc-1", "chunk_index": 1, "content": "one"},
@@ -227,13 +227,13 @@ def test_notebook_source_application_is_atomic_when_capacity_is_exceeded():
         capacity=NotebookCapacity(max_web_discoveries=1, max_render_tokens=1000)
     )
     notebook.apply(
-        "web_search",
+        "search_web",
         {"data": [{"url": "https://example.com/one"}]},
     )
     before = notebook.as_dict()
 
     rejected = notebook.apply(
-        "web_search",
+        "search_web",
         {
             "data": [
                 {"url": "https://example.com/two"},

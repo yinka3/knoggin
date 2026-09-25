@@ -90,10 +90,10 @@ def build_user_message(
                 "get_entity_recent_activity",
                 "find_relationship_path",
                 "read_episode_messages",
-                "search_documents",
-                "read_document",
-                "web_search",
-                "news_search",
+                "search_project_documents",
+                "read_project_document",
+                "search_web",
+                "search_news",
                 "read_web_page",
             ):
                 data_items = data if isinstance(data, list) else []
@@ -140,9 +140,9 @@ def _empty_retrieval_guidance(tool: str) -> str:
         "read_recent_episodes": "messages or recent activity",
         "search_knowledge_messages": "Episodes, entities, or documents",
         "search_knowledge_entities": "messages, Episodes, or documents",
-        "search_documents": "messages, Episodes, or entities",
-        "web_search": "a simpler query, synonyms, or project sources",
-        "news_search": "a broader date range, synonyms, or web search",
+        "search_project_documents": "messages, Episodes, or entities",
+        "search_web": "a simpler query, synonyms, or project sources",
+        "search_news": "a broader date range, synonyms, or web search",
         "read_web_page": "another discovered source",
     }
     alternative = alternatives.get(tool, "another retrieval surface")

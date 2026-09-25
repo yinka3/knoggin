@@ -301,14 +301,14 @@ def test_build_user_message_renders_discovered_sources_for_next_step():
             "source_kind": "news_search_result",
         },
     ]
-    ctx.accumulate_tool_result("web_search", {"data": result_data[:1]})
-    ctx.accumulate_tool_result("news_search", {"data": result_data[1:]})
+    ctx.accumulate_tool_result("search_web", {"data": result_data[:1]})
+    ctx.accumulate_tool_result("search_news", {"data": result_data[1:]})
 
     message = build_user_message(
         ctx,
         last_result=[
-            {"tool": "web_search", "result": {"data": result_data[:1]}},
-            {"tool": "news_search", "result": {"data": result_data[1:]}},
+            {"tool": "search_web", "result": {"data": result_data[:1]}},
+            {"tool": "search_news", "result": {"data": result_data[1:]}},
         ],
     )
 
@@ -331,7 +331,7 @@ def test_build_user_message_keeps_sources_after_a_later_non_web_tool_call():
         "query": "useful context",
         "rank": 1,
     }
-    ctx.accumulate_tool_result("web_search", {"data": [source]})
+    ctx.accumulate_tool_result("search_web", {"data": [source]})
     ctx.accumulate_tool_result(
         "search_knowledge_entities",
         {"data": [{"id": 1, "canonical_name": "Ada"}]},
@@ -356,7 +356,7 @@ def test_notebook_skips_non_source_search_status_items():
     ctx = make_ctx()
 
     ctx.accumulate_tool_result(
-        "web_search",
+        "search_web",
         {
             "data": [
                 {"title": "No Results", "url": "", "snippet": "Nothing found."},
@@ -387,7 +387,7 @@ def test_rollover_evidence_preserves_sources_and_summary_references():
         }
         for index in range(6)
     ]
-    assert ctx.accumulate_tool_result("web_search", {"data": sources}).changed is True
+    assert ctx.accumulate_tool_result("search_web", {"data": sources}).changed is True
 
     rollover = ctx.rollover_notebook("Condensed source evidence")
 
@@ -611,7 +611,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
     ctx.accumulate_tool_result("search_episodes", episode_result)
     ctx.accumulate_tool_result("search_episodes", episode_result)
     ctx.accumulate_tool_result(
-        "search_documents",
+        "search_project_documents",
         {
             "data": [
                 {
@@ -631,7 +631,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {
@@ -644,7 +644,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "web_search",
+        "search_web",
         {
             "data": [
                 {
@@ -667,7 +667,7 @@ def test_notebook_dedupes_profiles_graph_files_and_sources():
         },
     )
     ctx.accumulate_tool_result(
-        "news_search",
+        "search_news",
         {
             "data": [
                 {
@@ -796,14 +796,14 @@ def test_notebook_ignores_errors_and_empty_results():
         ("edit_agent_brain", {"data": {"success": True}}, ("Brain updated", 1)),
         ("read_agent_brain", {"data": {"content": "brain"}}, ("Brain loaded", 1)),
         (
-            "search_documents",
+            "search_project_documents",
             {"data": [{"id": "chunk"}]},
             ("Found 1 relevant chunks", 1),
         ),
-        ("search_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
-        ("list_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
+        ("search_project_documents", {"data": [{"error": "nope"}]}, ("No results", 0)),
+        ("list_project_documents", {"data": [{"document_id": "doc-1"}]}, ("Found 1 items", 1)),
         (
-            "read_document",
+            "read_project_document",
             {"data": [{"content": "lines"}]},
             ("Read document content", 1),
         ),

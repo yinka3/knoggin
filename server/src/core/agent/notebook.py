@@ -808,15 +808,15 @@ class RunNotebook:
                 if isinstance(item, dict):
                     references.append(self._add_message(item))
         elif tool_name in {
-            "list_documents",
-            "get_document_info",
-            "search_documents",
-            "read_document",
+            "list_project_documents",
+            "get_project_document_info",
+            "search_project_documents",
+            "read_project_document",
         }:
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict) and item.get("document_id") is not None:
                     references.append(self._add_document(item))
-        elif tool_name in {"web_search", "news_search"}:
+        elif tool_name in {"search_web", "search_news"}:
             section = "web_discoveries"
             for item in data if isinstance(data, list) else []:
                 if isinstance(item, dict):
@@ -824,7 +824,7 @@ class RunNotebook:
                     item.setdefault(
                         "source_kind",
                         "news_search_result"
-                        if tool_name == "news_search"
+                        if tool_name == "search_news"
                         else "web_search_result",
                     )
                     ref = self._add_source(section, item)

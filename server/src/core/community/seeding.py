@@ -62,9 +62,9 @@ class AACSeeder:
             ("search_episodes", 2),
             ("read_episode_messages", 2),
             ("read_recent_episodes", 2),
-            ("search_documents", 2),
-            ("read_document", 2),
-            ("list_documents", 2),
+            ("search_project_documents", 2),
+            ("read_project_document", 2),
+            ("list_project_documents", 2),
             ("search_insights", 2),
         ),
     )

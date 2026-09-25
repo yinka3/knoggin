@@ -132,11 +132,11 @@ def _is_local_reference_resolution_error(message: str) -> bool:
 def _local_reference_type(tool_name: str) -> str:
     if tool_name in {"read_episode_messages", "propose_entity_merge"}:
         return "episode"
-    if tool_name in {"get_document_info", "read_document"}:
+    if tool_name in {"get_project_document_info", "read_project_document"}:
         return "document"
     if tool_name in {
-        "list_documents",
-        "search_documents",
+        "list_project_documents",
+        "search_project_documents",
     }:
         return "folder"
     return "tool_argument"

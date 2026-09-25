@@ -98,12 +98,12 @@ _OBSERVATION_RUNTIME_INSTRUCTION = (
     "handle when its historical support needs verification.]"
 )
 _WEB_SEARCH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: web_search returns discovery snippets, not read evidence. "
+    "[SYSTEM NOTICE: search_web returns discovery snippets, not read evidence. "
     "Use it to find promising sources for an explicit investigation, favoring "
     "primary or authoritative material when appropriate.]"
 )
 _NEWS_SEARCH_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: news_search returns discovery snippets, not read evidence. "
+    "[SYSTEM NOTICE: search_news returns discovery snippets, not read evidence. "
     "Use it for time-sensitive investigation and distinguish discovery from "
     "content actually read.]"
 )
@@ -275,19 +275,19 @@ TOOL_DEFINITIONS = {
         default_limit=2,
         runtime_instruction=_RESTORE_BRAIN_RUNTIME_INSTRUCTION,
     ),
-    "list_documents": _definition("list_documents", default_limit=4),
-    "get_document_info": _definition("get_document_info", default_limit=6),
-    "read_document": _definition("read_document", default_limit=6),
-    "search_documents": _definition(
-        "search_documents", default_limit=8, parallel_safe=True
+    "list_project_documents": _definition("list_project_documents", default_limit=4),
+    "get_project_document_info": _definition("get_project_document_info", default_limit=6),
+    "read_project_document": _definition("read_project_document", default_limit=6),
+    "search_project_documents": _definition(
+        "search_project_documents", default_limit=8, parallel_safe=True
     ),
-    "web_search": _definition(
-        "web_search",
+    "search_web": _definition(
+        "search_web",
         default_limit=8,
         runtime_instruction=_WEB_SEARCH_RUNTIME_INSTRUCTION,
     ),
-    "news_search": _definition(
-        "news_search",
+    "search_news": _definition(
+        "search_news",
         default_limit=8,
         runtime_instruction=_NEWS_SEARCH_RUNTIME_INSTRUCTION,
     ),
@@ -764,7 +764,7 @@ class Tools(
         """Get indexed documents for prompt context."""
         if not self.document_service:
             return []
-        documents = await self.document_service.list_documents()
+        documents = await self.document_service.list_project_documents()
         return [
             document
             for document in documents

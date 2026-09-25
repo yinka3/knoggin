@@ -269,7 +269,7 @@ def test_agent_run_requires_read_content_after_document_or_web_discovery():
     run = make_run()
 
     run.notebook.apply(
-        "list_documents",
+        "list_project_documents",
         {
             "data": [
                 {
@@ -280,7 +280,7 @@ def test_agent_run_requires_read_content_after_document_or_web_discovery():
         },
     )
     run.notebook.apply(
-        "web_search",
+        "search_web",
         {
             "data": [
                 {
@@ -296,7 +296,7 @@ def test_agent_run_requires_read_content_after_document_or_web_discovery():
     assert run.has_grounded_investigation_evidence() is False
 
     run.notebook.apply(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {
@@ -358,7 +358,7 @@ def test_research_coverage_rejects_discovery_only_and_unknown_references():
     run = make_run(research_profile=resolve_research_profile("research"))
     assert run.set_research_plan(["What changed?"]) is None
     discovery = run.accumulate_tool_result(
-        "web_search",
+        "search_web",
         {"data": [{"title": "Result", "url": "https://example.test", "snippet": "Lead"}]},
     ).references[0]
 

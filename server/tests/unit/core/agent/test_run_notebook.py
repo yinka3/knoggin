@@ -193,7 +193,7 @@ def test_notebook_renderer_keeps_long_text_evidence_and_source_continuations():
         },
     )
     notebook.apply(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {
@@ -251,7 +251,7 @@ def test_notebook_renderer_keeps_long_text_evidence_and_source_continuations():
 def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
     notebook = RunNotebook()
     notebook.apply(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {
@@ -285,7 +285,7 @@ def test_notebook_renderer_marks_a_clipped_read_passage_for_follow_up():
 def test_notebook_renderer_handles_missing_passages_and_available_continuations():
     notebook = RunNotebook()
     notebook.apply(
-        "read_document",
+        "read_project_document",
         {
             "data": [
                 {

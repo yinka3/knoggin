@@ -39,7 +39,7 @@ def test_agent_prompt_renders_core_identity_phase_and_generic_tool_policy():
 @pytest.mark.no_network
 def test_agent_prompt_includes_only_active_tool_guidance():
     instructions = get_runtime_instructions(
-        get_tool_schemas(enabled_tools=["web_search"])
+        get_tool_schemas(enabled_tools=["search_web"])
     )
     prompt = get_agent_prompt(
         user_name="Ada",
@@ -47,7 +47,7 @@ def test_agent_prompt_includes_only_active_tool_guidance():
         runtime_instructions=instructions,
     )
 
-    assert "web_search returns discovery snippets" in instructions
+    assert "search_web returns discovery snippets" in instructions
     assert "read_web_page reads" not in instructions
     assert "edit_agent_brain changes" not in instructions
     assert "<runtime_instructions>" in prompt

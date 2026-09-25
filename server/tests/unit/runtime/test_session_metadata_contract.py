@@ -36,10 +36,10 @@ async def test_session_metadata_update_allows_only_configuration_columns():
 
     updated = await manager.update_session(
         "session-1",
-        {"model": "gpt-5", "enabled_tools": ["search_documents"]},
+        {"model": "gpt-5", "enabled_tools": ["search_project_documents"]},
     )
 
-    assert updated == {"model": "gpt-5", "enabled_tools": ["search_documents"]}
+    assert updated == {"model": "gpt-5", "enabled_tools": ["search_project_documents"]}
     assert len(resources.postgres.calls) == 1
 
 
@@ -74,7 +74,7 @@ async def test_list_sessions_preserves_native_timestamps_and_normalizes_json_fie
                     "project_id": "project-1",
                     "model": "gpt-5",
                     "agent_id": None,
-                    "enabled_tools": '["search_documents"]',
+                    "enabled_tools": '["search_project_documents"]',
                     "document_focus": '{"document_ids": ["document-1"]}',
                     "status": "active",
                     "created_at": created_at,
@@ -93,5 +93,5 @@ async def test_list_sessions_preserves_native_timestamps_and_normalizes_json_fie
 
     assert sessions["session-1"]["created_at"] is created_at
     assert sessions["session-1"]["last_active_at"] is last_active_at
-    assert sessions["session-1"]["enabled_tools"] == ["search_documents"]
+    assert sessions["session-1"]["enabled_tools"] == ["search_project_documents"]
     assert sessions["session-1"]["document_focus"] == {"document_ids": ["document-1"]}

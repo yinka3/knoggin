@@ -104,7 +104,7 @@ class ProjectFileTools:
                 raise ToolExecutionError(
                     "read_file",
                     "This path has ambiguous managed-document identity; use "
-                    "read_document with a document_id instead.",
+                    "read_project_document with a document_id instead.",
                 ) from exc
             active_project_id = getattr(self.document_service, "project_id", None)
             if document is not None and (
@@ -114,7 +114,7 @@ class ProjectFileTools:
                 raise ToolExecutionError(
                     "read_file",
                     "This path is a registered evidence document. Use "
-                    "read_document so the passage keeps source provenance.",
+                    "read_project_document so the passage keeps source provenance.",
                 )
         if not isinstance(start_line, int) or isinstance(start_line, bool) or start_line < 1:
             raise ValueError("start_line must be a positive integer")

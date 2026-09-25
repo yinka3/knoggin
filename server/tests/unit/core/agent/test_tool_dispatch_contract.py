@@ -53,7 +53,7 @@ class DispatchTools:
             }
         }
 
-    async def read_document(
+    async def read_project_document(
         self,
         document_id=None,
         relative_path=None,
@@ -61,7 +61,7 @@ class DispatchTools:
         end_line=None,
     ):
         self.calls.append(
-            ("read_document", document_id, relative_path, start_line, end_line)
+            ("read_project_document", document_id, relative_path, start_line, end_line)
         )
         return [{"document_id": document_id, "content": "lines"}]
 
@@ -107,7 +107,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
     )
     file_content = await execute_tool(
         tools,
-        "read_document",
+        "read_project_document",
         {"document_id": "file-1", "start_line": "2", "end_line": "4"},
     )
     page_content = await execute_tool(
@@ -177,7 +177,7 @@ async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
         ("get_entity_recent_activity", 7, 48),
         ("search_knowledge_entities", "99", 2),
         ("load_project_topic_context", ["Work", "Finance"]),
-        ("read_document", "file-1", None, 2, 4),
+        ("read_project_document", "file-1", None, 2, 4),
         ("read_web_page", "https://example.test/report", 2, 5, None, None),
         (
             "read_web_page",
@@ -233,7 +233,7 @@ def test_only_explicit_stateless_retrieval_tools_are_parallel_safe():
     assert get_tool_definition("search_knowledge_messages").parallel_safe is True
     assert get_tool_definition("search_knowledge_entities").parallel_safe is True
     assert get_tool_definition("search_episodes").parallel_safe is True
-    assert get_tool_definition("search_documents").parallel_safe is True
+    assert get_tool_definition("search_project_documents").parallel_safe is True
     assert get_tool_definition("read_web_page").parallel_safe is False
     assert get_tool_definition("edit_agent_brain").parallel_safe is False
 
@@ -270,7 +270,7 @@ def test_read_web_page_is_available_by_default_and_allowlists_opt_in_explicitly(
     }
     search_only_names = {
         schema["function"]["name"]
-        for schema in get_filtered_schemas(enabled_tools=["web_search"])
+        for schema in get_filtered_schemas(enabled_tools=["search_web"])
     }
     enabled_names = {
         schema["function"]["name"]

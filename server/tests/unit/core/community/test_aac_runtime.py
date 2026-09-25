@@ -384,7 +384,7 @@ async def test_private_specialists_cannot_publish_or_spawn_without_promotion(mon
     assert result == "Checked dates."
     assert captured["run"].is_community is False
     assert {"save_insight", "vote_insight", "remove_insight_vote", "spawn_specialist", "consult_specialist"}.isdisjoint(visible_tools)
-    assert {"search_documents", "search_insights", "edit_agent_brain"}.issubset(visible_tools)
+    assert {"search_project_documents", "search_insights", "edit_agent_brain"}.issubset(visible_tools)
 
 
 @pytest.mark.runtime
@@ -398,7 +398,7 @@ async def test_aac_participants_cannot_reexpose_project_tools_from_agent_setting
         "Researcher",
         "Careful",
         enabled_tools=[
-            "search_documents",
+            "search_project_documents",
             "create_file",
             "update_file",
             "append_file",
@@ -442,7 +442,7 @@ async def test_aac_participants_cannot_reexpose_project_tools_from_agent_setting
     visible_tools = {
         schema["function"]["name"] for schema in captured["run"].tool_runtime.schemas
     }
-    assert "search_documents" in visible_tools
+    assert "search_project_documents" in visible_tools
     assert {
         "create_file",
         "update_file",

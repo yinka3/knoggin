@@ -703,7 +703,7 @@ class SearchTools:
             result.get("section_path"),
         )
 
-    async def list_documents(
+    async def list_project_documents(
         self,
         path_prefix: str = None,
         limit: int = 50,
@@ -731,7 +731,7 @@ class SearchTools:
                     return [document]
                 focused_prefix = self.document_focus.get("path_prefix")
                 if restrictive and path_prefix is not None and not self._focus_path_contains(path_prefix):
-                    raise ValueError("list_documents is restricted to the focused subtree")
+                    raise ValueError("list_project_documents is restricted to the focused subtree")
                 if path_prefix is None:
                     path_prefix = focused_prefix
             elif path_prefix is not None:
@@ -743,7 +743,7 @@ class SearchTools:
         )
         return documents
 
-    async def get_document_info(
+    async def get_project_document_info(
         self,
         document_id: str = None,
         relative_path: str = None,
@@ -769,13 +769,13 @@ class SearchTools:
             and self._focus_is_restrictive()
             and self.document_focus["target_type"] == "subtree"
         ):
-            raise ValueError("get_document_info requires a selector within the focused subtree")
+            raise ValueError("get_project_document_info requires a selector within the focused subtree")
         return await self.document_service.get_document_info(
             document_id=document_id,
             relative_path=relative_path,
         )
 
-    async def read_document(
+    async def read_project_document(
         self,
         document_id: str = None,
         relative_path: str = None,
@@ -793,14 +793,14 @@ class SearchTools:
         if request_document_id is not None:
             if document_id is not None and document_id != request_document_id:
                 raise ValueError(
-                    "read_document is restricted to the selected document"
+                    "read_project_document is restricted to the selected document"
                 )
             if (
                 relative_path is not None
                 and relative_path != self.document_focus["relative_path"]
             ):
                 raise ValueError(
-                    "read_document is restricted to the selected document"
+                    "read_project_document is restricted to the selected document"
                 )
             document_id = request_document_id
             relative_path = None
@@ -819,7 +819,7 @@ class SearchTools:
             and self._focus_is_restrictive()
             and self.document_focus["target_type"] == "subtree"
         ):
-            raise ValueError("read_document requires a selector within the focused subtree")
+            raise ValueError("read_project_document requires a selector within the focused subtree")
         page_number, start_line, end_line = self._request_selection_defaults(
             page_number=page_number,
             start_line=start_line,
@@ -838,7 +838,7 @@ class SearchTools:
         )
         return [self._with_document_source_context(result)]
 
-    async def search_documents(
+    async def search_project_documents(
         self,
         query: str,
         document_name: str = None,
@@ -886,14 +886,14 @@ class SearchTools:
                 relative_path=relative_path,
             )
             if path_prefix is not None and self.document_focus["target_type"] == "subtree" and not self._focus_path_contains(path_prefix):
-                raise ValueError("search_documents is restricted to the focused subtree")
+                raise ValueError("search_project_documents is restricted to the focused subtree")
         if request_document_id is not None:
             if (
                 relative_path is not None
                 and relative_path != self.document_focus["relative_path"]
             ):
                 raise ValueError(
-                    "search_documents is restricted to the selected document"
+                    "search_project_documents is restricted to the selected document"
                 )
             relative_path = None
             path_prefix = None
@@ -984,7 +984,7 @@ class SearchTools:
 
         return [self._with_document_source_context(result) for result in results]
 
-    async def web_search(
+    async def search_web(
         self, query: str, limit: int = 5, freshness: str = None
     ) -> List[Dict]:
         """
@@ -1020,7 +1020,7 @@ class SearchTools:
             fallback_provider=fallback_provider,
         )
 
-    async def news_search(
+    async def search_news(
         self, query: str, limit: int = 5, freshness: str = None
     ) -> List[Dict]:
         """

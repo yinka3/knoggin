@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
     "search_episodes": {"episode_id": "ep"},
     "read_recent_episodes": {"episode_id": "ep"},
-    "list_documents": {"document_id": "doc"},
-    "get_document_info": {"document_id": "doc"},
-    "read_document": {"document_id": "doc"},
-    "search_documents": {"document_id": "doc"},
+    "list_project_documents": {"document_id": "doc"},
+    "get_project_document_info": {"document_id": "doc"},
+    "read_project_document": {"document_id": "doc"},
+    "search_project_documents": {"document_id": "doc"},
     "propose_entity_merge": {
         "episode_id": "ep",
         "evidence_episode_ids": "ep",
@@ -31,8 +31,8 @@ _RESULT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
 
 _TOOL_ARGUMENT_UUID_FIELDS: Dict[str, Dict[str, str]] = {
     "read_episode_messages": {"episode_id": "ep"},
-    "get_document_info": {"document_id": "doc"},
-    "read_document": {"document_id": "doc"},
+    "get_project_document_info": {"document_id": "doc"},
+    "read_project_document": {"document_id": "doc"},
     "propose_entity_merge": {
         "evidence_episode_ids": "ep",
     },
