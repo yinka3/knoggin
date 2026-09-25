@@ -1183,7 +1183,7 @@ async def test_research_fallback_requires_grounded_investigation_evidence(mode):
 
     llm.generate_text = generate_summary
     run = make_run(research_profile=resolve_research_profile(mode))
-    run.notebook.apply("edit_brain", {"data": {"success": True}})
+    run.notebook.apply("edit_agent_brain", {"data": {"success": True}})
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
     event = await executor._fallback()
@@ -1638,7 +1638,7 @@ async def test_executor_rejects_hidden_synthesis_write_without_dispatch(monkeypa
             ],
             [
                 tool_call_event(
-                    "edit_brain",
+                    "edit_agent_brain",
                     (
                         '{"section": "Role", "content": "'
                         f"{secret}"

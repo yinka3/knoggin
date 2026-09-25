@@ -235,7 +235,7 @@ def test_only_explicit_stateless_retrieval_tools_are_parallel_safe():
     assert get_tool_definition("search_episodes").parallel_safe is True
     assert get_tool_definition("search_documents").parallel_safe is True
     assert get_tool_definition("read_web_page").parallel_safe is False
-    assert get_tool_definition("edit_brain").parallel_safe is False
+    assert get_tool_definition("edit_agent_brain").parallel_safe is False
 
 
 @pytest.mark.no_network
@@ -312,13 +312,13 @@ async def test_execute_tool_raises_for_unknown_or_missing_methods():
     assert "Unknown tool" in unknown.value.message
 
     with pytest.raises(ToolExecutionError) as missing:
-        await execute_tool(tools, "edit_brain", {
+        await execute_tool(tools, "edit_agent_brain", {
             "section": "Role",
             "content": "updated",
             "expected_revision": 1,
         })
 
-    assert missing.value.details["tool"] == "edit_brain"
+    assert missing.value.details["tool"] == "edit_agent_brain"
     assert "Tool method not found" in missing.value.message
 
 
@@ -428,12 +428,12 @@ class MemoryToolHarness(MemoryTools):
 
 
 @pytest.mark.no_network
-async def test_memory_tools_read_and_edit_brain_with_configured_postgres():
+async def test_memory_tools_read_and_edit_agent_brain_with_configured_postgres():
     postgres = RecordingPostgres()
     tools = MemoryToolHarness(postgres)
 
-    brain = await tools.read_brain()
-    edited = await tools.edit_brain(
+    brain = await tools.read_agent_brain()
+    edited = await tools.edit_agent_brain(
         "Behavioral Directives",
         "Ada prefers scoped tests",
         expected_revision=1,
@@ -457,17 +457,17 @@ async def test_memory_tools_read_and_edit_brain_with_configured_postgres():
 async def test_memory_tools_return_clean_defaults_without_active_agent():
     tools = MemoryToolHarness(postgres=None, agent_id=None)
 
-    assert await tools.read_brain() == {"error": "No durable agent identity is active"}
-    assert await tools.list_brain_snapshots() == {
+    assert await tools.read_agent_brain() == {"error": "No durable agent identity is active"}
+    assert await tools.list_agent_brain_snapshots() == {
         "error": "No durable agent identity is active"
     }
-    assert await tools.read_brain_snapshot(1) == {
+    assert await tools.read_agent_brain_snapshot(1) == {
         "error": "No durable agent identity is active"
     }
-    assert await tools.edit_brain("Behavioral Directives", "note", 1) == {
+    assert await tools.edit_agent_brain("Behavioral Directives", "note", 1) == {
         "error": "No durable agent identity is active"
     }
-    assert await tools.restore_brain_section(
+    assert await tools.restore_agent_brain_section(
         "Behavioral Directives",
         1,
         1,

@@ -24,7 +24,7 @@ class MemoryTools:
     postgres: PostgresClient
     entities: EntityResolver
 
-    async def read_brain(self) -> Dict:
+    async def read_agent_brain(self) -> Dict:
         """Read the current durable Markdown brain and its revision."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
@@ -54,7 +54,7 @@ class MemoryTools:
         except Exception as exc:
             return {"error": f"Failed to read brain: {exc}"}
 
-    async def list_brain_snapshots(self) -> Dict:
+    async def list_agent_brain_snapshots(self) -> Dict:
         """List available restore points for the active durable Brain."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
@@ -96,7 +96,7 @@ class MemoryTools:
         except Exception as exc:
             return {"error": f"Failed to list brain snapshots: {exc}"}
 
-    async def read_brain_snapshot(self, revision: int) -> Dict:
+    async def read_agent_brain_snapshot(self, revision: int) -> Dict:
         """Read one stored Brain restore point."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
@@ -133,7 +133,7 @@ class MemoryTools:
         except Exception as exc:
             return {"error": f"Failed to read brain snapshot: {exc}"}
 
-    async def edit_brain(
+    async def edit_agent_brain(
         self,
         section: str,
         content: str,
@@ -236,7 +236,7 @@ class MemoryTools:
                 """
             updated = await self.postgres.execute(query, params)
             if updated != 1:
-                latest = await self.read_brain()
+                latest = await self.read_agent_brain()
                 return {
                     "error": "Brain changed before the edit could be committed",
                     "current_revision": latest.get("revision"),
@@ -254,7 +254,7 @@ class MemoryTools:
         except Exception as exc:
             return {"error": f"Failed to edit brain: {exc}"}
 
-    async def restore_brain_section(
+    async def restore_agent_brain_section(
         self,
         section: str,
         from_snapshot_revision: int,
@@ -369,7 +369,7 @@ class MemoryTools:
                 },
             )
             if updated != 1:
-                latest = await self.read_brain()
+                latest = await self.read_agent_brain()
                 return {
                     "error": "Brain changed before the restore could be committed",
                     "current_revision": latest.get("revision"),

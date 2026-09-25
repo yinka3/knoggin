@@ -101,12 +101,12 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
             return f"Resolved via {res_type} ({count} matches)", count
         return "No results", 0
 
-    if tool_name in ("edit_brain", "restore_brain_section"):
+    if tool_name in ("edit_agent_brain", "restore_agent_brain_section"):
         if "error" in result:
             return f"Error: {result['error']}", 0
         return "Brain updated", 1
 
-    if tool_name in ("read_brain", "list_brain_snapshots", "read_brain_snapshot"):
+    if tool_name in ("read_agent_brain", "list_agent_brain_snapshots", "read_agent_brain_snapshot"):
         return "Brain loaded", 1
 
     if tool_name in ("search_documents", "read_document", "read_web_page"):

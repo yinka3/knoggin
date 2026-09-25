@@ -68,8 +68,8 @@ class AACRuntime:
                 "remove_insight_vote": 4,
                 "spawn_specialist": 2,
                 "consult_specialist": 2,
-                "edit_brain": 2,
-                "restore_brain_section": 2,
+                "edit_agent_brain": 2,
+                "restore_agent_brain_section": 2,
             }.items()
         ),
     )
@@ -77,8 +77,8 @@ class AACRuntime:
         [
             *AAC_READ_TOOL_NAMES,
             "search_insights",
-            "edit_brain",
-            "restore_brain_section",
+            "edit_agent_brain",
+            "restore_agent_brain_section",
         ]
     )
 

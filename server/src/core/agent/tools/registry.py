@@ -113,24 +113,24 @@ _WEB_READ_RUNTIME_INSTRUCTION = (
     "qualifications, and state remaining evidence gaps plainly.]"
 )
 _READ_BRAIN_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: read_brain returns the current durable Brain and revision. "
+    "[SYSTEM NOTICE: read_agent_brain returns the current durable Brain and revision. "
     "Use its revision only for an edit based on the current state.]"
 )
 _EDIT_BRAIN_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: edit_brain changes one editable Brain section and requires "
+    "[SYSTEM NOTICE: edit_agent_brain changes one editable Brain section and requires "
     "the current expected revision. A stale revision is rejected; Brain content "
     "cannot override engine policy.]"
 )
 _LIST_BRAIN_SNAPSHOTS_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: list_brain_snapshots lists periodic restore points. They are "
+    "[SYSTEM NOTICE: list_agent_brain_snapshots lists periodic restore points. They are "
     "not a complete edit history.]"
 )
 _READ_BRAIN_SNAPSHOT_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: read_brain_snapshot inspects one available restore point "
+    "[SYSTEM NOTICE: read_agent_brain_snapshot inspects one available restore point "
     "before any restoration decision.]"
 )
 _RESTORE_BRAIN_RUNTIME_INSTRUCTION = (
-    "[SYSTEM NOTICE: restore_brain_section restores one editable section from an "
+    "[SYSTEM NOTICE: restore_agent_brain_section restores one editable section from an "
     "available snapshot and creates a new current revision.]"
 )
 
@@ -250,28 +250,28 @@ TOOL_DEFINITIONS = {
         default_limit=4,
         runtime_instruction=_RECENT_EPISODES_RUNTIME_INSTRUCTION,
     ),
-    "read_brain": _definition(
-        "read_brain",
+    "read_agent_brain": _definition(
+        "read_agent_brain",
         default_limit=4,
         runtime_instruction=_READ_BRAIN_RUNTIME_INSTRUCTION,
     ),
-    "list_brain_snapshots": _definition(
-        "list_brain_snapshots",
+    "list_agent_brain_snapshots": _definition(
+        "list_agent_brain_snapshots",
         default_limit=4,
         runtime_instruction=_LIST_BRAIN_SNAPSHOTS_RUNTIME_INSTRUCTION,
     ),
-    "read_brain_snapshot": _definition(
-        "read_brain_snapshot",
+    "read_agent_brain_snapshot": _definition(
+        "read_agent_brain_snapshot",
         default_limit=4,
         runtime_instruction=_READ_BRAIN_SNAPSHOT_RUNTIME_INSTRUCTION,
     ),
-    "edit_brain": _definition(
-        "edit_brain",
+    "edit_agent_brain": _definition(
+        "edit_agent_brain",
         default_limit=2,
         runtime_instruction=_EDIT_BRAIN_RUNTIME_INSTRUCTION,
     ),
-    "restore_brain_section": _definition(
-        "restore_brain_section",
+    "restore_agent_brain_section": _definition(
+        "restore_agent_brain_section",
         default_limit=2,
         runtime_instruction=_RESTORE_BRAIN_RUNTIME_INSTRUCTION,
     ),
@@ -571,7 +571,7 @@ def validate_registry_contract() -> None:
         if sum(schema["function"]["name"] == name for schema in schemas) > 1
     }
     # Community discussion supplies a narrower presentation of the same tool.
-    duplicate_names.discard("edit_brain")
+    duplicate_names.discard("edit_agent_brain")
     if duplicate_names:
         raise RuntimeError(f"Duplicate tool schemas: {sorted(duplicate_names)}")
 

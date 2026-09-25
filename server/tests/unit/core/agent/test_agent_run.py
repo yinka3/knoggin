@@ -235,7 +235,7 @@ def test_agent_run_enforces_attempt_and_tool_call_invariants():
 def test_agent_run_distinguishes_grounded_evidence_from_actions_and_validates_input():
     run = make_run()
 
-    run.notebook.apply("edit_brain", {"data": {"success": True}})
+    run.notebook.apply("edit_agent_brain", {"data": {"success": True}})
 
     assert run.has_any() is True
     assert run.has_grounded_investigation_evidence() is False

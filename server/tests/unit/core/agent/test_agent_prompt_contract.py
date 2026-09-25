@@ -49,7 +49,7 @@ def test_agent_prompt_includes_only_active_tool_guidance():
 
     assert "web_search returns discovery snippets" in instructions
     assert "read_web_page reads" not in instructions
-    assert "edit_brain changes" not in instructions
+    assert "edit_agent_brain changes" not in instructions
     assert "<runtime_instructions>" in prompt
     assert instructions in prompt
 

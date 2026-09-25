@@ -55,10 +55,10 @@ def brain_row(*, revision=3):
 
 
 @pytest.mark.no_network
-async def test_read_brain_returns_durable_content_and_revision():
+async def test_read_agent_brain_returns_durable_content_and_revision():
     postgres = RecordingPostgres([[brain_row()]])
 
-    result = await BrainHarness(postgres).read_brain()
+    result = await BrainHarness(postgres).read_agent_brain()
 
     assert result["revision"] == 3
     assert "Old context" in result["content"]
@@ -71,17 +71,17 @@ async def test_read_brain_returns_durable_content_and_revision():
 
 
 @pytest.mark.no_network
-async def test_read_edit_read_brain_round_trip_uses_durable_agent_row():
+async def test_read_edit_read_agent_brain_round_trip_uses_durable_agent_row():
     postgres = StatefulBrainPostgres()
     tools = BrainHarness(postgres)
 
-    before = await tools.read_brain()
-    edited = await tools.edit_brain(
+    before = await tools.read_agent_brain()
+    edited = await tools.edit_agent_brain(
         "Project Context",
         "New durable context",
         expected_revision=before["revision"],
     )
-    after = await tools.read_brain()
+    after = await tools.read_agent_brain()
 
     assert before["revision"] == 1
     assert edited["revision"] == 2
@@ -96,20 +96,20 @@ async def test_brain_tools_require_active_durable_agent_identity():
     postgres = RecordingPostgres()
     tools = BrainHarness(postgres, agent_id=None)
 
-    assert await tools.read_brain() == {
+    assert await tools.read_agent_brain() == {
         "error": "No durable agent identity is active"
     }
-    assert await tools.list_brain_snapshots() == {
+    assert await tools.list_agent_brain_snapshots() == {
         "error": "No durable agent identity is active"
     }
-    assert await tools.read_brain_snapshot(1) == {
+    assert await tools.read_agent_brain_snapshot(1) == {
         "error": "No durable agent identity is active"
     }
     assert (
-        await tools.edit_brain("Project Context", "new", expected_revision=1)
+        await tools.edit_agent_brain("Project Context", "new", expected_revision=1)
     ) == {"error": "No durable agent identity is active"}
     assert (
-        await tools.restore_brain_section(
+        await tools.restore_agent_brain_section(
             "Project Context",
             from_snapshot_revision=1,
             expected_current_revision=1,
@@ -119,10 +119,10 @@ async def test_brain_tools_require_active_durable_agent_identity():
 
 
 @pytest.mark.no_network
-async def test_edit_brain_rejects_stale_revision_without_writing():
+async def test_edit_agent_brain_rejects_stale_revision_without_writing():
     postgres = RecordingPostgres([[brain_row(revision=4)]])
 
-    result = await BrainHarness(postgres).edit_brain(
+    result = await BrainHarness(postgres).edit_agent_brain(
         "Project Context",
         "New context",
         expected_revision=3,
@@ -136,10 +136,10 @@ async def test_edit_brain_rejects_stale_revision_without_writing():
 
 
 @pytest.mark.no_network
-async def test_edit_brain_updates_one_section_without_snapshot_before_boundary():
+async def test_edit_agent_brain_updates_one_section_without_snapshot_before_boundary():
     postgres = RecordingPostgres([[brain_row(revision=3)]])
 
-    result = await BrainHarness(postgres).edit_brain(
+    result = await BrainHarness(postgres).edit_agent_brain(
         "Project Context",
         "Investigate graph drift.",
         expected_revision=3,
@@ -162,10 +162,10 @@ async def test_edit_brain_updates_one_section_without_snapshot_before_boundary()
 
 
 @pytest.mark.no_network
-async def test_edit_brain_records_snapshot_at_boundary_with_summary():
+async def test_edit_agent_brain_records_snapshot_at_boundary_with_summary():
     postgres = RecordingPostgres([[brain_row(revision=4)]])
 
-    result = await BrainHarness(postgres).edit_brain(
+    result = await BrainHarness(postgres).edit_agent_brain(
         "Project Context",
         "Investigate graph drift.",
         expected_revision=4,
@@ -188,10 +188,10 @@ async def test_edit_brain_records_snapshot_at_boundary_with_summary():
 
 
 @pytest.mark.no_network
-async def test_edit_brain_rejects_noneditable_section():
+async def test_edit_agent_brain_rejects_noneditable_section():
     postgres = RecordingPostgres([[brain_row()]])
 
-    result = await BrainHarness(postgres).edit_brain(
+    result = await BrainHarness(postgres).edit_agent_brain(
         "Birth Persona",
         "Rewrite identity",
         expected_revision=3,
@@ -202,7 +202,7 @@ async def test_edit_brain_rejects_noneditable_section():
 
 
 @pytest.mark.no_network
-async def test_list_brain_snapshots_returns_metadata_without_content():
+async def test_list_agent_brain_snapshots_returns_metadata_without_content():
     postgres = RecordingPostgres(
         [
             [{"brain_revision": 7}],
@@ -220,7 +220,7 @@ async def test_list_brain_snapshots_returns_metadata_without_content():
         ]
     )
 
-    result = await BrainHarness(postgres).list_brain_snapshots()
+    result = await BrainHarness(postgres).list_agent_brain_snapshots()
 
     assert result["current_revision"] == 7
     assert result["snapshot_interval"] == 5
@@ -230,7 +230,7 @@ async def test_list_brain_snapshots_returns_metadata_without_content():
 
 
 @pytest.mark.no_network
-async def test_read_brain_snapshot_returns_owned_snapshot_content():
+async def test_read_agent_brain_snapshot_returns_owned_snapshot_content():
     postgres = RecordingPostgres(
         [
             [
@@ -248,7 +248,7 @@ async def test_read_brain_snapshot_returns_owned_snapshot_content():
         ]
     )
 
-    result = await BrainHarness(postgres).read_brain_snapshot(5)
+    result = await BrainHarness(postgres).read_agent_brain_snapshot(5)
 
     assert result["revision"] == 5
     assert "Old context" in result["content"]
@@ -256,7 +256,7 @@ async def test_read_brain_snapshot_returns_owned_snapshot_content():
 
 
 @pytest.mark.no_network
-async def test_restore_brain_section_restores_one_section_and_snapshots():
+async def test_restore_agent_brain_section_restores_one_section_and_snapshots():
     current = brain_row(revision=7)
     snapshot = brain_row(revision=5)
     snapshot["brain"] = snapshot["brain"].replace("Old context", "Snapshot context")
@@ -267,7 +267,7 @@ async def test_restore_brain_section_restores_one_section_and_snapshots():
         ]
     )
 
-    result = await BrainHarness(postgres).restore_brain_section(
+    result = await BrainHarness(postgres).restore_agent_brain_section(
         "Project Context",
         from_snapshot_revision=5,
         expected_current_revision=7,
@@ -294,10 +294,10 @@ async def test_restore_brain_section_restores_one_section_and_snapshots():
 
 
 @pytest.mark.no_network
-async def test_restore_brain_section_rejects_stale_current_revision():
+async def test_restore_agent_brain_section_rejects_stale_current_revision():
     postgres = RecordingPostgres([[brain_row(revision=8)]])
 
-    result = await BrainHarness(postgres).restore_brain_section(
+    result = await BrainHarness(postgres).restore_agent_brain_section(
         "Project Context",
         from_snapshot_revision=5,
         expected_current_revision=7,
@@ -311,7 +311,7 @@ async def test_restore_brain_section_rejects_stale_current_revision():
 
 
 @pytest.mark.no_network
-async def test_restore_brain_section_rejects_noneditable_section():
+async def test_restore_agent_brain_section_rejects_noneditable_section():
     postgres = RecordingPostgres(
         [
             [brain_row(revision=7)],
@@ -319,7 +319,7 @@ async def test_restore_brain_section_rejects_noneditable_section():
         ]
     )
 
-    result = await BrainHarness(postgres).restore_brain_section(
+    result = await BrainHarness(postgres).restore_agent_brain_section(
         "Self-Conception",
         from_snapshot_revision=5,
         expected_current_revision=7,

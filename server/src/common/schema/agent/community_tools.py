@@ -13,9 +13,9 @@ AAC_READ_TOOL_NAMES = [
     "read_document",
     "list_documents",
     "get_document_info",
-    "read_brain",
-    "list_brain_snapshots",
-    "read_brain_snapshot",
+    "read_agent_brain",
+    "list_agent_brain_snapshots",
+    "read_agent_brain_snapshot",
 ]
 
 AAC_SPECIFIC_SCHEMAS = [
@@ -55,10 +55,10 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "edit_brain",
+            "name": "edit_agent_brain",
             "description": (
                 "Update one editable section of your persistent identity. "
-                "Call read_brain first and pass its revision."
+                "Call read_agent_brain first and pass its revision."
             ),
             "parameters": {
                 "type": "object",
@@ -77,7 +77,7 @@ AAC_SPECIFIC_SCHEMAS = [
                     },
                     "expected_revision": {
                         "type": "integer",
-                        "description": "Revision returned by read_brain.",
+                        "description": "Revision returned by read_agent_brain.",
                     },
                     "change_note": {
                         "type": "string",
@@ -220,7 +220,7 @@ AAC_SPECIFIC_SCHEMAS = [
 ]
 
 AAC_TOOL_NAMES = [
-    "restore_brain_section",
+    "restore_agent_brain_section",
     *[schema["function"]["name"] for schema in AAC_SPECIFIC_SCHEMAS],
 ]
 AAC_DEFAULT_ENABLED_TOOLS = AAC_READ_TOOL_NAMES + AAC_TOOL_NAMES

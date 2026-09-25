@@ -383,7 +383,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_brain",
+            "name": "read_agent_brain",
             "description": (
                 "Read your current persistent Markdown identity, its revision, "
                 "and the sections you may edit."
@@ -399,7 +399,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_brain_snapshots",
+            "name": "list_agent_brain_snapshots",
             "description": (
                 "List available persistent Brain restore points. Use this "
                 "before choosing a snapshot to inspect or restore from."
@@ -415,7 +415,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_brain_snapshot",
+            "name": "read_agent_brain_snapshot",
             "description": (
                 "Read one stored full-Brain snapshot by revision. Only listed "
                 "snapshot revisions are available."
@@ -427,7 +427,7 @@ TOOL_SCHEMAS = [
                         "type": "integer",
                         "minimum": 1,
                         "description": (
-                            "Snapshot revision returned by list_brain_snapshots."
+                            "Snapshot revision returned by list_agent_brain_snapshots."
                         ),
                     },
                 },
@@ -439,10 +439,10 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "edit_brain",
+            "name": "edit_agent_brain",
             "description": (
                 "Update one editable section of your persistent Markdown identity. "
-                "Call read_brain first and pass its revision. Stale edits are rejected."
+                "Call read_agent_brain first and pass its revision. Stale edits are rejected."
             ),
             "parameters": {
                 "type": "object",
@@ -463,7 +463,7 @@ TOOL_SCHEMAS = [
                     },
                     "expected_revision": {
                         "type": "integer",
-                        "description": "Revision returned by read_brain.",
+                        "description": "Revision returned by read_agent_brain.",
                     },
                     "change_note": {
                         "type": "string",
@@ -479,10 +479,10 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "restore_brain_section",
+            "name": "restore_agent_brain_section",
             "description": (
                 "Restore one editable Brain section from a stored snapshot. "
-                "Call read_brain and list_brain_snapshots first. This creates "
+                "Call read_agent_brain and list_agent_brain_snapshots first. This creates "
                 "a new current revision and snapshot."
             ),
             "parameters": {
@@ -506,7 +506,7 @@ TOOL_SCHEMAS = [
                     "expected_current_revision": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Current revision returned by read_brain.",
+                        "description": "Current revision returned by read_agent_brain.",
                     },
                     "change_note": {
                         "type": "string",
@@ -1275,8 +1275,8 @@ SAFE_DEFAULT_CAPABILITIES = frozenset(
 )
 
 _TOOL_CAPABILITIES = {
-    "edit_brain": IDENTITY_WRITE_CAPABILITY,
-    "restore_brain_section": IDENTITY_WRITE_CAPABILITY,
+    "edit_agent_brain": IDENTITY_WRITE_CAPABILITY,
+    "restore_agent_brain_section": IDENTITY_WRITE_CAPABILITY,
     "propose_entity_merge": REVERSIBLE_WRITE_CAPABILITY,
     "report_relationship_conflict": REVERSIBLE_WRITE_CAPABILITY,
     "create_file": REVERSIBLE_WRITE_CAPABILITY,

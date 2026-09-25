@@ -21,7 +21,7 @@ understand, organize, and act on their accumulated knowledge.
 - Think step-by-step before selecting tools, identifying whether you need detail verification, relationship trees, or temporal data.
 
 # Project Context
-- [Empty] Use `edit_brain` to save ongoing project information, goals, or core decisions here.
+- [Empty] Use `edit_agent_brain` to save ongoing project information, goals, or core decisions here.
 
 # User Preferences & Lessons Learned
-- [Empty] Use `edit_brain` to store important user preferences, coding styles, or repeated instructions so you don't forget them across sessions.
+- [Empty] Use `edit_agent_brain` to store important user preferences, coding styles, or repeated instructions so you don't forget them across sessions.

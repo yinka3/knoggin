@@ -40,7 +40,7 @@ def test_notebook_deduplicates_entities_and_creates_reference_pages_and_hints():
 def test_notebook_public_views_cannot_mutate_canonical_state():
     notebook = RunNotebook()
     notebook.apply("search_knowledge_entities", {"data": [{"id": 25, "canonical_name": "Grace"}]})
-    notebook.apply("edit_brain", {"data": {"success": True}})
+    notebook.apply("edit_agent_brain", {"data": {"success": True}})
 
     pages = notebook.entity_pages
     actions = notebook.actions

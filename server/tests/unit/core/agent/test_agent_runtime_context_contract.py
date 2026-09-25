@@ -62,7 +62,7 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
                 "result": {"data": [{"id": 7, "canonical_name": "Ada"}]},
             },
             {
-                "tool": "edit_brain",
+                "tool": "edit_agent_brain",
                 "result": {
                     "data": {
                         "success": True,
@@ -95,7 +95,7 @@ def test_build_user_message_trims_history_and_includes_runtime_context():
     assert "**Calls remaining:** 11" in message
     assert "**Last action rejected:** Duplicate call skipped" in message
     assert "`search_knowledge_entities`: Found 1 items" in message
-    assert '`edit_brain`: {\n  "success": true,' in message
+    assert '`edit_agent_brain`: {\n  "success": true,' in message
     assert '"section": "Project Context"' in message
     assert "`search_episodes`: No results found on this retrieval surface." in message
     assert "Simplify or paraphrase the query" in message
@@ -793,8 +793,8 @@ def test_notebook_ignores_errors_and_empty_results():
             ("Resolved via exact (2 matches)", 2),
         ),
         ("search_episodes", {"data": []}, ("No results", 0)),
-        ("edit_brain", {"data": {"success": True}}, ("Brain updated", 1)),
-        ("read_brain", {"data": {"content": "brain"}}, ("Brain loaded", 1)),
+        ("edit_agent_brain", {"data": {"success": True}}, ("Brain updated", 1)),
+        ("read_agent_brain", {"data": {"content": "brain"}}, ("Brain loaded", 1)),
         (
             "search_documents",
             {"data": [{"id": "chunk"}]},

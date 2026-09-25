@@ -34,8 +34,8 @@ _ALL_SECTIONS = _KNOWLEDGE_SECTIONS + _EVIDENCE_SECTIONS
 _GROUNDED_KNOWLEDGE_SECTIONS = ("relationships", "episodes", "paths")
 _ACTION_TOOLS = frozenset(
     {
-        "edit_brain",
-        "restore_brain_section",
+        "edit_agent_brain",
+        "restore_agent_brain_section",
         "create_file",
         "update_file",
         "append_file",
