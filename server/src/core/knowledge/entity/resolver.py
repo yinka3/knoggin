@@ -3,12 +3,10 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
-from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from cachetools import LRUCache, cached
 from loguru import logger
 from rapidfuzz import fuzz, process
 from wordfreq import word_frequency
@@ -80,15 +78,46 @@ class EntityCandidate:
         return "exact" in self.signals and "ambiguous_alias" not in self.signals
 
 
+@dataclass(frozen=True)
+class ContextEntityResolution:
+    """Typed output from one context-block entity-resolution pass."""
+
+    entity_ids: tuple[int, ...]
+    new_entity_ids: frozenset[int]
+    alias_updated_ids: frozenset[int]
+    alias_updates: dict[int, tuple[str, ...]]
+    pending_entity_writes: dict[int, EntityWrite]
+    project_classifications: dict[int, ProjectEntityClassification]
+    resolved_mentions: tuple[ResolvedContextBlockMention, ...]
+    block_entity_associations: tuple[ContextBlockEntityAssociation, ...]
+    identity_decisions: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _ContextEntityResolutionState:
+    """Mutable state accumulated during one resolution pass."""
+
+    entity_ids: list[int] = field(default_factory=list)
+    new_ids: set[int] = field(default_factory=set)
+    alias_ids: set[int] = field(default_factory=set)
+    alias_updates: dict[int, list[str]] = field(default_factory=dict)
+    pending_entity_writes: dict[int, EntityWrite] = field(default_factory=dict)
+    pending_ids_by_surface: dict[str, list[int]] = field(default_factory=dict)
+    pending_support_by_id: dict[int, str] = field(default_factory=dict)
+    project_classifications: dict[int, ProjectEntityClassification] = field(
+        default_factory=dict
+    )
+    resolved_mentions: list[ResolvedContextBlockMention] = field(default_factory=list)
+    associations: list[ContextBlockEntityAssociation] = field(default_factory=list)
+    identity_decisions: list[dict[str, Any]] = field(default_factory=list)
+
+
 class EntityResolver:
     def __init__(
         self,
         knowledge_store: "KnowledgeStore",
         project_id: str,
         readable_project_ids: List[str],
-        fuzzy_substring_threshold: int = 75,
-        fuzzy_non_substring_threshold: int = 91,
-        generic_token_freq: int = 10,
         candidate_fuzzy_threshold: int = 85,
     ):
 
@@ -108,9 +137,6 @@ class EntityResolver:
         self._resolution_lock = asyncio.Lock()
 
         self.candidate_fuzzy_threshold = candidate_fuzzy_threshold
-        self.fuzzy_substring_threshold = fuzzy_substring_threshold
-        self.fuzzy_non_substring_threshold = fuzzy_non_substring_threshold
-        self.generic_token_freq = generic_token_freq
 
     @property
     def resolution_lock(self) -> asyncio.Lock:
@@ -125,16 +151,11 @@ class EntityResolver:
 
     def update_settings(self, config: EntityResolutionSettings):
         """Update resolution thresholds on the fly."""
-        self.fuzzy_substring_threshold = config.fuzzy_substring_threshold
-        self.fuzzy_non_substring_threshold = config.fuzzy_non_substring_threshold
-        self.generic_token_freq = config.generic_token_freq
         self.candidate_fuzzy_threshold = config.candidate_fuzzy_threshold
 
         logger.info(
             "EntityResolver settings updated: "
-            f"sub={self.fuzzy_substring_threshold}, "
-            f"non-sub={self.fuzzy_non_substring_threshold}, "
-            f"freq={self.generic_token_freq}"
+            f"candidate_fuzzy_threshold={self.candidate_fuzzy_threshold}"
         )
 
     @staticmethod
@@ -150,7 +171,7 @@ class EntityResolver:
         block_text_by_id: dict[object, str],
         policy: IngestionPolicy,
         allocate_entity_id,
-    ) -> Dict[str, Any]:
+    ) -> ContextEntityResolution:
         """Resolve typed Context-block mentions without manufacturing message refs.
 
         Context-first callers use this boundary: block associations are returned
@@ -168,17 +189,7 @@ class EntityResolver:
             raise TypeError("Context entity resolution requires block text by ID")
 
         async with self.resolution_lock:
-            entity_ids: List[int] = []
-            new_ids: set[int] = set()
-            alias_ids: set[int] = set()
-            alias_updates: Dict[int, List[str]] = {}
-            pending_entity_writes: Dict[int, EntityWrite] = {}
-            pending_ids_by_surface: Dict[str, List[int]] = {}
-            pending_support_by_id: Dict[int, str] = {}
-            project_classifications: Dict[int, ProjectEntityClassification] = {}
-            resolved_mentions: list[ResolvedContextBlockMention] = []
-            associations: list[ContextBlockEntityAssociation] = []
-            identity_decisions: list[dict[str, Any]] = []
+            state = _ContextEntityResolutionState()
 
             candidate_snapshot: EntityCandidateSnapshot | None = None
             candidate_entries: list[Optional[Tuple[str, Any]]] = []
@@ -264,7 +275,7 @@ class EntityResolver:
                             or winner[0] - runner_up_score >= policy.resolution_margin
                         )
                     )
-                    identity_decisions.append(
+                    state.identity_decisions.append(
                         {
                             "mention": mention.name,
                             "candidate_id": winner[1] if winner else None,
@@ -282,7 +293,7 @@ class EntityResolver:
                             profile,
                         )
                         if not self._classification_conflicts(
-                            project_classifications,
+                            state.project_classifications,
                             classification,
                         ):
                             entity_id = candidate_id
@@ -293,39 +304,39 @@ class EntityResolver:
                                 candidate_snapshot=candidate_snapshot,
                             )
                             if new_aliases:
-                                alias_ids.add(candidate_id)
-                                alias_updates.setdefault(candidate_id, []).extend(
+                                state.alias_ids.add(candidate_id)
+                                state.alias_updates.setdefault(candidate_id, []).extend(
                                     new_aliases
                                 )
 
                 if entity_id is None:
-                    for pending_id in pending_ids_by_surface.get(surface_key, []):
-                        pending_write = pending_entity_writes[pending_id]
+                    for pending_id in state.pending_ids_by_surface.get(surface_key, []):
+                        pending_write = state.pending_entity_writes[pending_id]
                         if self._should_reuse_pending_entity(
                             mention,
                             support_text,
                             pending_write,
-                            pending_support_by_id[pending_id],
+                            state.pending_support_by_id[pending_id],
                             policy,
                         ):
                             entity_id = pending_id
                             break
                     if entity_id is None:
                         entity_id = await allocate_entity_id()
-                        pending_entity_writes[
+                        state.pending_entity_writes[
                             entity_id
-                        ] = await self.prepare_pending_entity(
+                        ] = self._prepare_pending_entity(
                             entity_id,
                             mention.name.strip(),
                             [mention.name.strip()],
                             mention.entity_type,
                             mention.topic,
                         )
-                        new_ids.add(entity_id)
-                        pending_ids_by_surface.setdefault(surface_key, []).append(
+                        state.new_ids.add(entity_id)
+                        state.pending_ids_by_surface.setdefault(surface_key, []).append(
                             entity_id
                         )
-                        pending_support_by_id[entity_id] = support_text
+                        state.pending_support_by_id[entity_id] = support_text
 
                 classification = self._classification_for_resolution(
                     entity_id,
@@ -333,21 +344,21 @@ class EntityResolver:
                     selected_profile,
                 )
                 if self._classification_conflicts(
-                    project_classifications,
+                    state.project_classifications,
                     classification,
                 ):
                     raise ValueError(
                         "Context entity resolution produced conflicting project classifications"
                     )
                 if classification is not None:
-                    project_classifications[entity_id] = classification
+                    state.project_classifications[entity_id] = classification
 
-                if entity_id not in entity_ids:
-                    entity_ids.append(entity_id)
-                resolved_mentions.append(
+                if entity_id not in state.entity_ids:
+                    state.entity_ids.append(entity_id)
+                state.resolved_mentions.append(
                     ResolvedContextBlockMention(mention=mention, entity_id=entity_id)
                 )
-                associations.extend(
+                state.associations.extend(
                     ContextBlockEntityAssociation(
                         block_id=block_id,
                         entity_id=entity_id,
@@ -363,23 +374,23 @@ class EntityResolver:
                         association.entity_id,
                         association.mention_text.casefold(),
                     ): association
-                    for association in associations
+                    for association in state.associations
                 }.values()
             )
-            return {
-                "entity_ids": tuple(entity_ids),
-                "new_entity_ids": frozenset(new_ids),
-                "alias_updated_ids": frozenset(alias_ids),
-                "alias_updates": {
+            return ContextEntityResolution(
+                entity_ids=tuple(state.entity_ids),
+                new_entity_ids=frozenset(state.new_ids),
+                alias_updated_ids=frozenset(state.alias_ids),
+                alias_updates={
                     entity_id: tuple(dict.fromkeys(aliases))
-                    for entity_id, aliases in alias_updates.items()
+                    for entity_id, aliases in state.alias_updates.items()
                 },
-                "pending_entity_writes": pending_entity_writes,
-                "project_classifications": project_classifications,
-                "resolved_mentions": tuple(resolved_mentions),
-                "block_entity_associations": unique_associations,
-                "identity_decisions": tuple(identity_decisions),
-            }
+                pending_entity_writes=state.pending_entity_writes,
+                project_classifications=state.project_classifications,
+                resolved_mentions=tuple(state.resolved_mentions),
+                block_entity_associations=unique_associations,
+                identity_decisions=tuple(state.identity_decisions),
+            )
 
     def _identity_decision_signals(
         self,
@@ -961,79 +972,19 @@ class EntityResolver:
         entity_id: int,
         mentions: List[str],
         *,
-        candidate_snapshot: EntityCandidateSnapshot | None = None,
+        candidate_snapshot: EntityCandidateSnapshot,
     ) -> List[str]:
-        """Return collision-free aliases for the candidate ID already selected."""
+        """Return aliases absent from this pass's authoritative snapshot."""
 
-        if candidate_snapshot is not None:
-            if candidate_snapshot.get_profile(entity_id) is None:
-                return []
-            return [
-                mention
-                for mention in mentions
-                if mention
-                and mention.strip()
-                and not candidate_snapshot.get_entity_ids_for_name(mention)
-            ]
-
-        with self._lock:
-            if not self._index.has_entity(entity_id):
-                return []
-            return [
-                mention
-                for mention in mentions
-                if mention
-                and mention.strip()
-                and not self._index.get_entity_ids_for_name(mention)
-            ]
-
-    def commit_new_aliases(self, entity_id: int, aliases: List[str]):
-        """Explicitly commit aliases after Graph validation."""
-        if not aliases:
-            return
-
-        with self._lock:
-            if not self._index.has_entity(entity_id):
-                return
-            safe_aliases = []
-            for mention in aliases:
-                owners = self._index.get_entity_ids_for_name(mention)
-                if owners and owners != {entity_id}:
-                    logger.warning(
-                        f"Alias collision: '{mention}' belongs to {sorted(owners)}, "
-                        f"skipping for {entity_id}"
-                    )
-                    continue
-                safe_aliases.append(mention)
-            aliases_changed = self._index.commit_aliases(entity_id, safe_aliases)
-            if aliases_changed:
-                self._bump_alias_version()
-
-    @cached(cache=LRUCache(maxsize=5))
-    def _build_generic_tokens(self, alias_version: int) -> set:
-        """Tokens appearing in N+ distinct entities are generic."""
-        token_to_entities = defaultdict(set)
-
-        with self._lock:
-            profiles_snapshot = self._index.get_profiles()
-            aliases_snapshot = {
-                eid: self._index.get_mentions(eid) for eid in profiles_snapshot
-            }
-
-        for ent_id, profile in profiles_snapshot.items():
-            canonical = profile.canonical_lower
-            for token in canonical.split():
-                token_to_entities[token].add(ent_id)
-
-            for alias in aliases_snapshot.get(ent_id, []):
-                for token in alias.lower().split():
-                    token_to_entities[token].add(ent_id)
-
-        return {
-            token
-            for token, ent_ids in token_to_entities.items()
-            if len(ent_ids) >= self.generic_token_freq
-        }
+        if candidate_snapshot.get_profile(entity_id) is None:
+            return []
+        return [
+            mention
+            for mention in mentions
+            if mention
+            and mention.strip()
+            and not candidate_snapshot.get_entity_ids_for_name(mention)
+        ]
 
     async def get_candidate_ids(
         self,
@@ -1109,8 +1060,8 @@ class EntityResolver:
             key=lambda candidate: (-candidate.score, candidate.entity_id),
         )
 
-    async def prepare_pending_entity(
-        self,
+    @staticmethod
+    def _prepare_pending_entity(
         entity_id: int,
         canonical_name: str,
         aliases: List[str],

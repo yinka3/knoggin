@@ -911,8 +911,8 @@ async def test_context_alias_only_mode_is_valid_without_a_model_candidate():
         allocate_entity_id=lambda: _async_value(701),
     )
 
-    assert resolution["entity_ids"] == (701,)
-    assert resolution["block_entity_associations"][0].block_id == current.block_id
+    assert resolution.entity_ids == (701,)
+    assert resolution.block_entity_associations[0].block_id == current.block_id
     assert store.catalog_lookups == [["project-1"]]
     assert entity_resolver.has_cached_entity(701) is False
     assert entity_resolver.get_alias_version() == 0
@@ -930,7 +930,7 @@ async def test_empty_context_resolution_does_not_load_a_candidate_catalog():
         allocate_entity_id=lambda: _async_value(701),
     )
 
-    assert resolution["entity_ids"] == ()
+    assert resolution.entity_ids == ()
     assert store.catalog_lookups == []
 
 
@@ -997,9 +997,9 @@ async def test_foreign_visible_identity_gets_a_target_project_classification():
         allocate_entity_id=lambda: _async_value(702),
     )
 
-    assert resolution["entity_ids"] == (701,)
-    assert resolution["new_entity_ids"] == frozenset()
-    classification = resolution["project_classifications"][701]
+    assert resolution.entity_ids == (701,)
+    assert resolution.new_entity_ids == frozenset()
+    classification = resolution.project_classifications[701]
     assert (
         classification.entity_type,
         classification.topic,
@@ -1047,7 +1047,7 @@ async def test_standalone_and_batch_candidate_matching_agree():
     )
 
     assert standalone_candidates == [(701, 1.0)]
-    assert resolution["entity_ids"] == (701,)
+    assert resolution.entity_ids == (701,)
     assert store.catalog_lookups == [["project-1"], ["project-1"]]
     assert entity_resolver.has_cached_entity(701) is False
 
@@ -1112,7 +1112,7 @@ async def test_context_resolution_uses_one_catalog_for_distinct_names():
         allocate_entity_id=lambda: _async_value(703),
     )
 
-    assert resolution["entity_ids"] == (701, 702)
+    assert resolution.entity_ids == (701, 702)
     assert store.catalog_lookups == [["project-1"]]
     assert store.name_lookups == []
     assert store.profile_lookups == []
@@ -1168,10 +1168,10 @@ async def test_foreign_identity_does_not_overwrite_a_conflicting_target_type():
         allocate_entity_id=lambda: _async_value(702),
     )
 
-    assert resolution["entity_ids"] == (701, 702)
+    assert resolution.entity_ids == (701, 702)
     assert {
         entity_id: (classification.entity_type, classification.membership)
-        for entity_id, classification in resolution["project_classifications"].items()
+        for entity_id, classification in resolution.project_classifications.items()
     } == {701: ("Company", "missing"), 702: ("Person", "missing")}
     assert store.catalog_lookups == [["project-1", "project-2"]]
     assert store.name_lookups == []
@@ -1217,9 +1217,9 @@ async def test_ambiguous_alias_abstains_when_candidates_have_no_meaningful_lead(
         allocate_entity_id=lambda: _async_value(703),
     )
 
-    assert resolution["entity_ids"] == (703,)
-    assert resolution["new_entity_ids"] == frozenset({703})
-    assert resolution["identity_decisions"][0]["outcome"] == "abstained"
+    assert resolution.entity_ids == (703,)
+    assert resolution.new_entity_ids == frozenset({703})
+    assert resolution.identity_decisions[0]["outcome"] == "abstained"
 
 
 @pytest.mark.unit
@@ -1260,9 +1260,9 @@ async def test_ambiguous_alias_uses_explicit_context_name_to_select_owner():
         allocate_entity_id=lambda: _async_value(703),
     )
 
-    assert resolution["entity_ids"] == (701,)
-    assert resolution["new_entity_ids"] == frozenset()
-    decision = resolution["identity_decisions"][0]
+    assert resolution.entity_ids == (701,)
+    assert resolution.new_entity_ids == frozenset()
+    decision = resolution.identity_decisions[0]
     assert decision["outcome"] == "reused"
     assert decision["candidate_id"] == 701
     assert "context_name_support" in decision["signals"]
@@ -1305,10 +1305,10 @@ async def test_pending_same_name_incompatible_types_do_not_collapse_by_topic():
         allocate_entity_id=allocate,
     )
 
-    assert resolution["entity_ids"] == (701, 702)
+    assert resolution.entity_ids == (701, 702)
     assert {
         entity_id: write.entity_type
-        for entity_id, write in resolution["pending_entity_writes"].items()
+        for entity_id, write in resolution.pending_entity_writes.items()
     } == {701: "Person", 702: "Company"}
 
 
@@ -1345,9 +1345,9 @@ async def test_pending_compatible_repetition_reuses_one_identity_with_same_conte
         allocate_entity_id=lambda: _async_value(701),
     )
 
-    assert resolution["entity_ids"] == (701,)
-    assert set(resolution["new_entity_ids"]) == {701}
-    assert [item.entity_id for item in resolution["resolved_mentions"]] == [701, 701]
+    assert resolution.entity_ids == (701,)
+    assert set(resolution.new_entity_ids) == {701}
+    assert [item.entity_id for item in resolution.resolved_mentions] == [701, 701]
 
 
 @pytest.mark.unit
@@ -1387,8 +1387,8 @@ async def test_pending_same_type_homonyms_without_shared_context_stay_separate()
         allocate_entity_id=allocate,
     )
 
-    assert resolution["entity_ids"] == (701, 702)
-    assert set(resolution["new_entity_ids"]) == {701, 702}
+    assert resolution.entity_ids == (701, 702)
+    assert set(resolution.new_entity_ids) == {701, 702}
 
 
 @pytest.mark.unit

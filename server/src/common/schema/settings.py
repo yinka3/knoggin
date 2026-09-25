@@ -127,9 +127,6 @@ class SearchSettings(ConfigModel):
 
 
 class EntityResolutionSettings(ConfigModel):
-    fuzzy_substring_threshold: int = Field(75, ge=50, le=100)
-    fuzzy_non_substring_threshold: int = Field(91, ge=50, le=100)
-    generic_token_freq: int = Field(10, ge=1)
     candidate_fuzzy_threshold: int = Field(85, ge=50, le=100)
     resolution_threshold: float = Field(0.85, ge=0.0, le=1.0)
     resolution_margin: float = Field(0.10, ge=0.0, le=1.0)

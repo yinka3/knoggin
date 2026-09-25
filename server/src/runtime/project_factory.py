@@ -84,9 +84,6 @@ class ProjectRuntimeFactory:
             project_id=project_id,
             readable_project_ids=readable_project_ids,
             knowledge_store=resources.knowledge_store,
-            fuzzy_substring_threshold=entity_settings.fuzzy_substring_threshold,
-            fuzzy_non_substring_threshold=entity_settings.fuzzy_non_substring_threshold,
-            generic_token_freq=entity_settings.generic_token_freq,
             candidate_fuzzy_threshold=entity_settings.candidate_fuzzy_threshold,
         )
         await self._verify_user_entity(entities)

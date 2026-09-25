@@ -167,31 +167,6 @@ class EntityIndex:
 
         return aliases_changed
 
-    def commit_aliases(self, entity_id: int, aliases: List[str]) -> bool:
-        if entity_id not in self._profiles:
-            return False
-
-        aliases_changed = False
-        if entity_id not in self._id_to_names:
-            self._id_to_names[entity_id] = set()
-
-        for alias in aliases:
-            alias_key = self._normalize_name(alias)
-            if not alias_key:
-                continue
-            owners = self._name_to_ids.get(alias_key, set())
-            if owners and owners != {entity_id}:
-                continue
-            if (
-                owners == {entity_id}
-                and alias_key in self._id_to_names[entity_id]
-            ):
-                continue
-            aliases_changed = self._add_alias_owner(entity_id, alias) or aliases_changed
-
-        return aliases_changed
-
-
     def remove(self, entity_ids: List[int]) -> Tuple[int, bool]:
         removed = 0
         aliases_changed = False

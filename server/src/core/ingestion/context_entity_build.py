@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 
 from common.schema.ingestion.contracts import (
     ContextEntityResult,
@@ -12,7 +11,7 @@ from common.schema.ingestion.contracts import (
 )
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.text_processor import TextProcessor
-from core.knowledge.entity.resolver import EntityResolver
+from core.knowledge.entity.resolver import ContextEntityResolution, EntityResolver
 
 
 def _literal_mention_is_present(mention: str, text: str) -> bool:
@@ -31,7 +30,7 @@ def _literal_mention_is_present(mention: str, text: str) -> bool:
 
 def assemble_context_entity_result(
     build: SemanticWindowBuild,
-    resolution: Mapping[str, object],
+    resolution: ContextEntityResolution,
 ) -> ContextEntityResult:
     """Turn resolver output into pending writes and literal message references.
 
@@ -42,8 +41,8 @@ def assemble_context_entity_result(
 
     if not isinstance(build, SemanticWindowBuild):
         raise TypeError("Context entity assembly requires a SemanticWindowBuild")
-    resolved_mentions = resolution.get("resolved_mentions")
-    if not isinstance(resolved_mentions, tuple) or any(
+    resolved_mentions = resolution.resolved_mentions
+    if any(
         not isinstance(item, ResolvedContextBlockMention) for item in resolved_mentions
     ):
         raise TypeError("Context resolution must contain typed resolved mentions")
@@ -62,13 +61,13 @@ def assemble_context_entity_result(
                     )
 
     result = ContextEntityResult(
-        entity_ids=resolution["entity_ids"],
-        new_entity_ids=resolution["new_entity_ids"],
-        alias_updated_ids=resolution["alias_updated_ids"],
-        alias_updates=resolution["alias_updates"],
-        pending_entity_writes=resolution["pending_entity_writes"],
-        project_classifications=resolution["project_classifications"],
-        block_entity_associations=resolution["block_entity_associations"],
+        entity_ids=resolution.entity_ids,
+        new_entity_ids=resolution.new_entity_ids,
+        alias_updated_ids=resolution.alias_updated_ids,
+        alias_updates=resolution.alias_updates,
+        pending_entity_writes=resolution.pending_entity_writes,
+        project_classifications=resolution.project_classifications,
+        block_entity_associations=resolution.block_entity_associations,
         message_entity_refs=tuple(message_refs.values()),
     )
     build.set_entity_result(result)
@@ -109,6 +108,6 @@ class ContextEntityBuildService:
             allocate_entity_id=self._allocate_entity_id,
         )
         semantic_build.trace.identity_decisions.extend(
-            resolution.get("identity_decisions", ())
+            resolution.identity_decisions
         )
         return assemble_context_entity_result(semantic_build, resolution)
