@@ -1,5 +1,6 @@
 import pytest
 
+from knoggin import client as client_module
 from knoggin import (
     DocumentFocusDocument,
     Knoggin,
@@ -78,6 +79,48 @@ class _FakeRuntime:
 
     async def shutdown(self):
         self.shutdown_called = True
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_sdk_forwards_explicit_configuration_directory(monkeypatch, tmp_path):
+    received = {}
+    runtime = _FakeRuntime(_FakeSession())
+
+    async def start_runtime(**kwargs):
+        received.update(kwargs)
+        return runtime
+
+    monkeypatch.setattr(client_module.ApplicationRuntime, "start", start_runtime)
+
+    knoggin = await Knoggin.start(user_name="ada", config_dir=tmp_path)
+
+    assert received == {
+        "user_name": "ada",
+        "config_dir": tmp_path,
+        "num_workers": None,
+    }
+    await knoggin.close()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_sdk_uses_stable_user_configuration_directory(monkeypatch, tmp_path):
+    received = {}
+    runtime = _FakeRuntime(_FakeSession())
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("KNOGGIN_CONFIG_DIR", raising=False)
+
+    async def start_runtime(**kwargs):
+        received.update(kwargs)
+        return runtime
+
+    monkeypatch.setattr(client_module.ApplicationRuntime, "start", start_runtime)
+
+    knoggin = await Knoggin.start(user_name="ada")
+
+    assert received["config_dir"] == tmp_path / "knoggin"
+    await knoggin.close()
 
 
 @pytest.mark.unit

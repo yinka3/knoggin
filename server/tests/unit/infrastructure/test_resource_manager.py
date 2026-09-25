@@ -1,4 +1,5 @@
 from concurrent.futures import Future
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -88,6 +89,10 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
                 unsubscribe_calls.append(path)
 
             return unsubscribe
+
+        @staticmethod
+        def resolve_path(configured_path):
+            return Path("/tmp/knoggin-config") / configured_path
 
     class FakeKnowledgeStore:
         def __init__(self, postgres_client, embedding_service):
@@ -179,14 +184,19 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     assert manager.embedding.reranker_model == "custom/reranker"
     assert manager.embedding.nli_model == "custom/nli"
     assert manager.knowledge_store.postgres_client is manager.postgres
-    assert subscribe_calls == [
-        (configure_coordination_log, "developer_settings.coordination_log"),
-        (manager.llm_service.update_settings, "llm"),
+    assert [path for _callback, path in subscribe_calls] == [
+        "developer_settings.coordination_log",
+        "llm",
     ]
-    assert configure_coordination_log.call_args_list == [
-        ((fake_config.config.developer_settings.coordination_log,),),
-        ((fake_config.config.developer_settings.coordination_log,),),
-    ]
+    configured_log_settings = configure_coordination_log.call_args.args[0]
+    assert configured_log_settings.path == (
+        "/tmp/knoggin-config/logs/coordination.log"
+    )
+    assert configure_coordination_log.call_count == 2
+    assert all(
+        call.args[0].path == "/tmp/knoggin-config/logs/coordination.log"
+        for call in configure_coordination_log.call_args_list
+    )
     assert manager.llm_service.updated_settings == [fake_config.config.llm]
 
     await manager.shutdown()
@@ -224,6 +234,10 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
 
         def subscribe(self, callback, path=None):
             return lambda: None
+
+        @staticmethod
+        def resolve_path(configured_path):
+            return Path("/tmp/knoggin-config") / configured_path
 
     class RecordingKnowledgeStore:
         def __init__(self, postgres_client, embedding_service):

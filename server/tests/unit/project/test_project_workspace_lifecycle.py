@@ -60,6 +60,28 @@ class RecordingCursor:
             raise RuntimeError("project insert failed")
 
 
+def _manager_without_filesystem() -> ProjectManager:
+    return ProjectManager(
+        resources=type("Resources", (), {"postgres": RecordingPostgres()})(),
+        user_name="ada",
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_creation_requires_configured_filesystem():
+    with pytest.raises(RuntimeError, match="filesystem is not configured"):
+        await _manager_without_filesystem().create_project(
+            "Research",
+            domain_config=make_domain_config(version=0),
+        )
+
+
+@pytest.mark.asyncio
+async def test_project_file_cleanup_requires_configured_filesystem():
+    with pytest.raises(RuntimeError, match="filesystem is not configured"):
+        await _manager_without_filesystem()._finish_project_file_cleanup("project-1")
+
+
 @pytest.mark.asyncio
 async def test_project_creation_seeds_native_project_file(tmp_path):
     postgres = RecordingPostgres()

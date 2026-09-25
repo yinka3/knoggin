@@ -36,8 +36,6 @@ KNOGGIN_ONNX_PROVIDER=auto
 KNOGGIN_EMBEDDING_MODEL=dunzhang/stella_en_1.5B_v5
 KNOGGIN_RERANKER_MODEL=BAAI/bge-reranker-large
 KNOGGIN_NLI_MODEL=MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli
-KNOGGIN_DOCUMENT_RERANK_ENABLED=true
-KNOGGIN_DOCUMENT_RERANK_CANDIDATES=15
 EOF
 
 echo "Generated .env with secure passwords"

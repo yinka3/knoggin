@@ -1,18 +1,13 @@
-from unittest.mock import patch
-
 import pytest
 
-from common.conf.manager import ConfigManager, deep_merge
+from common.conf.manager import (
+    ConfigManager,
+    ConfigurationLoadError,
+    ConfigurationPersistenceError,
+    deep_merge,
+)
 from common.schema.agent.settings import AgentLimitSettings
 from common.schema.settings import LLMSettings, RootConfig
-
-
-@pytest.fixture
-def mock_config_paths(tmp_path):
-    yaml_path = tmp_path / "knoggin.yml"
-    with patch("common.conf.manager.CONFIG_DIR", tmp_path), \
-         patch("common.conf.manager.CONFIG_FILE_YAML", yaml_path):
-        yield {"yaml": yaml_path, "dir": tmp_path}
 
 
 @pytest.fixture
@@ -21,6 +16,12 @@ def reset_config_manager():
     ConfigManager._instance = None
     yield
     ConfigManager._instance = None
+
+
+@pytest.fixture
+def mock_config_paths(tmp_path, reset_config_manager):
+    manager = ConfigManager.initialize(tmp_path)
+    return {"yaml": tmp_path / "knoggin.yml", "dir": tmp_path, "manager": manager}
 
 
 @pytest.mark.unit
@@ -53,6 +54,45 @@ def test_config_manager_loads_defaults_when_files_missing(mock_config_paths, res
 
     # It should have saved the default config to YAML
     assert mock_config_paths["yaml"].exists()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_config_manager_reuses_only_the_same_explicit_directory(
+    mock_config_paths, tmp_path
+):
+    manager = mock_config_paths["manager"]
+
+    assert ConfigManager.initialize(mock_config_paths["dir"] / ".") is manager
+    with pytest.raises(RuntimeError, match="already initialized"):
+        ConfigManager.initialize(tmp_path / "different")
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_config_manager_requires_initialization(reset_config_manager):
+    with pytest.raises(RuntimeError, match="has not been initialized"):
+        ConfigManager.get()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_config_writes_do_not_follow_the_process_working_directory(
+    mock_config_paths, tmp_path, monkeypatch
+):
+    manager = mock_config_paths["manager"]
+    other_working_directory = tmp_path / "elsewhere"
+    other_working_directory.mkdir()
+    monkeypatch.chdir(other_working_directory)
+
+    assert manager.update_settings({"user_aliases": ["Ada"]}) is True
+
+    assert mock_config_paths["yaml"].exists()
+    assert not (other_working_directory / "config" / "knoggin.yml").exists()
+    assert manager.resolve_path("data/projects") == (
+        mock_config_paths["dir"] / "data" / "projects"
+    ).resolve()
+    assert manager.resolve_path(tmp_path / "absolute") == (tmp_path / "absolute")
 
 
 @pytest.mark.unit
@@ -104,6 +144,17 @@ def test_root_config_rejects_unknown_top_level_and_nested_keys():
 
 @pytest.mark.unit
 @pytest.mark.no_network
+def test_root_config_excludes_retired_identity_metadata():
+    serialized = RootConfig().model_dump()
+
+    assert "user_name" not in serialized
+    assert "configured_at" not in serialized
+    with pytest.raises(ValueError, match="user_name"):
+        RootConfig.model_validate({"user_name": "stale"})
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
 def test_failed_config_reload_keeps_the_previous_valid_config(
     mock_config_paths,
     reset_config_manager,
@@ -113,10 +164,111 @@ def test_failed_config_reload_keeps_the_previous_valid_config(
     invalid_source = "llm:\n  agent_modell: typo\n"
     mock_config_paths["yaml"].write_text(invalid_source, encoding="utf-8")
 
-    mgr.load()
+    assert mgr.load() is False
 
     assert mgr.config.llm.agent_model == "known-good"
     assert mock_config_paths["yaml"].read_text(encoding="utf-8") == invalid_source
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_invalid_existing_config_prevents_initialization(tmp_path, reset_config_manager):
+    config_file = tmp_path / "knoggin.yml"
+    config_file.write_text("llm:\n  agent_modell: typo\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationLoadError, match="agent_modell"):
+        ConfigManager.initialize(tmp_path)
+
+    assert ConfigManager._instance is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_malformed_yaml_reload_preserves_active_config(mock_config_paths):
+    manager = mock_config_paths["manager"]
+    previous = manager.config
+    mock_config_paths["yaml"].write_text("llm: [", encoding="utf-8")
+
+    assert manager.load() is False
+    assert manager.config is previous
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_malformed_yaml_prevents_initialization(tmp_path, reset_config_manager):
+    (tmp_path / "knoggin.yml").write_text("llm: [", encoding="utf-8")
+
+    with pytest.raises(ConfigurationLoadError, match="Failed to load"):
+        ConfigManager.initialize(tmp_path)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_runtime_validation_failure_is_reported_for_reload_and_startup(
+    mock_config_paths, reset_config_manager, monkeypatch
+):
+    manager = mock_config_paths["manager"]
+    previous = manager.config
+
+    def fail_validation(_config):
+        raise RuntimeError("registry failed")
+
+    monkeypatch.setattr(
+        ConfigManager,
+        "_validate_runtime_config",
+        staticmethod(fail_validation),
+    )
+
+    assert manager.load() is False
+    assert manager.config is previous
+
+    ConfigManager._instance = None
+    with pytest.raises(ConfigurationLoadError, match="registry failed"):
+        ConfigManager.initialize(mock_config_paths["dir"])
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_failed_atomic_replace_removes_temporary_file(mock_config_paths, monkeypatch):
+    manager = mock_config_paths["manager"]
+    existing_files = set(mock_config_paths["dir"].iterdir())
+
+    def fail_replace(_self, _target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(type(mock_config_paths["yaml"]), "replace", fail_replace)
+
+    assert manager.save() is False
+    assert set(mock_config_paths["dir"].iterdir()) == existing_files
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_initial_config_write_failure_prevents_initialization(
+    tmp_path, reset_config_manager, monkeypatch
+):
+    monkeypatch.setattr(ConfigManager, "save", lambda self, config=None: False)
+
+    with pytest.raises(ConfigurationPersistenceError, match="initial configuration"):
+        ConfigManager.initialize(tmp_path)
+
+    assert ConfigManager._instance is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_failed_update_write_preserves_active_config_and_subscribers(
+    mock_config_paths, monkeypatch
+):
+    manager = mock_config_paths["manager"]
+    received = []
+    manager.subscribe(received.append, "user_aliases")
+    previous = manager.config
+    monkeypatch.setattr(manager, "save", lambda config=None: False)
+
+    assert manager.update_settings({"user_aliases": ["Ada"]}) is False
+    assert manager.config is previous
+    assert received == [[]]
 
 
 @pytest.mark.unit

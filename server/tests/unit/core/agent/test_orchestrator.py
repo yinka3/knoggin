@@ -69,10 +69,6 @@ class FakeConfig:
 class FakeConfigManager:
     config = FakeConfig()
 
-    @staticmethod
-    def get():
-        return FakeConfigManager()
-
 
 class FakeTools:
     def __init__(self):
@@ -131,7 +127,7 @@ class FakeSession:
 def make_orchestrator(context):
     return AgentOrchestrator(
         AgentManager(context.resources, context.user_name),
-        config_provider=FakeConfigManager,
+        config_manager=FakeConfigManager(),
     )
 
 

@@ -14,12 +14,18 @@ from common.schema.agent.tool_names import get_configurable_tool_names
 from common.schema.settings import RootConfig
 from common.utils.core_utils import safe_update
 
-CONFIG_DIR = Path(os.getenv("CONFIG_DIR", "./config"))
-CONFIG_FILE_YAML = CONFIG_DIR / "knoggin.yml"
 CONFIG_FILE_NOTICE = (
     "# This configuration file is managed by Knoggin.\n"
     "# Manual edits may be overwritten by the app.\n\n"
 )
+
+
+class ConfigurationLoadError(RuntimeError):
+    """Raised when the configured YAML file cannot safely initialize runtime."""
+
+
+class ConfigurationPersistenceError(RuntimeError):
+    """Raised when initial configuration cannot be persisted."""
 
 
 def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -40,44 +46,72 @@ class ConfigManager:
     _instance: Optional["ConfigManager"] = None
     _lock = threading.Lock()
 
-    def __init__(self):
+    def __init__(self, config_dir: Path):
         if ConfigManager._instance is not None:
             raise Exception("ConfigManager is a singleton. Use ConfigManager.get()")
+
+        self.config_dir = config_dir.expanduser().resolve()
+        self.config_file = self.config_dir / "knoggin.yml"
 
         self.config: RootConfig = RootConfig()
         self.subscribers: List[Dict[str, Any]] = []
         self._async_lock = asyncio.Lock()
 
-        self.load()
+        self.load(require_valid=True)
+
+    @classmethod
+    def initialize(cls, config_dir: str | Path) -> "ConfigManager":
+        """Initialize the process-wide configuration bus at one explicit path."""
+
+        resolved = Path(config_dir).expanduser().resolve()
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls(resolved)
+            elif cls._instance.config_dir != resolved:
+                raise RuntimeError(
+                    "ConfigManager is already initialized for "
+                    f"{cls._instance.config_dir}; cannot switch to {resolved}"
+                )
+        return cls._instance
 
     @classmethod
     def get(cls) -> "ConfigManager":
         with cls._lock:
             if cls._instance is None:
-                cls._instance = cls()
-        return cls._instance
+                raise RuntimeError(
+                    "ConfigManager has not been initialized with a configuration directory"
+                )
+            return cls._instance
 
-    def load(self):
+    def resolve_path(self, configured_path: str | Path) -> Path:
+        """Resolve one config-owned path independently of the process cwd."""
+
+        path = Path(configured_path).expanduser()
+        if path.is_absolute():
+            return path.resolve()
+        return (self.config_dir / path).resolve()
+
+    def load(self, *, require_valid: bool = False) -> bool:
         """Loads configuration from YAML."""
         from common.utils.prompt_loader import validate_prompt_library
 
         validate_prompt_library()
         data = None
         load_failed = False
-        config_exists = CONFIG_FILE_YAML.exists()
+        config_exists = self.config_file.exists()
         if config_exists:
             try:
-                with open(CONFIG_FILE_YAML, "r") as f:
+                with self.config_file.open("r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
             except Exception as exc:
                 load_failed = True
-                logger.error(
-                    "Failed to load knoggin.yml; keeping the active "
-                    f"configuration: {exc}"
-                )
+                message = f"Failed to load {self.config_file}: {exc}"
+                if require_valid:
+                    raise ConfigurationLoadError(message) from exc
+                logger.error(f"{message}; keeping the active configuration")
 
         if load_failed:
-            return
+            return False
         if data:
             try:
                 new_config = RootConfig(**data)
@@ -89,38 +123,43 @@ class ConfigManager:
                     f"{error['msg']}"
                     for error in exc.errors(include_url=False)
                 )
-                logger.error(
-                    "Configuration validation failed; keeping the active "
-                    f"configuration: {errors}"
-                )
+                message = f"Configuration validation failed for {self.config_file}: {errors}"
+                if require_valid:
+                    raise ConfigurationLoadError(message) from exc
+                logger.error(f"{message}; keeping the active configuration")
+                return False
             except Exception as exc:
-                logger.error(
-                    "Configuration load failed; keeping the active "
-                    f"configuration: {exc}"
-                )
+                message = f"Configuration load failed for {self.config_file}: {exc}"
+                if require_valid:
+                    raise ConfigurationLoadError(message) from exc
+                logger.error(f"{message}; keeping the active configuration")
+                return False
         else:
             self.config = RootConfig()
 
-        if not config_exists:
-            self.save()
+        if not config_exists and not self.save():
+            raise ConfigurationPersistenceError(
+                f"Failed to create initial configuration at {self.config_file}"
+            )
+        return True
 
-    def save(self) -> bool:
+    def save(self, config: RootConfig | None = None) -> bool:
         """Saves current Pydantic RootConfig to the YAML file."""
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            self.config_dir.mkdir(parents=True, exist_ok=True)
             # Use model_dump(mode="json") to get YAML-compatible primitive types (e.g. str dates)
-            data = self.config.model_dump(mode="json")
+            data = (config or self.config).model_dump(mode="json")
 
             old_umask = os.umask(0o177)
             try:
-                fd, temp_path = tempfile.mkstemp(dir=CONFIG_DIR, text=True)
+                fd, temp_path = tempfile.mkstemp(dir=self.config_dir, text=True)
                 try:
                     with os.fdopen(fd, "w") as f:
                         f.write(CONFIG_FILE_NOTICE)
                         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-                    os.replace(temp_path, CONFIG_FILE_YAML)
+                    Path(temp_path).replace(self.config_file)
                 except Exception as write_err:
-                    os.unlink(temp_path)
+                    Path(temp_path).unlink(missing_ok=True)
                     raise write_err
             finally:
                 os.umask(old_umask)
@@ -189,8 +228,10 @@ class ConfigManager:
             return False
 
         old_config = self.config
+        if not self.save(new_config):
+            logger.error("Configuration update was not applied because persistence failed")
+            return False
         self.config = new_config
-        self.save()
 
         logger.info("Applying hot-reload of runtime settings via ConfigManager...")
 

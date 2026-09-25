@@ -91,7 +91,10 @@ The first command permanently deletes the local Postgres volume. Restart Knoggin
 
 `.env.example` documents local runtime settings, including the database URL, model choices, resource profile, and document storage directory. Docker Compose starts Postgres configured with Apache AGE, pgvector, and the project schema.
 
-Knoggin writes application-level settings to `config/knoggin.yml`. This file is managed by the app; manual changes can be overwritten. The topic seed lives at `server/src/common/templates/topics.yaml`.
+Knoggin writes application-level settings to `~/.config/knoggin/knoggin.yml` by
+default. Set `KNOGGIN_CONFIG_DIR` to use another directory. The file is managed
+by the app, so manual changes can be overwritten. The topic seed lives at
+`server/src/common/templates/topics.yaml`.
 
 For more predictable startup performance, set `KNOGGIN_RESOURCE_PROFILE` to `conservative`, `balanced` (default), or `performance`. Set `KNOGGIN_GPU=true` when a supported accelerator and matching runtime are available.
 

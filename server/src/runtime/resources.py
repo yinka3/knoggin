@@ -212,11 +212,22 @@ class RuntimeResources:
         if self.postgres is None or self.model_work is None or self.resource_profile is None:
             raise RuntimeError("Runtime datastore and worker dependencies are unavailable")
 
-        config = ConfigManager.get().config
-        configure_coordination_log(config.developer_settings.coordination_log)
+        config_manager = ConfigManager.get()
+        config = config_manager.config
+
+        def configure_runtime_coordination_log(settings):
+            configure_coordination_log(
+                settings.model_copy(
+                    update={"path": str(config_manager.resolve_path(settings.path))}
+                )
+            )
+
+        configure_runtime_coordination_log(
+            config.developer_settings.coordination_log
+        )
         self.config_unsubscribers.append(
-            ConfigManager.get().subscribe(
-                configure_coordination_log,
+            config_manager.subscribe(
+                configure_runtime_coordination_log,
                 "developer_settings.coordination_log",
             )
         )
@@ -237,7 +248,7 @@ class RuntimeResources:
             postgres_client=self.postgres,
         )
         self.config_unsubscribers.append(
-            ConfigManager.get().subscribe(self.llm_service.update_settings, "llm")
+            config_manager.subscribe(self.llm_service.update_settings, "llm")
         )
         self.embedding = EmbeddingService(
             embedding_model=os.getenv(

@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,10 @@ class RecordingConfigManager:
             value = getattr(value, part)
         callback(value)
         return lambda: None
+
+    def resolve_path(self, configured_path):
+        path = Path(configured_path)
+        return path if path.is_absolute() else Path("/tmp/knoggin-config") / path
 
     def emit(self, path, value):
         for callback, subscribed_path in self.subscriptions:

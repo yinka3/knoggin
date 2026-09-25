@@ -6,6 +6,13 @@ from runtime import application as application_module
 from runtime.application import ApplicationRuntime, ApplicationShutdownError
 
 
+@pytest.fixture(autouse=True)
+def reset_config_manager():
+    application_module.ConfigManager._instance = None
+    yield
+    application_module.ConfigManager._instance = None
+
+
 class RecordingOwner:
     def __init__(self, name, calls, error=None):
         self.name = name
@@ -43,6 +50,7 @@ class RecordingSessions(RecordingOwner):
 async def test_application_shutdown_is_ordered_and_idempotent():
     calls = []
     runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(),
         resources=RecordingOwner("resources", calls),
         projects=RecordingOwner("projects", calls),
         sessions=RecordingSessions("sessions", calls),
@@ -62,6 +70,7 @@ async def test_application_shutdown_is_ordered_and_idempotent():
 async def test_application_shutdown_continues_after_a_phase_failure_and_replays_error():
     calls = []
     runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(),
         resources=RecordingOwner("resources", calls),
         projects=RecordingOwner("projects", calls),
         sessions=RecordingSessions("sessions", calls),
@@ -91,6 +100,7 @@ async def test_application_runtime_owns_and_explicitly_attaches_health_service()
     resources = RecordingOwner("resources", calls)
     sessions = RecordingSessions("sessions", calls)
     runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(),
         resources=resources,
         projects=RecordingOwner("projects", calls),
         sessions=sessions,
@@ -105,7 +115,9 @@ async def test_application_runtime_owns_and_explicitly_attaches_health_service()
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_application_start_cleans_resources_when_composition_fails(monkeypatch):
+async def test_application_start_cleans_resources_when_composition_fails(
+    monkeypatch, tmp_path
+):
     resources = RecordingOwner("resources", [])
 
     class KnowledgeStore:
@@ -128,14 +140,18 @@ async def test_application_start_cleans_resources_when_composition_fails(monkeyp
     monkeypatch.setattr(application_module, "ProjectManager", fail_project_manager)
 
     with pytest.raises(RuntimeError, match="project composition failed"):
-        await application_module.ApplicationRuntime.start(user_name="ada")
+        await application_module.ApplicationRuntime.start(
+            user_name="ada", config_dir=tmp_path
+        )
 
     assert resources.shutdown_count == 1
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(monkeypatch):
+async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
+    monkeypatch, tmp_path
+):
     calls = []
     resources = RecordingOwner("resources", calls)
     projects = RecordingOwner("projects", calls)
@@ -194,14 +210,18 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(m
     )
 
     with pytest.raises(RuntimeError, match="AAC start failed"):
-        await application_module.ApplicationRuntime.start(user_name="ada")
+        await application_module.ApplicationRuntime.start(
+            user_name="ada", config_dir=tmp_path
+        )
 
     assert calls == ["projects_start", "aac", "projects", "resources"]
 
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_application_start_establishes_identity_before_managers(monkeypatch):
+async def test_application_start_establishes_identity_before_managers(
+    monkeypatch, tmp_path
+):
     calls = []
 
     class KnowledgeStore:
@@ -264,14 +284,26 @@ async def test_application_start_establishes_identity_before_managers(monkeypatc
     monkeypatch.setattr(application_module, "AgentOrchestrator", RecordingAgentOrchestrator)
     monkeypatch.setattr(application_module, "SessionManager", create_sessions)
     monkeypatch.setattr(application_module, "AACRuntime", RecordingAACRuntime)
+    config_manager = SimpleNamespace(
+        config=SimpleNamespace(
+            user_aliases=["Ada"],
+            developer_settings=SimpleNamespace(
+                documents=SimpleNamespace(project_library_root="data/projects")
+            ),
+        ),
+        resolve_path=lambda path: tmp_path / path,
+    )
     monkeypatch.setattr(
         application_module.ConfigManager,
-        "get",
-        staticmethod(lambda: SimpleNamespace(config=SimpleNamespace(user_aliases=["Ada"]))),
+        "initialize",
+        staticmethod(lambda _config_dir: config_manager),
     )
 
-    runtime = await application_module.ApplicationRuntime.start(user_name="ada")
+    runtime = await application_module.ApplicationRuntime.start(
+        user_name="ada", config_dir=tmp_path
+    )
 
+    assert runtime.config_manager is config_manager
     assert calls == [
         ("identity", "ada", ["Ada"]),
         "projects_start",

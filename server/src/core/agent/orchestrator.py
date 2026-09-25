@@ -45,11 +45,11 @@ class AgentOrchestrator:
         self,
         agent_manager: AgentManager,
         *,
-        config_provider,
+        config_manager,
         entity_maintenance_service: EntityMaintenanceService | None = None,
     ):
         self._agent_manager = agent_manager
-        self._config_provider = config_provider
+        self._config_manager = config_manager
         self._entity_maintenance_service = entity_maintenance_service
 
     async def run_stream(
@@ -77,7 +77,7 @@ class AgentOrchestrator:
                 request_document_focus = parse_document_focus(request_document_focus)
 
             # Configuration
-            config = self._config_provider.get().config
+            config = self._config_manager.config
             limits = config.developer_settings.limits
             research_profile = resolve_research_profile(research_mode)
             run_limits = AgentRunLimits.from_settings(limits).for_research_profile(
@@ -243,7 +243,7 @@ class AgentOrchestrator:
         document_focus: Optional[DocumentFocus] = None,
     ) -> Tools:
         """Retrieve context services and instantiate the agent tool suite."""
-        config = self._config_provider.get().config
+        config = self._config_manager.config
         search_cfg = {
             **config.developer_settings.search.model_dump(),
             **config.search.model_dump(),
