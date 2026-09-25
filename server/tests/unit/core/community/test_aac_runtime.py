@@ -383,8 +383,8 @@ async def test_private_specialists_cannot_publish_or_spawn_without_promotion(mon
     }
     assert result == "Checked dates."
     assert captured["run"].is_community is False
-    assert {"save_insight", "vote_insight", "remove_insight_vote", "spawn_specialist", "consult_specialist"}.isdisjoint(visible_tools)
-    assert {"search_project_documents", "search_insights", "edit_agent_brain"}.issubset(visible_tools)
+    assert {"save_community_insight", "vote_community_insight", "remove_community_insight_vote", "spawn_community_specialist", "consult_community_specialist"}.isdisjoint(visible_tools)
+    assert {"search_project_documents", "search_community_insights", "edit_agent_brain"}.issubset(visible_tools)
 
 
 @pytest.mark.runtime

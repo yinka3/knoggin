@@ -478,9 +478,9 @@ async def test_memory_tools_return_clean_defaults_without_active_agent():
 async def test_normal_memory_tools_keep_community_only_tools_unavailable():
     tools = MemoryToolHarness(postgres=RecordingPostgres())
 
-    assert await tools.save_insight("community insight") == {
-        "error": "save_insight is only available in community discussions."
+    assert await tools.save_community_insight("community insight") == {
+        "error": "save_community_insight is only available in community discussions."
     }
-    assert await tools.spawn_specialist("Expert", "Persona") == {
-        "error": "spawn_specialist is only available in community discussions."
+    assert await tools.spawn_community_specialist("Expert", "Persona") == {
+        "error": "spawn_community_specialist is only available in community discussions."
     }

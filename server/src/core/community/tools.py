@@ -53,7 +53,7 @@ class AACTools(Tools):
         self.agent_id = agent_id
         self._specialist_runner = specialist_runner
 
-    async def save_insight(
+    async def save_community_insight(
         self,
         content: str,
         visibility: str = "shared",
@@ -67,7 +67,7 @@ class AACTools(Tools):
         )
         return {"saved": True, "insight_id": insight_id, "visibility": visibility}
 
-    async def search_insights(
+    async def search_community_insights(
         self,
         query: str = "",
         limit: int = 20,
@@ -79,7 +79,7 @@ class AACTools(Tools):
             limit=limit,
         )
 
-    async def vote_insight(
+    async def vote_community_insight(
         self,
         insight_id: str,
         vote: str,
@@ -94,7 +94,7 @@ class AACTools(Tools):
         )
         return {"voted": True, "insight_id": insight_id, "vote": vote}
 
-    async def remove_insight_vote(self, insight_id: str) -> Dict[str, object]:
+    async def remove_community_insight_vote(self, insight_id: str) -> Dict[str, object]:
         removed = await self.aac_store.remove_insight_vote(
             insight_id=insight_id,
             user_name=self.user_name,
@@ -102,7 +102,7 @@ class AACTools(Tools):
         )
         return {"removed": removed, "insight_id": insight_id}
 
-    async def spawn_specialist(
+    async def spawn_community_specialist(
         self,
         name: str,
         persona: Mapping[str, str],
@@ -125,7 +125,7 @@ class AACTools(Tools):
             "seeded_directives": len(initial_directives or []),
         }
 
-    async def consult_specialist(
+    async def consult_community_specialist(
         self,
         specialist_id: str,
         question: str,

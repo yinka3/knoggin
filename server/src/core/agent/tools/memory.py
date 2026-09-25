@@ -388,34 +388,34 @@ class MemoryTools:
         except Exception as exc:
             return {"error": f"Failed to restore brain section: {exc}"}
 
-    async def save_insight(self, content: str) -> Dict:
-        return {"error": "save_insight is only available in community discussions."}
+    async def save_community_insight(self, content: str) -> Dict:
+        return {"error": "save_community_insight is only available in community discussions."}
 
-    async def spawn_specialist(
+    async def spawn_community_specialist(
         self,
         name: str,
         persona: str,
         initial_directives: List[Dict] = None,
     ) -> Dict:
-        return {"error": "spawn_specialist is only available in community discussions."}
+        return {"error": "spawn_community_specialist is only available in community discussions."}
 
-    async def search_insights(self, query: str = "", limit: int = 20) -> Dict:
-        return {"error": "search_insights is only available in AAC discussions."}
+    async def search_community_insights(self, query: str = "", limit: int = 20) -> Dict:
+        return {"error": "search_community_insights is only available in AAC discussions."}
 
-    async def vote_insight(
+    async def vote_community_insight(
         self,
         insight_id: str,
         vote: str,
         reason: str,
     ) -> Dict:
-        return {"error": "vote_insight is only available in AAC discussions."}
+        return {"error": "vote_community_insight is only available in AAC discussions."}
 
-    async def remove_insight_vote(self, insight_id: str) -> Dict:
-        return {"error": "remove_insight_vote is only available in AAC discussions."}
+    async def remove_community_insight_vote(self, insight_id: str) -> Dict:
+        return {"error": "remove_community_insight_vote is only available in AAC discussions."}
 
-    async def consult_specialist(
+    async def consult_community_specialist(
         self,
         specialist_id: str,
         question: str,
     ) -> Dict:
-        return {"error": "consult_specialist is only available in AAC discussions."}
+        return {"error": "consult_community_specialist is only available in AAC discussions."}

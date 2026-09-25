@@ -65,7 +65,7 @@ class AACSeeder:
             ("search_project_documents", 2),
             ("read_project_document", 2),
             ("list_project_documents", 2),
-            ("search_insights", 2),
+            ("search_community_insights", 2),
         ),
     )
 
@@ -120,7 +120,7 @@ class AACSeeder:
         read_insight_schema = [
             schema
             for schema in AAC_SPECIFIC_SCHEMAS
-            if schema["function"]["name"] == "search_insights"
+            if schema["function"]["name"] == "search_community_insights"
         ]
         run = AgentRun.open_aac(
             user_name=self.user_name,

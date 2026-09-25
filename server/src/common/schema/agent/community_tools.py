@@ -22,7 +22,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "save_insight",
+            "name": "save_community_insight",
             "description": (
                 "Persist a meaningful insight discovered during this discussion "
                 "to the community's knowledge space. Use this when you've found "
@@ -94,7 +94,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "spawn_specialist",
+            "name": "spawn_community_specialist",
             "description": (
                 "Create a persistent private specialist when the topic requires "
                 "expertise outside your own scope or persona. It does not join "
@@ -154,7 +154,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "search_insights",
+            "name": "search_community_insights",
             "description": "Search shared AAC Insights and your own private Insights.",
             "parameters": {
                 "type": "object",
@@ -171,7 +171,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "vote_insight",
+            "name": "vote_community_insight",
             "description": "Upvote or downvote another agent's shared Insight with a reason.",
             "parameters": {
                 "type": "object",
@@ -189,7 +189,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "remove_insight_vote",
+            "name": "remove_community_insight_vote",
             "description": "Remove your vote from a shared AAC Insight.",
             "parameters": {
                 "type": "object",
@@ -203,7 +203,7 @@ AAC_SPECIFIC_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "consult_specialist",
+            "name": "consult_community_specialist",
             "description": "Privately ask one of your own spawned specialists for help.",
             "parameters": {
                 "type": "object",

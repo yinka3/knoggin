@@ -62,12 +62,12 @@ class AACRuntime:
                 "search_project_documents": 4,
                 "read_project_document": 4,
                 "list_project_documents": 2,
-                "search_insights": 3,
-                "save_insight": 4,
-                "vote_insight": 4,
-                "remove_insight_vote": 4,
-                "spawn_specialist": 2,
-                "consult_specialist": 2,
+                "search_community_insights": 3,
+                "save_community_insight": 4,
+                "vote_community_insight": 4,
+                "remove_community_insight_vote": 4,
+                "spawn_community_specialist": 2,
+                "consult_community_specialist": 2,
                 "edit_agent_brain": 2,
                 "restore_agent_brain_section": 2,
             }.items()
@@ -76,7 +76,7 @@ class AACRuntime:
     _SPECIALIST_ENABLED_TOOLS = frozenset(
         [
             *AAC_READ_TOOL_NAMES,
-            "search_insights",
+            "search_community_insights",
             "edit_agent_brain",
             "restore_agent_brain_section",
         ]

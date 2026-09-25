@@ -58,7 +58,7 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
             next(
                 schema
                 for schema in AAC_SPECIFIC_SCHEMAS
-                if schema["function"]["name"] == "search_insights"
+                if schema["function"]["name"] == "search_community_insights"
             )
         ],
     )
@@ -72,12 +72,12 @@ def test_agent_run_owns_scope_limits_identity_and_effective_policy():
     assert run.temperature == 0.2
     assert run.brain == "Use evidence."
     assert run.enabled_tools == ("search_knowledge_messages",)
-    assert run.additional_tool_schemas[0]["function"]["name"] == "search_insights"
+    assert run.additional_tool_schemas[0]["function"]["name"] == "search_community_insights"
     assert run.tool_runtime.permissions.allowed_tools >= {
         "search_knowledge_messages",
         "request_clarification",
         "submit_answer",
-        "search_insights",
+        "search_community_insights",
     }
     with pytest.raises(AttributeError):
         run.limits.max_calls = 4

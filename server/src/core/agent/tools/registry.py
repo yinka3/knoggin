@@ -320,12 +320,12 @@ TOOL_DEFINITIONS = {
     "move_project_file": _definition("move_project_file", default_limit=2),
     "delete_project_file": _definition("delete_project_file", default_limit=2),
     "create_project_folder": _definition("create_project_folder", default_limit=2),
-    "save_insight": _definition("save_insight", default_limit=4),
-    "spawn_specialist": _definition("spawn_specialist", default_limit=2),
-    "search_insights": _definition("search_insights", default_limit=4),
-    "vote_insight": _definition("vote_insight", default_limit=4),
-    "remove_insight_vote": _definition("remove_insight_vote", default_limit=4),
-    "consult_specialist": _definition("consult_specialist", default_limit=2),
+    "save_community_insight": _definition("save_community_insight", default_limit=4),
+    "spawn_community_specialist": _definition("spawn_community_specialist", default_limit=2),
+    "search_community_insights": _definition("search_community_insights", default_limit=4),
+    "vote_community_insight": _definition("vote_community_insight", default_limit=4),
+    "remove_community_insight_vote": _definition("remove_community_insight_vote", default_limit=4),
+    "consult_community_specialist": _definition("consult_community_specialist", default_limit=2),
 }
 
 
