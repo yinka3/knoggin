@@ -129,8 +129,6 @@ class ConfigManager:
                 logger.error(f"{message}; keeping the active configuration")
                 return False
             except Exception as exc:
-                if isinstance(exc, ConfigurationLoadError):
-                    raise
                 message = f"Configuration load failed for {self.config_file}: {exc}"
                 if require_valid:
                     raise ConfigurationLoadError(message) from exc

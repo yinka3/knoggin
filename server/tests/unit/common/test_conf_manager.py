@@ -92,6 +92,7 @@ def test_config_writes_do_not_follow_the_process_working_directory(
     assert manager.resolve_path("data/projects") == (
         mock_config_paths["dir"] / "data" / "projects"
     ).resolve()
+    assert manager.resolve_path(tmp_path / "absolute") == (tmp_path / "absolute")
 
 
 @pytest.mark.unit
@@ -179,6 +180,66 @@ def test_invalid_existing_config_prevents_initialization(tmp_path, reset_config_
         ConfigManager.initialize(tmp_path)
 
     assert ConfigManager._instance is None
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_malformed_yaml_reload_preserves_active_config(mock_config_paths):
+    manager = mock_config_paths["manager"]
+    previous = manager.config
+    mock_config_paths["yaml"].write_text("llm: [", encoding="utf-8")
+
+    assert manager.load() is False
+    assert manager.config is previous
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_malformed_yaml_prevents_initialization(tmp_path, reset_config_manager):
+    (tmp_path / "knoggin.yml").write_text("llm: [", encoding="utf-8")
+
+    with pytest.raises(ConfigurationLoadError, match="Failed to load"):
+        ConfigManager.initialize(tmp_path)
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_runtime_validation_failure_is_reported_for_reload_and_startup(
+    mock_config_paths, reset_config_manager, monkeypatch
+):
+    manager = mock_config_paths["manager"]
+    previous = manager.config
+
+    def fail_validation(_config):
+        raise RuntimeError("registry failed")
+
+    monkeypatch.setattr(
+        ConfigManager,
+        "_validate_runtime_config",
+        staticmethod(fail_validation),
+    )
+
+    assert manager.load() is False
+    assert manager.config is previous
+
+    ConfigManager._instance = None
+    with pytest.raises(ConfigurationLoadError, match="registry failed"):
+        ConfigManager.initialize(mock_config_paths["dir"])
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+def test_failed_atomic_replace_removes_temporary_file(mock_config_paths, monkeypatch):
+    manager = mock_config_paths["manager"]
+    existing_files = set(mock_config_paths["dir"].iterdir())
+
+    def fail_replace(_self, _target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(type(mock_config_paths["yaml"]), "replace", fail_replace)
+
+    assert manager.save() is False
+    assert set(mock_config_paths["dir"].iterdir()) == existing_files
 
 
 @pytest.mark.unit
