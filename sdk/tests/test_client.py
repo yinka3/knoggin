@@ -7,6 +7,7 @@ from knoggin import (
 )
 from knoggin import client as client_module
 
+from common.schema.document import FolderScanSettings
 from common.schema.health import HealthActivity, HealthSnapshot
 
 
@@ -64,6 +65,36 @@ class _FakeDocumentService:
             "relative_path": "notes/project.md",
         }
 
+    async def list_documents(self, *, limit):
+        self.calls.append(("list_documents", limit))
+        return [{"document_id": "document-1"}]
+
+    async def list_saved_web_links(self, *, limit):
+        self.calls.append(("list_saved_web_links", limit))
+        return [{"link_id": "link-1"}]
+
+    async def get_scan_settings(self):
+        self.calls.append(("get_scan_settings",))
+        return FolderScanSettings(blocked_extensions={".log"})
+
+
+class _FakeProject:
+    def __init__(self, document_service):
+        self.document_service = document_service
+
+
+class _FakeProjects:
+    def __init__(self, document_service):
+        self.document_service = document_service
+        self.calls = []
+
+    async def acquire_project_for_session(self, project_id, lease_id):
+        self.calls.append(("acquire", project_id, lease_id))
+        return _FakeProject(self.document_service)
+
+    async def release_project_for_session(self, project_id, lease_id):
+        self.calls.append(("release", project_id, lease_id))
+
 
 class _FakeSessions:
     def __init__(self, session):
@@ -78,6 +109,7 @@ class _FakeRuntime:
         self.sessions = _FakeSessions(session)
         self.sessions.user_name = "ada"
         self.health_service = self._HealthService()
+        self.projects = _FakeProjects(_FakeDocumentService())
         self.shutdown_called = False
 
     class _HealthService:
@@ -109,6 +141,36 @@ async def test_sdk_exposes_all_health_drilldowns():
     assert (await knoggin.get_resource_health(project_id="project-1"))["activity"] == "busy"
     assert (await knoggin.get_ingestion_health(project_id="project-1"))["summary"] == "Ingestion healthy"
     assert (await knoggin.get_background_health(project_id="project-1"))["summary"] == "Background healthy"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_sdk_exposes_project_document_management_under_a_runtime_lease():
+    runtime = _FakeRuntime(_FakeSession())
+    knoggin = Knoggin(runtime)
+
+    assert await knoggin.list_documents(project_id="project-1", limit=3) == [
+        {"document_id": "document-1"}
+    ]
+    assert await knoggin.list_saved_web_links(project_id="project-1") == [
+        {"link_id": "link-1"}
+    ]
+    assert (await knoggin.get_document_scan_settings(project_id="project-1"))[
+        "blocked_extensions"
+    ] == [".log"]
+
+    assert [call[0] for call in runtime.projects.calls] == [
+        "acquire",
+        "release",
+        "acquire",
+        "release",
+        "acquire",
+        "release",
+    ]
+    for acquire, release in zip(
+        runtime.projects.calls[::2], runtime.projects.calls[1::2], strict=True
+    ):
+        assert acquire[1:] == release[1:]
 
 
 @pytest.mark.unit

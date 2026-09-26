@@ -49,6 +49,10 @@ class FakeDocumentService:
             },
         }
 
+    async def list_documents(self, *, limit):
+        self.calls.append(("list", {"limit": limit}))
+        return [{"document_id": "document-1"}]
+
 
 class FakeSession:
     user_name = "ada"
@@ -116,6 +120,14 @@ class FakeProjects:
     def __init__(self):
         self.calls = []
         self.maintenance_service = self
+        self.document_service = FakeDocumentService()
+
+    async def acquire_project_for_session(self, project_id, session_id):
+        self.calls.append(("acquire", project_id, session_id))
+        return SimpleNamespace(document_service=self.document_service)
+
+    async def release_project_for_session(self, project_id, session_id):
+        self.calls.append(("release", project_id, session_id))
 
     @staticmethod
     def _review(*, scope="user-global", project_id=None, status="open"):
@@ -319,6 +331,21 @@ async def test_runtime_port_exposes_typed_scoped_health(port):
     assert resources.activity is HealthActivity.BUSY
     assert ingestion.summary == "Ingestion healthy"
     assert background.summary == "Background healthy"
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_runtime_port_scopes_document_calls_to_a_short_project_lease(port):
+    application, runtime, _session = port
+
+    assert await application.list_documents(
+        user_name="ada", project_id="project-1", limit=3
+    ) == [{"document_id": "document-1"}]
+
+    acquire, release = runtime.projects.calls[-2:]
+    assert acquire[0] == "acquire"
+    assert release[0] == "release"
+    assert acquire[1:] == release[1:]
     with pytest.raises(NotFoundError):
         await application.get_resource_health(user_name="ada", project_id="missing")
 

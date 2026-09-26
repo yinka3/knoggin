@@ -34,6 +34,7 @@ from common.exceptions import (
     ToolExecutionError,
     WorkspaceConflictError,
 )
+from common.schema.document import FolderScanSettings
 from common.schema.health import HealthSnapshot
 from common.schema.public import (
     ArtifactListResponse,
@@ -58,6 +59,8 @@ from common.schema.public import (
     RunResult,
     SetDocumentFocusRequest,
     StartRunRequest,
+    UpdateSavedWebLinkRequest,
+    UploadDocumentRequest,
     to_public_error,
     validate_public_stream_event,
 )
@@ -129,6 +132,19 @@ class ApplicationPort(Protocol):
         project_id: str,
         request: PromoteSourceRequest,
     ) -> Any: ...
+
+    async def list_documents(self, **kwargs: Any) -> Any: ...
+    async def get_document(self, **kwargs: Any) -> Any: ...
+    async def read_document(self, **kwargs: Any) -> Any: ...
+    async def upload_document(self, **kwargs: Any) -> Any: ...
+    async def reindex_document(self, **kwargs: Any) -> Any: ...
+    async def delete_document(self, **kwargs: Any) -> Any: ...
+    async def list_saved_web_links(self, **kwargs: Any) -> Any: ...
+    async def update_saved_web_link(self, **kwargs: Any) -> Any: ...
+    async def delete_saved_web_link(self, **kwargs: Any) -> Any: ...
+    async def get_document_scan_settings(self, **kwargs: Any) -> Any: ...
+    async def set_document_scan_settings(self, **kwargs: Any) -> Any: ...
+    async def reset_document_scan_settings(self, **kwargs: Any) -> Any: ...
 
     async def run_stream(
         self,
@@ -736,6 +752,98 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             project_id=project_id,
             request=body,
         )
+
+    @app.get("/v1/projects/{project_id}/documents")
+    async def list_documents(
+        project_id: str,
+        limit: int = Query(default=100, ge=1, le=100),
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.list_documents, user_name=user_name, project_id=project_id, limit=limit)
+
+    @app.post("/v1/projects/{project_id}/documents", status_code=201)
+    async def upload_document(
+        project_id: str, body: UploadDocumentRequest,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.upload_document, user_name=user_name, project_id=project_id, request=body)
+
+    @app.get("/v1/projects/{project_id}/documents/{document_id}")
+    async def get_document(
+        project_id: str, document_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.get_document, user_name=user_name, project_id=project_id, document_id=document_id)
+
+    @app.get("/v1/projects/{project_id}/documents/{document_id}/content")
+    async def read_document(
+        project_id: str, document_id: str,
+        start_line: int = Query(default=1, ge=1),
+        end_line: int | None = Query(default=None, ge=1),
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(
+            port.read_document, user_name=user_name, project_id=project_id,
+            document_id=document_id, start_line=start_line, end_line=end_line,
+        )
+
+    @app.post("/v1/projects/{project_id}/documents/{document_id}/reindex")
+    async def reindex_document(
+        project_id: str, document_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.reindex_document, user_name=user_name, project_id=project_id, document_id=document_id)
+
+    @app.delete("/v1/projects/{project_id}/documents/{document_id}")
+    async def delete_document(
+        project_id: str, document_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.delete_document, user_name=user_name, project_id=project_id, document_id=document_id)
+
+    @app.get("/v1/projects/{project_id}/saved-web-links")
+    async def list_saved_web_links(
+        project_id: str,
+        limit: int = Query(default=50, ge=1, le=100),
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.list_saved_web_links, user_name=user_name, project_id=project_id, limit=limit)
+
+    @app.patch("/v1/projects/{project_id}/saved-web-links/{link_id}")
+    async def update_saved_web_link(
+        project_id: str, link_id: str, body: UpdateSavedWebLinkRequest,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(
+            port.update_saved_web_link, user_name=user_name, project_id=project_id,
+            link_id=link_id, request=body,
+        )
+
+    @app.delete("/v1/projects/{project_id}/saved-web-links/{link_id}")
+    async def delete_saved_web_link(
+        project_id: str, link_id: str,
+        user_name: str = Depends(current_user),
+    ):
+        return await _call(port.delete_saved_web_link, user_name=user_name, project_id=project_id, link_id=link_id)
+
+    @app.get("/v1/projects/{project_id}/document-scan-settings", response_model=FolderScanSettings)
+    async def get_document_scan_settings(
+        project_id: str, user_name: str = Depends(current_user),
+    ) -> FolderScanSettings:
+        return await _call(port.get_document_scan_settings, user_name=user_name, project_id=project_id)
+
+    @app.put("/v1/projects/{project_id}/document-scan-settings", response_model=FolderScanSettings)
+    async def set_document_scan_settings(
+        project_id: str, body: FolderScanSettings,
+        user_name: str = Depends(current_user),
+    ) -> FolderScanSettings:
+        return await _call(port.set_document_scan_settings, user_name=user_name, project_id=project_id, settings=body)
+
+    @app.delete("/v1/projects/{project_id}/document-scan-settings", response_model=FolderScanSettings)
+    async def reset_document_scan_settings(
+        project_id: str, user_name: str = Depends(current_user),
+    ) -> FolderScanSettings:
+        return await _call(port.reset_document_scan_settings, user_name=user_name, project_id=project_id)
 
     @app.get(
         "/v1/maintenance/reviews",

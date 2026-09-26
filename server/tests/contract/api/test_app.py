@@ -18,6 +18,7 @@ from common.schema.artifacts import (
     artifact_content_hash,
     render_artifact_markdown,
 )
+from common.schema.document import FolderScanSettings
 from common.schema.health import HealthActivity, HealthSnapshot
 from common.schema.public import (
     CreateProjectRequest,
@@ -137,6 +138,18 @@ class FakeApplication:
     async def clear_document_focus(self, *, user_name, session_id):
         self.calls.append(("document_focus_clear", user_name, session_id))
         self.document_focus = None
+
+    async def list_documents(self, *, user_name, project_id, limit):
+        self.calls.append(("documents", user_name, project_id, limit))
+        return [{"document_id": "document-1", "status": "indexed"}]
+
+    async def list_saved_web_links(self, *, user_name, project_id, limit):
+        self.calls.append(("saved_links", user_name, project_id, limit))
+        return [{"link_id": "link-1", "url": "https://example.com"}]
+
+    async def get_document_scan_settings(self, *, user_name, project_id):
+        self.calls.append(("scan_settings", user_name, project_id))
+        return FolderScanSettings(blocked_extensions={".log"})
 
     async def run_stream(self, *, user_name, request: StartRunRequest):
         self.calls.append(("run", user_name, request))
@@ -435,6 +448,34 @@ async def test_document_focus_routes_keep_selection_request_only():
         "document_focus_set",
         "document_focus_clear",
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_document_management_routes_delegate_to_the_project_port():
+    port = FakeApplication()
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        documents = await client.get(
+            "/v1/projects/project-1/documents?limit=3",
+            headers={"X-User-Name": "ada"},
+        )
+        links = await client.get(
+            "/v1/projects/project-1/saved-web-links",
+            headers={"X-User-Name": "ada"},
+        )
+        settings = await client.get(
+            "/v1/projects/project-1/document-scan-settings",
+            headers={"X-User-Name": "ada"},
+        )
+
+    assert documents.status_code == 200
+    assert documents.json()[0]["document_id"] == "document-1"
+    assert links.status_code == 200
+    assert links.json()[0]["link_id"] == "link-1"
+    assert settings.status_code == 200
+    assert settings.json()["blocked_extensions"] == [".log"]
 
 
 @pytest.mark.unit

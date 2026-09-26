@@ -32,7 +32,7 @@ from common.exceptions import (
 )
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
-from common.schema.document import DocumentSelection
+from common.schema.document import DocumentSelection, FolderScanSettings
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from common.schema.maintenance import MaintenanceImpactPreview
 from common.schema.source.references import SourceConsulted
@@ -201,6 +201,23 @@ class PromoteSourceRequest(PublicModel):
     source_ref_id: str = Field(min_length=1)
     title: str | None = Field(default=None, max_length=512)
     summary: str | None = Field(default=None, max_length=4000)
+
+
+class UploadDocumentRequest(PublicModel):
+    """Upload one document using base64-encoded source bytes."""
+
+    original_name: str = Field(min_length=1, max_length=512)
+    content_base64: str = Field(min_length=1)
+    relative_path: str | None = Field(default=None, min_length=1, max_length=2048)
+
+
+class UpdateSavedWebLinkRequest(PublicModel):
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+
+
+class ScanSettingsResponse(PublicModel):
+    settings: FolderScanSettings
 
 
 class MaintenanceReviewResponse(PublicModel):

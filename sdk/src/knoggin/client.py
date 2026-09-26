@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
+from uuid import uuid4
 
 from common.schema.document import DocumentFocus as EngineDocumentFocus
-from common.schema.document import create_document_focus
+from common.schema.document import FolderScanSettings, create_document_focus
 from common.schema.primitives import Message
 from common.utils.time_utils import get_now_iso
 from runtime.application import ApplicationRuntime
@@ -20,6 +22,8 @@ from .contracts import (
     SessionHandle,
     Turn,
 )
+
+_UNSET = object()
 
 
 class Knoggin:
@@ -104,6 +108,110 @@ class Knoggin:
             project_id=session.project_id,
             model=session.model,
         )
+
+    @asynccontextmanager
+    async def _project_documents(self, project_id: str):
+        lease_id = f"sdk-documents:{uuid4()}"
+        project = await self.runtime.projects.acquire_project_for_session(
+            project_id,
+            lease_id,
+        )
+        try:
+            yield project.document_service
+        finally:
+            await self.runtime.projects.release_project_for_session(project_id, lease_id)
+
+    async def list_documents(self, *, project_id: str, limit: int = 100):
+        async with self._project_documents(project_id) as documents:
+            return await documents.list_documents(limit=limit)
+
+    async def get_document(self, *, project_id: str, document_id: str):
+        async with self._project_documents(project_id) as documents:
+            return await documents.get_document_info(document_id=document_id)
+
+    async def read_document(
+        self,
+        *,
+        project_id: str,
+        document_id: str,
+        start_line: int = 1,
+        end_line: int | None = None,
+    ):
+        async with self._project_documents(project_id) as documents:
+            return await documents.read_document(
+                document_id=document_id,
+                start_line=start_line,
+                end_line=end_line,
+            )
+
+    async def upload_document(
+        self,
+        *,
+        project_id: str,
+        content: bytes,
+        original_name: str,
+        relative_path: str | None = None,
+    ):
+        async with self._project_documents(project_id) as documents:
+            return await documents.submit_document(
+                content=content,
+                original_name=original_name,
+                relative_path=relative_path,
+            )
+
+    async def reindex_document(self, *, project_id: str, document_id: str):
+        async with self._project_documents(project_id) as documents:
+            return await documents.reindex_document(document_id=document_id)
+
+    async def delete_document(self, *, project_id: str, document_id: str):
+        async with self._project_documents(project_id) as documents:
+            return await documents.delete_document(document_id=document_id)
+
+    async def list_saved_web_links(self, *, project_id: str, limit: int = 50):
+        async with self._project_documents(project_id) as documents:
+            return await documents.list_saved_web_links(limit=limit)
+
+    async def update_saved_web_link(
+        self,
+        *,
+        project_id: str,
+        link_id: str,
+        title: str | None | object = _UNSET,
+        summary: str | None | object = _UNSET,
+    ):
+        updates = {}
+        if title is not _UNSET:
+            updates["title"] = title
+        if summary is not _UNSET:
+            updates["summary"] = summary
+        async with self._project_documents(project_id) as documents:
+            return await documents.update_saved_web_link(
+                link_id=link_id,
+                **updates,
+            )
+
+    async def delete_saved_web_link(self, *, project_id: str, link_id: str):
+        async with self._project_documents(project_id) as documents:
+            return await documents.delete_saved_web_link(link_id=link_id)
+
+    async def get_document_scan_settings(self, *, project_id: str):
+        async with self._project_documents(project_id) as documents:
+            return (await documents.get_scan_settings()).model_dump(mode="json")
+
+    async def set_document_scan_settings(
+        self,
+        *,
+        project_id: str,
+        settings: FolderScanSettings | dict[str, Any],
+    ):
+        async with self._project_documents(project_id) as documents:
+            saved = await documents.save_scan_settings(settings)
+            return saved.model_dump(mode="json")
+
+    async def reset_document_scan_settings(self, *, project_id: str):
+        async with self._project_documents(project_id) as documents:
+            settings = await documents.reset_scan_settings()
+            return settings.model_dump(mode="json")
 
     async def open_turn_stream(
         self,

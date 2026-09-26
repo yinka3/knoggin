@@ -8,14 +8,20 @@ internal agent event stream back into the versioned public stream contract.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from common.conf.domain_config import DomainConfig
 from common.exceptions import NotFoundError
-from common.schema.document import DocumentSelection, create_document_focus
+from common.schema.document import (
+    DocumentSelection,
+    FolderScanSettings,
+    create_document_focus,
+)
 from common.schema.health import HealthSnapshot
 from common.schema.primitives import Message
 from common.schema.public import (
@@ -42,6 +48,8 @@ from common.schema.public import (
     StartRunRequest,
     ToolCompletedEvent,
     ToolStartedEvent,
+    UpdateSavedWebLinkRequest,
+    UploadDocumentRequest,
     Usage,
     UsageUpdatedEvent,
 )
@@ -254,6 +262,93 @@ class ApplicationRuntimePort:
             title=request.title,
             summary=request.summary,
         )
+
+    @asynccontextmanager
+    async def _project_documents(self, *, user_name: str, project_id: str):
+        self._require_user(user_name)
+        lease_id = f"api-documents:{uuid4()}"
+        try:
+            project = await self.runtime.projects.acquire_project_for_session(
+                project_id,
+                lease_id,
+            )
+        except ValueError as exc:
+            raise NotFoundError("project") from exc
+        try:
+            yield project.document_service
+        finally:
+            await self.runtime.projects.release_project_for_session(project_id, lease_id)
+
+    async def list_documents(self, *, user_name: str, project_id: str, limit: int = 100):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.list_documents(limit=limit)
+
+    async def get_document(self, *, user_name: str, project_id: str, document_id: str):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.get_document_info(document_id=document_id)
+
+    async def read_document(
+        self, *, user_name: str, project_id: str, document_id: str,
+        start_line: int = 1, end_line: int | None = None,
+    ):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.read_document(
+                document_id=document_id, start_line=start_line, end_line=end_line
+            )
+
+    async def upload_document(
+        self, *, user_name: str, project_id: str, request: UploadDocumentRequest,
+    ):
+        try:
+            content = base64.b64decode(request.content_base64, validate=True)
+        except ValueError as exc:
+            raise ValueError("content_base64 must be valid base64") from exc
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.submit_document(
+                content=content,
+                original_name=request.original_name,
+                relative_path=request.relative_path,
+            )
+
+    async def reindex_document(self, *, user_name: str, project_id: str, document_id: str):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.reindex_document(document_id=document_id)
+
+    async def delete_document(self, *, user_name: str, project_id: str, document_id: str):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.delete_document(document_id=document_id)
+
+    async def list_saved_web_links(self, *, user_name: str, project_id: str, limit: int = 50):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.list_saved_web_links(limit=limit)
+
+    async def update_saved_web_link(
+        self, *, user_name: str, project_id: str, link_id: str,
+        request: UpdateSavedWebLinkRequest,
+    ):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.update_saved_web_link(
+                link_id=link_id,
+                **request.model_dump(exclude_unset=True),
+            )
+
+    async def delete_saved_web_link(self, *, user_name: str, project_id: str, link_id: str):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.delete_saved_web_link(link_id=link_id)
+
+    async def get_document_scan_settings(self, *, user_name: str, project_id: str):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.get_scan_settings()
+
+    async def set_document_scan_settings(
+        self, *, user_name: str, project_id: str, settings: FolderScanSettings,
+    ):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.save_scan_settings(settings)
+
+    async def reset_document_scan_settings(self, *, user_name: str, project_id: str):
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            return await service.reset_scan_settings()
 
     @staticmethod
     def _maintenance_review_response(review: Any) -> MaintenanceReviewResponse:

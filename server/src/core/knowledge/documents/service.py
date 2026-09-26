@@ -1239,21 +1239,6 @@ class DocumentService:
             summary=validated.summary,
         )
 
-    async def admit_user_sources(
-        self,
-        sources: Iterable[UserAttachedSource | Dict[str, Any]],
-        *,
-        durable: bool = True,
-    ) -> list[Dict[str, Any]]:
-        """Admit a bounded batch of user sources with one explicit policy."""
-        values = list(sources)
-        if len(values) > 100:
-            raise ValueError("at most 100 user sources may be admitted at once")
-        return [
-            await self.admit_user_source(source, durable=durable)
-            for source in values
-        ]
-
     async def schedule_document_index(
         self,
         *,
