@@ -265,6 +265,23 @@ def test_agent_run_distinguishes_grounded_evidence_from_actions_and_validates_in
 
 
 @pytest.mark.no_network
+def test_agent_run_deduplicates_identical_source_candidates():
+    candidate = build_pasted_text_candidates(
+        project_id="project-1",
+        session_id="session-1",
+        source_message_id=1,
+        message_content="Use this:\n```text\nSource-backed detail.\n```",
+        agent_run_id="run-2",
+    )[0]
+    run = make_run(run_id="run-2", initial_source_candidates=[candidate])
+
+    run.record_source(candidate)
+    run.record_sources([candidate])
+
+    assert run.source_candidates == [candidate]
+
+
+@pytest.mark.no_network
 def test_agent_run_requires_read_content_after_document_or_web_discovery():
     run = make_run()
 

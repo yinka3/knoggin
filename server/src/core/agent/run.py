@@ -706,11 +706,13 @@ class AgentRun:
 
     def record_source(self, candidate: SourceReferenceCandidate) -> None:
         self._require_active()
-        self.source_candidates.append(candidate)
+        if candidate not in self.source_candidates:
+            self.source_candidates.append(candidate)
 
     def record_sources(self, candidates: List[SourceReferenceCandidate]) -> None:
         self._require_active()
-        self.source_candidates.extend(candidates)
+        for candidate in candidates:
+            self.record_source(candidate)
 
     def accumulate_tool_result(
         self, tool_name: str, result: Dict

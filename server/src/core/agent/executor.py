@@ -1007,10 +1007,9 @@ class AgentExecutor:
                     }
                     continue
 
-                if admission.changed:
-                    self.ctx.record_sources(
-                        capture_tool_source_candidates(self.ctx, call, result)
-                    )
+                self.ctx.record_sources(
+                    capture_tool_source_candidates(self.ctx, call, result)
+                )
                 summary, _ = summarize_result(call.name, result)
                 model_result = localize_agent_tool_result(self.ctx, call.name, result)
                 self.ctx.record_tool_success()
@@ -1116,10 +1115,9 @@ class AgentExecutor:
                     },
                 }
                 continue
-            if admission.changed:
-                self.ctx.record_sources(
-                    capture_tool_source_candidates(self.ctx, call, outcome)
-                )
+            self.ctx.record_sources(
+                capture_tool_source_candidates(self.ctx, call, outcome)
+            )
             summary, _ = summarize_result(call.name, outcome)
             model_result = localize_agent_tool_result(
                 self.ctx, call.name, outcome

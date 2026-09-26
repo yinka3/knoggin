@@ -989,6 +989,59 @@ async def test_capacity_rejection_records_no_sources_and_allows_a_narrow_retry(
 
 
 @pytest.mark.no_network
+async def test_accepted_unchanged_result_still_records_the_source_consultation(
+    monkeypatch,
+):
+    run = make_run(limits=AgentRunLimits(max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+    result = {
+        "data": [
+            {
+                "title": "Report",
+                "url": "https://example.test/report",
+                "content": "Stable report text.",
+                "source_context": {
+                    "source_kind": "web_page",
+                    "canonical_url": "https://example.test/report",
+                    "content_hash": "d" * 64,
+                    "locator": {
+                        "kind": "text_lines",
+                        "start_line": 1,
+                        "end_line": 1,
+                    },
+                    "excerpt": "Stable report text.",
+                    "metadata": {"title": "Report"},
+                },
+            }
+        ]
+    }
+
+    async def same_source(*_args):
+        return result
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", same_source)
+    for call in (
+        ToolCall(
+            "read_web_page",
+            {"url": "https://example.test/report", "query": "launch"},
+            call_id="read-1",
+        ),
+        ToolCall(
+            "read_web_page",
+            {"url": "https://example.test/report", "query": "timeline"},
+            call_id="read-2",
+        ),
+    ):
+        _ = [event async for event in executor._execute_tools([call], [])]
+
+    assert len(run.notebook.section_items("web_reads")) == 1
+    assert [candidate.tool_call_id for candidate in run.source_candidates] == [
+        "read-1",
+        "read-2",
+    ]
+
+
+@pytest.mark.no_network
 async def test_executor_automatically_replans_after_empty_evidence(monkeypatch):
     llm = ScriptedLLM(
         [
