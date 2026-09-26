@@ -307,6 +307,81 @@ class DocumentService:
             "excluded": preview.summary.excluded_count + len(reserved_paths),
         }
 
+    async def _reconcile_owned_file_changes(
+        self,
+        *,
+        upserts: Dict[str, bytes],
+        removed_paths: Iterable[str] = (),
+    ) -> None:
+        """Update catalog rows for filesystem mutations already made by Knoggin."""
+        normalized_removed = {
+            normalize_relative_path(path, path) for path in removed_paths
+        }
+        settings = await self.get_scan_settings()
+        entries = [
+            FolderUploadEntry(relative_path=path, content=content)
+            for path, content in upserts.items()
+        ]
+        preview = await self.preview_folder(
+            folder_name=self.project_id,
+            entries=entries,
+            settings=settings,
+        )
+        included = {entry.relative_path: entry for entry in preview.included}
+        affected_paths = [*upserts, *normalized_removed]
+        current_rows = await self._reader.fetch_project_documents_for_paths(
+            relative_paths=affected_paths,
+        )
+        current = {row["relative_path"]: row for row in current_rows}
+        created_rows: list[Dict[str, Any]] = []
+        changed_rows: list[Dict[str, Any]] = []
+        deleted_document_ids: list[str] = []
+
+        for relative_path in upserts:
+            existing = current.get(relative_path)
+            preview_entry = included.get(relative_path)
+            if preview_entry is None:
+                if existing is not None:
+                    deleted_document_ids.append(str(existing["document_id"]))
+                continue
+            if existing is None:
+                created_rows.append(
+                    {
+                        "document_id": str(uuid.uuid4()),
+                        "original_name": preview_entry.original_name,
+                        "relative_path": relative_path,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
+                )
+            elif existing["content_hash"] != preview_entry.content_hash:
+                changed_rows.append(
+                    {
+                        "document_id": str(existing["document_id"]),
+                        "original_name": preview_entry.original_name,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
+                )
+
+        for relative_path in normalized_removed:
+            existing = current.get(relative_path)
+            if existing is not None:
+                deleted_document_ids.append(str(existing["document_id"]))
+
+        await self._writer.apply_filesystem_reconciliation(
+            created=created_rows,
+            changed=changed_rows,
+            deleted_document_ids=list(dict.fromkeys(deleted_document_ids)),
+            updated_at=get_now_iso(),
+        )
+        for relative_path in {*upserts, *normalized_removed}:
+            self._reconciliation_fingerprints.pop(relative_path, None)
+        if created_rows or changed_rows or deleted_document_ids:
+            self._indexer.wake_pending_indexes()
+
     async def list_project_files(
         self,
         *,
@@ -421,13 +496,13 @@ class DocumentService:
             return None
 
     async def create_project_file(self, path: str, content: str) -> Dict:
-        """Create a text project file and reconcile it into the document catalog."""
+        """Create a text project file and update its document catalog row."""
         payload = self._validate_project_file_content(path, content)
         filesystem = self._require_filesystem()
         normalized_path = normalize_relative_path(path, path)
         self._require_unreserved_context_path(normalized_path)
         await self._run_blocking(filesystem.write_bytes, normalized_path, payload)
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
         return await self.read_project_file(normalized_path)
 
     async def update_project_file(
@@ -449,7 +524,7 @@ class DocumentService:
             overwrite=True,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
         return await self.read_project_file(normalized_path)
 
     async def append_project_file(
@@ -475,7 +550,7 @@ class DocumentService:
             overwrite=True,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(upserts={normalized_path: payload})
         return await self.read_project_file(normalized_path)
 
     async def move_project_file(
@@ -498,7 +573,14 @@ class DocumentService:
             destination,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        moved_content = await self._run_blocking(
+            filesystem.read_bytes,
+            destination,
+        )
+        await self._reconcile_owned_file_changes(
+            upserts={destination: moved_content},
+            removed_paths=(source,),
+        )
         return await self.read_project_file(destination)
 
     async def delete_project_file(
@@ -516,7 +598,7 @@ class DocumentService:
             normalized_path,
             expected_content_hash=expected_content_hash,
         )
-        await self.reconcile_project_files()
+        await self._reconcile_owned_file_changes(removed_paths=(normalized_path,), upserts={})
         return {
             "relative_path": deleted.relative_path,
             "content_hash": deleted.content_hash,

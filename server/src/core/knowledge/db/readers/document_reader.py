@@ -155,6 +155,40 @@ class DocumentReader:
             (selector_value, *self._document_visibility_params()),
         )
 
+    async def fetch_project_documents_for_paths(
+        self,
+        *,
+        relative_paths: Iterable[str],
+    ) -> List[Dict]:
+        """Return live active-project rows for an exact bounded path set."""
+        paths = list(dict.fromkeys(relative_paths))
+        if not paths:
+            return []
+        return await self._client.fetch_all(
+            """
+            SELECT
+                pd.document_id,
+                pd.project_id,
+                pd.original_name,
+                pd.relative_path,
+                pd.extension,
+                pd.size_bytes,
+                pd.content_hash,
+                pd.current_snapshot_id,
+                pd.status,
+                pd.created_at,
+                pd.updated_at,
+                pd.indexed_at,
+                pd.error_message
+            FROM public.project_documents AS pd
+            WHERE pd.project_id = %s
+              AND pd.relative_path = ANY(%s)
+              AND pd.status <> 'deleted'
+            ORDER BY pd.relative_path ASC
+            """,
+            (self._project_id, paths),
+        )
+
     async def fetch_current_parse_snapshot(
         self,
         *,

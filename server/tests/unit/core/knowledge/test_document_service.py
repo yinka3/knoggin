@@ -114,6 +114,18 @@ class MemoryPostgres:
 
     async def fetch_all(self, query, params=None):
         self.calls.append(("fetch_all", query, params))
+        if "pd.relative_path = ANY(%s)" in query:
+            project_id, relative_paths = params
+            return [
+                deepcopy(row)
+                for row in sorted(
+                    self.rows,
+                    key=lambda row: (row["relative_path"], row["document_id"]),
+                )
+                if row["project_id"] == project_id
+                and row["relative_path"] in relative_paths
+                and row["status"] != "deleted"
+            ]
         if (
             "FROM public.project_documents AS pd" in query
             and "ORDER BY pd.relative_path ASC" in query
@@ -1269,6 +1281,50 @@ async def test_native_project_file_operations_reconcile_the_document_catalog(
         row["relative_path"] == "notes/draft.md" and row["status"] == "deleted"
         for row in postgres.rows
     )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_native_project_file_mutations_do_not_scan_the_project_tree(
+    document_harness,
+    monkeypatch,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+
+    def reject_full_scan(*_args, **_kwargs):
+        raise AssertionError("workspace mutation must not scan the project tree")
+
+    monkeypatch.setattr(type(filesystem), "iter_paths", reject_full_scan)
+
+    created = await service.create_project_file("notes.md", "one")
+    updated = await service.update_project_file(
+        "notes.md",
+        "two",
+        expected_content_hash=created["content_hash"],
+    )
+    appended = await service.append_project_file(
+        "notes.md",
+        " three",
+        expected_content_hash=updated["content_hash"],
+    )
+    await service.move_project_file(
+        "notes.md",
+        "archive.md",
+        expected_content_hash=appended["content_hash"],
+    )
+    archived = next(
+        row
+        for row in postgres.rows
+        if row["relative_path"] == "archive.md" and row["status"] != "deleted"
+    )
+    await service.delete_project_file(
+        "archive.md",
+        expected_content_hash=hashlib.sha256(b"two three").hexdigest(),
+    )
+
+    assert archived["status"] == "deleted"
 
 
 @pytest.mark.storage
