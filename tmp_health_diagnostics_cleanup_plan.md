@@ -204,6 +204,19 @@ internal scheduler field.
   mode.
 - Document synchronous snapshot methods as cheap, read-only operations.
 
+#### Unit 4 result
+
+- Unloaded project runtimes now report an explicit degraded status instead of
+  claiming a missing semantic job is a failed engine component.
+- Ingestion details state whether the project runtime is loaded while durable
+  project aggregates remain readable and bounded.
+- Assisted conflict discovery affects background status only when it is both
+  configured and expected to run. Manual or intentionally disabled discovery
+  remains informational.
+- Component `snapshot_for_health` methods are required to be synchronous,
+  non-blocking, side-effect-free memory views. Accidentally async snapshots are
+  rejected as unavailable rather than awaited inside Health.
+
 ### Unit 5: Tool failure and redaction contract
 
 - Keep degraded health as successful structured tool data.

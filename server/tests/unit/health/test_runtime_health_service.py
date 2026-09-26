@@ -151,6 +151,7 @@ class FakeConflictDiscoveryJob:
         self.calls += 1
         return {
             "mode": "assisted",
+            "configured_enabled": True,
             "scheduler_enabled": True,
             "interval_hours": 48,
             "llm_available": True,
@@ -545,6 +546,7 @@ async def test_background_health_combines_scheduler_queue_and_document_indexing(
     assert payload["details"]["background_work"]["queued_for_project"] == 1
     assert payload["details"]["conflict_discovery"] == {
         "mode": "assisted",
+        "configured_enabled": True,
         "scheduler_enabled": True,
         "interval_hours": 48,
         "llm_available": True,
@@ -604,3 +606,84 @@ async def test_background_health_does_not_claim_a_stopped_scheduler_is_healthy()
     assert payload["status"] == "degraded"
     assert payload["activity"] == "idle"
     assert "background scheduler is stopped" in payload["warnings"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_unloaded_project_health_is_explicitly_degraded_not_failed():
+    resource_set = resources()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(active_projects={}),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    ingestion = (
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
+    ).model_dump(mode="json")
+    background = (
+        await service.get_background_health(project_id="project-a")
+    ).model_dump(mode="json")
+
+    assert ingestion["status"] == "degraded"
+    assert ingestion["summary"] == "Project runtime is not loaded"
+    assert ingestion["details"]["semantic_processor"]["runtime_loaded"] is False
+    assert background["status"] == "degraded"
+    assert background["summary"] == "Project runtime is not loaded"
+    assert background["details"]["project_runtime"]["loaded"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_expected_assisted_conflict_discovery_affects_background_health():
+    class UnavailableConflictDiscovery:
+        def snapshot_for_health(self):
+            return {
+                "mode": "assisted",
+                "configured_enabled": True,
+                "scheduler_enabled": False,
+                "llm_available": False,
+                "last_run": None,
+            }
+
+    project = SimpleNamespace(
+        scheduler=FakeScheduler({"state": "running"}),
+        document_service=FakeDocumentService(pending=0),
+        conflict_discovery_job=UnavailableConflictDiscovery(),
+    )
+    service = RuntimeHealthService(
+        resources=resources(),
+        projects=SimpleNamespace(active_projects={"project-a": project}),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (await service.get_background_health(project_id="project-a")).model_dump(
+        mode="json"
+    )
+
+    assert payload["status"] == "degraded"
+    assert payload["summary"] == "Assisted conflict discovery is unavailable"
+    assert "assisted conflict discovery is unavailable" in payload["warnings"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_component_health_snapshots_must_be_synchronous_and_non_blocking():
+    class AsyncSnapshot:
+        async def snapshot_for_health(self, **_kwargs):
+            return {"foreground_concurrency": 1}
+
+    resource_set = resources()
+    resource_set.model_work = AsyncSnapshot()
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(active_projects={}),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (await service.get_resource_health(project_id="project-a")).model_dump(
+        mode="json"
+    )
+
+    assert payload["status"] == "degraded"
+    assert any("synchronous snapshot" in warning for warning in payload["warnings"])

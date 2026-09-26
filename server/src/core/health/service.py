@@ -249,6 +249,7 @@ class RuntimeHealthService:
 
         warnings: list[str] = []
         project = self._project_state(project_id)
+        project_runtime_loaded = project is not None
         semantic_processor = getattr(project, "project_semantic_processor", None)
         scheduler_snapshot = self._component_snapshot(
             getattr(project, "scheduler", None),
@@ -304,8 +305,11 @@ class RuntimeHealthService:
         if scheduler_state in {"not_registered", "stopped"}:
             warnings.append("project semantic job is not running")
 
-        if scheduler_state == "not_registered":
-            status = HealthStatus.FAILED
+        if not project_runtime_loaded:
+            status = HealthStatus.DEGRADED
+            summary = "Project runtime is not loaded"
+        elif scheduler_state == "not_registered":
+            status = HealthStatus.DEGRADED
             summary = "Project semantic job is unavailable"
         elif (
             not queue_available
@@ -353,6 +357,7 @@ class RuntimeHealthService:
             summary=summary,
             details={
                 "semantic_processor": {
+                    "runtime_loaded": project_runtime_loaded,
                     "registered": semantic_processor is not None,
                     "scheduler": scheduler_snapshot,
                 },
@@ -397,6 +402,7 @@ class RuntimeHealthService:
 
         warnings: list[str] = []
         project = self._project_state(project_id)
+        project_runtime_loaded = project is not None
         scheduler_snapshot = self._component_snapshot(
             getattr(project, "scheduler", None),
             "snapshot_for_health",
@@ -454,8 +460,22 @@ class RuntimeHealthService:
             or local_indexing_tasks
             or pending_documents
         )
+        conflict_discovery_expected = bool(
+            conflict_discovery_snapshot.get("mode") == "assisted"
+            and conflict_discovery_snapshot.get("configured_enabled") is True
+        )
+        conflict_discovery_unavailable = bool(
+            conflict_discovery_expected
+            and (
+                conflict_discovery_snapshot.get("scheduler_enabled") is not True
+                or conflict_discovery_snapshot.get("llm_available") is not True
+            )
+        )
 
-        if not scheduler_snapshot and not indexing_snapshot:
+        if not project_runtime_loaded:
+            status = HealthStatus.DEGRADED
+            summary = "Project runtime is not loaded"
+        elif not scheduler_snapshot and not indexing_snapshot:
             status = HealthStatus.DEGRADED
             summary = "Background runtime health is unavailable"
         elif stalled_jobs or recent_failed_jobs:
@@ -467,6 +487,9 @@ class RuntimeHealthService:
         elif pending_error is not None:
             status = HealthStatus.DEGRADED
             summary = "Document-indexing health is unavailable"
+        elif conflict_discovery_unavailable:
+            status = HealthStatus.DEGRADED
+            summary = "Assisted conflict discovery is unavailable"
         elif (
             pending_documents
             and not running_jobs
@@ -501,12 +524,15 @@ class RuntimeHealthService:
             warnings.append("project background work is queued")
         if pending_documents:
             warnings.append("durable document indexing is pending")
+        if conflict_discovery_unavailable:
+            warnings.append("assisted conflict discovery is unavailable")
 
         return HealthSnapshot(
             status=status,
             activity=activity,
             summary=summary,
             details={
+                "project_runtime": {"loaded": project_runtime_loaded},
                 "scheduler": scheduler_snapshot,
                 "conflict_discovery": conflict_discovery_snapshot,
                 "background_work": background_snapshot,
@@ -761,6 +787,14 @@ class RuntimeHealthService:
             snapshot = method(**kwargs)
         except Exception:
             warnings.append(f"{method_name.replace('_', ' ')} failed")
+            return {}
+        if isawaitable(snapshot):
+            close = getattr(snapshot, "close", None)
+            if callable(close):
+                close()
+            warnings.append(
+                f"{method_name.replace('_', ' ')} must be a synchronous snapshot"
+            )
             return {}
         return dict(snapshot) if isinstance(snapshot, Mapping) else {}
 
