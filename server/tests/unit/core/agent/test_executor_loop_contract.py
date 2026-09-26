@@ -7,6 +7,7 @@ from common.exceptions import (
     LLMBudgetExceededError,
     LLMProviderError,
     ToolExecutionError,
+    WorkspaceConflictError,
 )
 from common.schema.agent.identity import AgentConfig
 from common.schema.agent.research import resolve_research_profile
@@ -2195,14 +2196,20 @@ async def test_one_parallel_read_failure_keeps_sibling_success(monkeypatch):
 
 @pytest.mark.no_network
 @pytest.mark.parametrize(
-    ("failure", "expected_error", "retryable"),
+    ("failure", "expected_error", "expected_code", "retryable"),
     [
-        (TimeoutError(), "Tool execution timed out", True),
-        (RuntimeError("private failure"), "Internal tool failure", False),
+        (TimeoutError(), "Tool execution timed out", "tool_failed", True),
+        (RuntimeError("private failure"), "Internal tool failure", "tool_failed", False),
+        (
+            WorkspaceConflictError("stale hash"),
+            "Workspace changed before the operation could be applied",
+            "workspace_conflict",
+            False,
+        ),
     ],
 )
 async def test_parallel_read_normalizes_timeout_and_internal_failures(
-    monkeypatch, failure, expected_error, retryable
+    monkeypatch, failure, expected_error, expected_code, retryable
 ):
     run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
     executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
@@ -2227,8 +2234,44 @@ async def test_parallel_read_normalizes_timeout_and_internal_failures(
 
     assert events[2]["event"] == "tool_error"
     assert events[2]["data"]["error"].startswith(expected_error)
+    assert events[2]["data"]["code"] == expected_code
     assert events[2]["data"]["retryable"] is retryable
     assert results[1]["result"]["data"][0]["id"] == "kept"
+
+
+@pytest.mark.no_network
+async def test_parallel_local_reference_failure_emits_the_same_diagnostic(monkeypatch):
+    run = make_run(limits=AgentRunLimits(max_attempts=1, max_calls=4))
+    executor = AgentExecutor(run, ScriptedLLM([]), SimpleNamespace(document_service=None))
+    diagnostics = []
+
+    async def mixed_result(_tools, _name, args):
+        if args["query"] == "broken":
+            raise ToolExecutionError(
+                "search_knowledge_messages",
+                "Unknown local ID 'message_9'",
+            )
+        return {"data": [{"id": "kept", "message": "usable"}]}
+
+    async def capture_emit(*args, **kwargs):
+        diagnostics.append((args, kwargs))
+
+    monkeypatch.setattr("core.agent.executor.execute_tool", mixed_result)
+    monkeypatch.setattr("core.agent.executor.emit", capture_emit)
+    events = [
+        event
+        async for event in executor._execute_tools(
+            [
+                ToolCall("search_knowledge_messages", {"query": "broken"}, call_id="bad"),
+                ToolCall("search_knowledge_messages", {"query": "working"}, call_id="good"),
+            ],
+            [],
+        )
+    ]
+
+    assert events[2]["data"]["code"] == "tool_failed"
+    assert diagnostics[0][0][2] == "local_reference_resolution_failed"
+    assert diagnostics[0][0][3]["reference_type"] == "tool_argument"
 
 
 @pytest.mark.no_network
