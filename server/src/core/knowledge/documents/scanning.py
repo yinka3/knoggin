@@ -27,7 +27,7 @@ from core.knowledge.documents.constants import (
     VIDEO_EXTENSIONS,
     document_extension,
 )
-from core.knowledge.documents.storage import looks_binary
+from core.knowledge.documents.extraction import looks_binary
 
 
 def normalize_relative_path(

@@ -18,7 +18,7 @@ from pypdf import PdfReader, PdfWriter
 SERVER_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SERVER_ROOT / "src"))
 
-from core.knowledge.documents import storage  # noqa: E402
+from core.knowledge.documents import extraction as extraction_module  # noqa: E402
 
 DEFAULT_LONG_PAGES = "1-40,95-114,370-389,745-764"
 
@@ -67,7 +67,7 @@ def evaluate(
     monitor.start()
     started = time.perf_counter()
     try:
-        extraction = storage.extract_and_split_document(content, ".pdf")
+        extraction = extraction_module.extract_and_split_document(content, ".pdf")
     finally:
         elapsed = time.perf_counter() - started
         stop.set()
@@ -155,7 +155,7 @@ def install_pdf_converter(*, table_structure: bool) -> None:
         allowed_formats=[InputFormat.PDF],
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)},
     )
-    storage._docling_converter = lambda: converter
+    extraction_module._docling_converter = lambda: converter
 
 
 def main() -> int:

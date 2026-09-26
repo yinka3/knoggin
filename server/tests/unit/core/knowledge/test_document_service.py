@@ -22,7 +22,7 @@ from core.knowledge.documents import (
     ProjectFilesystemFactory,
 )
 from core.knowledge.documents import (
-    storage as storage_module,
+    extraction as extraction_module,
 )
 from core.knowledge.documents.constants import document_extension
 from core.project.project_files import CONTEXT_FILE_PATH
@@ -41,18 +41,18 @@ def docling_snapshot(
 ):
     """Build a deterministic captured parse for document-pipeline tests."""
 
-    return storage_module.DocumentParseSnapshot(
+    return extraction_module.DocumentParseSnapshot(
         text=text,
         structure=structure or {"kind": "docling-test"},
         parser_name="docling",
         parser_version="test",
         parser_fingerprint="a" * 64,
         pages=tuple(
-            storage_module.DocumentSnapshotPage(
+            extraction_module.DocumentSnapshotPage(
                 page_number=page_number,
                 text=page_text,
                 regions=(
-                    storage_module.LayoutRegion(
+                    extraction_module.LayoutRegion(
                         page_number=page_number,
                         element_type="page",
                         extraction_method="native_text",
@@ -959,7 +959,7 @@ def test_tree_sitter_preserves_top_level_code_symbols(
     expected_symbols,
     expected_ranges,
 ):
-    chunks = storage_module.split_document(source, extension=extension)
+    chunks = extraction_module.split_document(source, extension=extension)
 
     assert [chunk.symbol_name for chunk in chunks] == expected_symbols
     assert [(chunk.start_line, chunk.end_line) for chunk in chunks] == expected_ranges
@@ -968,7 +968,7 @@ def test_tree_sitter_preserves_top_level_code_symbols(
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_tree_sitter_falls_back_to_regex_for_incomplete_python():
-    chunks = storage_module.split_document("def unfinished(", extension=".py")
+    chunks = extraction_module.split_document("def unfinished(", extension=".py")
 
     assert len(chunks) == 1
     assert chunks[0].symbol_name == "unfinished"
@@ -978,7 +978,7 @@ def test_tree_sitter_falls_back_to_regex_for_incomplete_python():
 @pytest.mark.no_network
 def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot(
             "Page one only.\n\nPage two only.",
@@ -986,7 +986,7 @@ def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
         ),
     )
 
-    extraction = storage_module.extract_and_split_document(b"pdf", ".pdf")
+    extraction = extraction_module.extract_and_split_document(b"pdf", ".pdf")
 
     assert extraction.text == "Page one only.\n\nPage two only."
     assert [(chunk.page_number, chunk.content) for chunk in extraction.chunks] == [
@@ -998,15 +998,15 @@ def test_pdf_extraction_splits_each_page_without_cross_page_chunks(monkeypatch):
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_text_markdown_and_csv_chunks_have_reliable_locators():
-    text_chunks = storage_module.split_document(
+    text_chunks = extraction_module.split_document(
         "\nFirst line\nSecond line\n",
         extension=".txt",
     )
-    markdown_chunks = storage_module.split_document(
+    markdown_chunks = extraction_module.split_document(
         "# Overview\nIntroduction\n\n## Risks\nMitigation\n",
         extension=".md",
     )
-    csv_chunks = storage_module.split_document(
+    csv_chunks = extraction_module.split_document(
         "name,value\nalpha,1\nbeta,2\n",
         extension=".csv",
     )
@@ -1028,7 +1028,7 @@ def test_text_markdown_and_csv_chunks_have_reliable_locators():
 @pytest.mark.no_network
 def test_docx_chunks_derive_from_the_captured_structured_markdown(monkeypatch):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot(
             "# Overview\nThe introduction.\n\n## Risks\nMitigate dependency risk.",
@@ -1036,7 +1036,7 @@ def test_docx_chunks_derive_from_the_captured_structured_markdown(monkeypatch):
         ),
     )
 
-    extraction = storage_module.extract_and_split_document(b"docx", ".docx")
+    extraction = extraction_module.extract_and_split_document(b"docx", ".docx")
 
     assert [
         (chunk.start_line, chunk.end_line, chunk.section_path)
@@ -1066,11 +1066,11 @@ def test_notebook_cells_become_retrievable_chunks():
         ]
     }
 
-    text = storage_module.extract_text(
+    text = extraction_module.extract_text(
         json.dumps(notebook).encode(),
         ".ipynb",
     )
-    chunks = storage_module.split_document(text, extension=".ipynb")
+    chunks = extraction_module.split_document(text, extension=".ipynb")
 
     assert [
         (chunk.chunk_kind, chunk.symbol_name, chunk.content) for chunk in chunks
@@ -1810,7 +1810,7 @@ async def test_delete_document_tombstones_metadata_and_removes_chunks_and_bytes(
         def split_text(self, text):
             return [text]
 
-    monkeypatch.setattr(storage_module, "SentenceSplitter", OneChunkSplitter)
+    monkeypatch.setattr(extraction_module, "SentenceSplitter", OneChunkSplitter)
     first = await service.add_document(
         content=b"same content",
         original_name="notes.txt",
@@ -2451,7 +2451,7 @@ async def test_index_document_extracts_supported_documents(
     service, postgres = document_harness
     if extension == ".pdf":
         monkeypatch.setattr(
-            storage_module,
+            extraction_module,
             "_extract_docling_snapshot",
             lambda *_: docling_snapshot(
                 "First page\n\nSecond page",
@@ -2460,7 +2460,7 @@ async def test_index_document_extracts_supported_documents(
         )
     else:
         monkeypatch.setattr(
-            storage_module,
+            extraction_module,
             "_extract_docling_snapshot",
             lambda *_: docling_snapshot("Document text"),
         )
@@ -2485,7 +2485,7 @@ async def test_read_document_keeps_pdf_line_ranges_page_local(
     monkeypatch, document_harness
 ):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot(
             "First page line\n\nSecond page first\nSecond page last",
@@ -2532,7 +2532,7 @@ async def test_document_selection_reads_docx_from_its_captured_snapshot(
     document_harness,
 ):
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: docling_snapshot("# Overview\n\nCurrent selection"),
     )
@@ -2612,7 +2612,7 @@ async def test_index_document_records_document_parser_errors(
     def fail_pdf_parse(*_):
         raise ValueError("damaged PDF")
 
-    monkeypatch.setattr(storage_module, "_extract_docling_snapshot", fail_pdf_parse)
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", fail_pdf_parse)
     uploaded = await service.add_document(
         content=b"not a valid PDF",
         original_name="notes.pdf",
@@ -2856,7 +2856,7 @@ async def test_accept_folder_indexes_selected_subset_atomically(
             return [text]
 
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -2966,7 +2966,7 @@ async def test_accept_folder_without_selection_accepts_all_eligible_documents(
             return [text]
 
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -3006,7 +3006,7 @@ async def test_repeated_folder_acceptance_rejects_an_existing_project_path(
             return [text]
 
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -3103,7 +3103,7 @@ async def test_accept_folder_admits_selected_paths_before_background_indexing(
             return [text]
 
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )
@@ -3142,7 +3142,7 @@ async def test_accept_folder_commit_failure_removes_rows_and_bytes(
             return [text]
 
     monkeypatch.setattr(
-        storage_module,
+        extraction_module,
         "SentenceSplitter",
         OneChunkSplitter,
     )

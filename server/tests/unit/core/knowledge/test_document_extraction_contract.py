@@ -1,7 +1,7 @@
 import pytest
 
-from core.knowledge.documents import storage
-from core.knowledge.documents.storage import (
+from core.knowledge.documents import extraction as extraction_module
+from core.knowledge.documents.extraction import (
     DocumentChunk,
     DocumentParseSnapshot,
     DocumentSnapshotPage,
@@ -52,9 +52,9 @@ def test_pdf_extraction_preserves_captured_page_boundaries(monkeypatch):
             ),
         ),
     )
-    monkeypatch.setattr(storage, "_extract_docling_snapshot", lambda *_: snapshot)
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", lambda *_: snapshot)
 
-    extraction = storage.extract_and_split_document(
+    extraction = extraction_module.extract_and_split_document(
         build_pdf_bytes("Alpha page.", "Beta page."),
         ".pdf",
     )
@@ -114,10 +114,10 @@ def test_docling_parse_failures_distinguish_missing_models_from_bad_content(
         def convert(self, _stream):
             raise RuntimeError(detail)
 
-    monkeypatch.setattr(storage, "_docling_converter", lambda: FailingConverter())
+    monkeypatch.setattr(extraction_module, "_docling_converter", lambda: FailingConverter())
 
     with pytest.raises((RuntimeError, ValueError), match=expected):
-        storage._parse_with_docling(b"document", ".pdf")
+        extraction_module._parse_with_docling(b"document", ".pdf")
 
 
 @pytest.mark.unit
@@ -142,9 +142,9 @@ def test_docling_region_projection_ignores_malformed_provenance():
         ],
     }
 
-    regions = storage._regions_from_docling_structure(structure, native_regions={1: ()})
+    regions = extraction_module._regions_from_docling_structure(structure, native_regions={1: ()})
 
-    assert storage._page_numbers(structure) == [1]
+    assert extraction_module._page_numbers(structure) == [1]
     assert len(regions[1]) == 1
     assert regions[1][0].extraction_method == "ocr"
     assert regions[1][0].bbox is None
@@ -162,7 +162,7 @@ def test_mixed_pdf_page_classifies_regions_from_native_cell_bounds():
         ]
     }
 
-    regions = storage._regions_from_docling_structure(
+    regions = extraction_module._regions_from_docling_structure(
         structure,
         native_regions={1: ((9, 89, 81, 111),)},
     )
@@ -177,7 +177,7 @@ def test_mixed_pdf_page_classifies_regions_from_native_cell_bounds():
         text="Heading\nScanned body",
         regions=regions[1],
     )
-    assert storage._page_locator(page)["extraction_method"] == "mixed"
+    assert extraction_module._page_locator(page)["extraction_method"] == "mixed"
 
 
 @pytest.mark.unit
@@ -218,11 +218,11 @@ def test_document_index_uses_native_lines_without_flattening_real_tables(monkeyp
         NativePdfTextCell("Chapter Two", (10, 50, 80, 60)),
         NativePdfTextCell("24", (170, 50, 190, 60)),
     )
-    monkeypatch.setattr(storage, "_parse_with_docling", lambda *_: ParsedDocument())
-    monkeypatch.setattr(storage, "_native_pdf_cells", lambda _content: {1: cells})
-    monkeypatch.setattr(storage, "_docling_version", lambda: "test")
+    monkeypatch.setattr(extraction_module, "_parse_with_docling", lambda *_: ParsedDocument())
+    monkeypatch.setattr(extraction_module, "_native_pdf_cells", lambda _content: {1: cells})
+    monkeypatch.setattr(extraction_module, "_docling_version", lambda: "test")
 
-    snapshot = storage._extract_docling_snapshot(b"pdf", ".pdf")
+    snapshot = extraction_module._extract_docling_snapshot(b"pdf", ".pdf")
 
     assert snapshot.pages[0].text == "Contents\nChapter One 12\nChapter Two 24"
     assert snapshot.pages[1].text == "| name | value |\n|---|---|\n| alpha | 1 |"
@@ -249,9 +249,9 @@ def test_docx_extraction_uses_the_captured_structured_markdown(monkeypatch):
         parser_version="test",
         parser_fingerprint="a" * 64,
     )
-    monkeypatch.setattr(storage, "_extract_docling_snapshot", lambda *_: snapshot)
+    monkeypatch.setattr(extraction_module, "_extract_docling_snapshot", lambda *_: snapshot)
 
-    extraction = storage.extract_and_split_document(
+    extraction = extraction_module.extract_and_split_document(
         build_docx_bytes(
             [
                 ("Overview", 1),
@@ -347,7 +347,7 @@ def test_text_processing_strategies_preserve_exact_chunk_locations(
     extension,
     expected_chunks,
 ):
-    extraction = storage.extract_and_split_document(content, extension)
+    extraction = extraction_module.extract_and_split_document(content, extension)
 
     assert extraction.chunks == expected_chunks
 
@@ -355,7 +355,7 @@ def test_text_processing_strategies_preserve_exact_chunk_locations(
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_notebook_extraction_preserves_cell_type_order_and_line_locations():
-    extraction = storage.extract_and_split_document(
+    extraction = extraction_module.extract_and_split_document(
         build_notebook_bytes(),
         ".ipynb",
     )
@@ -384,12 +384,12 @@ def test_notebook_extraction_preserves_cell_type_order_and_line_locations():
 @pytest.mark.no_network
 def test_image_ocr_is_indexed_as_line_located_text(monkeypatch):
     monkeypatch.setattr(
-        storage.pytesseract,
+        extraction_module.pytesseract,
         "image_to_string",
         lambda _: "Launch ready.\nProceed now.\n",
     )
 
-    extraction = storage.extract_and_split_document(build_png_bytes(), ".png")
+    extraction = extraction_module.extract_and_split_document(build_png_bytes(), ".png")
 
     assert extraction.text == "Launch ready.\nProceed now.\n"
     assert extraction.chunks == [
@@ -419,7 +419,7 @@ def test_invalid_or_empty_documents_fail_before_chunk_publication(
     error,
 ):
     with pytest.raises(ValueError, match=error):
-        storage.extract_and_split_document(content, extension)
+        extraction_module.extract_and_split_document(content, extension)
 
 
 @pytest.mark.unit
@@ -427,19 +427,19 @@ def test_invalid_or_empty_documents_fail_before_chunk_publication(
 @pytest.mark.parametrize("extension", [".pdf", ".docx"])
 def test_empty_structured_documents_fail_before_chunk_publication(monkeypatch, extension):
     monkeypatch.setattr(
-        storage,
+        extraction_module,
         "_extract_docling_snapshot",
         lambda *_: (_ for _ in ()).throw(ValueError("Document contains no extractable text")),
     )
 
     with pytest.raises(ValueError, match="no extractable text"):
-        storage.extract_and_split_document(b"empty", extension)
+        extraction_module.extract_and_split_document(b"empty", extension)
 
 
 @pytest.mark.unit
 @pytest.mark.no_network
 def test_empty_image_ocr_is_rejected(monkeypatch):
-    monkeypatch.setattr(storage.pytesseract, "image_to_string", lambda _: " \n")
+    monkeypatch.setattr(extraction_module.pytesseract, "image_to_string", lambda _: " \n")
 
     with pytest.raises(ValueError, match="no readable text"):
-        storage.extract_and_split_document(build_png_bytes(), ".png")
+        extraction_module.extract_and_split_document(build_png_bytes(), ".png")

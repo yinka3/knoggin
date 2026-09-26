@@ -1,6 +1,4 @@
-"""
-Documents subpackage — document storage, retrieval, scanning, and indexing.
-"""
+"""Documents subpackage: extraction, retrieval, scanning, and indexing."""
 
 from core.knowledge.documents.filesystem import (
     ProjectFile,

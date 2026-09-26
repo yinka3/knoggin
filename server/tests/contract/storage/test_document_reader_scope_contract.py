@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 
 from core.knowledge.db.readers.document_reader import DocumentReader
-from core.knowledge.documents.storage import DocumentParseSnapshot
+from core.knowledge.documents.extraction import DocumentParseSnapshot
 
 
 async def _insert_document_snapshot(

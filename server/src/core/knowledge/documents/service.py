@@ -51,14 +51,14 @@ from .constants import (
     MAX_READ_LINES,
     document_extension,
 )
+from .extraction import (
+    csv_data_rows,
+    is_code_extension,
+)
 from .filesystem import ProjectFilesystem, ProjectFilesystemFactory
 from .indexer import DocumentIndexer
 from .policy import DocumentIndexPolicy
 from .scanning import build_folder_preview, normalize_relative_path
-from .storage import (
-    csv_data_rows,
-    is_code_extension,
-)
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000

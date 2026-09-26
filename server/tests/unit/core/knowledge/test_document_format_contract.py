@@ -1,7 +1,7 @@
 import pytest
 
 from core.knowledge.documents.constants import ACCEPTED_EXTENSIONS, IMAGE_EXTENSIONS
-from core.knowledge.documents.storage import is_accepted_extension
+from core.knowledge.documents.extraction import is_accepted_extension
 from tests.fixtures.documents import (
     build_docx_bytes,
     build_notebook_bytes,

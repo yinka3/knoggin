@@ -9,7 +9,7 @@ from common.utils.time_utils import parse_iso_time
 from infrastructure.postgres_client import PostgresClient
 
 if TYPE_CHECKING:
-    from core.knowledge.documents.storage import DocumentChunk, DocumentParseSnapshot
+    from core.knowledge.documents.extraction import DocumentChunk, DocumentParseSnapshot
 
 
 class DocumentWriter:
@@ -74,7 +74,7 @@ class DocumentWriter:
         embedding: List[float],
     ) -> tuple:
         if isinstance(chunk, str):
-            from core.knowledge.documents.storage import DocumentChunk
+            from core.knowledge.documents.extraction import DocumentChunk
 
             chunk = DocumentChunk(content=chunk)
         return (

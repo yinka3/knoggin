@@ -3,8 +3,8 @@ import hashlib
 import pytest
 
 from core.knowledge.documents import DocumentService, ProjectFilesystemFactory
-from core.knowledge.documents import storage as document_storage
-from core.knowledge.documents.storage import (
+from core.knowledge.documents import extraction as document_extraction
+from core.knowledge.documents.extraction import (
     DocumentParseSnapshot,
     DocumentSnapshotPage,
     LayoutRegion,
@@ -216,12 +216,12 @@ async def test_representative_document_formats_publish_durable_located_chunks(
     tmp_path,
 ):
     monkeypatch.setattr(
-        document_storage.pytesseract,
+        document_extraction.pytesseract,
         "image_to_string",
         lambda _: "Launch ready.\nProceed now.\n",
     )
     monkeypatch.setattr(
-        document_storage,
+        document_extraction,
         "_extract_docling_snapshot",
         _structured_parse_snapshot,
     )

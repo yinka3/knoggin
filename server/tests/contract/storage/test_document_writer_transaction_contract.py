@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from core.knowledge.db.writers.document_writer import DocumentWriter
-from core.knowledge.documents.storage import DocumentChunk, DocumentParseSnapshot
+from core.knowledge.documents.extraction import DocumentChunk, DocumentParseSnapshot
 
 _MISMATCH_ERROR = "chunks and embeddings must have the same length"
 
