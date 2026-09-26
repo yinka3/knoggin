@@ -21,6 +21,13 @@ def _persona():
     }
 
 
+def test_aac_schemas_are_owned_by_aac_tools():
+    assert all(
+        callable(getattr(AACTools, schema["function"]["name"], None))
+        for schema in AAC_SPECIFIC_SCHEMAS
+    )
+
+
 def _base_tools(resources):
     return SimpleNamespace(
         entities=SimpleNamespace(

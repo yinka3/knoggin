@@ -540,15 +540,3 @@ async def test_memory_tools_return_clean_defaults_without_active_agent():
         1,
         1,
     ) == {"error": "No durable agent identity is active"}
-
-
-@pytest.mark.no_network
-async def test_normal_memory_tools_keep_community_only_tools_unavailable():
-    tools = MemoryToolHarness(postgres=RecordingPostgres())
-
-    assert await tools.save_community_insight("community insight") == {
-        "error": "save_community_insight is only available in community discussions."
-    }
-    assert await tools.spawn_community_specialist("Expert", "Persona") == {
-        "error": "spawn_community_specialist is only available in community discussions."
-    }

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Dict, List, Mapping, Optional
 
+from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.identity import AgentConfig, PersonaProfile
 from common.utils.agent_identity import normalize_agent_brain
 from core.agent.services.agent_manager import AgentManager
-from core.agent.tools.registry import Tools
+from core.agent.tools.registry import Tools, validate_tool_owner
 from core.community.aac_store import AACStore
 
 SpecialistRunner = Callable[[AgentConfig, str], Awaitable[object]]
@@ -156,3 +157,6 @@ class AACTools(Tools):
             for mode in labels
             if grouped[mode]
         )
+
+
+validate_tool_owner(AACTools, AAC_SPECIFIC_SCHEMAS)

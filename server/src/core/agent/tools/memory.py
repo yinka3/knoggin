@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING, Dict
 
 from common.utils.agent_identity import (
     BRAIN_SNAPSHOT_INTERVAL,
@@ -14,7 +14,6 @@ from common.utils.agent_identity import (
 )
 
 if TYPE_CHECKING:
-    from core.knowledge.entity.resolver import EntityResolver
     from core.knowledge.store import KnowledgeStore
     from infrastructure.postgres_client import PostgresClient
 
@@ -22,7 +21,6 @@ if TYPE_CHECKING:
 class MemoryTools:
     knowledge_store: KnowledgeStore
     postgres: PostgresClient
-    entities: EntityResolver
 
     async def read_agent_brain(self) -> Dict:
         """Read the current durable Markdown brain and its revision."""
@@ -387,35 +385,3 @@ class MemoryTools:
             return {"error": str(exc)}
         except Exception as exc:
             return {"error": f"Failed to restore brain section: {exc}"}
-
-    async def save_community_insight(self, content: str) -> Dict:
-        return {"error": "save_community_insight is only available in community discussions."}
-
-    async def spawn_community_specialist(
-        self,
-        name: str,
-        persona: str,
-        initial_directives: List[Dict] = None,
-    ) -> Dict:
-        return {"error": "spawn_community_specialist is only available in community discussions."}
-
-    async def search_community_insights(self, query: str = "", limit: int = 20) -> Dict:
-        return {"error": "search_community_insights is only available in AAC discussions."}
-
-    async def vote_community_insight(
-        self,
-        insight_id: str,
-        vote: str,
-        reason: str,
-    ) -> Dict:
-        return {"error": "vote_community_insight is only available in AAC discussions."}
-
-    async def remove_community_insight_vote(self, insight_id: str) -> Dict:
-        return {"error": "remove_community_insight_vote is only available in AAC discussions."}
-
-    async def consult_community_specialist(
-        self,
-        specialist_id: str,
-        question: str,
-    ) -> Dict:
-        return {"error": "consult_community_specialist is only available in AAC discussions."}

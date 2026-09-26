@@ -560,10 +560,28 @@ def validate_registry_contract() -> None:
             raise RuntimeError(f"Tool definition '{name}' capability mismatch")
         if definition.executor_protocol:
             continue
+        if name in {
+            schema["function"]["name"] for schema in AAC_SPECIFIC_SCHEMAS
+        }:
+            continue
         if not callable(getattr(Tools, name, None)):
             raise RuntimeError(
                 f"Tool '{name}' has no concrete method '{name}'"
             )
+
+
+def validate_tool_owner(owner: type, schemas: Iterable[dict]) -> None:
+    """Validate additional tool methods against their concrete composition."""
+
+    missing = sorted(
+        schema["function"]["name"]
+        for schema in schemas
+        if not callable(getattr(owner, schema["function"]["name"], None))
+    )
+    if missing:
+        raise RuntimeError(
+            f"{owner.__name__} is missing registered tool methods: {missing}"
+        )
 
 
 class Tools(
