@@ -613,6 +613,39 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             raise ValueError("X-User-Name must not be blank")
         return user_name
 
+    @app.get("/v1/health", response_model=HealthSnapshot)
+    async def get_engine_health(
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(port.get_engine_health, user_name=user_name)
+
+    @app.get("/v1/projects/{project_id}/health/resources", response_model=HealthSnapshot)
+    async def get_resource_health(
+        project_id: str,
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(
+            port.get_resource_health, user_name=user_name, project_id=project_id
+        )
+
+    @app.get("/v1/projects/{project_id}/health/ingestion", response_model=HealthSnapshot)
+    async def get_ingestion_health(
+        project_id: str,
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(
+            port.get_ingestion_health, user_name=user_name, project_id=project_id
+        )
+
+    @app.get("/v1/projects/{project_id}/health/background", response_model=HealthSnapshot)
+    async def get_background_health(
+        project_id: str,
+        user_name: str = Depends(current_user),
+    ) -> HealthSnapshot:
+        return await _call(
+            port.get_background_health, user_name=user_name, project_id=project_id
+        )
+
     @app.post("/v1/projects", response_model=ProjectResponse, status_code=201)
     async def create_project(
         body: CreateProjectRequest,

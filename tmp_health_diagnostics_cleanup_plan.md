@@ -256,6 +256,9 @@ internal scheduler field.
   does not expose the service or runtime objects themselves.
 - The UI health route now mirrors the engine snapshot status instead of always
   claiming top-level success.
+- The dependency-injected HTTP API exposes typed engine and project health
+  routes backed by the same application port rather than reaching into runtime
+  internals.
 
 ### Unit 7: Final Health/Maintenance boundary audit
 

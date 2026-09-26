@@ -18,6 +18,7 @@ from common.schema.artifacts import (
     artifact_content_hash,
     render_artifact_markdown,
 )
+from common.schema.health import HealthActivity, HealthSnapshot
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
@@ -72,6 +73,22 @@ class FakeApplication:
         self.project_error = None
         self.artifact, self.artifact_revision = _artifact_payloads()
         self.document_focus = None
+
+    async def get_engine_health(self, *, user_name):
+        self.calls.append(("engine_health", user_name))
+        return HealthSnapshot(summary="Engine healthy")
+
+    async def get_resource_health(self, *, user_name, project_id):
+        self.calls.append(("resource_health", user_name, project_id))
+        return HealthSnapshot(activity=HealthActivity.BUSY, summary="Resources busy")
+
+    async def get_ingestion_health(self, *, user_name, project_id):
+        self.calls.append(("ingestion_health", user_name, project_id))
+        return HealthSnapshot(summary="Ingestion healthy")
+
+    async def get_background_health(self, *, user_name, project_id):
+        self.calls.append(("background_health", user_name, project_id))
+        return HealthSnapshot(summary="Background healthy")
 
     async def create_project(self, *, user_name, request: CreateProjectRequest):
         self.calls.append(("project", user_name, request))
@@ -334,6 +351,39 @@ async def test_first_vertical_slice_delegates_public_routes_to_injected_port():
         "run",
     ]
     assert port.calls[-1][2].research_mode == "research"
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_health_routes_delegate_typed_scoped_snapshots():
+    port = FakeApplication()
+    app = create_app(port)
+
+    async with await _client(app) as client:
+        engine = await client.get("/v1/health", headers={"X-User-Name": "ada"})
+        resources = await client.get(
+            "/v1/projects/project-1/health/resources",
+            headers={"X-User-Name": "ada"},
+        )
+        ingestion = await client.get(
+            "/v1/projects/project-1/health/ingestion",
+            headers={"X-User-Name": "ada"},
+        )
+        background = await client.get(
+            "/v1/projects/project-1/health/background",
+            headers={"X-User-Name": "ada"},
+        )
+
+    assert engine.json()["summary"] == "Engine healthy"
+    assert resources.json()["activity"] == "busy"
+    assert ingestion.json()["summary"] == "Ingestion healthy"
+    assert background.json()["summary"] == "Background healthy"
+    assert [call[0] for call in port.calls] == [
+        "engine_health",
+        "resource_health",
+        "ingestion_health",
+        "background_health",
+    ]
 
 
 @pytest.mark.unit
