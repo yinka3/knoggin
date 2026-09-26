@@ -2292,7 +2292,8 @@ async def test_parallel_local_reference_failure_emits_the_same_diagnostic(monkey
         if args["query"] == "broken":
             raise ToolExecutionError(
                 "search_knowledge_messages",
-                "Unknown local ID 'message_9'",
+                "Unknown local ID for this LLM call.",
+                details={"reason": "local_reference_invalid"},
             )
         return {"data": [{"id": "kept", "message": "usable"}]}
 

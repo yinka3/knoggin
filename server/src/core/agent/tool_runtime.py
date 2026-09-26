@@ -17,7 +17,10 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS,
     validate_tool_arguments,
 )
-from core.agent.tool_references import resolve_agent_tool_arguments
+from core.agent.tool_references import (
+    LocalToolReferenceError,
+    resolve_agent_tool_arguments,
+)
 from core.agent.tools.registry import Tools, get_tool_definition
 
 _TOOL_PARAM_TYPES: Dict[str, Dict[str, str]] = {}
@@ -211,7 +214,14 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
 
         # Tool schemas validate the model-facing local values first. Only then
         # resolve them for the scoped backend reader/writer call.
-        kwargs = resolve_agent_tool_arguments(tools, name, kwargs)
+        try:
+            kwargs = resolve_agent_tool_arguments(tools, name, kwargs)
+        except LocalToolReferenceError as exc:
+            raise ToolExecutionError(
+                name,
+                str(exc),
+                details={"reason": "local_reference_invalid"},
+            ) from exc
         result = await method(**kwargs)
         result = _normalize_tool_result(name, result)
         if audit_id:

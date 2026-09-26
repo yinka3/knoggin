@@ -8,6 +8,10 @@ from common.utils.local_references import (
     resolve_local_id,
 )
 
+
+class LocalToolReferenceError(ValueError):
+    """A safe model-facing compact reference could not be resolved."""
+
 if TYPE_CHECKING:
     from core.agent.run import AgentRun
     from core.agent.tools.registry import Tools
@@ -209,7 +213,7 @@ def resolve_agent_tool_arguments(tools: Tools, tool_name: str, args: Dict) -> Di
         if isinstance(value, list):
             local_values = [str(item) for item in value]
             if len(local_values) != len(set(local_values)):
-                raise ValueError(
+                raise LocalToolReferenceError(
                     f"Duplicate local {prefix} references are not allowed."
                 )
             resolved[field_name] = [
@@ -234,5 +238,10 @@ def _resolve_short_uuid_reference(
     """Resolve one correctly typed compact UUID handle."""
 
     if not isinstance(value, str) or not value.startswith(f"{prefix}_"):
-        raise ValueError(f"Expected a {prefix}_ UUID handle for this argument.")
-    return str(resolve_local_id(value, local_to_actual))
+        raise LocalToolReferenceError(
+            f"Expected a {prefix}_ UUID handle for this argument."
+        )
+    try:
+        return str(resolve_local_id(value, local_to_actual))
+    except ValueError as exc:
+        raise LocalToolReferenceError("Unknown local ID for this LLM call.") from exc

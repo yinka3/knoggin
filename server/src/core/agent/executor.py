@@ -122,12 +122,6 @@ class _ToolCall:
     call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
-def _is_local_reference_resolution_error(message: str) -> bool:
-    """Recognize resolver failures without exposing the supplied ID in metrics."""
-
-    return "Unknown local ID" in message or "UUID handle" in message
-
-
 def _local_reference_type(tool_name: str) -> str:
     if tool_name in {"read_episode_messages", "propose_entity_merge"}:
         return "episode"
@@ -1145,7 +1139,7 @@ class AgentExecutor:
         elif isinstance(failure, ToolExecutionError):
             message = failure.message
             retryable = failure.retryable
-            if _is_local_reference_resolution_error(message):
+            if failure.details.get("reason") == "local_reference_invalid":
                 await emit(
                     self.ctx.session_id,
                     "agent",

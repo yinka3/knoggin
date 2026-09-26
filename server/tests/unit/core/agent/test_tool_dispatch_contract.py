@@ -341,6 +341,22 @@ async def test_execute_tool_rejects_direct_entity_merge_bypass():
 
 
 @pytest.mark.no_network
+async def test_execute_tool_preserves_typed_local_reference_failure():
+    tools = DispatchTools()
+    tools.short_uuid_references = {}
+
+    with pytest.raises(ToolExecutionError) as captured:
+        await execute_tool(
+            tools,
+            "read_episode_messages",
+            {"episode_id": "wrong_1"},
+        )
+
+    assert captured.value.details["reason"] == "local_reference_invalid"
+    assert captured.value.retryable is False
+
+
+@pytest.mark.no_network
 async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
     tools = DispatchTools()
 
