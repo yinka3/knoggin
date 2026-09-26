@@ -144,6 +144,7 @@ class ProjectRuntimeFactory:
             user_name=self.user_name,
             readable_project_ids=readable_project_ids,
             domain_config=domain_config,
+            compiled_domain=compiled_domain,
             document_service=document_service,
             domain_config_store=domain_store,
             config_manager=config_manager,
@@ -175,7 +176,6 @@ class ProjectRuntimeFactory:
                 processor=text_processor,
                 project_semantic_processor=project_semantic_processor,
                 conflict_discovery_job=conflict_discovery_job,
-                resources=resources,
                 config_manager=config_manager,
             )
             await scheduler.start()
@@ -329,9 +329,8 @@ class ProjectRuntimeFactory:
         *,
         entities: EntityResolver,
         processor: TextProcessor,
-        project_semantic_processor: ProjectSemanticProcessor | None = None,
+        project_semantic_processor: ProjectSemanticProcessor,
         conflict_discovery_job: ConflictDiscoveryJob | None = None,
-        resources: ReadyRuntimeResources | None = None,
         config_manager: ConfigManager | None = None,
     ) -> None:
         scheduler = runtime.scheduler
@@ -352,20 +351,19 @@ class ProjectRuntimeFactory:
                 "developer_settings.nlp_pipeline",
             )
         )
-        if project_semantic_processor is not None:
-            scheduler.register(project_semantic_processor)
-            runtime.add_config_unsubscriber(
-                config_manager.subscribe(
-                    project_semantic_processor.update_settings,
-                    "developer_settings.ingestion",
-                )
+        scheduler.register(project_semantic_processor)
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                project_semantic_processor.update_settings,
+                "developer_settings.ingestion",
             )
-            runtime.add_config_unsubscriber(
-                config_manager.subscribe(
-                    project_semantic_processor.update_episode_settings,
-                    "developer_settings.jobs.episode",
-                )
+        )
+        runtime.add_config_unsubscriber(
+            config_manager.subscribe(
+                project_semantic_processor.update_episode_settings,
+                "developer_settings.jobs.episode",
             )
+        )
         if conflict_discovery_job is not None:
             scheduler.register(conflict_discovery_job)
             runtime.add_config_unsubscriber(

@@ -61,6 +61,7 @@ def make_project_state(
         reader=reader,
         writer=writer,
     )
+    active_domain = domain_config or make_domain_config()
     return ProjectRuntime(
         project_id=project_id,
         entities=entities,
@@ -70,7 +71,8 @@ def make_project_state(
         ),
         scheduler=scheduler,
         user_name="ada",
-        domain_config=domain_config or make_domain_config(),
+        domain_config=active_domain,
+        compiled_domain=active_domain.compile(),
         readable_project_ids=[project_id],
         document_service=document_service,
         domain_config_store=DomainConfigStore(postgres),

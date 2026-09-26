@@ -32,6 +32,7 @@ class ProjectRuntime:
         user_name: str,
         readable_project_ids: list[str],
         domain_config: DomainConfig,
+        compiled_domain: CompiledDomain,
         document_service: DocumentService,
         domain_config_store: DomainConfigStore,
         config_manager: ConfigManager,
@@ -49,6 +50,8 @@ class ProjectRuntime:
         )
         if not isinstance(domain_config, DomainConfig):
             raise TypeError("ProjectRuntime requires a DomainConfig")
+        if not isinstance(compiled_domain, CompiledDomain):
+            raise TypeError("ProjectRuntime requires a CompiledDomain")
         self.entities = entities
         self.knowledge_retrieval = knowledge_retrieval
         self.text_processor = text_processor
@@ -61,7 +64,7 @@ class ProjectRuntime:
         self.domain_config_store = domain_config_store
         self._config_manager = config_manager
         self.domain_config = domain_config
-        self.compiled_domain: CompiledDomain = domain_config.compile()
+        self.compiled_domain = compiled_domain
         self._domain_config_lock = asyncio.Lock()
         self.document_service = document_service
 
@@ -76,7 +79,7 @@ class ProjectRuntime:
     def signal_semantic_work(self) -> bool:
         """Expose one project-owned wake edge to every attached session."""
 
-        if self.project_semantic_processor is None or self.scheduler is None:
+        if self.project_semantic_processor is None:
             return False
         return self.scheduler.wake_job(self.project_semantic_processor.name)
 
@@ -89,7 +92,7 @@ class ProjectRuntime:
         failures = []
 
         for phase, shutdown in (
-            ("scheduler", self.scheduler.stop if self.scheduler else None),
+            ("scheduler", self.scheduler.stop),
             ("document indexing", self.document_service.indexer.shutdown),
             (
                 "background work",
@@ -132,29 +135,12 @@ class ProjectRuntime:
         if self.background_work is None:
             return
         owners = {f"project:{self.project_id}:document-index"}
-        if self.scheduler is not None:
-            owners.update(
-                f"project:{self.project_id}:{name}"
-                for name in getattr(self.scheduler, "registered_job_names", ())
-            )
+        owners.update(
+            f"project:{self.project_id}:{name}"
+            for name in getattr(self.scheduler, "registered_job_names", ())
+        )
         for owner in sorted(owners):
             await self.background_work.cancel_owner(owner)
-
-    async def load_domain_config(self) -> DomainConfig:
-        """Load the active domain and install its immutable runtime snapshot."""
-        async with self._domain_config_lock:
-            config = await self.domain_config_store.load(
-                self.user_name,
-                self.project_id,
-            )
-            if config is None:
-                raise RuntimeError(
-                    "Project domain configuration is required before runtime use"
-                )
-            self.domain_config = config
-            self.compiled_domain = config.compile()
-            await self._select_vp01(self.compiled_domain)
-        return config
 
     async def capture_semantic_policy(self) -> IngestionPolicy:
         """Capture one coherent policy and domain snapshot for semantic work."""
@@ -178,11 +164,6 @@ class ProjectRuntime:
         self.text_processor.set_vp01(
             await self._get_vp01(compiled_domain.vp01_language)
         )
-
-    async def capture_domain(self) -> CompiledDomain:
-        """Return a stable domain snapshot for one admitted runtime operation."""
-        async with self._domain_config_lock:
-            return self.compiled_domain
 
     async def activate_domain_config(
         self,
