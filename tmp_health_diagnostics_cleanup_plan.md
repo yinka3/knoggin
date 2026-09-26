@@ -246,6 +246,17 @@ internal scheduler field.
 - Align the UI health route with actual engine status instead of always wrapping
   it in top-level `status: "ok"`.
 
+#### Unit 6 result
+
+- The application port now owns typed engine, resource, ingestion, and
+  background health operations.
+- Project health operations validate user ownership and project existence
+  before reading runtime status.
+- The direct SDK exposes all four health concepts as stable JSON snapshots; it
+  does not expose the service or runtime objects themselves.
+- The UI health route now mirrors the engine snapshot status instead of always
+  claiming top-level success.
+
 ### Unit 7: Final Health/Maintenance boundary audit
 
 - Confirm Health remains read-only and bounded.

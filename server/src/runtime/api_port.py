@@ -16,6 +16,7 @@ from uuid import uuid4
 from common.conf.domain_config import DomainConfig
 from common.exceptions import NotFoundError
 from common.schema.document import DocumentSelection, create_document_focus
+from common.schema.health import HealthSnapshot
 from common.schema.primitives import Message
 from common.schema.public import (
     ArtifactListResponse,
@@ -87,6 +88,40 @@ class ApplicationRuntimePort:
         if user_name != configured_user:
             raise PermissionError("Request user does not match the running application")
         return configured_user
+
+    async def _require_health_project(self, user_name: str, project_id: str) -> None:
+        self._require_user(user_name)
+        if await self.runtime.projects.get_project(project_id) is None:
+            raise NotFoundError("project")
+
+    async def get_engine_health(self, *, user_name: str) -> HealthSnapshot:
+        self._require_user(user_name)
+        return await self.runtime.health_service.get_engine_health()
+
+    async def get_resource_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot:
+        await self._require_health_project(user_name, project_id)
+        return await self.runtime.health_service.get_resource_health(
+            project_id=project_id
+        )
+
+    async def get_ingestion_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot:
+        await self._require_health_project(user_name, project_id)
+        return await self.runtime.health_service.get_ingestion_health(
+            user_name=user_name,
+            project_id=project_id,
+        )
+
+    async def get_background_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot:
+        await self._require_health_project(user_name, project_id)
+        return await self.runtime.health_service.get_background_health(
+            project_id=project_id
+        )
 
     async def create_project(
         self,

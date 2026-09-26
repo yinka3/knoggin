@@ -1,12 +1,13 @@
 import pytest
-
-from knoggin import client as client_module
 from knoggin import (
     DocumentFocusDocument,
     Knoggin,
     Turn,
     source_provenance_from_response,
 )
+from knoggin import client as client_module
+
+from common.schema.health import HealthActivity, HealthSnapshot
 
 
 class _FakeSession:
@@ -75,10 +76,39 @@ class _FakeSessions:
 class _FakeRuntime:
     def __init__(self, session):
         self.sessions = _FakeSessions(session)
+        self.sessions.user_name = "ada"
+        self.health_service = self._HealthService()
         self.shutdown_called = False
+
+    class _HealthService:
+        async def get_engine_health(self):
+            return HealthSnapshot(summary="Engine healthy")
+
+        async def get_resource_health(self, *, project_id):
+            assert project_id == "project-1"
+            return HealthSnapshot(activity=HealthActivity.BUSY, summary="Resources busy")
+
+        async def get_ingestion_health(self, *, user_name, project_id):
+            assert (user_name, project_id) == ("ada", "project-1")
+            return HealthSnapshot(summary="Ingestion healthy")
+
+        async def get_background_health(self, *, project_id):
+            assert project_id == "project-1"
+            return HealthSnapshot(summary="Background healthy")
 
     async def shutdown(self):
         self.shutdown_called = True
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_sdk_exposes_all_health_drilldowns():
+    knoggin = Knoggin(_FakeRuntime(_FakeSession()))
+
+    assert (await knoggin.get_engine_health())["summary"] == "Engine healthy"
+    assert (await knoggin.get_resource_health(project_id="project-1"))["activity"] == "busy"
+    assert (await knoggin.get_ingestion_health(project_id="project-1"))["summary"] == "Ingestion healthy"
+    assert (await knoggin.get_background_health(project_id="project-1"))["summary"] == "Background healthy"
 
 
 @pytest.mark.unit

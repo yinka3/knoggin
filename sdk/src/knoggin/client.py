@@ -53,6 +53,25 @@ class Knoggin:
         snapshot = await self.runtime.health_service.get_engine_health()
         return snapshot.model_dump(mode="json")
 
+    async def get_resource_health(self, *, project_id: str) -> dict[str, Any]:
+        snapshot = await self.runtime.health_service.get_resource_health(
+            project_id=project_id
+        )
+        return snapshot.model_dump(mode="json")
+
+    async def get_ingestion_health(self, *, project_id: str) -> dict[str, Any]:
+        snapshot = await self.runtime.health_service.get_ingestion_health(
+            user_name=self.runtime.sessions.user_name,
+            project_id=project_id,
+        )
+        return snapshot.model_dump(mode="json")
+
+    async def get_background_health(self, *, project_id: str) -> dict[str, Any]:
+        snapshot = await self.runtime.health_service.get_background_health(
+            project_id=project_id
+        )
+        return snapshot.model_dump(mode="json")
+
     async def create_project(
         self,
         *,

@@ -34,6 +34,7 @@ from common.exceptions import (
     ToolExecutionError,
     WorkspaceConflictError,
 )
+from common.schema.health import HealthSnapshot
 from common.schema.public import (
     ArtifactListResponse,
     ArtifactResponse,
@@ -70,6 +71,20 @@ class ApplicationPort(Protocol):
     port method may return the corresponding public model or a mapping/object
     that can be projected to it.
     """
+
+    async def get_engine_health(self, *, user_name: str) -> HealthSnapshot: ...
+
+    async def get_resource_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot: ...
+
+    async def get_ingestion_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot: ...
+
+    async def get_background_health(
+        self, *, user_name: str, project_id: str
+    ) -> HealthSnapshot: ...
 
     async def create_project(
         self,

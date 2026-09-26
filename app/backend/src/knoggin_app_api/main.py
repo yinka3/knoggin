@@ -74,7 +74,7 @@ def _router() -> APIRouter:
     @router.get("/health")
     async def health(request: Request) -> dict[str, Any]:
         engine = await request.app.state.knoggin.get_engine_health()
-        return {"status": "ok", "engine": engine}
+        return {"status": engine.get("status", "failed"), "engine": engine}
 
     @router.post("/projects", status_code=201)
     async def create_project(

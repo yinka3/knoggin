@@ -6,6 +6,7 @@ import pytest
 
 from common.exceptions import NotFoundError
 from common.schema.artifacts import ArtifactReference
+from common.schema.health import HealthActivity, HealthSnapshot
 from common.schema.public import (
     CreateProjectRequest,
     CreateSessionRequest,
@@ -144,6 +145,9 @@ class FakeProjects:
             "allowed_projects": [],
         }
 
+    async def get_project(self, project_id):
+        return {"id": project_id, "status": "active"} if project_id == "project-1" else None
+
     async def list_global_maintenance_reviews(self):
         self.calls.append({"operation": "list_global_reviews"})
         return [self._review()]
@@ -275,12 +279,48 @@ def port():
         updated_at=created_at,
     )
     session = FakeSession()
+
+    class HealthService:
+        async def get_engine_health(self):
+            return HealthSnapshot(summary="Engine healthy")
+
+        async def get_resource_health(self, *, project_id):
+            assert project_id == "project-1"
+            return HealthSnapshot(activity=HealthActivity.BUSY, summary="Resources busy")
+
+        async def get_ingestion_health(self, *, user_name, project_id):
+            assert (user_name, project_id) == ("ada", "project-1")
+            return HealthSnapshot(summary="Ingestion healthy")
+
+        async def get_background_health(self, *, project_id):
+            assert project_id == "project-1"
+            return HealthSnapshot(summary="Background healthy")
+
     runtime = SimpleNamespace(
         sessions=FakeSessions(session),
         projects=FakeProjects(),
+        health_service=HealthService(),
         resources=SimpleNamespace(knowledge_store=FakeKnowledgeStore(artifact)),
     )
     return ApplicationRuntimePort(runtime), runtime, session
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_runtime_port_exposes_typed_scoped_health(port):
+    application, _runtime, _session = port
+
+    engine = await application.get_engine_health(user_name="ada")
+    resources = await application.get_resource_health(user_name="ada", project_id="project-1")
+    ingestion = await application.get_ingestion_health(user_name="ada", project_id="project-1")
+    background = await application.get_background_health(user_name="ada", project_id="project-1")
+
+    assert engine.summary == "Engine healthy"
+    assert resources.activity is HealthActivity.BUSY
+    assert ingestion.summary == "Ingestion healthy"
+    assert background.summary == "Background healthy"
+    with pytest.raises(NotFoundError):
+        await application.get_resource_health(user_name="ada", project_id="missing")
 
 
 @pytest.mark.runtime
