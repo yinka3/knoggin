@@ -34,6 +34,7 @@ class ProjectRuntime:
         domain_config: DomainConfig,
         document_service: DocumentService,
         domain_config_store: DomainConfigStore,
+        config_manager: ConfigManager,
         background_work: Optional[BackgroundWorkCoordinator] = None,
         get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
     ):
@@ -58,6 +59,7 @@ class ProjectRuntime:
             raise TypeError("ProjectRuntime get_vp01 must be callable")
         self._get_vp01 = get_vp01
         self.domain_config_store = domain_config_store
+        self._config_manager = config_manager
         self.domain_config = domain_config
         self.compiled_domain: CompiledDomain = domain_config.compile()
         self._domain_config_lock = asyncio.Lock()
@@ -158,7 +160,7 @@ class ProjectRuntime:
         """Capture one coherent policy and domain snapshot for semantic work."""
 
         async with self._domain_config_lock:
-            settings = ConfigManager.get().config.developer_settings
+            settings = self._config_manager.config.developer_settings
             return IngestionPolicy.capture(
                 text_processor=TextProcessorSettings(
                     gliner_threshold=self.text_processor.gliner_threshold,

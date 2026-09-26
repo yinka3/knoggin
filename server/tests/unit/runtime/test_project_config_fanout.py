@@ -424,9 +424,14 @@ async def test_semantic_policy_capture_and_domain_activation_share_one_lock(
         ),
     )
     runtime.domain_config_store = Store()
+    runtime._config_manager = config_manager
     monkeypatch.setattr(
         "runtime.project_runtime.ConfigManager.get",
-        staticmethod(lambda: config_manager),
+        staticmethod(
+            lambda: (_ for _ in ()).throw(
+                AssertionError("ProjectRuntime must use its injected config manager")
+            )
+        ),
     )
 
     before_activation = await runtime.capture_semantic_policy()
@@ -457,7 +462,9 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
     monkeypatch,
 ):
     config_manager = RecordingConfigManager()
+    initial_config = config_manager.config
     events = []
+    captured = {}
 
     async def get_vp01(_language):
         return object()
@@ -474,7 +481,11 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
         get_vp01=get_vp01,
     )
     resources.require_ready = lambda: resources
-    factory = ProjectRuntimeFactory(resources=resources, user_name="ada")
+    factory = ProjectRuntimeFactory(
+        resources=resources,
+        user_name="ada",
+        config_manager=config_manager,
+    )
     indexer = RecordingIndexer(events)
     job = RecordingStartupJob(events)
 
@@ -483,6 +494,11 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
             pass
 
         async def load(self, _user_name, _project_id):
+            config_manager.config = RootConfig(
+                developer_settings=DeveloperSettings(
+                    documents=DocumentSettings(rerank_enabled=False),
+                )
+            )
             return make_domain_config()
 
     class Loop:
@@ -492,10 +508,6 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
     async def verify_user_entity(_entities):
         return None
 
-    monkeypatch.setattr(
-        "runtime.project_factory.ConfigManager.get",
-        staticmethod(lambda: config_manager),
-    )
     monkeypatch.setattr("runtime.project_factory.DomainConfigStore", DomainStore)
     monkeypatch.setattr(
         "runtime.project_factory.EntityResolver",
@@ -512,15 +524,19 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
         "runtime.project_factory.asyncio.get_running_loop", lambda: Loop()
     )
     monkeypatch.setattr(factory, "_verify_user_entity", verify_user_entity)
-    monkeypatch.setattr(
-        factory,
-        "_create_document_service",
-        lambda *_args, **_kwargs: SimpleNamespace(indexer=indexer),
-    )
+    def create_document_service(*_args, **kwargs):
+        captured["document_config"] = kwargs["runtime_config"]
+        return SimpleNamespace(indexer=indexer)
+
+    def create_semantic_processor(*_args, **kwargs):
+        captured["semantic_settings"] = kwargs["developer_settings"]
+        return job
+
+    monkeypatch.setattr(factory, "_create_document_service", create_document_service)
     monkeypatch.setattr(
         factory,
         "_create_project_semantic_processor",
-        lambda *_args, **_kwargs: job,
+        create_semantic_processor,
     )
     monkeypatch.setattr(
         factory,
@@ -536,3 +552,5 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
     assert job.calls == [("ada", "project-1", True)]
     assert events == ["sync", "indexer", "registered"]
     assert runtime.scheduler.started is True
+    assert captured["document_config"] is initial_config
+    assert captured["semantic_settings"] is initial_config.developer_settings

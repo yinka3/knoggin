@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from common.conf.domain_config import DomainConfig
+from common.schema.settings import RootConfig
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.documents import DocumentService
@@ -73,5 +74,6 @@ def make_project_state(
         readable_project_ids=[project_id],
         document_service=document_service,
         domain_config_store=DomainConfigStore(postgres),
+        config_manager=SimpleNamespace(config=RootConfig()),
         background_work=background_work,
     )
