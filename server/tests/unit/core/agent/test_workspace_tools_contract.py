@@ -167,7 +167,6 @@ async def test_project_file_writes_require_authorization_and_are_audited():
         session_id="session",
         run_id="run",
         allowed_tools=frozenset({"create_project_file"}),
-        allowed_capabilities=frozenset({REVERSIBLE_WRITE_CAPABILITY}),
     )
 
     result = await execute_tool(

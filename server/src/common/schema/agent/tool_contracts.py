@@ -1263,17 +1263,6 @@ CAPABILITY_CLASSES = frozenset(
     }
 )
 
-# Missing agent configuration gets useful autonomy for the currently exposed
-# read and reversible write tools.
-SAFE_DEFAULT_CAPABILITIES = frozenset(
-    {
-        READ_CAPABILITY,
-        REVERSIBLE_WRITE_CAPABILITY,
-        CONFIGURATION_WRITE_CAPABILITY,
-        IDENTITY_WRITE_CAPABILITY,
-    }
-)
-
 _TOOL_CAPABILITIES = {
     "edit_agent_brain": IDENTITY_WRITE_CAPABILITY,
     "restore_agent_brain_section": IDENTITY_WRITE_CAPABILITY,
@@ -1294,7 +1283,6 @@ for _schema in TOOL_SCHEMAS:
         READ_CAPABILITY,
     )
 
-ALL_TOOL_NAMES = [s["function"]["name"] for s in TOOL_SCHEMAS]
 TOOL_SCHEMAS_BY_NAME = {
     schema["function"]["name"]: schema for schema in TOOL_SCHEMAS
 }
@@ -1390,60 +1378,3 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
                 )
 
     return errors
-
-
-def get_filtered_schemas(
-    enabled_tools: list[str] | None = None,
-    tags: list[str] | None = None,
-    capabilities: list[str] | set[str] | frozenset[str] | None = None,
-) -> list[dict]:
-    """
-    Return tool schemas filtered by enabled tools AND specific tags.
-    Always includes request_clarification (not user-toggleable).
-    """
-    filtered = []
-    enabled_set = set(enabled_tools) if enabled_tools is not None else None
-    tags_set = set(tags) if tags else None
-    capability_set = (
-        set(capabilities)
-        if capabilities is not None
-        else set(SAFE_DEFAULT_CAPABILITIES)
-    )
-    if capabilities is None and enabled_set is not None:
-        # An explicit per-agent tool allow-list may opt into a stronger
-        # capability. Runtime authorization still applies confirmation rules.
-        capability_set.update(
-            get_schema_capability(TOOL_SCHEMAS_BY_NAME[name])
-            for name in enabled_set
-            if name in TOOL_SCHEMAS_BY_NAME
-        )
-    invalid_capabilities = capability_set - CAPABILITY_CLASSES
-    if invalid_capabilities:
-        raise ValueError(
-            "Unknown tool capabilities: "
-            + ", ".join(sorted(invalid_capabilities))
-        )
-
-    for schema in TOOL_SCHEMAS:
-        name = schema["function"]["name"]
-        if name in (
-            "request_clarification",
-            "set_research_plan",
-            "show_previous_notebook_page",
-            "submit_answer",
-        ):
-            filtered.append(schema)
-            continue
-
-        is_enabled = enabled_set is None or name in enabled_set
-        has_capability = get_schema_capability(schema) in capability_set
-
-        has_tag = True
-        if tags_set is not None:
-            tool_tags = set(schema["function"].get("tags", []))
-            has_tag = bool(tool_tags & tags_set)
-
-        if is_enabled and has_tag and has_capability:
-            filtered.append(schema)
-
-    return filtered

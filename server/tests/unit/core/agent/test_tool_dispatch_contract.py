@@ -5,12 +5,16 @@ import pytest
 from common.exceptions import StorageReadError, ToolExecutionError
 from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS_BY_NAME,
-    get_filtered_schemas,
 )
 from core.agent.notebook import RunNotebook
 from core.agent.tool_runtime import execute_tool
 from core.agent.tools.memory import MemoryTools
-from core.agent.tools.registry import Tools, build_tool_runtime, get_tool_definition
+from core.agent.tools.registry import (
+    Tools,
+    build_tool_runtime,
+    get_tool_definition,
+    get_tool_schemas,
+)
 
 
 class DispatchTools:
@@ -224,10 +228,7 @@ def test_read_web_page_registry_definition_matches_schema_and_default_limit():
     assert definition is not None
     assert definition.default_limit == 6
     assert definition.schema == TOOL_SCHEMAS_BY_NAME["read_web_page"]
-    assert definition.dispatch == (
-        "read_web_page",
-        ("url", "start_line", "max_lines", "query", "page_number"),
-    )
+    assert definition.executor_protocol is False
     assert definition.parallel_safe is False
 
 
@@ -269,15 +270,15 @@ def test_entity_search_schema_routes_memory_questions_to_episode_check_first():
 @pytest.mark.no_network
 def test_read_web_page_is_available_by_default_and_allowlists_opt_in_explicitly():
     default_names = {
-        schema["function"]["name"] for schema in get_filtered_schemas()
+        schema["function"]["name"] for schema in get_tool_schemas()
     }
     search_only_names = {
         schema["function"]["name"]
-        for schema in get_filtered_schemas(enabled_tools=["search_web"])
+        for schema in get_tool_schemas(enabled_tools=["search_web"])
     }
     enabled_names = {
         schema["function"]["name"]
-        for schema in get_filtered_schemas(enabled_tools=["read_web_page"])
+        for schema in get_tool_schemas(enabled_tools=["read_web_page"])
     }
 
     assert "read_web_page" in default_names
@@ -384,7 +385,8 @@ async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
         "core.agent.tool_runtime.get_tool_definition",
         lambda name: (
             SimpleNamespace(
-                dispatch=("broken", ()),
+                name="broken",
+                executor_protocol=False,
                 schema={
                     "function": {
                         "capability": "read",
@@ -415,7 +417,8 @@ async def test_execute_tool_marks_transient_storage_failures_retryable(monkeypat
         "core.agent.tool_runtime.get_tool_definition",
         lambda name: (
             SimpleNamespace(
-                dispatch=("broken_storage", ()),
+                name="broken_storage",
+                executor_protocol=False,
                 schema={
                     "function": {
                         "capability": "read",
@@ -443,7 +446,8 @@ async def test_execute_tool_rejects_legacy_error_data(monkeypatch):
         "core.agent.tool_runtime.get_tool_definition",
         lambda name: (
             SimpleNamespace(
-                dispatch=("legacy_error", ()),
+                name="legacy_error",
+                executor_protocol=False,
                 schema={
                     "function": {
                         "capability": "read",

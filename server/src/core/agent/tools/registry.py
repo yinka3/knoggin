@@ -8,8 +8,6 @@ from common.conf.domain_config import CompiledDomain
 from common.exceptions import ToolExecutionError
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
 from common.schema.agent.tool_contracts import (
-    CAPABILITY_CLASSES,
-    SAFE_DEFAULT_CAPABILITIES,
     TOOL_SCHEMAS,
     get_schema_capability,
 )
@@ -30,7 +28,6 @@ class ToolDefinition:
 
     name: str
     schema: dict
-    dispatch: tuple[str, tuple[str, ...]] | None
     capability: str
     default_limit: Optional[int] = None
     runtime_instruction: Optional[str] = None
@@ -154,11 +151,9 @@ def _definition(
     parallel_safe: bool = False,
 ) -> ToolDefinition:
     schema = _canonical_schema(name)
-    parameters = schema["function"].get("parameters", {}).get("properties", {})
     return ToolDefinition(
         name=name,
         schema=schema,
-        dispatch=None if executor_protocol else (name, tuple(parameters)),
         capability=get_schema_capability(schema),
         default_limit=default_limit,
         runtime_instruction=runtime_instruction,
@@ -349,32 +344,11 @@ def get_registered_tool_names() -> frozenset[str]:
 
 def get_tool_schemas(
     enabled_tools: list[str] | tuple[str, ...] | None = None,
-    tags: list[str] | None = None,
-    capabilities: list[str] | set[str] | frozenset[str] | None = None,
     additional_schemas: Iterable[dict] = (),
 ) -> list[dict]:
     """Resolve model-visible schemas from canonical definitions for one run."""
 
     enabled_set = set(enabled_tools) if enabled_tools is not None else None
-    tags_set = set(tags) if tags else None
-    capability_set = (
-        set(capabilities)
-        if capabilities is not None
-        else set(SAFE_DEFAULT_CAPABILITIES)
-    )
-    if capabilities is None and enabled_set is not None:
-        capability_set.update(
-            TOOL_DEFINITIONS[name].capability
-            for name in enabled_set
-            if name in TOOL_DEFINITIONS
-        )
-    invalid_capabilities = capability_set - CAPABILITY_CLASSES
-    if invalid_capabilities:
-        raise ValueError(
-            "Unknown tool capabilities: "
-            + ", ".join(sorted(invalid_capabilities))
-        )
-
     additional = tuple(additional_schemas)
     _validate_additional_schemas(additional)
     overrides = {
@@ -399,11 +373,7 @@ def get_tool_schemas(
             continue
 
         is_enabled = enabled_set is None or name in enabled_set
-        has_capability = definition.capability in capability_set
-        has_tag = True
-        if tags_set is not None:
-            has_tag = bool(set(schema["function"].get("tags", [])) & tags_set)
-        if is_enabled and has_capability and has_tag:
+        if is_enabled:
             filtered.append(schema)
             selected_names.add(name)
 
@@ -442,7 +412,7 @@ def _validate_additional_schemas(schemas: Iterable[dict]) -> None:
                 f"Tool schema override for '{name}' changes its capability"
             )
 
-        if definition.dispatch is None:
+        if definition.executor_protocol:
             continue
         parameters = function.get("parameters")
         properties = (
@@ -454,7 +424,11 @@ def _validate_additional_schemas(schemas: Iterable[dict]) -> None:
             raise ValueError(
                 f"Additional tool schema '{name}' has invalid parameters"
             )
-        expected = set(definition.dispatch[1])
+        expected = set(
+            definition.schema["function"]
+            .get("parameters", {})
+            .get("properties", {})
+        )
         if set(properties) != expected:
             raise ValueError(
                 f"Additional tool schema '{name}' does not match its registered "
@@ -482,13 +456,10 @@ class ToolPermissions:
     session_id: str
     run_id: str
     allowed_tools: frozenset[str]
-    allowed_capabilities: frozenset[str]
 
     def authorize(self, tool_name: str, capability: str) -> Optional[str]:
         if tool_name not in self.allowed_tools:
             return f"Tool '{tool_name}' is not enabled for this run"
-        if capability not in self.allowed_capabilities:
-            return f"Capability '{capability}' is not enabled for this run"
         return None
 
 
@@ -535,9 +506,6 @@ def build_tool_runtime(
         session_id=session_id,
         run_id=run_id,
         allowed_tools=frozenset(schema_map),
-        allowed_capabilities=frozenset(
-            get_schema_capability(schema) for schema in schema_map.values()
-        ),
     )
     return ToolRuntime(
         schemas=schemas,
@@ -590,23 +558,11 @@ def validate_registry_contract() -> None:
             raise RuntimeError(f"Tool definition '{name}' schema mismatch")
         if definition.capability != get_schema_capability(definition.schema):
             raise RuntimeError(f"Tool definition '{name}' capability mismatch")
-        if definition.executor_protocol != (definition.dispatch is None):
-            raise RuntimeError(f"Tool definition '{name}' dispatch mismatch")
-        if definition.dispatch is None:
+        if definition.executor_protocol:
             continue
-        method_name, parameter_names = definition.dispatch
-        if not callable(getattr(Tools, method_name, None)):
+        if not callable(getattr(Tools, name, None)):
             raise RuntimeError(
-                f"Tool '{name}' has no concrete method '{method_name}'"
-            )
-        schema_parameters = set(
-            definition.schema["function"].get("parameters", {}).get("properties", {})
-        )
-        if set(parameter_names) != schema_parameters:
-            raise RuntimeError(
-                f"Tool '{name}' dispatch/schema parameters differ: "
-                f"dispatch={sorted(parameter_names)}, "
-                f"schema={sorted(schema_parameters)}"
+                f"Tool '{name}' has no concrete method '{name}'"
             )
 
 

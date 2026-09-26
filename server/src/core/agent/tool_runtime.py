@@ -14,7 +14,6 @@ from common.exceptions import (
 )
 from common.schema.agent.tool_contracts import (
     READ_CAPABILITY,
-    TOOL_SCHEMAS,
     validate_tool_arguments,
 )
 from core.agent.tool_references import (
@@ -23,12 +22,7 @@ from core.agent.tool_references import (
 )
 from core.agent.tools.registry import Tools, get_tool_definition
 
-_TOOL_PARAM_TYPES: Dict[str, Dict[str, str]] = {}
-for _schema in TOOL_SCHEMAS:
-    _fn = _schema.get("function", {})
-    _name = _fn.get("name", "")
-    _props = _fn.get("parameters", {}).get("properties", {})
-    _TOOL_PARAM_TYPES[_name] = {k: v.get("type", "string") for k, v in _props.items()}
+
 def _coerce_arg(value, expected_type: str):
     """Best-effort coercion of LLM-provided arg values to declared schema types."""
     if value is None:
@@ -131,13 +125,12 @@ def summarize_result(tool_name: str, result: Dict) -> Tuple[str, int]:
 
 async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
     definition = get_tool_definition(name)
-    if definition is None or definition.dispatch is None:
+    if definition is None or definition.executor_protocol:
         raise ToolExecutionError(name, f"Unknown tool: {name}")
 
-    method_name, param_keys = definition.dispatch
-    method = getattr(tools, method_name, None)
+    method = getattr(tools, definition.name, None)
     if method is None:
-        raise ToolExecutionError(name, f"Tool method not found: {method_name}")
+        raise ToolExecutionError(name, f"Tool method not found: {definition.name}")
 
     active_schemas = getattr(tools, "active_tool_schemas", {})
     canonical_schema = definition.schema
@@ -177,17 +170,13 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
 
         kwargs = dict(args)
 
-        param_types = (
-            {
-                key: value.get("type", "string")
-                for key, value in canonical_schema["function"]
-                .get("parameters", {})
-                .get("properties", {})
-                .items()
-            }
-            if schema
-            else _TOOL_PARAM_TYPES.get(name, {})
-        )
+        param_types = {
+            key: value.get("type", "string")
+            for key, value in canonical_schema["function"]
+            .get("parameters", {})
+            .get("properties", {})
+            .items()
+        }
         for k, v in kwargs.items():
             if k in param_types:
                 kwargs[k] = _coerce_arg(v, param_types[k])
@@ -218,9 +207,6 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
                 for key, value in kwargs.items()
                 if key in parameter_names
             }
-        else:
-            kwargs = {k: args.get(k) for k in param_keys if k in args}
-
         # Tool schemas validate the model-facing local values first. Only then
         # resolve them for the scoped backend reader/writer call.
         try:
