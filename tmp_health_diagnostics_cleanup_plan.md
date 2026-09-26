@@ -183,6 +183,18 @@ internal scheduler field.
   remove it until a single threshold exists.
 - Make engine required/optional dependency classification explicit.
 
+#### Unit 3 result
+
+- Ordinary queued or active work is now `busy` rather than degraded.
+- Resource health degrades only for missing capacity metrics, database waiters,
+  model work queued at active capacity, or a full background queue.
+- Engine startup dependencies are explicit: if any runtime-owned core
+  dependency is unavailable after startup, engine status is failed regardless
+  of whether a project or session happens to be loaded.
+- Projection repair obligations and runtime closing remain degraded states.
+- The unreachable ingestion `delayed` branch was removed. Scheduler stall
+  detection remains the single current owner of delayed semantic-work status.
+
 ### Unit 4: Project scope and live/durable correlation
 
 - Settle and enforce the unused `session_id` contract.

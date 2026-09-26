@@ -245,13 +245,42 @@ async def test_resource_health_projects_current_queue_without_other_project_ids(
         mode="json"
     )
 
-    assert payload["status"] == "degraded"
+    assert payload["status"] == "healthy"
+    assert payload["activity"] == "busy"
     assert payload["details"]["background_work"]["queued_for_project"] == 1
     assert payload["details"]["model_work"]["foreground"]["active"] == 1
     assert resource_set.background_work.calls == [{"project_id": "project-a"}]
     serialized = json.dumps(payload)
     assert "project-a" not in serialized
     assert "project-b" not in serialized
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_resource_health_degrades_only_when_queued_work_is_at_capacity():
+    resource_set = resources()
+    resource_set.model_work = FakeCoordinator(
+        {
+            "foreground_concurrency": 1,
+            "background_concurrency": 1,
+            "queued_by_priority": {"foreground": 1, "background": 0},
+            "in_flight_by_priority": {"foreground": 1, "background": 0},
+        }
+    )
+    service = RuntimeHealthService(
+        resources=resource_set,
+        projects=SimpleNamespace(active_projects={}),
+        sessions=SessionRuntimeReader({}),
+    )
+
+    payload = (await service.get_resource_health(project_id="project-a")).model_dump(
+        mode="json"
+    )
+
+    assert payload["status"] == "degraded"
+    assert payload["activity"] == "delayed"
+    assert payload["activity"] == "delayed"
+    assert "model work is queued at active capacity" in payload["warnings"]
 
 
 @pytest.mark.unit

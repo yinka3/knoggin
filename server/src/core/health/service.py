@@ -53,11 +53,6 @@ class RuntimeHealthService:
         projection_repair = await self._read_maintenance_projection_repair()
         active_project_count = self._active_project_count()
         active_session_count = self._active_session_count()
-        failures = [
-            name
-            for name, result in (("PostgreSQL", postgres),)
-            if not result["available"]
-        ]
         subsystems = {
             "postgres": bool(postgres["available"]),
             "model_work": getattr(self.resources, "model_work", None) is not None,
@@ -74,7 +69,9 @@ class RuntimeHealthService:
         unavailable_subsystems = [
             name for name, available in subsystems.items() if not available
         ]
-        warnings = [f"{name} probe failed" for name in failures]
+        warnings = []
+        if not postgres["available"]:
+            warnings.append("PostgreSQL probe failed")
         if projection_repair.get("pending_count", 0):
             warnings.append("Maintenance projection repair is pending")
         warnings.extend(
@@ -85,22 +82,15 @@ class RuntimeHealthService:
         if self._closing:
             warnings.append("runtime is closing")
 
-        dependency_failure_count = len(failures)
-        if dependency_failure_count >= 2 or (
-            not active_project_count
-            and not active_session_count
-            and unavailable_subsystems
-        ):
+        if unavailable_subsystems:
             status = HealthStatus.FAILED
             summary = "Core runtime dependencies are unavailable"
         elif (
-            failures
-            or unavailable_subsystems
-            or self._closing
+            self._closing
             or projection_repair.get("pending_count", 0)
         ):
             status = HealthStatus.DEGRADED
-            summary = "Runtime is operating with degraded dependencies"
+            summary = "Runtime is operating with degraded health"
         else:
             status = HealthStatus.HEALTHY
             summary = "Runtime is healthy"
@@ -178,11 +168,25 @@ class RuntimeHealthService:
         model_details = self._model_capacity(model_snapshot)
         background_details = self._background_capacity(background_snapshot)
         database_details = self._database_capacity(postgres_snapshot)
-        queue_pressure = (
+        queued_work = (
             model_details["foreground"]["queued"]
             + model_details["background"]["queued"]
             + background_details["queued_for_project"]
-            + database_details["requests_waiting"]
+        )
+        model_pressure = any(
+            self._capacity_is_saturated(model_details[priority])
+            for priority in ("foreground", "background")
+        )
+        background_pressure = bool(
+            background_details["queued_for_project"]
+            and background_details["global_queue_limit"]
+            and background_details["global_queued"]
+            >= background_details["global_queue_limit"]
+        )
+        queue_pressure = bool(
+            database_details["requests_waiting"]
+            or model_pressure
+            or background_pressure
         )
         capacity_missing = (
             not model_snapshot
@@ -204,16 +208,19 @@ class RuntimeHealthService:
             warnings.append("database pool has waiting requests")
         if not database_details["connected"]:
             warnings.append("database pool is unavailable")
-        if background_details["queued_for_project"]:
-            warnings.append("project background work is queued")
-        if (
-            model_details["foreground"]["queued"]
-            or model_details["background"]["queued"]
-        ):
-            warnings.append("model work is queued")
+        if background_pressure:
+            warnings.append("background work queue is at its configured limit")
+        if model_pressure:
+            warnings.append("model work is queued at active capacity")
 
-        activity = HealthActivity.BUSY if queue_pressure else HealthActivity.IDLE
-        if database_details["requests_waiting"] or capacity_missing:
+        work_present = bool(
+            queued_work
+            or model_details["foreground"]["active"]
+            or model_details["background"]["active"]
+            or database_details["active"]
+        )
+        activity = HealthActivity.BUSY if work_present else HealthActivity.IDLE
+        if queue_pressure or capacity_missing:
             activity = HealthActivity.DELAYED
 
         return HealthSnapshot(
@@ -284,8 +291,6 @@ class RuntimeHealthService:
 
         if delay_state == "stalled":
             warnings.append("pending semantic work is stalled")
-        elif delay_state == "delayed":
-            warnings.append("pending semantic work is delayed")
         if failed_count:
             warnings.append("semantic windows have recorded failures")
         if exhausted_count:
@@ -305,7 +310,7 @@ class RuntimeHealthService:
         elif (
             not queue_available
             or scheduler_state != "running"
-            or delay_state in {"delayed", "stalled"}
+            or delay_state == "stalled"
             or failed_count
             or exhausted_count
             or consecutive_failures
@@ -318,7 +323,7 @@ class RuntimeHealthService:
             status = HealthStatus.HEALTHY
             summary = "Semantic processing is healthy"
 
-        if delay_state in {"delayed", "stalled"} or not queue_available:
+        if delay_state == "stalled" or not queue_available:
             activity = HealthActivity.DELAYED
         elif (
             pending_count
@@ -793,6 +798,15 @@ class RuntimeHealthService:
                 else []
             ),
         }
+
+    @staticmethod
+    def _capacity_is_saturated(details: Mapping[str, Any]) -> bool:
+        queued = RuntimeHealthService._nonnegative_int(details.get("queued"))
+        if not queued:
+            return False
+        capacity = RuntimeHealthService._nonnegative_int(details.get("capacity"))
+        active = RuntimeHealthService._nonnegative_int(details.get("active"))
+        return capacity == 0 or active >= capacity
 
     @staticmethod
     def _background_capacity(snapshot: Mapping[str, Any]) -> dict[str, Any]:
