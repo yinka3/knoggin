@@ -1244,6 +1244,33 @@ async def test_native_project_file_operations_reconcile_the_document_catalog(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_list_project_files_only_reads_the_bounded_result_set(
+    document_harness,
+    monkeypatch,
+):
+    service, _postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("a.md", b"alpha")
+    filesystem.write_bytes("b.md", b"beta")
+    filesystem.write_bytes("c.md", b"gamma")
+    reads: list[str] = []
+    original_read_file = type(filesystem).read_file
+
+    def count_read_file(instance, relative_path, **kwargs):
+        reads.append(relative_path)
+        return original_read_file(instance, relative_path, **kwargs)
+
+    monkeypatch.setattr(type(filesystem), "read_file", count_read_file)
+
+    listed = await service.list_project_files(limit=1)
+
+    assert [item["relative_path"] for item in listed] == ["a.md"]
+    assert reads == ["a.md"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_controlled_context_file_is_hidden_from_workspace_and_document_discovery(
     document_harness,
 ):

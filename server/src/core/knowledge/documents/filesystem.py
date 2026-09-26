@@ -78,6 +78,20 @@ class ProjectFilesystem:
             raise ValueError(f"file exceeds the {max_bytes}-byte read limit")
         return content
 
+    def read_file(
+        self,
+        relative_path: str,
+        *,
+        max_bytes: int = MAX_DOCUMENT_SIZE,
+    ) -> ProjectFile:
+        """Read and fingerprint one bounded regular project file."""
+        content = self.read_bytes(relative_path, max_bytes=max_bytes)
+        return ProjectFile(
+            relative_path=self.normalize_path(relative_path),
+            size_bytes=len(content),
+            content_hash=self._content_hash(content),
+        )
+
     def write_bytes(
         self,
         relative_path: str,
@@ -204,12 +218,7 @@ class ProjectFilesystem:
     def iter_files(self, *, limit: int | None = None) -> Iterator[ProjectFile]:
         """Yield regular project files in stable path order without following links."""
         for path in self.iter_paths(limit=limit):
-            content = self.read_bytes(path.relative_path)
-            yield ProjectFile(
-                relative_path=path.relative_path,
-                size_bytes=len(content),
-                content_hash=self._content_hash(content),
-            )
+            yield self.read_file(path.relative_path)
 
     def iter_paths(self, *, limit: int | None = None) -> Iterator[ProjectFilePath]:
         """Yield regular project paths in stable order without following links."""

@@ -275,17 +275,24 @@ class DocumentService:
         normalized_prefix = None
         if path_prefix is not None and path_prefix.strip() not in {"", "."}:
             normalized_prefix = normalize_relative_path(path_prefix, path_prefix).rstrip("/")
-        files = await self._run_blocking(lambda: list(filesystem.iter_files()))
-        files = [
-            file for file in files if not is_controlled_context_file(file.relative_path)
+        paths = await self._run_blocking(lambda: list(filesystem.iter_paths()))
+        paths = [
+            path for path in paths if not is_controlled_context_file(path.relative_path)
         ]
         if normalized_prefix is not None:
-            files = [
-                file
-                for file in files
-                if file.relative_path == normalized_prefix
-                or file.relative_path.startswith(normalized_prefix + "/")
+            paths = [
+                path
+                for path in paths
+                if path.relative_path == normalized_prefix
+                or path.relative_path.startswith(normalized_prefix + "/")
             ]
+        selected_paths = paths[:limit]
+        files = await self._run_blocking(
+            lambda: [
+                filesystem.read_file(path.relative_path)
+                for path in selected_paths
+            ]
+        )
         return [
             {
                 "relative_path": file.relative_path,
@@ -294,7 +301,7 @@ class DocumentService:
                 "size_bytes": file.size_bytes,
                 "content_hash": file.content_hash,
             }
-            for file in files[:limit]
+            for file in files
         ]
 
     async def read_project_file(
