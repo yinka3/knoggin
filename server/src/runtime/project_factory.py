@@ -178,6 +178,12 @@ class ProjectRuntimeFactory:
         readable_project_ids: list[str],
         resources: ReadyRuntimeResources | None = None,
     ) -> DocumentService:
+        """Build the project document boundary from one captured config snapshot.
+
+        Document parser/indexing policy, reranking, project-library location,
+        and reconciliation cadence intentionally change only when the project
+        runtime is rebuilt. They are not registered as live config subscribers.
+        """
         resources = resources or cast(ReadyRuntimeResources, self.resources)
         runtime_config = self._config().config
         document_settings = runtime_config.developer_settings.documents

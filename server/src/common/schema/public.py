@@ -32,7 +32,7 @@ from common.exceptions import (
 )
 from common.schema.agent.research import ResearchMode
 from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
-from common.schema.document import DocumentSelection, FolderScanSettings
+from common.schema.document import DocumentSelection
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from common.schema.maintenance import MaintenanceImpactPreview
 from common.schema.source.references import SourceConsulted
@@ -214,10 +214,6 @@ class UploadDocumentRequest(PublicModel):
 class UpdateSavedWebLinkRequest(PublicModel):
     title: str | None = Field(default=None, max_length=512)
     summary: str | None = Field(default=None, max_length=4000)
-
-
-class ScanSettingsResponse(PublicModel):
-    settings: FolderScanSettings
 
 
 class MaintenanceReviewResponse(PublicModel):
