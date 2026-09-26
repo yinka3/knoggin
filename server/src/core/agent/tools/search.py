@@ -711,7 +711,10 @@ class SearchTools:
     ) -> List[Dict]:
         """List documents visible to the current project/session."""
         if not self.document_service:
-            return [{"error": "No project document service available"}]
+            raise ToolExecutionError(
+                "list_project_documents",
+                "No project document service is available",
+            )
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
@@ -751,7 +754,10 @@ class SearchTools:
     ) -> Dict:
         """Get metadata for one visible document."""
         if not self.document_service:
-            return {"error": "No project document service available"}
+            raise ToolExecutionError(
+                "get_project_document_info",
+                "No project document service is available",
+            )
         if self.document_focus and self._focus_is_restrictive():
             await self._require_focus_document(document_id=document_id, relative_path=relative_path)
         if (
@@ -786,7 +792,10 @@ class SearchTools:
     ) -> List[Dict]:
         """Read a bounded line range from one visible document."""
         if not self.document_service:
-            return [{"error": "No project document service available"}]
+            raise ToolExecutionError(
+                "read_project_document",
+                "No project document service is available",
+            )
         request_document_id = self._request_focus_document_id()
         if self.document_focus and self._focus_is_restrictive():
             await self._require_focus_document(document_id=document_id, relative_path=relative_path)
@@ -861,7 +870,10 @@ class SearchTools:
             Matching chunks with document metadata and relevance scores.
         """
         if not self.document_service:
-            return [{"error": "No project document service available"}]
+            raise ToolExecutionError(
+                "search_project_documents",
+                "No project document service is available",
+            )
         if (
             not isinstance(limit, int)
             or isinstance(limit, bool)
@@ -929,7 +941,7 @@ class SearchTools:
         ]
 
         if not documents:
-            return [{"error": "No indexed documents available in this project"}]
+            return []
 
         if document_name:
             requested = document_name.lower()
@@ -948,26 +960,20 @@ class SearchTools:
                 document_filter = matches[0]["document_id"]
             elif len(matches) > 1:
                 paths = [document["relative_path"] for document in matches]
-                return [
-                    {
-                        "error": (
-                            f"Document name '{document_name}' is ambiguous. "
-                            f"Use one of these paths: {', '.join(paths)}"
-                        )
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_project_documents",
+                    f"Document name '{document_name}' is ambiguous. "
+                    f"Use one of these paths: {', '.join(paths)}",
+                )
             else:
                 available = [
                     document["relative_path"] for document in documents
                 ]
-                return [
-                    {
-                        "error": (
-                            f"Document '{document_name}' not found. Available: "
-                            f"{', '.join(available)}"
-                        )
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_project_documents",
+                    f"Document '{document_name}' not found. Available: "
+                    f"{', '.join(available)}",
+                )
 
         results = await self.document_service.search(
             query,

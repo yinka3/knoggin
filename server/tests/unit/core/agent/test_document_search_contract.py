@@ -1,5 +1,6 @@
 import pytest
 
+from common.exceptions import ToolExecutionError
 from common.schema.agent.tool_contracts import TOOL_SCHEMAS
 from common.schema.source.references import SourceReferenceCandidate
 from core.agent.tools.search import SearchTools, _layout_region_locator
@@ -273,9 +274,7 @@ async def test_search_project_documents_reports_project_empty_state():
     tools.document_service = EmptyDocumentService()
     tools.session_id = "session-1"
 
-    assert await tools.search_project_documents("alpha") == [
-        {"error": "No indexed documents available in this project"}
-    ]
+    assert await tools.search_project_documents("alpha") == []
 
 
 @pytest.mark.no_network
@@ -334,9 +333,9 @@ async def test_search_project_documents_rejects_ambiguous_document_names():
     tools.document_service = document_service
     tools.session_id = "session-1"
 
-    result = await tools.search_project_documents("alpha", document_name="notes.md")
+    with pytest.raises(ToolExecutionError, match="ambiguous"):
+        await tools.search_project_documents("alpha", document_name="notes.md")
 
-    assert "ambiguous" in result[0]["error"]
     assert document_service.search_calls == []
 
 

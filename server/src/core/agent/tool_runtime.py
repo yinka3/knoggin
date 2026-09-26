@@ -213,16 +213,12 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         # resolve them for the scoped backend reader/writer call.
         kwargs = resolve_agent_tool_arguments(tools, name, kwargs)
         result = await method(**kwargs)
+        result = _normalize_tool_result(name, result)
         if audit_id:
-            audit_status = (
-                "rejected"
-                if isinstance(result, dict) and result.get("error")
-                else "succeeded"
-            )
             await _safe_finish_tool_audit(
                 tools,
                 audit_id,
-                status=audit_status,
+                status="succeeded",
                 result=result,
             )
         return {"data": result}
@@ -249,6 +245,54 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
             "Tool execution failed",
             retryable=_is_retryable_tool_failure(exc),
         ) from exc
+
+
+def _normalize_tool_result(tool_name: str, result):
+    """Reject legacy error-shaped returns before they look like success data."""
+
+    error = None
+    if isinstance(result, dict):
+        error = result.get("error")
+    elif isinstance(result, list):
+        error_rows = [
+            row.get("error")
+            for row in result
+            if isinstance(row, dict) and row.get("error")
+        ]
+        if error_rows:
+            error = error_rows[0]
+        elif result and all(
+            isinstance(row, dict) and row.get("title") == "No Results"
+            for row in result
+        ):
+            return []
+        elif any(
+            isinstance(row, dict)
+            and row.get("title") == "Not Available"
+            and not row.get("url")
+            for row in result
+        ):
+            raise ToolExecutionError(
+                tool_name,
+                "The requested provider is not configured",
+            )
+        elif any(
+            isinstance(row, dict)
+            and row.get("title") in {"Error", "Search Error", "Timeout"}
+            and not row.get("url")
+            for row in result
+        ):
+            raise ToolExecutionError(
+                tool_name,
+                "The external search provider failed",
+                retryable=True,
+            )
+    if error:
+        message = str(error)
+        if message.casefold().startswith("failed to "):
+            message = "The tool operation failed"
+        raise ToolExecutionError(tool_name, message)
+    return result
 
 
 def _is_retryable_tool_failure(exc: Exception) -> bool:

@@ -80,6 +80,9 @@ class DispatchTools:
     async def broken_storage(self):
         raise StorageReadError("message search")
 
+    async def legacy_error(self):
+        return {"error": "The requested operation is unavailable"}
+
 
 @pytest.mark.no_network
 async def test_execute_tool_dispatches_known_tools_and_coerces_schema_types():
@@ -395,6 +398,31 @@ async def test_execute_tool_marks_transient_storage_failures_retryable(monkeypat
 
     assert exc.value.retryable is True
     assert exc.value.details["retryable"] is True
+
+
+@pytest.mark.no_network
+async def test_execute_tool_rejects_legacy_error_data(monkeypatch):
+    tools = DispatchTools()
+    monkeypatch.setattr(
+        "core.agent.tool_runtime.get_tool_definition",
+        lambda name: (
+            SimpleNamespace(
+                dispatch=("legacy_error", ()),
+                schema={
+                    "function": {
+                        "capability": "read",
+                        "parameters": {"type": "object"},
+                    }
+                },
+                capability="read",
+            )
+            if name == "legacy_error_tool"
+            else None
+        ),
+    )
+
+    with pytest.raises(ToolExecutionError, match="operation is unavailable"):
+        await execute_tool(tools, "legacy_error_tool", {})
 
 
 class RecordingPostgres:

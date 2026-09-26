@@ -47,9 +47,12 @@ class ProjectFileTools:
 
     document_service = None
 
-    def _files_unavailable(self, *, list_result: bool = False):
-        message = "No project document service with local-file access is available"
-        return [{"error": message}] if list_result else {"error": message}
+    @staticmethod
+    def _files_unavailable(tool_name: str) -> None:
+        raise ToolExecutionError(
+            tool_name,
+            "No project document service with local-file access is available",
+        )
 
     async def list_project_files(
         self,
@@ -57,7 +60,7 @@ class ProjectFileTools:
         limit: int = PROJECT_FILE_TOOL_MAX_LIST_LIMIT,
     ) -> List[Dict]:
         if self.document_service is None:
-            return self._files_unavailable(list_result=True)
+            self._files_unavailable("list_project_files")
         if path_prefix is not None:
             if not isinstance(path_prefix, str) or len(path_prefix) > PROJECT_FILE_TOOL_MAX_PATH_LENGTH:
                 raise ValueError("path_prefix must be a bounded string")
@@ -87,7 +90,7 @@ class ProjectFileTools:
         max_characters: int = PROJECT_FILE_TOOL_MAX_READ_CHARACTERS,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("read_project_file")
         normalized_path = _normalize_tool_path(path)
         if is_controlled_context_file(normalized_path):
             raise PermissionError(
@@ -146,7 +149,7 @@ class ProjectFileTools:
 
     async def create_project_file(self, path: str, content: str) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("create_project_file")
         return await self.document_service.create_project_file(
             _editable_path(path),
             _validate_content(content),
@@ -159,7 +162,7 @@ class ProjectFileTools:
         expected_content_hash: str,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("update_project_file")
         return await self.document_service.update_project_file(
             _editable_path(path),
             _validate_content(content),
@@ -173,7 +176,7 @@ class ProjectFileTools:
         expected_content_hash: str,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("append_project_file")
         return await self.document_service.append_project_file(
             _editable_path(path),
             _validate_content(content),
@@ -187,7 +190,7 @@ class ProjectFileTools:
         expected_content_hash: str,
     ) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("move_project_file")
         return await self.document_service.move_project_file(
             _editable_path(source_path),
             _editable_path(destination_path),
@@ -196,7 +199,7 @@ class ProjectFileTools:
 
     async def delete_project_file(self, path: str, expected_content_hash: str) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("delete_project_file")
         return await self.document_service.delete_project_file(
             _editable_path(path),
             expected_content_hash=_validate_content_hash(expected_content_hash),
@@ -204,7 +207,7 @@ class ProjectFileTools:
 
     async def create_project_folder(self, path: str) -> Dict:
         if self.document_service is None:
-            return self._files_unavailable()
+            self._files_unavailable("create_project_folder")
         return await self.document_service.create_project_folder(_editable_path(path))
 
 
