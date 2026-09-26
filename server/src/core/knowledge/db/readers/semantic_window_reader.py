@@ -116,6 +116,40 @@ class SemanticWindowReader:
         )
         return None if row is None else SemanticWindowRecord.model_validate(row)
 
+    async def list_failed_active_windows(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int,
+    ) -> list[SemanticWindowRecord]:
+        """Return a bounded set of active windows carrying failure metadata."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "list_failed_active_windows"
+        )
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("limit must be between 1 and 100")
+        rows = await self.client.fetch_all(
+            f"""
+            SELECT {_WINDOW_COLUMNS}
+            FROM public.project_semantic_windows AS semantic_window
+            WHERE semantic_window.user_name = %s
+              AND semantic_window.project_id = %s
+              AND semantic_window.stage <> 'completed'
+              AND semantic_window.last_failure_at_ms IS NOT NULL
+            ORDER BY semantic_window.last_failure_at_ms ASC,
+                     semantic_window.window_id ASC
+            LIMIT %s
+            """,
+            (user_name, project_id, limit),
+        )
+        return [SemanticWindowRecord.model_validate(row) for row in rows]
+
     async def get_window_messages(
         self,
         window_id: UUID | str,

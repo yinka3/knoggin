@@ -7,7 +7,12 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 
 from loguru import logger
 
-from common.schema.maintenance import MaintenanceImpactPreview
+from common.schema.maintenance import (
+    MaintenanceImpactPreview,
+    OrphanedExchangeBlockage,
+    SemanticWindowBlockage,
+    SessionBlockageInspection,
+)
 from core.knowledge.conflict.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflict.conflict_service import (
     ConflictService,
@@ -158,6 +163,132 @@ class ProjectMaintenanceService:
             if runtime is not None:
                 runtime.signal_semantic_work()
             return window
+
+    async def inspect_semantic_window_blockages(
+        self, project_id: str, *, limit: int = 100
+    ) -> tuple[SemanticWindowBlockage, ...]:
+        """Return bounded failed-window diagnostics without exposing storage rows."""
+
+        await self._require_domain_project(project_id, allow_archived=True)
+        windows = (
+            await self._require_knowledge_store().list_failed_project_semantic_windows(
+                user_name=self.user_name,
+                project_id=project_id,
+                limit=limit,
+            )
+        )
+        return tuple(
+            SemanticWindowBlockage(
+                window_id=window.window_id,
+                stage=window.stage,
+                kind=(
+                    "retry_exhausted"
+                    if window.next_retry_at_ms is None
+                    else "retry_scheduled"
+                ),
+                attempt_count=window.attempt_count,
+                failure_stage=window.last_failure_stage,
+                failure_code=window.last_failure_code,
+                failed_at_ms=window.last_failure_at_ms,
+                next_retry_at_ms=window.next_retry_at_ms,
+            )
+            for window in windows
+        )
+
+    async def inspect_session_blockages(
+        self,
+        project_id: str,
+        *,
+        stale_before_ms: int,
+        limit: int = 100,
+    ) -> SessionBlockageInspection:
+        """Find old open exchanges only in sessions without live owners."""
+
+        if (
+            not isinstance(stale_before_ms, int)
+            or isinstance(stale_before_ms, bool)
+            or stale_before_ms < 0
+        ):
+            raise ValueError("stale_before_ms must be a non-negative integer")
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= 100
+        ):
+            raise ValueError("limit must be between 1 and 100")
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            live_sessions = self._project_leases.get(project_id, set())
+            rows = await self.pg.fetch_all(
+                """
+                SELECT message.session_id, message.message_id, message.timestamp_ms,
+                       count(*) OVER () AS total_count
+                FROM public.messages AS message
+                JOIN public.sessions AS session
+                  ON session.user_name = message.user_name
+                 AND session.project_id = message.project_id
+                 AND session.session_id = message.session_id
+                WHERE message.user_name = %s
+                  AND message.project_id = %s
+                  AND message.role = 'user'
+                  AND message.exchange_state = 'open'
+                  AND message.timestamp_ms <= %s
+                  AND session.status = 'open'
+                  AND NOT (message.session_id = ANY(%s::text[]))
+                ORDER BY message.timestamp_ms ASC, message.message_id ASC
+                LIMIT %s
+                """,
+                (
+                    self.user_name,
+                    project_id,
+                    stale_before_ms,
+                    list(live_sessions),
+                    limit,
+                ),
+            )
+        total = int(rows[0]["total_count"]) if rows else 0
+        return SessionBlockageInspection(
+            exchanges=tuple(
+                OrphanedExchangeBlockage(
+                    session_id=row["session_id"],
+                    user_message_id=int(row["message_id"]),
+                    opened_at_ms=int(row["timestamp_ms"]),
+                )
+                for row in rows
+            ),
+            total_count=total,
+            truncated=total > len(rows),
+        )
+
+    async def repair_orphaned_exchange(
+        self,
+        project_id: str,
+        *,
+        session_id: str,
+        user_message_id: int,
+        expected_opened_at_ms: int,
+        stale_before_ms: int,
+    ):
+        """Close one inspected orphan as failed after rechecking every guard."""
+
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=False)
+            if session_id in self._project_leases.get(project_id, set()):
+                raise ValueError("Cannot repair an exchange owned by a live session")
+            closure = (
+                await self._require_knowledge_store().close_orphaned_user_exchange(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                    session_id=session_id,
+                    user_message_id=user_message_id,
+                    expected_opened_at_ms=expected_opened_at_ms,
+                    stale_before_ms=stale_before_ms,
+                )
+            )
+            runtime = self._active_projects.get(project_id)
+            if runtime is not None:
+                runtime.signal_semantic_work()
+            return closure
 
     @staticmethod
     def _validate_expected_domain_version(value: object) -> int:

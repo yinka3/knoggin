@@ -131,3 +131,51 @@ async def test_closed_assistant_exchange_requires_its_assistant_row():
                 closed_at_ms=100,
                 cur=cur,
             )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_orphan_repair_rechecks_open_state_and_inspection_timestamp():
+    client = RecordingPostgresClient(
+        fetch_one_results=[{"timestamp_ms": 51, "exchange_state": "open"}]
+    )
+
+    with pytest.raises(ValueError, match="changed since it was inspected"):
+        await _writer(client).close_orphaned_user_exchange(
+            user_name="ada",
+            project_id="project-1",
+            session_id="session-1",
+            user_message_id=7,
+            expected_opened_at_ms=50,
+            stale_before_ms=100,
+        )
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_orphan_repair_closes_through_canonical_failed_exchange_path():
+    client = RecordingPostgresClient(
+        fetch_one_results=[
+            {"timestamp_ms": 50, "exchange_state": "open"},
+            {
+                "message_id": 7,
+                "exchange_state": "open",
+                "exchange_outcome": None,
+                "exchange_closed_at_ms": None,
+            },
+            {"message_id": 7},
+        ]
+    )
+
+    result = await _writer(client).close_orphaned_user_exchange(
+        user_name="ada",
+        project_id="project-1",
+        session_id="session-1",
+        user_message_id=7,
+        expected_opened_at_ms=50,
+        stale_before_ms=100,
+    )
+
+    assert result.outcome == "failed"
+    update_call = next(call for call in client.calls if "UPDATE public.messages" in call[1])
+    assert '"code": "run_failed"' in update_call[2][3]

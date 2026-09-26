@@ -200,6 +200,21 @@ Caller audit conclusions:
 - Add a conservative reviewed or explicit repair operation for abandoned work.
 - Ensure Health reports the condition without performing the repair.
 
+#### Unit 4 result
+
+- Failed active semantic windows now have a bounded typed maintenance view that
+  distinguishes a scheduled retry from exhausted automatic retries. Existing
+  Health already reports both failure and exhaustion counts read-only.
+- Old open exchanges can be inspected with an explicit caller-supplied age
+  cutoff and a maximum result size. Sessions with live runtime leases are
+  excluded while holding the same lock used to acquire and release leases.
+- Repair targets one previously inspected exchange, refuses live sessions,
+  locks and rechecks the durable row, and closes it through the canonical
+  failed-exchange path before waking semantic work.
+- Health does not label an open exchange as orphaned because it lacks an
+  operator-selected age policy and live-lease proof. That condition stays in
+  Maintenance rather than producing false Health alarms for active turns.
+
 ### Unit 5: Lock and runtime/cache invariants
 
 - Test maintenance versus project activation/archive/delete/domain transitions.

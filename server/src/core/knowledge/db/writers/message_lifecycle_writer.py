@@ -357,6 +357,51 @@ class MessageLifecycleWriter:
             closed_at_ms=closed_at_ms,
         )
 
+    async def close_orphaned_user_exchange(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        session_id: str,
+        user_message_id: int,
+        expected_opened_at_ms: int,
+        stale_before_ms: int,
+    ) -> ExchangeClosure:
+        """Close an explicitly selected stale exchange after locking its row."""
+
+        async with self.client.transaction() as cur:
+            await cur.execute(
+                """
+                SELECT timestamp_ms, exchange_state
+                FROM public.messages
+                WHERE user_name = %s
+                  AND project_id = %s
+                  AND session_id = %s
+                  AND message_id = %s
+                  AND role = 'user'
+                FOR UPDATE
+                """,
+                (user_name, project_id, session_id, user_message_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise ValueError("Orphaned exchange is unavailable")
+            if row["exchange_state"] != "open":
+                raise ValueError("Exchange is no longer open")
+            if int(row["timestamp_ms"]) != expected_opened_at_ms:
+                raise ValueError("Exchange changed since it was inspected")
+            if expected_opened_at_ms > stale_before_ms:
+                raise ValueError("Exchange is not old enough to repair")
+            return await self.close_user_exchange(
+                user_name=user_name,
+                project_id=project_id,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                outcome="failed",
+                terminal_error={"code": "run_failed", "retryable": True},
+                cur=cur,
+            )
+
     async def edit_user_message(
         self,
         *,

@@ -409,6 +409,19 @@ class KnowledgeStore:
             project_id=project_id,
         )
 
+    async def list_failed_project_semantic_windows(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+        limit: int = 100,
+    ) -> list[SemanticWindowRecord]:
+        return await self._semantic_window_reader.list_failed_active_windows(
+            user_name=user_name,
+            project_id=project_id,
+            limit=limit,
+        )
+
     async def get_project_semantic_window_evidence_messages(
         self,
         window_id: str,
@@ -506,6 +519,11 @@ class KnowledgeStore:
         return await self._semantic_window_reader.get_unclaimed_project_exchange_rows(
             user_name=user_name,
             project_id=project_id,
+        )
+
+    async def close_orphaned_user_exchange(self, **kwargs):
+        return await self._message_lifecycle_writer.close_orphaned_user_exchange(
+            **kwargs
         )
 
     async def advance_project_semantic_window_stage(
