@@ -357,6 +357,26 @@ async def test_execute_tool_preserves_typed_local_reference_failure():
 
 
 @pytest.mark.no_network
+async def test_execute_tool_keeps_canonical_constraints_with_weaker_override():
+    tools = DispatchTools()
+    canonical = get_tool_definition("read_episode_messages").schema
+    override = {
+        **canonical,
+        "function": {
+            **canonical["function"],
+            "parameters": {
+                **canonical["function"]["parameters"],
+                "required": [],
+            },
+        },
+    }
+    tools.active_tool_schemas = {"read_episode_messages": override}
+
+    with pytest.raises(ToolExecutionError, match="episode_id is required"):
+        await execute_tool(tools, "read_episode_messages", {})
+
+
+@pytest.mark.no_network
 async def test_execute_tool_wraps_tool_method_exceptions(monkeypatch):
     tools = DispatchTools()
 

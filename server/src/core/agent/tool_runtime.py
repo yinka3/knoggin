@@ -140,7 +140,8 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         raise ToolExecutionError(name, f"Tool method not found: {method_name}")
 
     active_schemas = getattr(tools, "active_tool_schemas", {})
-    schema = active_schemas.get(name) or definition.schema
+    canonical_schema = definition.schema
+    schema = active_schemas.get(name) or canonical_schema
     authorization = getattr(tools, "tool_authorization", None)
     capability = definition.capability if schema else READ_CAPABILITY
 
@@ -179,7 +180,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
         param_types = (
             {
                 key: value.get("type", "string")
-                for key, value in schema["function"]
+                for key, value in canonical_schema["function"]
                 .get("parameters", {})
                 .get("properties", {})
                 .items()
@@ -191,16 +192,24 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
             if k in param_types:
                 kwargs[k] = _coerce_arg(v, param_types[k])
 
-        if schema:
-            validation_errors = validate_tool_arguments(schema, kwargs)
+        if canonical_schema:
+            validation_errors = validate_tool_arguments(canonical_schema, kwargs)
             if validation_errors:
                 raise ToolExecutionError(
                     name,
                     "Invalid arguments: " + "; ".join(validation_errors),
                 )
 
+            if schema is not canonical_schema:
+                presentation_errors = validate_tool_arguments(schema, kwargs)
+                if presentation_errors:
+                    raise ToolExecutionError(
+                        name,
+                        "Invalid arguments: " + "; ".join(presentation_errors),
+                    )
+
             parameter_names = set(
-                schema["function"]
+                canonical_schema["function"]
                 .get("parameters", {})
                 .get("properties", {})
             )

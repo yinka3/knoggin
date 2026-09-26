@@ -1320,6 +1320,14 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
     errors = []
     expected_type = schema.get("type")
 
+    any_of = schema.get("anyOf")
+    if any_of and not any(
+        not _validate_schema_value(value, option, path)
+        for option in any_of
+        if isinstance(option, dict)
+    ):
+        errors.append(f"{path} must satisfy at least one allowed shape")
+
     type_matches = {
         "object": lambda item: isinstance(item, dict),
         "array": lambda item: isinstance(item, list),
@@ -1360,14 +1368,16 @@ def _validate_schema_value(value, schema: dict, path: str) -> list[str]:
                     _validate_schema_value(item, item_schema, f"{path}[{index}]")
                 )
 
-    if expected_type == "object":
+    if expected_type == "object" or any(
+        key in schema for key in ("properties", "required", "additionalProperties")
+    ):
         properties = schema.get("properties", {})
         required = schema.get("required", [])
         for key in required:
             if key not in value:
                 errors.append(f"{path}.{key} is required")
         unknown = sorted(set(value) - set(properties))
-        if unknown and schema.get("additionalProperties", False) is False:
+        if unknown and schema.get("additionalProperties") is False:
             errors.append(f"{path} contains unknown fields: {', '.join(unknown)}")
         for key, item in value.items():
             if key in properties:

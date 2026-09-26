@@ -6,6 +6,7 @@ from common.schema.agent.tool_contracts import (
     REVERSIBLE_WRITE_CAPABILITY,
     TOOL_SCHEMAS_BY_NAME,
     get_schema_capability,
+    validate_tool_arguments,
 )
 from common.schema.evidence import (
     EvidenceBundle,
@@ -14,6 +15,21 @@ from common.schema.evidence import (
     EvidenceSubject,
 )
 from core.agent.tools.maintenance import MaintenanceTools
+
+
+def test_merge_schema_requires_at_least_one_evidence_kind():
+    schema = TOOL_SCHEMAS_BY_NAME["propose_entity_merge"]
+    arguments = {
+        "primary_id": 1,
+        "duplicate_id": 2,
+        "reasoning": "same durable identity",
+    }
+
+    assert validate_tool_arguments(schema, arguments) == [
+        "arguments must satisfy at least one allowed shape"
+    ]
+    arguments["evidence_message_ids"] = [10]
+    assert validate_tool_arguments(schema, arguments) == []
 
 
 class RecordingKnowledgeStore:
