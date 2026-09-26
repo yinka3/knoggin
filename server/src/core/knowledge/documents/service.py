@@ -19,7 +19,6 @@ from common.schema.document import (
     UserAttachedSource,
     UserAttachedUrl,
 )
-from common.schema.health import sanitize_health_details
 from common.schema.source.locators import (
     CodeLineLocator,
     CsvRowLocator,
@@ -1403,24 +1402,12 @@ class DocumentService:
             )
         )
 
-    async def shutdown(self) -> None:
-        """Delegate indexer task shutdown while retaining this public façade."""
-        await self._indexer.shutdown()
-
-    async def recover_pending_indexes(self, limit: int = 16) -> int:
-        """Delegate recovery to the project-owned indexer."""
-        return await self._indexer.recover_pending_indexes(limit)
-
     async def pending_index_count(self) -> int:
         return await self._indexer.pending_index_count()
 
-    def indexing_snapshot(self) -> Dict:
-        """Expose the indexer's bounded health projection."""
-        return self._indexer.indexing_snapshot()
-
     def indexing_snapshot_for_health(self) -> dict[str, object]:
         """Return a bounded public projection of indexing metrics."""
-        return sanitize_health_details(self.indexing_snapshot())
+        return self._indexer.indexing_snapshot_for_health()
 
     async def resolve_focus_target(
         self,

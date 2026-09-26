@@ -2037,7 +2037,7 @@ async def test_indexer_start_drains_more_than_one_recovery_batch(document_harnes
         await asyncio.sleep(0.01)
 
     assert {row["status"] for row in postgres.rows} == {"indexed"}
-    await service.shutdown()
+    await service.indexer.shutdown()
 
 
 @pytest.mark.storage
@@ -2082,7 +2082,7 @@ async def test_indexer_retries_document_admission_after_temporary_rejection(
 
     assert background_work.calls >= 2
     assert postgres.rows[0]["status"] == "indexed"
-    await service.shutdown()
+    await service.indexer.shutdown()
 
 
 @pytest.mark.storage
