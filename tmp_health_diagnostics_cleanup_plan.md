@@ -268,6 +268,19 @@ internal scheduler field.
 - Run health, maintenance, runtime lifecycle, SDK/API, and relevant PostgreSQL
   contract suites.
 
+#### Unit 7 result
+
+- Health remains read-only: it probes, aggregates, sanitizes, and classifies;
+  it does not retry, wake, reconcile, or mutate a subsystem.
+- Durable failed-window and orphaned-exchange details remain under Maintenance,
+  including every explicit repair operation.
+- Live runtime snapshots are synchronous bounded views; durable reads use
+  timeout-bounded async probes.
+- Agent tools, HTTP routes, the application port, SDK, and UI all consume the
+  same `HealthSnapshot` envelope and expose no runtime or storage objects.
+- The final cross-subsystem audit passed 82 Health, Maintenance, runtime
+  lifecycle, integration, and API tests.
+
 ## Decisions to settle during implementation
 
 - Is ingestion health project-scoped or session-scoped?
