@@ -411,6 +411,27 @@ def test_executor_requires_terminal_protocol_calls_to_be_exclusive(tool_calls):
 
 
 @pytest.mark.no_network
+def test_executor_rejects_duplicate_tool_call_correlation_ids():
+    executor = make_executor(StreamingLLM())
+    tool_calls = [
+        ToolCall(
+            "search_knowledge_messages",
+            {"query": "first"},
+            call_id="duplicate-id",
+        ),
+        ToolCall(
+            "search_knowledge_messages",
+            {"query": "second"},
+            call_id="duplicate-id",
+        ),
+    ]
+
+    assert executor._validate_tool_call_batch(tool_calls, _AgentPhase.PLAN) == (
+        "Returned tool calls contain duplicate correlation IDs."
+    )
+
+
+@pytest.mark.no_network
 async def test_step_completed_without_tool_calls_yields_formatting_step_error():
     llm = StreamingLLM(
         [

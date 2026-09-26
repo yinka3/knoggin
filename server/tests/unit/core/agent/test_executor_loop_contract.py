@@ -1939,7 +1939,7 @@ async def test_executor_reports_the_notebook_owned_bounded_token_count():
 
 
 @pytest.mark.no_network
-async def test_executor_loop_recovers_from_invalid_arguments_and_tool_exceptions(
+async def test_executor_loop_normalizes_tool_exceptions(
     monkeypatch,
 ):
     run = make_run(limits=AgentRunLimits(max_calls=3))
@@ -1954,29 +1954,19 @@ async def test_executor_loop_recovers_from_invalid_arguments_and_tool_exceptions
 
     monkeypatch.setattr("core.agent.executor.execute_tool", fake_execute)
 
-    invalid = executor._parse_tool_calls(
-        [{"name": "search_knowledge_messages", "arguments": "{bad", "id": "bad"}],
-        "",
-    )[0]
     results = []
     events = [
         event
         async for event in executor._execute_tools(
-            [invalid, ToolCall("search_knowledge_entities", {"query": "Ada"}, call_id="ok")],
+            [ToolCall("search_knowledge_entities", {"query": "Ada"}, call_id="ok")],
             results,
         )
     ]
 
     assert calls == ["search_knowledge_entities"]
-    assert [event["event"] for event in events] == [
-        "tool_start",
-        "tool_error",
-        "tool_start",
-        "tool_end",
-    ]
-    assert "Argument parse failure" in events[1]["data"]["error"]
+    assert [event["event"] for event in events] == ["tool_start", "tool_end"]
     assert results[-1]["result"]["data"] == [{"id": "ok", "message": "usable"}]
-    assert run.call_count == 2
+    assert run.call_count == 1
 
     error_results = []
     error_events = [

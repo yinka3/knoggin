@@ -586,6 +586,9 @@ class AgentExecutor:
         allowed_names = {
             schema["function"]["name"] for schema in self._tool_schemas_for_phase(phase)
         }
+        call_ids = [call.call_id for call in tool_calls]
+        if len(call_ids) != len(set(call_ids)):
+            return "Returned tool calls contain duplicate correlation IDs."
         has_terminal_protocol = False
         for call in tool_calls:
             definition = get_tool_definition(call.name)
@@ -968,20 +971,6 @@ class AgentExecutor:
 
                 self.ctx.record_tool_call(call.name, call.args)
 
-                if call.args.get("_parse_error"):
-                    error_message = f"Failed to parse arguments for '{call.name}'"
-                    self.ctx.note_nonfatal_error(error_message)
-                    results_out.append({"tool": call.name, "error": error_message})
-                    yield {
-                        "event": "tool_error",
-                        "data": {
-                            "tool": call.name,
-                            "error": "Argument parse failure",
-                            "call_id": call.call_id,
-                        },
-                    }
-                    continue
-
                 async with asyncio.timeout(self.ctx.limits.tool_timeout):
                     result = await execute_tool(
                         self.tools,
@@ -1046,7 +1035,6 @@ class AgentExecutor:
             limit = self.ctx.limits.get_tool_limit(
                 call.name, self.ctx.limits.max_calls
             )
-            reservable = reservable and not call.args.get("_parse_error")
             reservable = reservable and not self.ctx.is_duplicate(
                 call.name, call.args
             )
