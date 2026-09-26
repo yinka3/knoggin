@@ -827,7 +827,7 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
     ]
 
     notebook = RunNotebook()
-    admission = notebook.apply("episode_check", {"data": result})
+    admission = notebook.apply("search_episodes", {"data": result})
     assert admission.accepted
     assert set(admission.references) == {
         f"episode:{episode.episode_id}" for episode in generated
@@ -838,7 +838,7 @@ async def test_window_local_episodes_reach_notebook_synthesis_with_reversal_hist
             session_id="session-1",
         )
         assert len(sources) == 1
-        assert notebook.apply("read_episode", {"data": sources}).accepted
+        assert notebook.apply("read_episode_messages", {"data": sources}).accepted
 
     rendered_notebook = render_notebook(notebook)
     synthesis_prompt = get_agent_prompt(

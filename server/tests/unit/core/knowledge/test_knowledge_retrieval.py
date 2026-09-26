@@ -425,7 +425,7 @@ async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
         postgres=SimpleNamespace(),
     )
     try:
-        assert await tools.search_messages("project memory", limit=3) == [
+        assert await tools.search_knowledge_messages("project memory", limit=3) == [
             {"id": "msg_7"}
         ]
     finally:
@@ -473,7 +473,7 @@ async def test_run_graph_limit_controls_the_relationship_retrieval_query():
     )
     try:
         install_tool_runtime(tools, run.tool_runtime, {})
-        assert await tools.get_connections(7) == [{"relationship_id": "r-1"}]
+        assert await tools.get_entity_relationships(7) == [{"relationship_id": "r-1"}]
     finally:
         await tools.close()
 
@@ -641,12 +641,12 @@ async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
         postgres=SimpleNamespace(),
     )
     try:
-        assert await tools.load_topic_context(["career", "Finance", "Work"]) == {
+        assert await tools.load_project_topic_context(["career", "Finance", "Work"]) == {
             "Work": {"entities": [{"name": "Work"}], "messages": []},
             "Finance": {"entities": [{"name": "Finance"}], "messages": []},
         }
         with pytest.raises(ToolExecutionError, match="Unknown or inactive"):
-            await tools.load_topic_context(["Work", "Unknown"])
+            await tools.load_project_topic_context(["Work", "Unknown"])
     finally:
         await tools.close()
 
