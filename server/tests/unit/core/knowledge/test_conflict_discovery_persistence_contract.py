@@ -91,12 +91,15 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
         fetch_one_results=[None, review],
     )
     store = EvidenceStore({10: bundles[0], 11: bundles[1], 12: bundles[2]})
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
     service = ProjectMaintenanceService(
         resources=type(
             "Resources", (), {"postgres": client, "knowledge_store": store}
         )(),
         user_name="ada",
-        project_lookup=lambda _project_id: None,
+        project_lookup=project_lookup,
         active_projects={},
         project_leases={},
     )
@@ -137,6 +140,68 @@ async def test_conflict_completion_writes_groups_and_advances_cursor_in_one_tran
     )
     assert cursor_call[2] == (11, "ada", "project-1")
     service._conflict_service.notify_detection.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_conflict_completion_keeps_committed_result_when_notification_fails():
+    async def project_lookup(_project_id):
+        return {"status": "active"}
+
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(
+            postgres=object(),
+            knowledge_store=EvidenceStore({}),
+        ),
+        user_name="ada",
+        project_lookup=project_lookup,
+        active_projects={},
+        project_leases={},
+    )
+    service._conflict_service.notify_detection = AsyncMock(
+        side_effect=RuntimeError("event sink unavailable")
+    )
+    service._persist_conflict_discovery = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                should_notify=True,
+                group=SimpleNamespace(conflict_id="conflict-1"),
+            )
+        ]
+    )
+    package = ConflictDiscoveryPackage(
+        cursor=ConflictDiscoveryCursor("ada", "project-1", 0),
+        observations=(),
+        next_observation_id=0,
+        prompt="",
+        estimated_tokens=0,
+        evidence_bundles=(),
+    )
+
+    assert await service.complete_conflict_discovery(package, candidates=[]) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_conflict_completion_rejects_foreign_package_scope():
+    service = ProjectMaintenanceService(
+        resources=SimpleNamespace(postgres=object(), knowledge_store=EvidenceStore({})),
+        user_name="ada",
+        project_lookup=AsyncMock(return_value={"status": "active"}),
+        active_projects={},
+        project_leases={},
+    )
+    package = ConflictDiscoveryPackage(
+        cursor=ConflictDiscoveryCursor("other", "project-1", 0),
+        observations=(),
+        next_observation_id=0,
+        prompt="",
+        estimated_tokens=0,
+        evidence_bundles=(),
+    )
+
+    with pytest.raises(ValueError, match="another user"):
+        await service.complete_conflict_discovery(package, candidates=[])
 
 
 @pytest.mark.unit

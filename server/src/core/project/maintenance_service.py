@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 
+from loguru import logger
+
 from common.schema.maintenance import MaintenanceImpactPreview
 from core.knowledge.conflict.conflict_discovery import ConflictPacketBuilder
 from core.knowledge.conflict.conflict_service import (
@@ -163,35 +165,36 @@ class ProjectMaintenanceService:
             raise ValueError("expected_domain_version must be a non-negative integer")
         return value
 
-    async def get_relationship_advisories(
+    async def refresh_relationship_advisories(
         self,
         project_id: str,
         *,
         thresholds: AdvisoryThresholds | None = None,
     ) -> list[RelationshipAdvisory]:
-        """Read evidence-backed relationship advisories with dispositions."""
+        """Discover advisories and materialize their pending review state."""
 
-        await self._require_domain_project(project_id, allow_archived=True)
-        domain = await self._domain_store.load(self.user_name, project_id)
-        advisories = await self._relationship_observation_reader.get_advisories(
-            user_name=self.user_name,
-            project_id=project_id,
-            thresholds=thresholds,
-        )
-        for advisory in advisories:
-            bundles = await self._require_knowledge_store().get_relationship_observations_evidence(
-                list(advisory.observation_ids),
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            domain = await self._domain_store.load(self.user_name, project_id)
+            advisories = await self._relationship_observation_reader.get_advisories(
                 user_name=self.user_name,
                 project_id=project_id,
+                thresholds=thresholds,
             )
-            await self._relationship_advisory_writer.materialize_pending(
-                user_name=self.user_name,
-                project_id=project_id,
-                advisory=advisory,
-                domain_version=domain.version,
-                evidence_snapshot=EvidenceService.snapshot(bundles),
-            )
-        return advisories
+            for advisory in advisories:
+                bundles = await self._require_knowledge_store().get_relationship_observations_evidence(
+                    list(advisory.observation_ids),
+                    user_name=self.user_name,
+                    project_id=project_id,
+                )
+                await self._relationship_advisory_writer.materialize_pending(
+                    user_name=self.user_name,
+                    project_id=project_id,
+                    advisory=advisory,
+                    domain_version=domain.version,
+                    evidence_snapshot=EvidenceService.snapshot(bundles),
+                )
+            return advisories
 
     async def list_maintenance_reviews(self, project_id: str):
         """Return durable typed review history for this project."""
@@ -429,7 +432,41 @@ class ProjectMaintenanceService:
     ) -> int:
         """Persist grounded conflict reviews and advance the cursor atomically."""
 
-        candidate_items = tuple(candidates)
+        if package.cursor.user_name != self.user_name:
+            raise ValueError("Conflict discovery package belongs to another user")
+        async with self._lock:
+            await self._require_domain_project(
+                package.cursor.project_id,
+                allow_archived=False,
+            )
+            results = await self._persist_conflict_discovery(
+                package,
+                candidates=tuple(candidates),
+            )
+        for result in results:
+            try:
+                await self._conflict_service.notify_detection(
+                    user_name=package.cursor.user_name,
+                    project_id=package.cursor.project_id,
+                    origin="background_discovery",
+                    result=result,
+                )
+            except Exception:
+                logger.exception(
+                    "Conflict {} was committed but its notification failed",
+                    result.group.conflict_id,
+                )
+        return sum(int(result.should_notify) for result in results)
+
+    async def _persist_conflict_discovery(
+        self,
+        package: ConflictDiscoveryPackage,
+        *,
+        candidates: tuple[LLMConflictCandidate, ...],
+    ) -> list[ConflictWriteResult]:
+        """Write one validated discovery package and cursor atomically."""
+
+        candidate_items = candidates
         snapshots = {}
         for candidate in candidate_items:
             evidence_ids = tuple(sorted(set(candidate.evidence_ids)))
@@ -464,14 +501,7 @@ class ProjectMaintenanceService:
                 last_reviewed_observation_id=package.next_observation_id,
                 cur=cur,
             )
-        for result in results:
-            await self._conflict_service.notify_detection(
-                user_name=package.cursor.user_name,
-                project_id=package.cursor.project_id,
-                origin="background_discovery",
-                result=result,
-            )
-        return sum(int(result.should_notify) for result in results)
+        return results
 
     async def record_conflict_detection(
         self,
@@ -486,25 +516,26 @@ class ProjectMaintenanceService:
         existing_conflict_id: str | None = None,
     ) -> ConflictWriteResult:
         """Record an agent/user conflict report at the maintenance boundary."""
-        await self._require_domain_project(project_id, allow_archived=True)
-        snapshot = await snapshot_conflict_evidence(
-            self._require_knowledge_store(),
-            observation_ids=evidence_ids,
-            user_name=self.user_name,
-            project_id=project_id,
-        )
-        return await self._conflict_service.record_detection(
-            user_name=self.user_name,
-            project_id=project_id,
-            origin=origin,
-            kind=kind,
-            rationale=rationale,
-            confidence=confidence,
-            evidence_ids=evidence_ids,
-            metadata=metadata,
-            evidence_snapshot=snapshot,
-            existing_conflict_id=existing_conflict_id,
-        )
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            snapshot = await snapshot_conflict_evidence(
+                self._require_knowledge_store(),
+                observation_ids=evidence_ids,
+                user_name=self.user_name,
+                project_id=project_id,
+            )
+            return await self._conflict_service.record_detection(
+                user_name=self.user_name,
+                project_id=project_id,
+                origin=origin,
+                kind=kind,
+                rationale=rationale,
+                confidence=confidence,
+                evidence_ids=evidence_ids,
+                metadata=metadata,
+                evidence_snapshot=snapshot,
+                existing_conflict_id=existing_conflict_id,
+            )
 
     async def resolve_conflict_group(
         self,
@@ -517,15 +548,16 @@ class ProjectMaintenanceService:
     ):
         """Apply a user-led classification without rewriting the evidence."""
 
-        await self._require_domain_project(project_id, allow_archived=True)
-        return await self._conflict_service.resolve(
-            conflict_id=conflict_id,
-            user_name=self.user_name,
-            project_id=project_id,
-            resolution_kind=resolution_kind,
-            resolved_by=resolved_by or self.user_name,
-            resolution_note=resolution_note,
-        )
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            return await self._conflict_service.resolve(
+                conflict_id=conflict_id,
+                user_name=self.user_name,
+                project_id=project_id,
+                resolution_kind=resolution_kind,
+                resolved_by=resolved_by or self.user_name,
+                resolution_note=resolution_note,
+            )
 
     async def apply_relationship_advisory_action(
         self,
@@ -539,16 +571,17 @@ class ProjectMaintenanceService:
     ) -> RelationshipAdvisoryDecision:
         """Persist an advisory decision without activating domain changes."""
 
-        await self._require_domain_project(project_id, allow_archived=True)
-        return await self._relationship_advisory_writer.apply_action(
-            user_name=self.user_name,
-            project_id=project_id,
-            pattern_key=pattern_key,
-            action=action,
-            relationship_type=relationship_type,
-            note=note,
-            decided_by=decided_by,
-        )
+        async with self._lock:
+            await self._require_domain_project(project_id, allow_archived=True)
+            return await self._relationship_advisory_writer.apply_action(
+                user_name=self.user_name,
+                project_id=project_id,
+                pattern_key=pattern_key,
+                action=action,
+                relationship_type=relationship_type,
+                note=note,
+                decided_by=decided_by,
+            )
 
     async def rebuild_project_embeddings(self, project_id: str) -> dict[str, int]:
         async with self._lock:
