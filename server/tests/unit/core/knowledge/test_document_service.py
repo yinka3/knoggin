@@ -508,6 +508,74 @@ class MemoryCursor:
 
         if (
             normalized.startswith("UPDATE public.project_documents")
+            and "SET original_name = %s" in normalized
+        ):
+            (
+                original_name,
+                extension,
+                size_bytes,
+                content_hash,
+                updated_at,
+                document_id,
+                project_id,
+            ) = params
+            row = next(
+                row
+                for row in self.postgres.rows
+                if row["document_id"] == document_id
+                and row["project_id"] == project_id
+                and row["status"] != "deleted"
+            )
+            row.update(
+                {
+                    "original_name": original_name,
+                    "extension": extension,
+                    "size_bytes": size_bytes,
+                    "content_hash": content_hash,
+                    "current_snapshot_id": None,
+                    "status": "queued",
+                    "deleted_at": None,
+                    "indexed_at": None,
+                    "error_message": None,
+                    "index_attempt_count": 0,
+                    "next_index_retry_at": None,
+                    "last_index_failure_kind": None,
+                    "updated_at": updated_at,
+                }
+            )
+            self.result = None
+            return
+
+        if (
+            normalized.startswith("UPDATE public.project_documents")
+            and "document_id = ANY(%s)" in normalized
+            and "SET status = 'deleted'" in normalized
+        ):
+            deleted_at, updated_at, project_id, document_ids = params
+            for row in self.postgres.rows:
+                if (
+                    row["project_id"] == project_id
+                    and row["document_id"] in document_ids
+                    and row["status"] != "deleted"
+                ):
+                    row.update(
+                        {
+                            "status": "deleted",
+                            "deleted_at": row.get("deleted_at") or deleted_at,
+                            "current_snapshot_id": None,
+                            "indexed_at": None,
+                            "error_message": None,
+                            "index_attempt_count": 0,
+                            "next_index_retry_at": None,
+                            "last_index_failure_kind": None,
+                            "updated_at": updated_at,
+                        }
+                    )
+            self.result = None
+            return
+
+        if (
+            normalized.startswith("UPDATE public.project_documents")
             and "SET status = 'deleted'" in normalized
         ):
             if self.postgres.delete_error is not None:
@@ -1089,13 +1157,46 @@ async def test_reconciliation_catalogs_local_changes_and_tombstones_missing_file
 
     filesystem.write_bytes("external.md", b"second external version", overwrite=True)
     changed = await service.reconcile_project_files()
+    changed_row = next(
+        row
+        for row in postgres.rows
+        if row["relative_path"] == "external.md" and row["status"] != "deleted"
+    )
     filesystem.delete_file("external.md")
     deleted = await service.reconcile_project_files()
 
     assert created["created"] == 1
     assert changed["changed"] == 1
     assert deleted["deleted"] == 1
+    assert changed_row["document_id"] == current["document_id"]
+    assert changed_row["content_hash"] != hashlib.sha256(b"first external version").hexdigest()
     assert current["status"] == "deleted"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reconciliation_rolls_back_all_catalog_changes_when_commit_fails(
+    document_harness,
+):
+    service, postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    existing = await service.add_document(
+        content=b"old content",
+        original_name="existing.md",
+    )
+    filesystem.write_bytes("existing.md", b"new content", overwrite=True)
+    filesystem.write_bytes("created.md", b"created content")
+    original_rows = deepcopy(postgres.rows)
+    postgres.transaction_commit_error = RuntimeError("commit failed")
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await service.reconcile_project_files()
+
+    assert postgres.rows == original_rows
+    assert next(
+        row for row in postgres.rows if row["document_id"] == existing["document_id"]
+    )["content_hash"] == hashlib.sha256(b"old content").hexdigest()
 
 
 @pytest.mark.storage
@@ -2540,13 +2641,13 @@ async def test_index_document_reconciles_before_extraction_when_source_bytes_cha
 
     assert extraction_calls == 0
     assert reconciled["status"] == "queued"
-    assert reconciled["document_id"] != uploaded["document_id"]
+    assert reconciled["document_id"] == uploaded["document_id"]
     assert reconciled["content_hash"] == hashlib.sha256(b"beta").hexdigest()
     assert postgres.chunks == []
     assert postgres.parse_snapshots == {}
     assert next(
         row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
-    )["status"] == "deleted"
+    )["status"] == "queued"
 
     indexed = await service.index_document(document_id=reconciled["document_id"])
 
@@ -2581,13 +2682,13 @@ async def test_index_document_does_not_publish_after_catalog_changes_during_deri
     result = await service.index_document(document_id=uploaded["document_id"])
 
     assert result["status"] == "queued"
-    assert result["document_id"] != uploaded["document_id"]
+    assert result["document_id"] == uploaded["document_id"]
     assert result["content_hash"] == hashlib.sha256(b"beta").hexdigest()
     assert postgres.chunks == []
     assert postgres.parse_snapshots == {}
     assert next(
         row for row in postgres.rows if row["document_id"] == uploaded["document_id"]
-    )["status"] == "deleted"
+    )["status"] == "queued"
 
 
 @pytest.mark.storage

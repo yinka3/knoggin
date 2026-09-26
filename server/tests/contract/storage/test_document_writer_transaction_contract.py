@@ -78,6 +78,44 @@ async def test_insert_document_uses_public_transaction_contract():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_filesystem_reconciliation_uses_one_transaction_for_all_changes():
+    client = TransactionOnlyClient()
+    writer = DocumentWriter(client, "project-1")
+
+    await writer.apply_filesystem_reconciliation(
+        created=[
+            {
+                "document_id": "created-document",
+                "original_name": "created.md",
+                "relative_path": "created.md",
+                "extension": ".md",
+                "size_bytes": 7,
+                "content_hash": "created-hash",
+            }
+        ],
+        changed=[
+            {
+                "document_id": "changed-document",
+                "original_name": "changed.md",
+                "extension": ".md",
+                "size_bytes": 7,
+                "content_hash": "changed-hash",
+            }
+        ],
+        deleted_document_ids=["deleted-document"],
+        updated_at="2026-09-26T00:00:00+00:00",
+    )
+
+    assert client.transaction_count == 1
+    queries = [query for query, _params in client.cursor.calls]
+    assert any("SET original_name" in query for query in queries)
+    assert any("INSERT INTO public.project_documents" in query for query in queries)
+    assert any("document_id = ANY" in query for query in queries)
+    assert any("DELETE FROM public.document_chunks" in query for query in queries)
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_document_writer_rejects_mismatched_chunk_embedding_lists():
     client = TransactionOnlyClient()
     writer = DocumentWriter(client, "project-1")

@@ -197,7 +197,6 @@ class DocumentService:
             entries=entries,
             settings=settings,
         )
-        content_by_path = {entry.relative_path: entry.content for entry in entries}
         desired = {entry.relative_path: entry for entry in preview.included}
         current_rows = await self._reader.list_documents_for_reconciliation(
             limit=_RECONCILIATION_MAX_FILES + 1,
@@ -212,34 +211,46 @@ class DocumentService:
                 f"{_RECONCILIATION_MAX_FILES}-file safety limit"
             )
 
-        created = changed = deleted = 0
+        created_rows: list[Dict[str, Any]] = []
+        changed_rows: list[Dict[str, Any]] = []
         now = get_now_iso()
         for relative_path, preview_entry in desired.items():
-            content = content_by_path[relative_path]
             existing = current.pop(relative_path, None)
             if existing is not None and existing["content_hash"] == preview_entry.content_hash:
                 continue
             if existing is not None:
-                await self._writer.delete_document(
-                    document_id=str(existing["document_id"]),
+                changed_rows.append(
+                    {
+                        "document_id": str(existing["document_id"]),
+                        "original_name": preview_entry.original_name,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
                 )
-                changed += 1
             else:
-                created += 1
-            await self._writer.insert_document(
-                document_id=str(uuid.uuid4()),
-                original_name=preview_entry.original_name,
-                relative_path=relative_path,
-                extension=preview_entry.extension,
-                size_bytes=preview_entry.size_bytes,
-                content_hash=preview_entry.content_hash,
-                created_at=now,
-            )
-        for document in current.values():
-            await self._writer.delete_document(
-                document_id=str(document["document_id"]),
-            )
-            deleted += 1
+                created_rows.append(
+                    {
+                        "document_id": str(uuid.uuid4()),
+                        "original_name": preview_entry.original_name,
+                        "relative_path": relative_path,
+                        "extension": preview_entry.extension,
+                        "size_bytes": preview_entry.size_bytes,
+                        "content_hash": preview_entry.content_hash,
+                    }
+                )
+        deleted_document_ids = [
+            str(document["document_id"]) for document in current.values()
+        ]
+        await self._writer.apply_filesystem_reconciliation(
+            created=created_rows,
+            changed=changed_rows,
+            deleted_document_ids=deleted_document_ids,
+            updated_at=now,
+        )
+        created = len(created_rows)
+        changed = len(changed_rows)
+        deleted = len(deleted_document_ids)
         if created or changed or deleted:
             self._indexer.wake_pending_indexes()
         return {

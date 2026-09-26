@@ -3,7 +3,7 @@
 import json
 import uuid
 from datetime import timedelta
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from common.utils.time_utils import parse_iso_time
 from infrastructure.postgres_client import PostgresClient
@@ -145,6 +145,117 @@ class DocumentWriter:
                     created_at,
                 ),
             )
+
+    async def apply_filesystem_reconciliation(
+        self,
+        *,
+        created: List[Dict[str, Any]],
+        changed: List[Dict[str, Any]],
+        deleted_document_ids: List[str],
+        updated_at: str,
+    ) -> None:
+        """Apply one filesystem/catalog reconciliation as a single transaction.
+
+        A changed path keeps its document identity. Its old immutable parse
+        snapshots remain available for provenance, while the current retrieval
+        projection is cleared until the new bytes are indexed.
+        """
+        affected_document_ids = [
+            str(item["document_id"]) for item in changed
+        ] + [str(document_id) for document_id in deleted_document_ids]
+        async with self._client.transaction() as cur:
+            for item in changed:
+                await cur.execute(
+                    """
+                    UPDATE public.project_documents
+                    SET original_name = %s,
+                        extension = %s,
+                        size_bytes = %s,
+                        content_hash = %s,
+                        current_snapshot_id = NULL,
+                        status = 'queued',
+                        deleted_at = NULL,
+                        indexed_at = NULL,
+                        error_message = NULL,
+                        index_attempt_count = 0,
+                        next_index_retry_at = NULL,
+                        last_index_failure_kind = NULL,
+                        updated_at = %s
+                    WHERE document_id = %s
+                      AND project_id = %s
+                      AND status <> 'deleted'
+                    """,
+                    (
+                        item["original_name"],
+                        item["extension"],
+                        item["size_bytes"],
+                        item["content_hash"],
+                        updated_at,
+                        item["document_id"],
+                        self._project_id,
+                    ),
+                )
+            for item in created:
+                await cur.execute(
+                    """
+                    INSERT INTO public.project_documents (
+                        document_id,
+                        project_id,
+                        original_name,
+                        relative_path,
+                        extension,
+                        size_bytes,
+                        content_hash,
+                        status,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'queued', %s, %s)
+                    """,
+                    (
+                        item["document_id"],
+                        self._project_id,
+                        item["original_name"],
+                        item["relative_path"],
+                        item["extension"],
+                        item["size_bytes"],
+                        item["content_hash"],
+                        updated_at,
+                        updated_at,
+                    ),
+                )
+            if deleted_document_ids:
+                await cur.execute(
+                    """
+                    UPDATE public.project_documents
+                    SET status = 'deleted',
+                        deleted_at = COALESCE(deleted_at, %s),
+                        current_snapshot_id = NULL,
+                        indexed_at = NULL,
+                        error_message = NULL,
+                        index_attempt_count = 0,
+                        next_index_retry_at = NULL,
+                        last_index_failure_kind = NULL,
+                        updated_at = %s
+                    WHERE project_id = %s
+                      AND document_id = ANY(%s)
+                      AND status <> 'deleted'
+                    """,
+                    (
+                        updated_at,
+                        updated_at,
+                        self._project_id,
+                        deleted_document_ids,
+                    ),
+                )
+            if affected_document_ids:
+                await cur.execute(
+                    """
+                    DELETE FROM public.document_chunks
+                    WHERE document_id = ANY(%s)
+                    """,
+                    (affected_document_ids,),
+                )
 
     async def delete_document(
         self,
