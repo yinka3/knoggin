@@ -225,6 +225,18 @@ internal scheduler field.
   unbounded component data.
 - Confirm malformed component snapshots cannot escape the public envelope.
 
+#### Unit 5 result
+
+- Agent health tools still return a valid degraded `HealthSnapshot` when a
+  health read fails; degraded health remains data rather than a tool error.
+- Unexpected adapter failures now record the operation name and exception type
+  only. Exception messages, tracebacks, arguments, and user/project/session
+  scope are not logged by this boundary.
+- Invalid dictionary snapshots follow the same safe categorization path before
+  returning the public fallback envelope.
+- Existing schema sanitization continues to bound detail depth, item counts,
+  strings, warnings, and sensitive key/value patterns.
+
 ### Unit 6: Application and SDK health surface
 
 - Add approved typed engine/project health operations to the application port.

@@ -1,6 +1,7 @@
 import pytest
 
 from common.schema.health import HealthSnapshot
+from core.agent.tools import health as health_module
 from core.agent.tools.health import HealthTools
 
 
@@ -56,6 +57,31 @@ async def test_health_tools_fail_closed_when_service_is_missing():
 
     assert result["status"] == "degraded"
     assert result["warnings"] == ["runtime health service is unavailable"]
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_health_tools_log_only_safe_failure_categories(monkeypatch):
+    class FailingService:
+        async def get_engine_health(self):
+            raise RuntimeError("postgresql://secret-host/private-user")
+
+    recorded = []
+    monkeypatch.setattr(
+        health_module.logger,
+        "error",
+        lambda message, *values: recorded.append((message, values)),
+    )
+    tools = ToolHarness()
+    tools.health_service = FailingService()
+
+    result = await tools.get_engine_health()
+
+    assert result["status"] == "degraded"
+    assert recorded == [
+        ("Health adapter {} failed with {}", ("get_engine_health", "RuntimeError"))
+    ]
+    assert "secret-host" not in str(recorded)
 
 
 @pytest.mark.unit

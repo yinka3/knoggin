@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Dict
 
+from loguru import logger
+
 from common.schema.health import HealthActivity, HealthSnapshot, HealthStatus
 
 
@@ -14,6 +16,16 @@ def _health_service_unavailable(summary: str) -> Dict:
         summary=summary,
         warnings=["runtime health service is unavailable"],
     ).model_dump(mode="json")
+
+
+def _record_health_adapter_failure(operation: str, error: Exception) -> None:
+    """Record a safe category without logging exception text or user scope."""
+
+    logger.error(
+        "Health adapter {} failed with {}",
+        operation,
+        type(error).__name__,
+    )
 
 
 class HealthTools:
@@ -27,7 +39,8 @@ class HealthTools:
             return _health_service_unavailable("Engine health is unavailable")
         try:
             snapshot = await service.get_engine_health()
-        except Exception:
+        except Exception as exc:
+            _record_health_adapter_failure("get_engine_health", exc)
             return _health_service_unavailable("Engine health could not be read")
         return _dump_health_snapshot(snapshot)
 
@@ -41,7 +54,8 @@ class HealthTools:
             snapshot = await service.get_resource_health(
                 project_id=str(getattr(self, "project_id", "")),
             )
-        except Exception:
+        except Exception as exc:
+            _record_health_adapter_failure("get_resource_health", exc)
             return _health_service_unavailable("Resource health could not be read")
         return _dump_health_snapshot(snapshot)
 
@@ -56,7 +70,8 @@ class HealthTools:
                 user_name=str(getattr(self, "user_name", "")),
                 project_id=str(getattr(self, "project_id", "")),
             )
-        except Exception:
+        except Exception as exc:
+            _record_health_adapter_failure("get_ingestion_health", exc)
             return _health_service_unavailable(
                 "Ingestion health could not be read"
             )
@@ -72,7 +87,8 @@ class HealthTools:
             snapshot = await service.get_background_health(
                 project_id=str(getattr(self, "project_id", "")),
             )
-        except Exception:
+        except Exception as exc:
+            _record_health_adapter_failure("get_background_health", exc)
             return _health_service_unavailable(
                 "Background health could not be read"
             )
@@ -85,7 +101,8 @@ def _dump_health_snapshot(snapshot) -> Dict:
     if isinstance(snapshot, dict):
         try:
             return HealthSnapshot.model_validate(snapshot).model_dump(mode="json")
-        except Exception:
+        except Exception as exc:
+            _record_health_adapter_failure("validate_health_snapshot", exc)
             return _health_service_unavailable(
                 "Runtime health returned an invalid snapshot"
             )
