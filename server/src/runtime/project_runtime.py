@@ -71,6 +71,8 @@ class ProjectRuntime:
         self.project_semantic_processor: Optional[Any] = None
         self.conflict_discovery_job: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
+        self._shutdown_lock = asyncio.Lock()
+        self._completed_shutdown_phases: set[str] = set()
         self._closed = False
 
     def add_config_unsubscriber(self, unsubscribe):
@@ -85,48 +87,48 @@ class ProjectRuntime:
 
     async def shutdown(self):
         """Stop admission, then release every project-owned runtime resource."""
-        if self._closed:
-            return
+        async with self._shutdown_lock:
+            if self._closed:
+                return
 
-        logger.info(f"Shutting down ProjectRuntime resources for {self.project_id}")
-        failures = []
+            logger.info(f"Shutting down ProjectRuntime resources for {self.project_id}")
+            failures = []
 
-        for phase, shutdown in (
-            ("scheduler", self.scheduler.stop),
-            ("document indexing", self.document_service.indexer.shutdown),
-            (
-                "background work",
-                self._cancel_owned_background_work,
-            ),
-        ):
-            if shutdown is None:
-                continue
-            try:
-                result = shutdown()
-                if result is not None:
-                    await result
-            except Exception as exc:
-                logger.exception(
-                    f"Project shutdown phase failed for {self.project_id}: {phase}"
-                )
-                failures.append(exc)
+            for phase, shutdown in (
+                ("scheduler", self.scheduler.stop),
+                ("document indexing", self.document_service.indexer.shutdown),
+                ("background work", self._cancel_owned_background_work),
+            ):
+                if phase in self._completed_shutdown_phases:
+                    continue
+                try:
+                    result = shutdown()
+                    if result is not None:
+                        await result
+                    self._completed_shutdown_phases.add(phase)
+                except Exception as exc:
+                    logger.exception(
+                        f"Project shutdown phase failed for {self.project_id}: {phase}"
+                    )
+                    failures.append(exc)
 
-        unsubscribers = self.config_unsubscribers
-        self.config_unsubscribers = []
-        for unsubscribe in unsubscribers:
-            try:
-                unsubscribe()
-            except Exception as exc:
-                logger.exception(
-                    f"Project configuration cleanup failed for {self.project_id}"
-                )
-                failures.append(exc)
+            failed_unsubscribers = []
+            for unsubscribe in self.config_unsubscribers:
+                try:
+                    unsubscribe()
+                except Exception as exc:
+                    logger.exception(
+                        f"Project configuration cleanup failed for {self.project_id}"
+                    )
+                    failed_unsubscribers.append(unsubscribe)
+                    failures.append(exc)
+            self.config_unsubscribers = failed_unsubscribers
 
-        self._closed = True
-        if failures:
-            raise RuntimeError(
-                f"ProjectRuntime shutdown failed for {self.project_id}"
-            ) from failures[0]
+            if failures:
+                raise RuntimeError(
+                    f"ProjectRuntime shutdown failed for {self.project_id}"
+                ) from failures[0]
+            self._closed = True
         # EntityResolver and others don't have explicit shutdown methods,
         # but they will be garbage collected.
 
