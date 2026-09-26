@@ -1863,7 +1863,7 @@ async def test_fallback_summary_uses_all_canonical_evidence_categories():
 
 
 @pytest.mark.no_network
-async def test_compaction_token_count_matches_post_compaction_context(monkeypatch):
+async def test_executor_reports_the_notebook_owned_bounded_token_count():
     llm = ScriptedLLM([])
     run = make_run()
     run.notebook.apply(
@@ -1876,16 +1876,12 @@ async def test_compaction_token_count_matches_post_compaction_context(monkeypatc
     )
     executor = AgentExecutor(run, llm, SimpleNamespace(document_service=None))
 
-    async def summarize(_evidence):
-        return "Condensed evidence."
-
-    monkeypatch.setattr(executor, "_generate_evidence_summary", summarize)
-    monkeypatch.setattr("core.agent.executor.MAX_TOKEN_CHUNK_SIZE", 1)
-
-    await executor._manage_context_size()
+    generation = run.notebook.generation
+    executor._refresh_evidence_token_count()
 
     assert build_evidence_context(run) == run.notebook.render()
     assert run.evidence_token_count == llm.count_tokens(build_evidence_context(run))
+    assert run.notebook.generation == generation
 
 
 @pytest.mark.no_network

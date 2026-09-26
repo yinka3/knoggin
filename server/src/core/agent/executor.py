@@ -62,7 +62,6 @@ from core.agent.tools.registry import (
 from core.knowledge.context.render import render_context_model_input
 from infrastructure.llm_client import LLMService
 
-MAX_TOKEN_CHUNK_SIZE = 10000
 MAX_PROJECT_CONTEXT_CHARS = 24_000
 PUBLIC_AGENT_FAILURE_MESSAGE = (
     "The agent couldn't complete this request. Please try again."
@@ -484,7 +483,7 @@ class AgentExecutor:
                         yield tool_event
 
                     last_result = current_results
-                    await self._manage_context_size()
+                    self._refresh_evidence_token_count()
 
                     if self.ctx.needs_deep_research_gap_review():
                         needs_deep_research_gap_review = True
@@ -1374,54 +1373,11 @@ class AgentExecutor:
             aac_budget=self._aac_budget,
         )
 
-    async def _manage_context_size(self):
-        """Monitor accumulated evidence and summarize if it approaches token limits."""
+    def _refresh_evidence_token_count(self) -> None:
+        """Measure the bounded notebook after its admission-owned rollover."""
+
         evidence_str = build_evidence_context(self.ctx)
         self.ctx.set_evidence_token_count(self.llm.count_tokens(evidence_str))
-
-        if self.ctx.evidence_token_count > MAX_TOKEN_CHUNK_SIZE:
-            logger.info(
-                f"Evidence size ({self.ctx.evidence_token_count} tokens) "
-                "exceeds limit. Summarizing..."
-            )
-
-            summary = await self._generate_evidence_summary(evidence_str)
-
-            if not summary:
-                logger.warning(
-                    "Evidence summarization failed. Rolling over the retained "
-                    "notebook neighborhood without a generated summary."
-                )
-            self.ctx.rollover_notebook(summary)
-
-            # Recalculate against the actual bounded state retained by the run.
-            post_compaction = build_evidence_context(self.ctx)
-            self.ctx.set_evidence_token_count(self.llm.count_tokens(post_compaction))
-
-    async def _generate_evidence_summary(self, evidence_text: str) -> Optional[str]:
-        """Call LLM to condense existing evidence into a core summary."""
-        prompt = (
-            "I have gathered the following evidence regarding: "
-            f"'{self.ctx.user_query}'\n\n"
-            f"{evidence_text}\n\n"
-            "Summarize the key details, connections, and relevant information into "
-            "a concise summary. Preserve the relevant evidence and any local "
-            "references already present; never invent or request system IDs."
-        )
-
-        try:
-            return await self.llm.generate_text(
-                system=(
-                    "You are a data librarian. Condense retrieved evidence into "
-                    "a factual summary without losing key details."
-                ),
-                user=prompt,
-                temperature=0.0,  # Strict factual summary
-                aac_budget=self._aac_budget,
-            )
-        except (ConfigurationError, LLMError) as e:
-            logger.error(f"Failed to summarize evidence: {e}")
-            return None
 
     async def _emit_llm_call(self, model: Optional[str], reasoning: str):
         briefing = self.ctx.project_briefing
