@@ -136,6 +136,46 @@ alias is needed under the current naming policy.
 - Identify production callers and public gaps before deleting wrappers.
 - Add focused ownership/lock tests for the intended boundary.
 
+#### Unit 1 inventory result
+
+The current safe baseline is one application-wide exclusion lock shared by
+`ProjectManager`, project maintenance, and user-global entity maintenance. It is
+broader than every individual operation needs, but it currently protects domain
+activation, project lifecycle changes, global identity mutations, projection
+repair, and live resolver invalidation as one family. Do not narrow it before
+Unit 5 proves a smaller invariant.
+
+| Operation family | Classification | Scope | Production owner/caller | Current lock |
+| --- | --- | --- | --- | --- |
+| review list/detail | inspection | project | application port | none |
+| review preview | preview | project | application port | none; reads a freshness snapshot |
+| review dismissal | reviewed status mutation | project | application port | durable compare/state transition only |
+| reviewed plan application | reviewed canonical mutation | project | application port | shared application lock |
+| semantic-window retry | direct repair | project | backend only | shared application lock |
+| conflict packet build | bounded inspection | project | conflict-discovery job | none |
+| conflict completion/cursor advance | internal job mutation | project | conflict-discovery job | database transaction, no application lock |
+| direct conflict report/resolution | reviewed mutation | project | agent/internal only | none |
+| advisory discovery/materialization | mixed inspection + mutation | project | backend only | none |
+| embedding rebuild | derived rebuild | project data | backend only | shared lock plus all-runtime inactivity |
+| entity cleanup | preview/direct repair | project | backend only | shared application lock |
+| historical entity reclassification | preview/direct repair | project | backend only | shared lock; apply requires all runtimes inactive |
+| relationship normalization | preview/direct repair | project | backend only | shared lock; apply requires all runtimes inactive |
+| global merge/rollback/projection repair | reviewed mutation/repair | user-global | `ProjectManager`; partially public | shared application lock |
+| session blockage inspection/repair | missing capability | session/project | no owner yet | must coordinate with live session ownership |
+
+Caller audit conclusions:
+
+- The application port exposes project review list/detail/preview/decision and
+  global review/merge rollback only.
+- Conflict discovery build/completion is a project-runtime background-job
+  contract, not an SDK contract.
+- Semantic retry, cleanup, reclassification, normalization, rebuild, advisory,
+  and conflict-resolution methods have no production application-port caller.
+  They remain valid backend capabilities pending Unit 6; lack of a caller is not
+  deletion evidence.
+- `report_relationship_conflict` is the exceptional agent-facing path and
+  currently bypasses the canonical project service; Unit 2 will correct it.
+
 ### Unit 2: Route agent maintenance through the canonical boundary
 
 - Inject project maintenance into agent tools.
