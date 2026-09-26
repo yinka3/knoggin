@@ -146,3 +146,24 @@ provider omits one.
 - Orchestrator and stream-event contract tests
 - Ruff and `git diff --check`
 - One commit after each completed unit of implementation
+
+## Implementation results
+
+Completed on 2026-09-26:
+
+- `cf12190` made `RunNotebook` the only rollover owner. The executor now only
+  measures the bounded notebook produced by admission.
+- `7a0191a` unified sequential and parallel failure normalization, including
+  workspace conflicts and local-reference diagnostics.
+- `c6b76e0` records every accepted source consultation even when evidence is
+  already present, while deduplicating only identical candidates.
+- `300bcb7` rejects duplicate provider correlation IDs before dispatch and
+  removes unreachable malformed-argument dispatch fallbacks.
+
+Final audit results:
+
+- 342 complete agent unit tests passed.
+- 39 session lifecycle, shutdown, orchestrator, and stream contract tests passed.
+- Ruff and `git diff --check` passed.
+- The remaining `_parse_error` state is intentional: parsing creates the bounded
+  marker and batch validation rejects it before any tool reservation or dispatch.
