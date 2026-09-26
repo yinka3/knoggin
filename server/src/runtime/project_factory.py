@@ -52,11 +52,13 @@ class ProjectRuntimeFactory:
         user_name: str,
         maintenance_service: ProjectMaintenanceService | None = None,
         config_manager: ConfigManager | None = None,
+        filesystem_factory: ProjectFilesystemFactory | None = None,
     ) -> None:
         self.resources = resources
         self.user_name = user_name
         self._maintenance_service = maintenance_service
         self._config_manager = config_manager
+        self._filesystem_factory = filesystem_factory
 
     @property
     def dev_settings(self):
@@ -201,7 +203,7 @@ class ProjectRuntimeFactory:
         config_manager = config_manager or self._config()
         runtime_config = runtime_config or config_manager.config
         document_settings = runtime_config.developer_settings.documents
-        filesystem_factory = ProjectFilesystemFactory(
+        filesystem_factory = self._filesystem_factory or ProjectFilesystemFactory(
             config_manager.resolve_path(document_settings.project_library_root)
         )
         reader = DocumentReader(
@@ -273,11 +275,12 @@ class ProjectRuntimeFactory:
             llm=resources.llm_service,
             embedding_service=resources.embedding,
         )
-        context_filesystem = ProjectFilesystemFactory(
+        filesystem_factory = self._filesystem_factory or ProjectFilesystemFactory(
             config_manager.resolve_path(
                 developer_settings.documents.project_library_root
             )
-        ).for_project(runtime.project_id)
+        )
+        context_filesystem = filesystem_factory.for_project(runtime.project_id)
         context_projection = ContextProjection(
             reader=ProjectContextReader(resources.postgres),
             writer=ProjectContextWriter(resources.postgres),

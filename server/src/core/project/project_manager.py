@@ -108,6 +108,7 @@ class ProjectManager:
             user_name=user_name,
             maintenance_service=self.maintenance_service,
             config_manager=config_manager,
+            filesystem_factory=filesystem_factory,
         )
         # Entity identity maintenance is user-global and must not be tied to a
         # loaded ProjectRuntime.  ProjectManager exposes the application-owned

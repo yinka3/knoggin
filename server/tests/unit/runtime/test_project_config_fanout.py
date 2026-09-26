@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.settings import DeveloperSettings, DocumentSettings, RootConfig
+from core.knowledge.documents import ProjectFilesystemFactory
 from core.project.domain_config_store import DomainActivation
 from runtime.project_factory import ProjectRuntimeFactory
 from tests.fixtures.factories import make_domain_config, make_project_state
@@ -138,7 +139,7 @@ class RecordingIndexer:
 @pytest.mark.runtime
 @pytest.mark.no_network
 def test_document_runtime_uses_typed_settings_and_shared_explicit_dependencies(
-    monkeypatch,
+    tmp_path,
 ):
     config_manager = RecordingConfigManager()
     config_manager.config = RootConfig(
@@ -154,13 +155,12 @@ def test_document_runtime_uses_typed_settings_and_shared_explicit_dependencies(
         embedding=object(),
         background_work=None,
     )
+    filesystem_factory = ProjectFilesystemFactory(tmp_path / "projects")
     factory = ProjectRuntimeFactory(
         resources=resources,
         user_name="ada",
-    )
-    monkeypatch.setattr(
-        "runtime.project_factory.ConfigManager.get",
-        staticmethod(lambda: config_manager),
+        config_manager=config_manager,
+        filesystem_factory=filesystem_factory,
     )
 
     documents = factory._create_document_service(
@@ -170,6 +170,10 @@ def test_document_runtime_uses_typed_settings_and_shared_explicit_dependencies(
 
     assert documents._document_rerank_enabled is False
     assert documents._document_rerank_candidates == 7
+    assert documents._filesystem_factory is filesystem_factory
+    assert documents.indexer._filesystem.root == filesystem_factory.for_project(
+        "project-1"
+    ).root
 
 
 @pytest.mark.runtime
@@ -345,6 +349,11 @@ async def test_conflict_discovery_job_is_registered_with_its_policy_subscription
 @pytest.mark.no_network
 def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch):
     config_manager = RecordingConfigManager()
+    context_filesystem = object()
+    filesystem_factory = SimpleNamespace(
+        for_project=lambda _project_id: context_filesystem,
+    )
+    captured_context = {}
 
     async def publisher(_entity_ids):
         return None
@@ -362,7 +371,11 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
         knowledge_store=SimpleNamespace(allocate_entity_id=lambda: None),
         embedding=object(),
     )
-    factory = ProjectRuntimeFactory(resources=resources, user_name="ada")
+    factory = ProjectRuntimeFactory(
+        resources=resources,
+        user_name="ada",
+        filesystem_factory=filesystem_factory,
+    )
 
     monkeypatch.setattr(
         "runtime.project_factory.ConfigManager.get",
@@ -371,7 +384,6 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
     for symbol in (
         "SemanticWindowAdmission",
         "EpisodeGenerator",
-        "ContextProjection",
         "ProjectContextReader",
         "ProjectContextWriter",
         "ContextUpdater",
@@ -382,8 +394,8 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
             "runtime.project_factory." + symbol, lambda *args, **kwargs: object()
         )
     monkeypatch.setattr(
-        "runtime.project_factory.ProjectFilesystemFactory",
-        lambda _root: SimpleNamespace(for_project=lambda _project_id: object()),
+        "runtime.project_factory.ContextProjection",
+        lambda **kwargs: captured_context.update(kwargs) or object(),
     )
     monkeypatch.setattr(
         "runtime.project_factory.ProjectSemanticProcessor", CapturedSemanticProcessor
@@ -393,6 +405,7 @@ def test_project_semantic_factory_wires_committed_entity_publication(monkeypatch
 
     assert job.kwargs["publish_committed_entity_ids"] is publisher
     assert job.kwargs["capture_semantic_policy"] is runtime.capture_semantic_policy
+    assert captured_context["filesystem"] is context_filesystem
 
 
 @pytest.mark.runtime
