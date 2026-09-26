@@ -233,7 +233,6 @@ class RuntimeHealthService:
         *,
         user_name: str,
         project_id: str,
-        session_id: str,
     ) -> HealthSnapshot:
         """Return bounded project semantic-job and durable-window health.
 

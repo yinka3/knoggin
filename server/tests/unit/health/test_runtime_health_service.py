@@ -109,9 +109,7 @@ async def test_ingestion_health_prefers_durable_semantic_window_state():
     )
 
     payload = (
-        await service.get_ingestion_health(
-            user_name="ada", project_id="project-a", session_id="session-a"
-        )
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
     ).model_dump(mode="json")
 
     assert payload["details"]["semantic_windows"]["pending_count"] == 2
@@ -285,9 +283,7 @@ async def test_ingestion_health_reports_pending_semantic_windows():
     )
 
     payload = (
-        await service.get_ingestion_health(
-            user_name="ada", project_id="project-a", session_id="session-a"
-        )
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
     ).model_dump(mode="json")
 
     assert payload["status"] == "healthy"
@@ -327,9 +323,7 @@ async def test_ingestion_health_reports_stopped_semantic_processor_and_failed_wo
     )
 
     payload = (
-        await service.get_ingestion_health(
-            user_name="ada", project_id="project-a", session_id="session-a"
-        )
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
     ).model_dump(mode="json")
 
     assert payload["status"] == "degraded"
@@ -367,9 +361,7 @@ async def test_ingestion_health_marks_exhausted_windows_for_manual_retry():
     )
 
     payload = (
-        await service.get_ingestion_health(
-            user_name="ada", project_id="project-a", session_id="session-a"
-        )
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
     ).model_dump(mode="json")
 
     assert payload["status"] == "degraded"
@@ -417,9 +409,7 @@ async def test_ingestion_health_surfaces_bounded_context_projection_failure():
     )
 
     payload = (
-        await service.get_ingestion_health(
-            user_name="ada", project_id="project-a", session_id="session-a"
-        )
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
     ).model_dump(mode="json")
 
     projection = payload["details"]["context_projection"]
@@ -456,9 +446,7 @@ async def test_ingestion_health_degrades_when_durable_queue_metrics_fail():
     )
 
     payload = (
-        await service.get_ingestion_health(
-            user_name="ada", project_id="project-a", session_id="session-a"
-        )
+        await service.get_ingestion_health(user_name="ada", project_id="project-a")
     ).model_dump(mode="json")
 
     assert payload["status"] == "degraded"

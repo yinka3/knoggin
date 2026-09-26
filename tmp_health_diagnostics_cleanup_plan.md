@@ -139,6 +139,25 @@ internal scheduler field.
 - Record current callers and decide project-scoped versus session-scoped health.
 - Add boundary tests that prove Health performs no writes or repairs.
 
+#### Unit 1 inventory result
+
+- Engine health is application-scoped. PostgreSQL and the runtime-owned model,
+  background, knowledge-store, executor, embedding, and LLM dependencies are
+  required after successful startup. Projection-repair health is an optional
+  diagnostic read and its absence must not imply that repair succeeded.
+- Resource health is project-filtered capacity status over application-owned
+  coordinators. Queue activity is live status, not durable maintenance state.
+- Ingestion health is project-scoped: semantic windows and Context projection
+  are both project aggregates. The unused `session_id` parameter was removed
+  instead of preserving a false session-ownership check.
+- Background health combines a loaded ProjectRuntime snapshot with a bounded
+  durable document count. It reports status only; document recovery remains
+  owned by the document subsystem and durable repair remains Maintenance work.
+- Agent tools are presentation adapters. The SDK/application port are the
+  correct public owners; storage and runtime objects are not public contracts.
+- Existing drill-down integration coverage proves the health path performs no
+  writes. Later units will retain that invariant while tightening status rules.
+
 ### Unit 2: Durable health read ownership
 
 - Move semantic-window health SQL into `SemanticWindowReader`.

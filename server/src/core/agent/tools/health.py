@@ -55,7 +55,6 @@ class HealthTools:
             snapshot = await service.get_ingestion_health(
                 user_name=str(getattr(self, "user_name", "")),
                 project_id=str(getattr(self, "project_id", "")),
-                session_id=str(getattr(self, "session_id", "")),
             )
         except Exception:
             return _health_service_unavailable(

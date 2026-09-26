@@ -12,14 +12,8 @@ class HealthyService:
         assert project_id == "project-a"
         return HealthSnapshot(summary="Resources are healthy")
 
-    async def get_ingestion_health(
-        self, *, user_name: str, project_id: str, session_id: str
-    ):
-        assert (user_name, project_id, session_id) == (
-            "ada",
-            "project-a",
-            "session-a",
-        )
+    async def get_ingestion_health(self, *, user_name: str, project_id: str):
+        assert (user_name, project_id) == ("ada", "project-a")
         return HealthSnapshot(summary="Ingestion is healthy")
 
     async def get_background_health(self, *, project_id: str):
