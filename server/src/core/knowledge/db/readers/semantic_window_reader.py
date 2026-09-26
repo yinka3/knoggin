@@ -150,6 +150,49 @@ class SemanticWindowReader:
         )
         return [SemanticWindowRecord.model_validate(row) for row in rows]
 
+    async def get_health_summary(
+        self,
+        *,
+        user_name: str,
+        project_id: str,
+    ) -> dict[str, int | None]:
+        """Return bounded aggregate window status without message identifiers."""
+
+        user_name, project_id = self._scope(
+            user_name, project_id, "get_health_summary"
+        )
+        row = await self.client.fetch_one(
+            """
+            SELECT
+                count(*) FILTER (WHERE stage <> 'completed') AS pending_count,
+                count(*) FILTER (WHERE stage = 'claimed') AS claimed_count,
+                count(*) FILTER (WHERE last_failure_at_ms IS NOT NULL) AS failed_count,
+                count(*) FILTER (
+                    WHERE stage <> 'completed'
+                      AND last_failure_at_ms IS NOT NULL
+                      AND next_retry_at_ms IS NULL
+                ) AS exhausted_count,
+                min((EXTRACT(EPOCH FROM claimed_at) * 1000)::BIGINT)
+                    FILTER (WHERE stage <> 'completed') AS oldest_pending_ms,
+                max((EXTRACT(EPOCH FROM completed_at) * 1000)::BIGINT)
+                    AS last_processed_ms
+            FROM public.project_semantic_windows
+            WHERE user_name = %s AND project_id = %s
+            """,
+            (user_name, project_id),
+        )
+        return {
+            key: row.get(key) if row else None
+            for key in (
+                "pending_count",
+                "claimed_count",
+                "failed_count",
+                "exhausted_count",
+                "oldest_pending_ms",
+                "last_processed_ms",
+            )
+        }
+
     async def get_window_messages(
         self,
         window_id: UUID | str,

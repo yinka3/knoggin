@@ -165,6 +165,16 @@ internal scheduler field.
 - Verify bounded aggregate queries expose no identifiers or content.
 - Keep blockage inspection and repair in Maintenance.
 
+#### Unit 2 result
+
+- Semantic-window health aggregation now belongs to `SemanticWindowReader`.
+- `KnowledgeStore` retains a narrow forwarding method because Health consumes
+  the persistence facade rather than a raw reader.
+- The aggregate remains project-scoped and returns counts/timestamps only; it
+  exposes no window, session, message, or content identifiers.
+- Failed-window details and orphaned-exchange inspection remain Maintenance
+  operations and were not added to Health.
+
 ### Unit 3: Status versus activity semantics
 
 - Treat ordinary moving work as busy rather than degraded.
