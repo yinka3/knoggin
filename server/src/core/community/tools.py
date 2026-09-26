@@ -46,6 +46,7 @@ class AACTools(Tools):
             agent_id=agent_id,
             health_service=None,
             entity_maintenance_service=base_tools.entity_maintenance_service,
+            project_maintenance_service=base_tools.project_maintenance_service,
         )
         self.aac_store = store
         self.agent_manager = agent_manager

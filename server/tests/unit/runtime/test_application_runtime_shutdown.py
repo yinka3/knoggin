@@ -156,6 +156,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
     resources = RecordingOwner("resources", calls)
     projects = RecordingOwner("projects", calls)
     projects.entity_maintenance_service = SimpleNamespace()
+    projects.maintenance_service = SimpleNamespace()
 
     class KnowledgeStore:
         async def ensure_identity_entity(self, _user_name, _aliases):
@@ -232,6 +233,7 @@ async def test_application_start_establishes_identity_before_managers(
     resources.knowledge_store = KnowledgeStore()
     projects = RecordingOwner("projects", calls)
     projects.entity_maintenance_service = SimpleNamespace()
+    projects.maintenance_service = SimpleNamespace()
     sessions = RecordingSessions("sessions", calls)
 
     class RecordingAgentManager:
@@ -249,6 +251,10 @@ async def test_application_start_establishes_identity_before_managers(
             assert (
                 kwargs["entity_maintenance_service"]
                 is projects.entity_maintenance_service
+            )
+            assert (
+                kwargs["project_maintenance_service"]
+                is projects.maintenance_service
             )
             calls.append("agent_orchestrator")
 

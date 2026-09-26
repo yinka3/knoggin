@@ -899,7 +899,7 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "check_graph_health",
+            "name": "inspect_duplicate_entities",
             "description": (
                 "Check for duplicate-entity candidates using the system merge "
                 "detector. Use this during routine maintenance before proposing "

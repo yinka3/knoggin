@@ -300,7 +300,7 @@ TOOL_DEFINITIONS = {
         "set_research_plan", executor_protocol=True
     ),
     "submit_answer": _definition("submit_answer", executor_protocol=True),
-    "check_graph_health": _definition("check_graph_health"),
+    "inspect_duplicate_entities": _definition("inspect_duplicate_entities"),
     "propose_entity_merge": _definition("propose_entity_merge"),
     "report_relationship_conflict": _definition("report_relationship_conflict"),
     "list_project_files": _definition("list_project_files", default_limit=4),
@@ -632,6 +632,7 @@ class Tools(
         agent_id: Optional[str] = None,
         health_service=None,
         entity_maintenance_service: Optional[EntityMaintenanceService] = None,
+        project_maintenance_service=None,
     ):
         if knowledge_store is None or postgres is None:
             raise ValueError("Tools requires explicit knowledge_store and postgres")
@@ -662,6 +663,7 @@ class Tools(
         # tool compositions intentionally leave it unavailable rather than
         # constructing an uncoordinated service instance here.
         self.entity_maintenance_service = entity_maintenance_service
+        self.project_maintenance_service = project_maintenance_service
 
         self._http_client = httpx.AsyncClient(timeout=10.0)
         self._web_page_client = create_web_page_http_client()

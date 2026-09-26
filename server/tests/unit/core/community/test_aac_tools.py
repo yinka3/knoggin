@@ -37,6 +37,7 @@ def _base_tools(resources):
         knowledge_store=resources.knowledge_store,
         postgres=resources.postgres,
         entity_maintenance_service=None,
+        project_maintenance_service=None,
     )
 
 

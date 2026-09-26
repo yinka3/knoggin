@@ -469,7 +469,7 @@ async def test_orchestrator_does_not_inject_maintenance_candidates(
         id="agent-1",
         name="Researcher",
         persona="Careful",
-        enabled_tools=["check_graph_health"],
+        enabled_tools=["inspect_duplicate_entities"],
     )
     context.resources.postgres.upsert_agent(agent)
 

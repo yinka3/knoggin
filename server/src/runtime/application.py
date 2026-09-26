@@ -104,6 +104,7 @@ class ApplicationRuntime:
                 agent_manager,
                 config_manager=config_manager,
                 entity_maintenance_service=projects.entity_maintenance_service,
+                project_maintenance_service=projects.maintenance_service,
             )
             sessions = SessionManager(
                 resources=resources,

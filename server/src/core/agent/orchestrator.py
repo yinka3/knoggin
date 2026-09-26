@@ -47,10 +47,12 @@ class AgentOrchestrator:
         *,
         config_manager,
         entity_maintenance_service: EntityMaintenanceService | None = None,
+        project_maintenance_service=None,
     ):
         self._agent_manager = agent_manager
         self._config_manager = config_manager
         self._entity_maintenance_service = entity_maintenance_service
+        self._project_maintenance_service = project_maintenance_service
 
     async def run_stream(
         self,
@@ -267,6 +269,7 @@ class AgentOrchestrator:
             agent_id=agent_id,
             health_service=getattr(context, "health_service", None),
             entity_maintenance_service=self._entity_maintenance_service,
+            project_maintenance_service=self._project_maintenance_service,
         )
 
         return tools

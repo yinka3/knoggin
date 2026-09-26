@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import core.agent.tools.maintenance as maintenance_module
 from common.schema.agent.tool_contracts import (
     REVERSIBLE_WRITE_CAPABILITY,
     TOOL_SCHEMAS_BY_NAME,
@@ -15,7 +14,6 @@ from common.schema.evidence import (
     EvidenceSubject,
 )
 from core.agent.tools.maintenance import MaintenanceTools
-from core.knowledge.evidence_service import EvidenceService
 
 
 class RecordingKnowledgeStore:
@@ -45,12 +43,17 @@ class RecordingKnowledgeStore:
 
 
 class MaintenanceHarness(MaintenanceTools):
-    def __init__(self, entity_maintenance_service=None) -> None:
+    def __init__(
+        self,
+        entity_maintenance_service=None,
+        project_maintenance_service=None,
+    ) -> None:
         self.user_name = "ada"
         self.project_id = "project-1"
         self.knowledge_store = RecordingKnowledgeStore()
         self.postgres = object()
         self.entity_maintenance_service = entity_maintenance_service
+        self.project_maintenance_service = project_maintenance_service
 
 
 @pytest.mark.no_network
@@ -91,37 +94,31 @@ async def test_agent_merge_proposal_uses_injected_application_service():
 
 @pytest.mark.no_network
 async def test_agent_merge_proposal_requires_application_owned_service():
-    result = await MaintenanceHarness().propose_entity_merge(
-        primary_id=2,
-        duplicate_id=3,
-        reasoning="The cited evidence identifies one entity.",
-    )
-
-    assert result == {
-        "error": "Entity maintenance is unavailable in this tool context"
-    }
+    with pytest.raises(RuntimeError, match="Entity maintenance is unavailable"):
+        await MaintenanceHarness().propose_entity_merge(
+            primary_id=2,
+            duplicate_id=3,
+            reasoning="The cited evidence identifies one entity.",
+        )
 
 
 @pytest.mark.no_network
 async def test_agent_conflict_report_keeps_evidence_immutable_and_opens_review_workflow(
-    monkeypatch,
 ):
-    tools = MaintenanceHarness()
-
-    class RecordingConflictService:
-        def __init__(self, _writer):
+    class ProjectMaintenance:
+        def __init__(self):
             self.calls = []
 
-        async def record_detection(self, **kwargs):
-            self.calls.append(kwargs)
+        async def record_conflict_detection(self, project_id, **kwargs):
+            self.calls.append((project_id, kwargs))
             return SimpleNamespace(
                 group=SimpleNamespace(conflict_id="conflict-1", status="open"),
                 created=True,
                 evidence_added=2,
             )
 
-    service = RecordingConflictService(None)
-    monkeypatch.setattr(maintenance_module, "ConflictService", lambda _writer: service)
+    service = ProjectMaintenance()
+    tools = MaintenanceHarness(project_maintenance_service=service)
 
     result = await tools.report_relationship_conflict(
         evidence_observation_ids=[101, 104],
@@ -132,28 +129,20 @@ async def test_agent_conflict_report_keeps_evidence_immutable_and_opens_review_w
 
     assert result["review_id"] == "conflict-1"
     assert result["created"] is True
-    expected_snapshot = EvidenceService.snapshot(
-        await tools.knowledge_store.get_relationship_observations_evidence(
-            [101, 104], user_name="ada", project_id="project-1"
-        )
-    )
     assert service.calls == [
-        {
-            "user_name": "ada",
-            "project_id": "project-1",
+        (
+            "project-1",
+            {
             "origin": "agent_discovery",
             "kind": "possible_contradiction",
             "rationale": "The employment observations conflict for the same period.",
             "confidence": 0.8,
             "evidence_ids": [101, 104],
             "metadata": {"reported_by": "agent"},
-            "evidence_snapshot": expected_snapshot,
-        }
+            },
+        )
     ]
-    assert tools.knowledge_store.calls[0] == (
-        (101, 104),
-        {"user_name": "ada", "project_id": "project-1"},
-    )
+    assert tools.knowledge_store.calls == []
 
 
 def test_agent_conflict_report_is_a_reversible_write_with_grounded_evidence_contract():

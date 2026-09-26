@@ -342,13 +342,13 @@ def test_registered_tool_limit_without_a_default_limit_is_allowed(
     assert mgr.update_settings(
         {
             "developer_settings": {
-                "limits": {"tool_limit_overrides": {"check_graph_health": 2}}
+                "limits": {"tool_limit_overrides": {"inspect_duplicate_entities": 2}}
             }
         }
     ) is True
     assert (
         mgr.config.developer_settings.limits.tool_limit_overrides[
-            "check_graph_health"
+            "inspect_duplicate_entities"
         ]
         == 2
     )
