@@ -34,6 +34,7 @@ class ProjectFilePath:
 
     relative_path: str
     size_bytes: int
+    modified_ns: int
 
 
 class ProjectFilesystem:
@@ -247,10 +248,12 @@ class ProjectFilesystem:
                 if not entry.is_file(follow_symlinks=False):
                     continue
                 relative_path = entry_path.relative_to(self._root).as_posix()
+                stat = entry.stat(follow_symlinks=False)
                 files.append(
                     ProjectFilePath(
                         relative_path=relative_path,
-                        size_bytes=entry.stat(follow_symlinks=False).st_size,
+                        size_bytes=stat.st_size,
+                        modified_ns=stat.st_mtime_ns,
                     )
                 )
             pending.extend(reversed(directories))

@@ -63,6 +63,7 @@ from .storage import (
 
 BlockingRunner = Callable[..., Awaitable[Any]]
 _RECONCILIATION_MAX_FILES = 10_000
+_RECONCILIATION_FULL_HASH_INTERVAL = 10
 
 
 class _UnsetSavedWebLinkField:
@@ -110,6 +111,10 @@ class DocumentService:
         self._writer = writer or DocumentWriter(postgres_client, project_id)
         self._run_blocking = blocking_runner
         self._filesystem_factory = filesystem_factory
+        self._reconciliation_fingerprints: dict[
+            str, tuple[int, int, str | None]
+        ] = {}
+        self._reconciliation_run_count = 0
         if indexer is None:
             indexing_policy = DocumentIndexPolicy.capture(
                 inline_index_max_bytes=inline_index_max_bytes,
@@ -180,9 +185,48 @@ class DocumentService:
         reserved_paths = [path for path in paths if is_controlled_context_file(path.relative_path)]
         paths = [path for path in paths if not is_controlled_context_file(path.relative_path)]
         settings = await self.get_scan_settings()
+        current_rows = await self._reader.list_documents_for_reconciliation(
+            limit=_RECONCILIATION_MAX_FILES + 1,
+        )
+        current = {row["relative_path"]: row for row in current_rows}
+        if len(current) > _RECONCILIATION_MAX_FILES:
+            raise RuntimeError(
+                "document catalog reconciliation exceeds the "
+                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
+            )
+
+        self._reconciliation_run_count += 1
+        full_hash_sweep = (
+            not self._reconciliation_fingerprints
+            or self._reconciliation_run_count % _RECONCILIATION_FULL_HASH_INTERVAL == 0
+        )
         entries: list[FolderUploadEntry] = []
+        next_fingerprints: dict[str, tuple[int, int, str | None]] = {
+            path.relative_path: (path.size_bytes, path.modified_ns, None)
+            for path in reserved_paths
+        }
         for path in paths:
             if path.size_bytes > settings.max_document_size_bytes:
+                next_fingerprints[path.relative_path] = (
+                    path.size_bytes,
+                    path.modified_ns,
+                    None,
+                )
+                continue
+            fingerprint = self._reconciliation_fingerprints.get(path.relative_path)
+            existing = current.get(path.relative_path)
+            if (
+                not full_hash_sweep
+                and fingerprint is not None
+                and fingerprint[:2] == (path.size_bytes, path.modified_ns)
+            ):
+                next_fingerprints[path.relative_path] = fingerprint
+                if (
+                    fingerprint[2] is not None
+                    and existing is not None
+                    and existing["content_hash"] == fingerprint[2]
+                ):
+                    current.pop(path.relative_path)
                 continue
             content = await self._run_blocking(
                 filesystem.read_bytes,
@@ -198,18 +242,20 @@ class DocumentService:
             settings=settings,
         )
         desired = {entry.relative_path: entry for entry in preview.included}
-        current_rows = await self._reader.list_documents_for_reconciliation(
-            limit=_RECONCILIATION_MAX_FILES + 1,
-        )
-        current = {
-            row["relative_path"]: row
-            for row in current_rows
-        }
-        if len(current) > _RECONCILIATION_MAX_FILES:
-            raise RuntimeError(
-                "document catalog reconciliation exceeds the "
-                f"{_RECONCILIATION_MAX_FILES}-file safety limit"
-            )
+        for path in paths:
+            preview_entry = desired.get(path.relative_path)
+            if preview_entry is not None:
+                next_fingerprints[path.relative_path] = (
+                    path.size_bytes,
+                    path.modified_ns,
+                    preview_entry.content_hash,
+                )
+            elif path.relative_path not in next_fingerprints:
+                next_fingerprints[path.relative_path] = (
+                    path.size_bytes,
+                    path.modified_ns,
+                    None,
+                )
 
         created_rows: list[Dict[str, Any]] = []
         changed_rows: list[Dict[str, Any]] = []
@@ -248,6 +294,7 @@ class DocumentService:
             deleted_document_ids=deleted_document_ids,
             updated_at=now,
         )
+        self._reconciliation_fingerprints = next_fingerprints
         created = len(created_rows)
         changed = len(changed_rows)
         deleted = len(deleted_document_ids)
@@ -560,11 +607,13 @@ class DocumentService:
             settings_json=json.dumps(validated.model_dump(mode="json")),
             saved_at=saved_at,
         )
+        self._reconciliation_fingerprints.clear()
         return validated
 
     async def reset_scan_settings(self) -> FolderScanSettings:
         """Remove saved project settings and return defaults."""
         await self._writer.delete_scan_settings()
+        self._reconciliation_fingerprints.clear()
         return FolderScanSettings()
 
     @staticmethod

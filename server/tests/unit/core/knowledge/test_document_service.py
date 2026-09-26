@@ -1201,6 +1201,35 @@ async def test_reconciliation_rolls_back_all_catalog_changes_when_commit_fails(
 
 @pytest.mark.storage
 @pytest.mark.no_network
+async def test_reconciliation_skips_unchanged_bytes_but_keeps_a_full_hash_sweep(
+    document_harness,
+    monkeypatch,
+):
+    service, _postgres = document_harness
+    filesystem = service._filesystem
+    assert filesystem is not None
+    filesystem.write_bytes("external.md", b"unchanged")
+    reads: list[str] = []
+    original_read_bytes = type(filesystem).read_bytes
+
+    def count_read_bytes(instance, relative_path, **kwargs):
+        reads.append(relative_path)
+        return original_read_bytes(instance, relative_path, **kwargs)
+
+    monkeypatch.setattr(type(filesystem), "read_bytes", count_read_bytes)
+    from core.knowledge.documents import service as service_module
+
+    monkeypatch.setattr(service_module, "_RECONCILIATION_FULL_HASH_INTERVAL", 3)
+
+    await service.reconcile_project_files()
+    await service.reconcile_project_files()
+    await service.reconcile_project_files()
+
+    assert reads == ["external.md", "external.md"]
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_native_project_file_operations_reconcile_the_document_catalog(
     document_harness,
 ):
