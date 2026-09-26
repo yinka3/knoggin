@@ -6,6 +6,8 @@ import asyncio
 from functools import partial
 from typing import cast
 
+from loguru import logger
+
 from common.conf.manager import ConfigManager
 from common.schema.settings import DeveloperSettings, RootConfig
 from common.scoping import (
@@ -180,7 +182,12 @@ class ProjectRuntimeFactory:
             )
             await scheduler.start()
         except Exception:
-            await runtime.shutdown()
+            try:
+                await runtime.shutdown()
+            except Exception:
+                logger.exception(
+                    "ProjectRuntime cleanup also failed after bootstrap failure"
+                )
             raise
         return runtime
 

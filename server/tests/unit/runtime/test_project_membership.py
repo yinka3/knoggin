@@ -130,6 +130,77 @@ async def test_project_runtime_releases_its_exact_final_lease():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_final_lease_release_retains_runtime_when_shutdown_fails():
+    manager = make_manager(RecordingPostgres())
+    attempts = 0
+
+    async def shutdown():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("cleanup failed")
+
+    state = SimpleNamespace(shutdown=shutdown)
+    manager.active_projects["project-1"] = state
+    manager._project_leases["project-1"] = {"session-1"}
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await manager.release_project_for_session("project-1", "session-1")
+
+    assert manager.active_projects == {"project-1": state}
+    assert manager._project_leases == {"project-1": {"session-1"}}
+
+    await manager.release_project_for_session("project-1", "session-1")
+
+    assert manager.active_projects == {}
+    assert manager._project_leases == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_manager_shutdown_retains_only_failed_runtimes_for_retry():
+    manager = make_manager(RecordingPostgres())
+    failed_attempts = 0
+
+    async def successful_shutdown():
+        return None
+
+    async def retry_shutdown():
+        nonlocal failed_attempts
+        failed_attempts += 1
+        if failed_attempts == 1:
+            raise RuntimeError("cleanup failed")
+
+    failed_state = SimpleNamespace(shutdown=retry_shutdown)
+    manager.active_projects.update(
+        {
+            "project-ok": SimpleNamespace(shutdown=successful_shutdown),
+            "project-retry": failed_state,
+        }
+    )
+    manager._project_leases.update(
+        {
+            "project-ok": {"session-ok"},
+            "project-retry": {"session-retry"},
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to shut down 1 project runtime"):
+        await manager.shutdown()
+
+    assert manager.active_projects == {"project-retry": failed_state}
+    assert manager._project_leases == {
+        "project-retry": {"session-retry"},
+    }
+
+    await manager.shutdown()
+
+    assert manager.active_projects == {}
+    assert manager._project_leases == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_acquire_bootstraps_once_and_tracks_exact_session_leases():
     manager = make_manager(RecordingPostgres([[project_row()], [project_row()]]))
     calls = []

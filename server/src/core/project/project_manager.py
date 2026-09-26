@@ -890,15 +890,17 @@ class ProjectManager:
                 raise RuntimeError(
                     f"Session '{session_id}' does not hold a lease for project '{project_id}'"
                 )
-            leases.remove(session_id)
-            if leases:
+            if len(leases) > 1:
+                leases.remove(session_id)
                 return
 
-            self._project_leases.pop(project_id, None)
-            state = self.active_projects.pop(project_id, None)
+            state = self.active_projects.get(project_id)
             if state is not None:
                 await state.shutdown()
+                self.active_projects.pop(project_id, None)
                 logger.info(f"Released ProjectRuntime for project_id: {project_id}")
+            leases.remove(session_id)
+            self._project_leases.pop(project_id, None)
 
     async def shutdown(self) -> None:
         """Stop every remaining project runtime before shared resources close."""
@@ -909,15 +911,21 @@ class ProjectManager:
             if self._closed and not self.active_projects:
                 return
             self._closed = True
-            states = list(self.active_projects.values())
-            self.active_projects.clear()
-            self._project_leases.clear()
+            states = list(self.active_projects.items())
 
         results = await asyncio.gather(
-            *(state.shutdown() for state in states),
+            *(state.shutdown() for _, state in states),
             return_exceptions=True,
         )
-        failures = [result for result in results if isinstance(result, Exception)]
+        failures = []
+        async with self.maintenance_service.lock:
+            for (project_id, state), result in zip(states, results, strict=True):
+                if isinstance(result, Exception):
+                    failures.append(result)
+                    continue
+                if self.active_projects.get(project_id) is state:
+                    self.active_projects.pop(project_id, None)
+                    self._project_leases.pop(project_id, None)
         if failures:
             raise RuntimeError(
                 f"Failed to shut down {len(failures)} project runtime(s)"

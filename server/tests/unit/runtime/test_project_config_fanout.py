@@ -567,3 +567,85 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
     assert runtime.scheduler.started is True
     assert captured["document_config"] is initial_config
     assert captured["semantic_settings"] is initial_config.developer_settings
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_bootstrap_cleanup_failure_preserves_original_startup_error(monkeypatch):
+    config_manager = RecordingConfigManager()
+
+    async def get_vp01(_language):
+        return object()
+
+    resources = SimpleNamespace(
+        postgres=object(),
+        embedding=object(),
+        knowledge_store=object(),
+        llm_service=object(),
+        executor=object(),
+        background_work=None,
+        model_work=object(),
+        spacy=object(),
+        get_vp01=get_vp01,
+        require_ready=lambda: resources,
+    )
+    factory = ProjectRuntimeFactory(
+        resources=resources,
+        user_name="ada",
+        config_manager=config_manager,
+    )
+
+    class DomainStore:
+        def __init__(self, _postgres):
+            pass
+
+        async def load(self, _user_name, _project_id):
+            return make_domain_config()
+
+    class Loop:
+        async def run_in_executor(self, _executor, _operation):
+            return object()
+
+    class FailingIndexer:
+        async def start(self):
+            raise ValueError("index startup failed")
+
+    class FailingCleanupRuntime(RecordingStartupRuntime):
+        async def shutdown(self):
+            raise RuntimeError("cleanup failed")
+
+    async def verify_user_entity(_entities):
+        return None
+
+    monkeypatch.setattr("runtime.project_factory.DomainConfigStore", DomainStore)
+    monkeypatch.setattr(
+        "runtime.project_factory.EntityResolver",
+        lambda **_kwargs: RecordingStartupEntities(),
+    )
+    monkeypatch.setattr(
+        "runtime.project_factory.KnowledgeRetrieval", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        "runtime.project_factory.ProjectRuntime", FailingCleanupRuntime
+    )
+    monkeypatch.setattr("runtime.project_factory.Scheduler", RecordingStartupScheduler)
+    monkeypatch.setattr(
+        "runtime.project_factory.asyncio.get_running_loop", lambda: Loop()
+    )
+    monkeypatch.setattr(factory, "_verify_user_entity", verify_user_entity)
+    monkeypatch.setattr(
+        factory,
+        "_create_document_service",
+        lambda *_args, **_kwargs: SimpleNamespace(indexer=FailingIndexer()),
+    )
+    monkeypatch.setattr(
+        factory,
+        "_create_project_semantic_processor",
+        lambda *_args, **_kwargs: RecordingStartupJob([]),
+    )
+
+    with pytest.raises(ValueError, match="index startup failed"):
+        await factory.create(
+            project_id="project-1",
+            readable_project_ids=["project-1"],
+        )
