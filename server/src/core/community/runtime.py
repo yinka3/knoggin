@@ -152,6 +152,7 @@ class AACRuntime:
         self._started = False
         self._shutdown_lock = asyncio.Lock()
         self._pending_finalizations: dict[str, dict] = {}
+        self._pending_stop_events: dict[str, dict] = {}
 
     @property
     def active_discussion_id(self) -> Optional[str]:
@@ -227,6 +228,13 @@ class AACRuntime:
 
     async def _retry_finalizations(self) -> None:
         failures = []
+        for discussion_id, event in tuple(self._pending_stop_events.items()):
+            try:
+                await self.store.append_timeline(**event)
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                del self._pending_stop_events[discussion_id]
         for discussion_id, outcome in tuple(self._pending_finalizations.items()):
             try:
                 await self.store.finish_discussion(**outcome)
@@ -307,13 +315,21 @@ class AACRuntime:
         discussion = self._discussion_task
         if discussion_id is None or discussion is None or discussion.done():
             return False
-        if self._discussion_stop_event.is_set():
-            return True
-        self._discussion_stop_event.set()
-        await self._append_event(
-            "AAC discussion stop requested by user.",
-            history=self._discussion_history,
-        )
+        if not self._discussion_stop_event.is_set():
+            self._discussion_stop_event.set()
+            content = "AAC discussion stop requested by user."
+            self._pending_stop_events[discussion_id] = dict(
+                discussion_id=discussion_id, user_name=self.user_name,
+                kind="system_event", content=content,
+                timeline_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"aac:{discussion_id}:user-stop")),
+            )
+            if self._discussion_history is not None:
+                self._discussion_history.append({"role": "system", "content": content})
+                del self._discussion_history[:-8]
+        event = self._pending_stop_events.get(discussion_id)
+        if event is not None:
+            await self.store.append_timeline(**event)
+            self._pending_stop_events.pop(discussion_id, None)
         return True
 
     async def list_discussions(self, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -647,6 +663,8 @@ class AACRuntime:
     def _on_community_settings_changed(self, _settings: object) -> None:
         """Wake the local loop so enabled/cadence changes take effect promptly."""
 
+        # Disabling AAC blocks future opportunities; an admitted discussion
+        # continues until its budget ends or the user requests a graceful stop.
         self._opportunity_wake_event.set()
 
     async def _refresh_read_context(self) -> None:

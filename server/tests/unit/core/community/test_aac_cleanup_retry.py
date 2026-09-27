@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -38,6 +39,38 @@ async def test_failed_unsubscribe_is_retained_and_retried():
     await owner.shutdown()
     assert owner._config_unsubscribe is None
     assert unsubscribe.call_count == 2
+
+
+async def test_stop_write_failure_reuses_event_identity_on_retry():
+    store = AsyncMock()
+    store.append_timeline.side_effect = [RuntimeError("write"), "saved"]
+    owner = runtime(store)
+    owner._discussion_id = "d"
+    owner._discussion_history = []
+    owner._discussion_task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        with pytest.raises(RuntimeError, match="write"):
+            await owner.request_stop()
+        assert owner._discussion_stop_event.is_set()
+        assert await owner.request_stop()
+        calls = store.append_timeline.await_args_list
+        assert calls[0].kwargs == calls[1].kwargs
+        assert not owner._pending_stop_events
+        assert len(owner._discussion_history) == 1
+    finally:
+        owner._discussion_task.cancel()
+        await asyncio.gather(owner._discussion_task, return_exceptions=True)
+
+
+async def test_timeline_replay_requires_same_scoped_content():
+    client = AsyncMock()
+    client.execute.return_value = 0
+    client.fetch_all.return_value = [{"kind": "system_event", "agent_id": None, "content": "stop"}]
+    store = AACStore(client)
+    args = dict(discussion_id="d", user_name="ada", kind="system_event", content="stop", timeline_id="event")
+    assert await store.append_timeline(**args) == "event"
+    with pytest.raises(ValueError, match="conflicts"):
+        await store.append_timeline(**{**args, "content": "different"})
 
 
 @pytest.mark.parametrize("status", ["completed", "failed"])
