@@ -423,6 +423,7 @@ class SessionRuntime:
                         artifact=self._response_artifact(response),
                         readable_project_ids=captured_readable_project_ids,
                     )
+                    exchange_outcome = "assistant_final"
                     await self._record_durable_agent_turn(
                         orchestrator,
                         agent_id=(
@@ -468,8 +469,9 @@ class SessionRuntime:
                     self.session_id,
                 )
         except asyncio.CancelledError:
-            exchange_outcome = "cancelled"
-            terminal_error = {"code": "run_cancelled", "retryable": False}
+            if exchange_outcome not in {"assistant_final", "clarification"}:
+                exchange_outcome = "cancelled"
+                terminal_error = {"code": "run_cancelled", "retryable": False}
             raise
         except GeneratorExit:
             if exchange_outcome not in {"assistant_final", "clarification"}:
@@ -477,7 +479,8 @@ class SessionRuntime:
                 terminal_error = {"code": "run_cancelled", "retryable": False}
             raise
         except Exception:
-            exchange_outcome = "failed"
+            if exchange_outcome not in {"assistant_final", "clarification"}:
+                exchange_outcome = "failed"
             logger.exception(
                 "Canonical agent turn failed for session {}", self.session_id
             )
@@ -954,7 +957,12 @@ class SessionRuntime:
 
         signal_semantic_work = getattr(self.project, "signal_semantic_work", None)
         if callable(signal_semantic_work):
-            signal_semantic_work()
+            try:
+                signal_semantic_work()
+            except Exception:
+                # The committed terminal result remains canonical; the project's
+                # periodic durable scan can recover this missed wake.
+                logger.exception("Failed to signal semantic work for {}", self.session_id)
 
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None

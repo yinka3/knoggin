@@ -162,6 +162,48 @@ def context(monkeypatch):
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+async def test_terminal_error_is_durable_before_the_first_error_is_consumed(context):
+    ctx, resources = context
+
+    async def handler(_kwargs):
+        yield {"event": "error", "data": {"code": "llm_budget_exhausted"}}
+
+    stream = await ctx.open_agent_run_stream(
+        Message(content="fail"), orchestrator=_FakeTurnOrchestrator(handler)
+    )
+    assert (await anext(stream))["event"] == "error"
+    assert resources.knowledge_store.closed_exchanges[-1]["outcome"] == "failed"
+    assert not ctx._agent_run_reserved
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancellation_after_answer_commit_does_not_close_as_cancelled(context):
+    ctx, resources = context
+    entered = asyncio.Event()
+
+    async def handler(_kwargs):
+        yield _response_event("Committed answer")
+
+    orchestrator = _FakeTurnOrchestrator(handler)
+
+    async def bookkeeping(_agent_id):
+        entered.set()
+        await asyncio.Event().wait()
+
+    orchestrator.mark_turn_completed = bookkeeping
+    task = asyncio.create_task(_collect_turn(ctx, Message(content="answer"), orchestrator))
+    await entered.wait()
+    assert resources.knowledge_store.saved_message_logs[-1][0]["role"] == "assistant"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not ctx._agent_run_reserved
+    assert not any(row["outcome"] == "cancelled" for row in resources.knowledge_store.closed_exchanges)
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
     resources = FakeResources()
     ctx = _runtime(resources)
