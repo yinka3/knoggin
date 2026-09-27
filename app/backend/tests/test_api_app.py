@@ -23,7 +23,6 @@ def test_message_request_accepts_a_structured_browser_document_focus():
             "content": "Compare the selected files",
             "documentFocus": {
                 "targetType": "subtree",
-                "folderRootId": "folder-1",
                 "pathPrefix": "design/",
             },
         }
@@ -31,6 +30,5 @@ def test_message_request_accepts_a_structured_browser_document_focus():
 
     focus = document_focus_to_sdk(request.document_focus)
     assert focus == DocumentFocusSubtree(
-        folder_root_id="folder-1",
         path_prefix="design/",
     )

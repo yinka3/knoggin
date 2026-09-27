@@ -2,16 +2,14 @@
 
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from knoggin import (
     DocumentFocus as SdkDocumentFocus,
 )
 from knoggin import (
     DocumentFocusDocument,
-    DocumentFocusFolderUpload,
     DocumentFocusSubtree,
 )
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _DocumentFocusRequest(BaseModel):
@@ -30,29 +28,18 @@ class DocumentFocusDocumentRequest(_DocumentFocusRequest):
 
 class DocumentFocusSubtreeRequest(_DocumentFocusRequest):
     target_type: Literal["subtree"] = Field(alias="targetType")
-    folder_root_id: str = Field(alias="folderRootId", min_length=1)
     path_prefix: str = Field(alias="pathPrefix", min_length=1)
 
     def to_sdk(self) -> DocumentFocusSubtree:
         return DocumentFocusSubtree(
-            folder_root_id=self.folder_root_id,
             path_prefix=self.path_prefix,
         )
-
-
-class DocumentFocusFolderUploadRequest(_DocumentFocusRequest):
-    target_type: Literal["folder_upload"] = Field(alias="targetType")
-    folder_root_id: str = Field(alias="folderRootId", min_length=1)
-
-    def to_sdk(self) -> DocumentFocusFolderUpload:
-        return DocumentFocusFolderUpload(folder_root_id=self.folder_root_id)
 
 
 DocumentFocusRequest = Annotated[
     Union[
         DocumentFocusDocumentRequest,
         DocumentFocusSubtreeRequest,
-        DocumentFocusFolderUploadRequest,
     ],
     Field(discriminator="target_type"),
 ]

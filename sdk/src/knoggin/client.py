@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,6 +32,7 @@ class Knoggin:
     def __init__(self, runtime: ApplicationRuntime):
         self.runtime = runtime
         self._closed = False
+        self._close_lock = asyncio.Lock()
 
     @classmethod
     async def start(
@@ -256,10 +258,11 @@ class Knoggin:
         )
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        await self.runtime.shutdown()
+        async with self._close_lock:
+            if self._closed:
+                return
+            await self.runtime.shutdown()
+            self._closed = True
 
 
 def _default_config_dir() -> Path:
