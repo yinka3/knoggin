@@ -121,6 +121,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.embedding_model = embedding_model
             self.reranker_model = reranker_model
@@ -367,6 +368,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.device = device
 
@@ -436,6 +438,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.device = device
 
@@ -522,6 +525,7 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
             nli_model=None,
             device=None,
             batch_size=None,
+            model_work=None,
         ):
             self.device = device
 

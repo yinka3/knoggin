@@ -279,9 +279,8 @@ class RuntimeResources:
             ),
             device=device,
             batch_size=self.resource_profile.embedding_batch_size,
+            model_work=self.model_work,
         )
-        if hasattr(self.embedding, "set_model_work_coordinator"):
-            self.embedding.set_model_work_coordinator(self.model_work)
         self.knowledge_store = KnowledgeStore(
             postgres_client=self.postgres,
             embedding_service=self.embedding,
