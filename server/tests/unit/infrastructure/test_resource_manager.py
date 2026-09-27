@@ -337,7 +337,7 @@ async def test_resource_manager_cleans_up_when_postgres_startup_fails(monkeypatc
     assert FailingPostgresClient.instances[0].closed is True
     assert embedding_instances == []
     assert llm_instances == []
-    assert executor_instances[0].shutdown_calls == [False]
+    assert executor_instances[0].shutdown_calls == [True]
 
 
 @pytest.mark.no_network

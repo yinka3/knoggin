@@ -17,6 +17,7 @@ from loguru import logger
 from common.conf.manager import ConfigManager
 from common.exceptions import ConfigurationError, DependencyError
 from common.utils.coordination_log import configure_coordination_log
+from common.utils.lifecycle import settle_owned_task
 from core.ingestion.vp01 import GLiNER25VP01Adapter
 from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.services.embedding_service import EmbeddingService
@@ -94,20 +95,27 @@ class RuntimeResources:
         instance = cls()
         try:
             await instance._start(num_workers=num_workers)
-        except Exception as exc:
+        except BaseException as exc:
             logger.error(f"Runtime resource initialization failed: {exc}")
-            cleanup_failures = await instance._teardown(wait=False)
+            cleanup = asyncio.create_task(instance._teardown(wait=True))
+            cleanup_failures = await settle_owned_task(cleanup)
             for failure in cleanup_failures:
                 logger.error(
                     "Runtime resource startup cleanup failed in {}: {}",
                     failure.phase,
                     failure.error,
                 )
-            if isinstance(exc, (DependencyError, ConfigurationError)):
+            if cleanup_failures:
+                # Keep failed handles reachable through the primary startup error.
+                exc.cleanup_owner = instance
+            if not isinstance(exc, Exception) or isinstance(exc, (DependencyError, ConfigurationError)):
                 raise
-            raise DependencyError(
+            error = DependencyError(
                 f"Unexpected error during runtime resource initialization: {exc}"
-            ) from exc
+            )
+            if cleanup_failures:
+                error.cleanup_owner = instance
+            raise error from exc
 
         instance._started = True
         logger.info("Runtime resources initialized")
@@ -288,14 +296,22 @@ class RuntimeResources:
         async def load_vp01() -> None:
             await self.get_vp01("en")
 
-        try:
-            await asyncio.gather(
+        loaders = asyncio.gather(
                 self.llm_service.load_tokenizer(),
                 self.embedding.load_models(),
                 load_spacy(),
                 load_vp01(),
+                return_exceptions=True,
             )
+        try:
+            results = await asyncio.shield(loaders)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
             await EmbeddingRebuilder(self.postgres, self.embedding).ensure_configuration()
+        except asyncio.CancelledError:
+            await settle_owned_task(loaders)
+            raise
         except Exception as exc:
             logger.critical(f"Global resource initialization failed: {exc}")
             raise DependencyError(

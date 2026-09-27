@@ -180,7 +180,7 @@ async def test_resource_manager_cleans_every_partial_startup_stage(
     assert all(resource.closed for resource in created.llm)
     assert all(resource.cleaned for resource in created.embedding)
     assert all(resource.closed for resource in created.postgres)
-    assert all(executor.shutdown_calls == [False] for executor in created.executors)
+    assert all(executor.shutdown_calls == [True] for executor in created.executors)
 
 
 @pytest.mark.no_network
