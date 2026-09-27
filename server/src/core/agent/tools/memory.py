@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict
 
+from common.exceptions import ToolExecutionError, WorkspaceConflictError
 from common.utils.agent_identity import (
     BRAIN_SNAPSHOT_INTERVAL,
     BRAIN_SNAPSHOT_POLICY,
@@ -26,7 +27,9 @@ class MemoryTools:
         """Read the current durable Markdown brain and its revision."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
-            return {"error": "No durable agent identity is active"}
+            raise ToolExecutionError(
+                "read_agent_brain", "No durable agent identity is active"
+            )
 
         try:
             rows = await self.postgres.fetch_all(
@@ -38,7 +41,9 @@ class MemoryTools:
                 {"user_name": self.user_name, "agent_id": target_agent},
             )
             if not rows:
-                return {"error": "Active agent identity was not found"}
+                raise ToolExecutionError(
+                    "read_agent_brain", "Active agent identity was not found"
+                )
             row = rows[0]
             return {
                 "content": normalize_agent_brain(
@@ -49,14 +54,18 @@ class MemoryTools:
                 "editable_sections": list(EDITABLE_BRAIN_SECTIONS),
                 "snapshot_policy": BRAIN_SNAPSHOT_POLICY,
             }
-        except Exception as exc:
-            return {"error": f"Failed to read brain: {exc}"}
+        except ToolExecutionError:
+            raise
+        except Exception:
+            raise
 
     async def list_agent_brain_snapshots(self) -> Dict:
         """List available restore points for the active durable Brain."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
-            return {"error": "No durable agent identity is active"}
+            raise ToolExecutionError(
+                "list_agent_brain_snapshots", "No durable agent identity is active"
+            )
 
         try:
             current_rows = await self.postgres.fetch_all(
@@ -68,7 +77,10 @@ class MemoryTools:
                 {"user_name": self.user_name, "agent_id": target_agent},
             )
             if not current_rows:
-                return {"error": "Active agent identity was not found"}
+                raise ToolExecutionError(
+                    "list_agent_brain_snapshots",
+                    "Active agent identity was not found",
+                )
             snapshot_rows = await self.postgres.fetch_all(
                 """
                 SELECT
@@ -91,14 +103,18 @@ class MemoryTools:
                 "snapshot_policy": BRAIN_SNAPSHOT_POLICY,
                 "snapshots": snapshot_rows,
             }
-        except Exception as exc:
-            return {"error": f"Failed to list brain snapshots: {exc}"}
+        except ToolExecutionError:
+            raise
+        except Exception:
+            raise
 
     async def read_agent_brain_snapshot(self, revision: int) -> Dict:
         """Read one stored Brain restore point."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
-            return {"error": "No durable agent identity is active"}
+            raise ToolExecutionError(
+                "read_agent_brain_snapshot", "No durable agent identity is active"
+            )
 
         try:
             rows = await self.postgres.fetch_all(
@@ -124,12 +140,16 @@ class MemoryTools:
                 },
             )
             if not rows:
-                return {"error": "Brain snapshot was not found"}
+                raise ToolExecutionError(
+                    "read_agent_brain_snapshot", "Brain snapshot was not found"
+                )
             row = rows[0]
             row["content"] = normalize_agent_brain(row.get("content") or "")
             return row
-        except Exception as exc:
-            return {"error": f"Failed to read brain snapshot: {exc}"}
+        except ToolExecutionError:
+            raise
+        except Exception:
+            raise
 
     async def edit_agent_brain(
         self,
@@ -141,7 +161,9 @@ class MemoryTools:
         """Update one editable Brain section using optimistic concurrency."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
-            return {"error": "No durable agent identity is active"}
+            raise ToolExecutionError(
+                "edit_agent_brain", "No durable agent identity is active"
+            )
 
         try:
             rows = await self.postgres.fetch_all(
@@ -153,15 +175,17 @@ class MemoryTools:
                 {"user_name": self.user_name, "agent_id": target_agent},
             )
             if not rows:
-                return {"error": "Active agent identity was not found"}
+                raise ToolExecutionError(
+                    "edit_agent_brain", "Active agent identity was not found"
+                )
 
             current = rows[0]
             current_revision = int(current.get("brain_revision", 1))
             if expected_revision != current_revision:
-                return {
-                    "error": "Brain changed since it was read",
-                    "current_revision": current_revision,
-                }
+                raise WorkspaceConflictError(
+                    "Brain changed since it was read",
+                    details={"current_revision": current_revision},
+                )
 
             current_content = normalize_agent_brain(
                 current.get("brain") or "",
@@ -235,10 +259,10 @@ class MemoryTools:
             updated = await self.postgres.execute(query, params)
             if updated != 1:
                 latest = await self.read_agent_brain()
-                return {
-                    "error": "Brain changed before the edit could be committed",
-                    "current_revision": latest.get("revision"),
-                }
+                raise WorkspaceConflictError(
+                    "Brain changed before the edit could be committed",
+                    details={"current_revision": latest.get("revision")},
+                )
 
             return {
                 "success": True,
@@ -247,10 +271,10 @@ class MemoryTools:
                 "message": "Brain section updated.",
                 "snapshot_created": should_snapshot_brain_revision(new_revision),
             }
+        except WorkspaceConflictError:
+            raise
         except ValueError as exc:
-            return {"error": str(exc)}
-        except Exception as exc:
-            return {"error": f"Failed to edit brain: {exc}"}
+            raise ToolExecutionError("edit_agent_brain", str(exc)) from exc
 
     async def restore_agent_brain_section(
         self,
@@ -262,7 +286,9 @@ class MemoryTools:
         """Restore one editable section from a stored Brain snapshot."""
         target_agent = getattr(self, "agent_id", None)
         if not target_agent:
-            return {"error": "No durable agent identity is active"}
+            raise ToolExecutionError(
+                "restore_agent_brain_section", "No durable agent identity is active"
+            )
 
         try:
             current_rows = await self.postgres.fetch_all(
@@ -274,15 +300,18 @@ class MemoryTools:
                 {"user_name": self.user_name, "agent_id": target_agent},
             )
             if not current_rows:
-                return {"error": "Active agent identity was not found"}
+                raise ToolExecutionError(
+                    "restore_agent_brain_section",
+                    "Active agent identity was not found",
+                )
 
             current = current_rows[0]
             current_revision = int(current.get("brain_revision", 1))
             if expected_current_revision != current_revision:
-                return {
-                    "error": "Brain changed since it was read",
-                    "current_revision": current_revision,
-                }
+                raise WorkspaceConflictError(
+                    "Brain changed since it was read",
+                    details={"current_revision": current_revision},
+                )
 
             snapshot_rows = await self.postgres.fetch_all(
                 """
@@ -299,7 +328,9 @@ class MemoryTools:
                 },
             )
             if not snapshot_rows:
-                return {"error": "Brain snapshot was not found"}
+                raise ToolExecutionError(
+                    "restore_agent_brain_section", "Brain snapshot was not found"
+                )
 
             current_content = normalize_agent_brain(
                 current.get("brain") or "",
@@ -368,10 +399,10 @@ class MemoryTools:
             )
             if updated != 1:
                 latest = await self.read_agent_brain()
-                return {
-                    "error": "Brain changed before the restore could be committed",
-                    "current_revision": latest.get("revision"),
-                }
+                raise WorkspaceConflictError(
+                    "Brain changed before the restore could be committed",
+                    details={"current_revision": latest.get("revision")},
+                )
 
             return {
                 "success": True,
@@ -381,7 +412,9 @@ class MemoryTools:
                 "snapshot_created": True,
                 "message": "Brain section restored from snapshot.",
             }
+        except WorkspaceConflictError:
+            raise
         except ValueError as exc:
-            return {"error": str(exc)}
-        except Exception as exc:
-            return {"error": f"Failed to restore brain section: {exc}"}
+            raise ToolExecutionError(
+                "restore_agent_brain_section", str(exc)
+            ) from exc

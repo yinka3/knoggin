@@ -547,18 +547,13 @@ async def test_memory_tools_read_and_edit_agent_brain_with_configured_postgres()
 async def test_memory_tools_return_clean_defaults_without_active_agent():
     tools = MemoryToolHarness(postgres=None, agent_id=None)
 
-    assert await tools.read_agent_brain() == {"error": "No durable agent identity is active"}
-    assert await tools.list_agent_brain_snapshots() == {
-        "error": "No durable agent identity is active"
-    }
-    assert await tools.read_agent_brain_snapshot(1) == {
-        "error": "No durable agent identity is active"
-    }
-    assert await tools.edit_agent_brain("Behavioral Directives", "note", 1) == {
-        "error": "No durable agent identity is active"
-    }
-    assert await tools.restore_agent_brain_section(
-        "Behavioral Directives",
-        1,
-        1,
-    ) == {"error": "No durable agent identity is active"}
+    operations = (
+        tools.read_agent_brain(),
+        tools.list_agent_brain_snapshots(),
+        tools.read_agent_brain_snapshot(1),
+        tools.edit_agent_brain("Behavioral Directives", "note", 1),
+        tools.restore_agent_brain_section("Behavioral Directives", 1, 1),
+    )
+    for operation in operations:
+        with pytest.raises(ToolExecutionError, match="No durable agent identity"):
+            await operation

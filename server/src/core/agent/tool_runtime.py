@@ -281,17 +281,6 @@ def _normalize_tool_result(tool_name: str, result):
                 tool_name,
                 "The requested provider is not configured",
             )
-        elif any(
-            isinstance(row, dict)
-            and row.get("title") in {"Error", "Search Error", "Timeout"}
-            and not row.get("url")
-            for row in result
-        ):
-            raise ToolExecutionError(
-                tool_name,
-                "The external search provider failed",
-                retryable=True,
-            )
     if error:
         message = str(error)
         if message.casefold().startswith("failed to "):

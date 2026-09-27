@@ -1542,13 +1542,10 @@ class WebTools:
         loop = asyncio.get_running_loop()
         try:
             if DDGS is None:
-                return [
-                    {
-                        "title": "Search Error",
-                        "url": "",
-                        "snippet": "duckduckgo_search is not installed",
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_web",
+                    "DuckDuckGo search dependency is unavailable",
+                )
             ddgs = DDGS()
             timelimit = {"pd": "d", "pw": "w", "pm": "m", "py": "y"}.get(freshness)
 
@@ -1560,13 +1557,7 @@ class WebTools:
             )
 
             if not raw:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No web results found for: {query}",
-                    }
-                ]
+                return []
 
             results = []
             for r in raw:
@@ -1579,15 +1570,15 @@ class WebTools:
                     }
                 )
             return results
+        except ToolExecutionError:
+            raise
         except Exception as e:
             logger.error(f"DuckDuckGo search failed: {e}")
-            return [
-                {
-                    "title": "Search Error",
-                    "url": "",
-                    "snippet": f"DuckDuckGo search failed: {e}",
-                }
-            ]
+            raise ToolExecutionError(
+                "search_web",
+                "DuckDuckGo search failed",
+                retryable=True,
+            ) from e
 
     async def _search_tavily(self, query: str, limit: int, api_key: str) -> List[Dict]:
         """Web search via Tavily API"""
@@ -1627,13 +1618,7 @@ class WebTools:
                 )
 
             if not results:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No web results found for: {query}",
-                    }
-                ]
+                return []
             return results
         except httpx.TimeoutException:
             logger.warning("Tavily timed out, falling back to DuckDuckGo")
@@ -1708,13 +1693,7 @@ class WebTools:
                 )
 
             if not results:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No web results found for: {query}",
-                    }
-                ]
+                return []
             return results
         except httpx.TimeoutException:
             logger.warning("Brave timed out, falling back to DuckDuckGo")
@@ -1747,16 +1726,11 @@ class WebTools:
 
             if response.status_code in (401, 429):
                 logger.warning(f"Brave news API returned {response.status_code}")
-                return [
-                    {
-                        "title": "Error",
-                        "url": "",
-                        "snippet": (
-                            f"Brave News API error ({response.status_code}). "
-                            "Check your API key in Settings."
-                        ),
-                    }
-                ]
+                raise ToolExecutionError(
+                    "search_news",
+                    "Brave News API rejected the request",
+                    retryable=response.status_code == 429,
+                )
 
             response.raise_for_status()
             data = response.json()
@@ -1777,32 +1751,20 @@ class WebTools:
                 )
 
             if not results:
-                return [
-                    {
-                        "title": "No Results",
-                        "url": "",
-                        "snippet": f"No news found for: {query}",
-                    }
-                ]
+                return []
             return results
-        except httpx.TimeoutException:
+        except ToolExecutionError:
+            raise
+        except httpx.TimeoutException as exc:
             logger.warning("Brave news timed out")
-            return [
-                {
-                    "title": "Timeout",
-                    "url": "",
-                    "snippet": "News search timed out. Try a simpler query.",
-                }
-            ]
+            raise ToolExecutionError(
+                "search_news", "News search timed out", retryable=True
+            ) from exc
         except Exception as e:
             logger.error(f"Brave news search failed: {e}")
-            return [
-                {
-                    "title": "Search Error",
-                    "url": "",
-                    "snippet": f"News search failed: {e}",
-                }
-            ]
+            raise ToolExecutionError(
+                "search_news", "News search failed", retryable=True
+            ) from e
 
 
 class SearchTools(DocumentSearchTools, WebTools):
