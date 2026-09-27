@@ -98,15 +98,17 @@ class PostgresClient:
                         "Failed to close partially initialized Postgres pool: "
                         f"{cleanup_error}"
                     )
-            self._pool = None
+                else:
+                    self._pool = None
             raise
 
     async def close(self):
         """Close the asynchronous connection pool."""
         pool = self._pool
-        self._pool = None
         if pool is not None:
             await pool.close()
+            if self._pool is pool:
+                self._pool = None
 
     def pool_snapshot(self) -> dict[str, bool | int]:
         """Return a bounded, read-only snapshot of pool state.

@@ -282,6 +282,7 @@ class LLMService:
         self._client_usage: dict[AsyncOpenAI, int] = {}
         self._active_requests: set[asyncio.Task] = set()
         self._closed = False
+        self._close_lock = asyncio.Lock()
 
         if self._api_key:
             self._raw_client, self._client = self._build_clients(
@@ -388,7 +389,7 @@ class LLMService:
             await client.close()
         except Exception as exc:
             logger.warning(f"Failed to close retired LLM client: {exc}")
-        finally:
+        else:
             self._retired_clients.discard(client)
 
     @asynccontextmanager
@@ -1135,11 +1136,14 @@ class LLMService:
                     )
 
     async def close(self):
-        if self._closed:
-            return
+        async with self._close_lock:
+            await self._close_owned_clients()
 
+    async def _close_owned_clients(self):
         self._closed = True
         active_client = self._raw_client
+        if active_client is not None:
+            self._retired_clients.add(active_client)
         self._raw_client = None
         self._client = None
         self._api_key = ""
@@ -1169,10 +1173,13 @@ class LLMService:
         clients = set(self._retired_clients)
         if active_client is not None:
             clients.add(active_client)
-        self._retired_clients.clear()
-
-        if clients:
-            await asyncio.gather(
-                *(client.close() for client in clients),
-                return_exceptions=True,
-            )
+        failures = []
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                self._retired_clients.discard(client)
+        if failures:
+            raise RuntimeError("LLM client cleanup failed") from failures[0]

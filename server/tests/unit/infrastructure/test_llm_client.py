@@ -28,6 +28,17 @@ class DummyModel(BaseModel):
     name: str
 
 
+async def test_failed_client_close_retains_handle_for_retry(llm_service):
+    service, raw, *_ = llm_service
+    raw.close.side_effect = [RuntimeError("close failed"), None]
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await service.close()
+    assert raw in service._retired_clients
+    await service.close()
+    assert raw not in service._retired_clients
+    assert raw.close.await_count == 2
+
+
 async def async_chunks(*chunks):
     for chunk in chunks:
         yield chunk
