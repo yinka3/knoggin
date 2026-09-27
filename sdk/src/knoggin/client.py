@@ -227,6 +227,10 @@ class Knoggin:
         responsible for serializing session execution and durably committing
         its final answer before exposing the response event. Admission happens
         before this method returns, so an overlapping turn raises immediately.
+
+        Draft editing belongs to the calling client before submission. This
+        method immediately admits a run; the SDK does not expose saved drafts
+        or post-submission message editing/revision selection.
         """
 
         session_id = session_id.strip()
