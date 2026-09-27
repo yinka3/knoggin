@@ -90,6 +90,39 @@ class FakeSession:
         }
 
 
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("start_adapter", [False, True])
+async def test_public_stream_close_reaches_unconsumed_run_owner(port, monkeypatch, start_adapter):
+    application, _, session = port
+
+    class OwnedStream:
+        closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise AssertionError("The inner run must not start")
+
+        async def aclose(self):
+            self.closed = True
+
+    owner = OwnedStream()
+
+    async def admit(*args, **kwargs):
+        return owner
+
+    monkeypatch.setattr(session, "open_agent_run_stream", admit)
+    stream = await application.open_run_stream(
+        user_name="ada", request=StartRunRequest(session_id="session-1", query="Question")
+    )
+    if start_adapter:
+        assert (await anext(stream)).type == "run.started"
+    await stream.aclose()
+    assert owner.closed
+
+
 class FakeKnowledgeStore:
     def __init__(self, artifact):
         self.artifact = artifact

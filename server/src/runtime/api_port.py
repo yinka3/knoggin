@@ -608,10 +608,13 @@ class ApplicationRuntimePort:
             idempotency_key=request.idempotency_key,
             research_mode=request.research_mode,
         )
-        return self._public_run_stream(
-            session=session,
-            request=request,
-            agent_stream=agent_stream,
+        from common.utils.streams import ClosingAsyncIterator
+
+        return ClosingAsyncIterator(
+            self._public_run_stream(
+                session=session, request=request, agent_stream=agent_stream,
+            ),
+            agent_stream,
         )
 
     async def run_stream(
@@ -621,8 +624,11 @@ class ApplicationRuntimePort:
         request: StartRunRequest,
     ) -> AsyncIterator[object]:
         stream = await self.open_run_stream(user_name=user_name, request=request)
-        async for event in stream:
-            yield event
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
 
     async def _public_run_stream(
         self,

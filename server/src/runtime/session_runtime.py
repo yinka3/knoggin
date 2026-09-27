@@ -34,6 +34,66 @@ from runtime.resources import RuntimeResources
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
 
 
+class _AdmittedAgentStream:
+    """Own one accepted exchange, including before the first iteration."""
+
+    def __init__(self, session, accepted, **kwargs):
+        self.session = session
+        self.accepted = accepted
+        self.stream = session._run_admitted_agent_stream(accepted, **kwargs)
+        self.started = False
+        self.closed = False
+        self.executing_task = None
+        self.close_lock = asyncio.Lock()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.closed:
+            raise StopAsyncIteration
+        self.started = True
+        self.executing_task = asyncio.current_task()
+        try:
+            event = await anext(self.stream)
+        except BaseException:
+            self.executing_task = None
+            await self.aclose()
+            raise
+        finally:
+            self.executing_task = None
+        if event["event"] in {"response", "clarification", "error"}:
+            await anext(self.stream, None)
+            self.closed = True
+        return event
+
+    async def aclose(self):
+        async with self.close_lock:
+            if self.closed:
+                return
+            task = self.executing_task
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                # The iterator's cancellation handler owns its own cleanup.
+                # Release this lock before waiting for that handler.
+            else:
+                if self.started:
+                    await self.stream.aclose()
+                else:
+                    await self.session._close_user_exchange(
+                        self.accepted.id,
+                        outcome="cancelled",
+                        terminal_error={"code": "run_cancelled", "retryable": False},
+                    )
+                    await self.session._release_agent_run(None)
+                self.closed = True
+                return
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 class SessionRuntime:
     """
     SessionRuntime represents one loaded, in-memory user session.
@@ -80,6 +140,7 @@ class SessionRuntime:
         self._shutdown_lock = asyncio.Lock()
         self._agent_run_reserved = False
         self._active_agent_task: Optional[asyncio.Task] = None
+        self._active_agent_stream: _AdmittedAgentStream | None = None
         self._active_idempotency_key: str | None = None
         self._active_request_fingerprint: str | None = None
         self._agent_runs_closed = False
@@ -102,6 +163,10 @@ class SessionRuntime:
 
         async with self._agent_run_lock:
             task = self._active_agent_task
+            stream = self._active_agent_stream
+        if stream is not None and not stream.closed:
+            await stream.aclose()
+            return True
         if task is None or task.done() or task is asyncio.current_task():
             return False
 
@@ -140,8 +205,11 @@ class SessionRuntime:
             idempotency_key=idempotency_key,
             research_mode=research_mode,
         )
-        async for event in stream:
-            yield event
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await stream.aclose()
 
     async def open_agent_run_stream(
         self,
@@ -214,12 +282,25 @@ class SessionRuntime:
             self._agent_run_reserved = True
             self._active_idempotency_key = normalized_idempotency_key
             self._active_request_fingerprint = request_fingerprint
+            self._active_agent_task = asyncio.current_task()
 
+        acceptance_task = asyncio.create_task(
+            self._accept_user_message(message, request_fingerprint=request_fingerprint)
+        )
         try:
-            accepted, created = await self._accept_user_message(
-                message,
-                request_fingerprint=request_fingerprint,
-            )
+            accepted, created = await asyncio.shield(acceptance_task)
+        except asyncio.CancelledError:
+            try:
+                accepted, created = await acceptance_task
+                if created:
+                    await self._close_user_exchange(
+                        accepted.id,
+                        outcome="cancelled",
+                        terminal_error={"code": "run_cancelled", "retryable": False},
+                    )
+            finally:
+                await self._release_agent_run(None)
+            raise
         except Exception:
             await self._release_agent_run(None)
             raise
@@ -244,7 +325,8 @@ class SessionRuntime:
             finally:
                 await self._release_agent_run(None)
 
-        return self._run_admitted_agent_stream(
+        stream = _AdmittedAgentStream(
+            self,
             accepted,
             orchestrator=orchestrator,
             user_timezone=user_timezone,
@@ -255,6 +337,9 @@ class SessionRuntime:
             pasted_text_spans=pasted_text_spans,
             research_mode=research_mode,
         )
+        self._active_agent_stream = stream
+        self._active_agent_task = None
+        return stream
 
     def _require_message_ingestion_ready(self) -> None:
         if (
@@ -386,6 +471,11 @@ class SessionRuntime:
             exchange_outcome = "cancelled"
             terminal_error = {"code": "run_cancelled", "retryable": False}
             raise
+        except GeneratorExit:
+            if exchange_outcome not in {"assistant_final", "clarification"}:
+                exchange_outcome = "cancelled"
+                terminal_error = {"code": "run_cancelled", "retryable": False}
+            raise
         except Exception:
             exchange_outcome = "failed"
             logger.exception(
@@ -419,11 +509,14 @@ class SessionRuntime:
 
     async def _release_agent_run(self, task: Optional[asyncio.Task]) -> None:
         async with self._agent_run_lock:
+            if task is not None and self._active_agent_task is not task:
+                return
             if task is None or self._active_agent_task is task:
                 self._active_agent_task = None
             self._agent_run_reserved = False
             self._active_idempotency_key = None
             self._active_request_fingerprint = None
+            self._active_agent_stream = None
 
     @staticmethod
     def _assistant_response_metadata(response: Dict[str, Any]) -> dict:
@@ -515,12 +608,12 @@ class SessionRuntime:
         # acceptance without a separate cache protocol.
         timestamp_ns = int(msg.timestamp.timestamp() * 1e9)
         fallback_key = hashlib.sha256(
-            (
-                f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}"
-            ).encode()
+            (f"{self.session_id}:{msg.content.strip()}:{timestamp_ns}").encode()
         ).hexdigest()
         acceptance_key = (
-            f"request:{idempotency_key}" if idempotency_key else f"content:{fallback_key}"
+            f"request:{idempotency_key}"
+            if idempotency_key
+            else f"content:{fallback_key}"
         )
         msg.id = await self.knowledge_store.allocate_message_id()
 
@@ -580,7 +673,9 @@ class SessionRuntime:
                 key: value
                 for key, value in focus.items()
                 if key != "created_at"
-                and not (focus.get("target_type") == "document" and key == "relative_path")
+                and not (
+                    focus.get("target_type") == "document" and key == "relative_path"
+                )
             }
         payload = {
             "query": message.content.strip(),
@@ -647,9 +742,9 @@ class SessionRuntime:
             ),
         )
 
-    async def _replay_terminal_exchange(self, exchange) -> AsyncGenerator[
-        AgentExecutionEvent, None
-    ]:
+    async def _replay_terminal_exchange(
+        self, exchange
+    ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Return the durable result for a duplicate submission without rerunning it."""
 
         outcome = exchange.exchange_outcome
@@ -660,7 +755,9 @@ class SessionRuntime:
                 or exchange.assistant_content is None
                 or not isinstance(metadata.get("usage"), dict)
             ):
-                raise RuntimeError("Completed request is missing its canonical response")
+                raise RuntimeError(
+                    "Completed request is missing its canonical response"
+                )
             response = {
                 "content": exchange.assistant_content,
                 "usage": metadata["usage"],
@@ -690,7 +787,9 @@ class SessionRuntime:
             yield {"event": "clarification", "data": clarification}
             return
         if outcome == "cancelled":
-            message = "The original request was cancelled. Submit a new request to retry."
+            message = (
+                "The original request was cancelled. Submit a new request to retry."
+            )
         elif outcome == "failed":
             message = "The original request failed. Submit a new request to retry."
         elif outcome == "user_only":
@@ -722,7 +821,10 @@ class SessionRuntime:
         message_id = await self.knowledge_store.allocate_message_id()
         if user_msg_id is None:
             raise ValueError("Assistant turns must be linked to a user exchange")
-        persisted_message_id, source_ref_ids = await self._persist_assistant_message_log(
+        (
+            persisted_message_id,
+            source_ref_ids,
+        ) = await self._persist_assistant_message_log(
             message_id,
             content,
             timestamp,
@@ -785,12 +887,14 @@ class SessionRuntime:
                 }
                 if outcome != "assistant_final":
                     finalization["outcome"] = outcome
-                persisted_id, source_ref_ids, _created = (
-                    await self.knowledge_store.finalize_assistant_exchange(
-                        agent_msg_batch[0],
-                        source_candidates or [],
-                        **finalization,
-                    )
+                (
+                    persisted_id,
+                    source_ref_ids,
+                    _created,
+                ) = await self.knowledge_store.finalize_assistant_exchange(
+                    agent_msg_batch[0],
+                    source_candidates or [],
+                    **finalization,
                 )
                 return persisted_id, source_ref_ids
 
@@ -894,7 +998,9 @@ class SessionRuntime:
             try:
                 await self.cancel_active_agent_run()
             except Exception as exc:
-                logger.exception("Failed to cancel agent run for session {}", self.session_id)
+                logger.exception(
+                    "Failed to cancel agent run for session {}", self.session_id
+                )
                 failures.append(exc)
 
             unsubscribers, self.config_unsubscribers = self.config_unsubscribers, []
