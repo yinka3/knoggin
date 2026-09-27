@@ -39,6 +39,35 @@ class ApplicationShutdownError(RuntimeError):
         super().__init__(f"Application shutdown failed in phase(s): {phases}")
 
 
+class _StartupCleanup:
+    """Retain partially constructed application owners until unwind succeeds."""
+
+    def __init__(self, resources):
+        self.owners = {"resources": resources}
+        self._lock = asyncio.Lock()
+
+    async def shutdown(self):
+        async with self._lock:
+            failures = []
+            for phase in ("aac", "sessions", "projects", "resources"):
+                if phase not in self.owners:
+                    continue
+                if phase == "projects" and "sessions" in self.owners:
+                    continue
+                if phase == "resources" and any(
+                    name in self.owners for name in ("aac", "sessions", "projects")
+                ):
+                    continue
+                try:
+                    await self.owners[phase].shutdown()
+                except Exception as exc:
+                    failures.append(ShutdownFailure(phase, exc))
+                else:
+                    del self.owners[phase]
+            if failures:
+                raise ApplicationShutdownError(tuple(failures))
+
+
 @dataclass(slots=True)
 class ApplicationRuntime:
     """The root owner of shared resources, projects, sessions, and health."""
@@ -83,6 +112,7 @@ class ApplicationRuntime:
 
         config_manager = ConfigManager.initialize(config_dir)
         resources = await RuntimeResources.create(num_workers=num_workers)
+        startup_cleanup = _StartupCleanup(resources)
         try:
             knowledge_store = resources.knowledge_store
             if knowledge_store is None:
@@ -101,6 +131,7 @@ class ApplicationRuntime:
                 ),
                 config_manager=config_manager,
             )
+            startup_cleanup.owners["projects"] = projects
             await projects.start()
             agent_manager = AgentManager(resources, user_name)
             await agent_manager.ensure_default_agent()
@@ -117,12 +148,14 @@ class ApplicationRuntime:
                 agent_orchestrator=agent_orchestrator,
                 config_manager=config_manager,
             )
+            startup_cleanup.owners["sessions"] = sessions
             aac_runtime = await AACRuntime.create(
                 user_name=user_name,
                 resources=resources,
                 agent_manager=agent_manager,
                 config_provider=ConfigManager,
             )
+            startup_cleanup.owners["aac"] = aac_runtime
             await aac_runtime.start()
             return cls(
                 config_manager=config_manager,
@@ -133,21 +166,13 @@ class ApplicationRuntime:
                 agent_orchestrator=agent_orchestrator,
                 aac_runtime=aac_runtime,
             )
-        except Exception:
-            if "aac_runtime" in locals() and aac_runtime is not None:
-                try:
-                    await aac_runtime.shutdown()
-                except Exception:
-                    logger.exception("AAC runtime cleanup failed during application startup")
-            if "projects" in locals() and projects is not None:
-                try:
-                    await projects.shutdown()
-                except Exception:
-                    logger.exception("Project manager cleanup failed during application startup")
+        except BaseException as exc:
+            cleanup = asyncio.create_task(startup_cleanup.shutdown())
             try:
-                await resources.shutdown()
+                await settle_owned_task(cleanup)
             except Exception:
-                logger.exception("Runtime resource cleanup failed during application startup")
+                logger.exception("Application startup cleanup failed; owner retained")
+                exc.cleanup_owner = startup_cleanup
             raise
 
     async def shutdown(self) -> None:

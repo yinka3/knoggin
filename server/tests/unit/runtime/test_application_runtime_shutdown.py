@@ -46,6 +46,43 @@ class RecordingSessions(RecordingOwner):
         return 0
 
 
+async def test_startup_cleanup_retains_dependencies_after_failure():
+    calls = []
+    cleanup = application_module._StartupCleanup(RecordingOwner("resources", calls))
+    sessions = RecordingSessions("sessions", calls, RuntimeError("busy"))
+    cleanup.owners.update(sessions=sessions, projects=RecordingOwner("projects", calls))
+    with pytest.raises(ApplicationShutdownError):
+        await cleanup.shutdown()
+    assert calls == ["sessions"]
+    sessions.error = None
+    await cleanup.shutdown()
+    assert calls == ["sessions", "sessions", "projects", "resources"]
+    assert not cleanup.owners
+
+
+async def test_cancelled_identity_bootstrap_cleans_resources(monkeypatch, tmp_path):
+    entered = asyncio.Event()
+    resources = RecordingOwner("resources", [])
+
+    async def identity(*_):
+        entered.set()
+        await asyncio.Event().wait()
+
+    resources.knowledge_store = SimpleNamespace(ensure_identity_entity=identity)
+
+    async def create(**_):
+        return resources
+
+    monkeypatch.setattr(application_module.RuntimeResources, "create", create)
+    monkeypatch.setattr(application_module.ConfigManager, "initialize", lambda _: SimpleNamespace(config=SimpleNamespace(user_aliases=[])))
+    startup = asyncio.create_task(ApplicationRuntime.start(user_name="ada", config_dir=tmp_path))
+    await entered.wait()
+    startup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+    assert resources.shutdown_count == 1
+
+
 @pytest.mark.runtime
 @pytest.mark.no_network
 async def test_application_shutdown_is_ordered_and_idempotent():
@@ -283,7 +320,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
     monkeypatch.setattr(
         application_module,
         "SessionManager",
-        lambda **_kwargs: object(),
+        lambda **_kwargs: RecordingSessions("sessions", calls),
     )
     monkeypatch.setattr(application_module, "AACRuntime", RecordingAACRuntime)
     monkeypatch.setattr(
@@ -297,7 +334,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
             user_name="ada", config_dir=tmp_path
         )
 
-    assert calls == ["projects_start", "aac", "projects", "resources"]
+    assert calls == ["projects_start", "aac", "sessions", "projects", "resources"]
 
 
 @pytest.mark.runtime
