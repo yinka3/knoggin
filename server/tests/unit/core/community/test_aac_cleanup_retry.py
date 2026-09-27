@@ -62,6 +62,40 @@ async def test_stop_write_failure_reuses_event_identity_on_retry():
         await asyncio.gather(owner._discussion_task, return_exceptions=True)
 
 
+async def test_participation_failure_retains_all_transitions_without_duplicate_history():
+    store = AsyncMock()
+    store.append_timeline.side_effect = [RuntimeError("write"), "saved", "saved"]
+    owner = runtime(store)
+    owner._discussion_id = "d"
+    owner._participants = ["old"]
+    owner._enabled_participants = AsyncMock(return_value=["new"])
+    history = []
+    with pytest.raises(RuntimeError, match="write"):
+        await owner._reconcile_participants(history=history)
+    assert owner._participants == ["new"]
+    assert len(owner._pending_participation_events) == 2
+    assert await owner._reconcile_participants(history=history) == ["new"]
+    assert not owner._pending_participation_events
+    assert len(history) == 2
+    calls = store.append_timeline.await_args_list
+    assert calls[0].kwargs == calls[1].kwargs
+    assert calls[1].kwargs["timeline_id"] != calls[2].kwargs["timeline_id"]
+
+
+async def test_shutdown_retries_participation_after_discussion_has_ended():
+    store = AsyncMock()
+    store.append_timeline.side_effect = [RuntimeError("write"), "saved"]
+    owner = runtime(store)
+    owner._discussion_id = "d"
+    owner._enabled_participants = AsyncMock(return_value=["new"])
+    with pytest.raises(RuntimeError, match="write"):
+        await owner._reconcile_participants()
+    owner._discussion_id = None
+    await owner.shutdown()
+    assert not owner._pending_participation_events
+    assert store.append_timeline.await_args_list[1].kwargs["discussion_id"] == "d"
+
+
 async def test_timeline_replay_requires_same_scoped_content():
     client = AsyncMock()
     client.execute.return_value = 0

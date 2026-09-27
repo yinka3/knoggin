@@ -139,6 +139,8 @@ class AACRuntime:
         )
         self._ownership_lock = asyncio.Lock()
         self._participants_lock = asyncio.Lock()
+        self._participation_write_lock = asyncio.Lock()
+        self._pending_participation_events: dict[str, dict] = {}
         self._shutdown_event = asyncio.Event()
         self._discussion_stop_event = asyncio.Event()
         self._opportunity_wake_event = asyncio.Event()
@@ -228,6 +230,10 @@ class AACRuntime:
 
     async def _retry_finalizations(self) -> None:
         failures = []
+        try:
+            await self._retry_participation_events()
+        except Exception as exc:
+            failures.append(exc)
         for discussion_id, event in tuple(self._pending_stop_events.items()):
             try:
                 await self.store.append_timeline(**event)
@@ -635,17 +641,31 @@ class AACRuntime:
             left = sorted(previous - current)
             self._participants = enabled
 
-        for agent_id in joined:
-            await self._append_event(
-                f"Agent {agent_id} joined the discussion.",
-                history=history,
-            )
-        for agent_id in left:
-            await self._append_event(
-                f"Agent {agent_id} left the discussion.",
-                history=history,
-            )
+            if self._discussion_id:
+                for agents, action in ((joined, "joined"), (left, "left")):
+                    for agent_id in agents:
+                        content = f"Agent {agent_id} {action} the discussion."
+                        event_id = str(uuid.uuid4())
+                        self._pending_participation_events[event_id] = dict(
+                            discussion_id=self._discussion_id,
+                            user_name=self.user_name,
+                            kind="system_event",
+                            content=content,
+                            timeline_id=event_id,
+                        )
+                        # Membership is effective even if transcript storage fails.
+                        if history is not None:
+                            history.append({"role": "system", "content": content})
+                            del history[:-8]
+        await self._retry_participation_events()
         return list(enabled)
+
+    async def _retry_participation_events(self) -> None:
+        """Save each transition once, retaining ordered retries after failure."""
+        async with self._participation_write_lock:
+            for event_id, event in tuple(self._pending_participation_events.items()):
+                await self.store.append_timeline(**event)
+                del self._pending_participation_events[event_id]
 
     def _community_settings(self):
         return self.config_provider.get().config.developer_settings.community
