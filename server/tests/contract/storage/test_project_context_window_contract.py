@@ -172,7 +172,7 @@ async def test_project_semantic_window_claim_is_atomic_and_membership_reloads_ex
     assert claimed.claimed is True
     assert duplicate.claimed is False
     assert duplicate.window.window_id == proposed.window_id
-    reloaded = await store.get_project_semantic_window(
+    reloaded = await SemanticWindowReader(real_postgres_client).get_window(
         proposed.window_id,
         user_name="ada",
         project_id="project-1",
@@ -180,7 +180,7 @@ async def test_project_semantic_window_claim_is_atomic_and_membership_reloads_ex
     assert reloaded is not None
     assert reloaded.domain_version == proposed.domain_version
     assert reloaded.policy_snapshot == proposed.policy_snapshot
-    assert await store.get_project_semantic_window_messages(
+    assert await SemanticWindowReader(real_postgres_client).get_window_messages(
         proposed.window_id,
         user_name="ada",
         project_id="project-1",

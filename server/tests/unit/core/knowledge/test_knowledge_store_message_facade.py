@@ -37,12 +37,12 @@ async def test_message_facade_routes_scoped_reads_to_the_message_reader():
     scope = {"user_name": "ada", "visible_project_ids": ["project-1"]}
     assert await store.get_visible_session_ids(**scope) == ["session-1"]
     assert await store.get_message_text(7, session_id="session-1", **scope) == "message"
-    assert await store.get_messages_by_ids(
-        [7], session_ids=["session-1"], **scope
-    ) == [{"id": 7}]
-    assert await store.get_recent_project_messages("ada", "project-1", 3, 7) == [
-        {"id": 8}
+    assert await store.get_messages_by_ids([7], session_ids=["session-1"], **scope) == [
+        {"id": 7}
     ]
+    assert await store.get_recent_project_messages(
+        "ada", "project-1", 3, before_message_id=7
+    ) == [{"id": 8}]
     assert await store.get_surrounding_messages(
         7,
         session_id="session-1",

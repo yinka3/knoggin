@@ -37,9 +37,6 @@ from core.knowledge.db.readers.graph_reader import GraphReader
 from core.knowledge.db.readers.knowledge_query_reader import KnowledgeQueryReader
 from core.knowledge.db.readers.message_reader import MessageReader
 from core.knowledge.db.readers.project_context_reader import ProjectContextReader
-from core.knowledge.db.readers.relationship_observation_reader import (
-    RelationshipObservationReader,
-)
 from core.knowledge.db.readers.semantic_window_reader import SemanticWindowReader
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.artifact_writer import ArtifactWriter
@@ -116,9 +113,6 @@ class KnowledgeStore:
         self._source_reference_reader = SourceReferenceReader(self._postgres_client)
         self._artifact_reader = ArtifactReader(self._postgres_client)
         self._project_context_reader = ProjectContextReader(self._postgres_client)
-        self._relationship_observation_reader = RelationshipObservationReader(
-            self._postgres_client
-        )
         self._semantic_window_reader = SemanticWindowReader(self._postgres_client)
         self._projection_rebuilder = GraphBuilder(self._postgres_client)
         self._embedding_rebuilder = EmbeddingRebuilder(
@@ -221,19 +215,6 @@ class KnowledgeStore:
             user_name=user_name,
             project_id=project_id,
             session_id=session_id,
-        )
-
-    async def ensure_project_context(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> None:
-        """Initialize the project-owned Context root without creating a revision."""
-
-        await self._project_context_writer.ensure_context(
-            user_name=user_name,
-            project_id=project_id,
         )
 
     async def get_current_project_context_revision(
@@ -350,53 +331,12 @@ class KnowledgeStore:
             materialization=materialization,
         )
 
-    async def record_project_context_projection(
-        self,
-        *,
-        user_name: str,
-        project_id: str,
-        revision_id: str,
-        projection_hash: str,
-    ) -> bool:
-        return await self._project_context_writer.record_projection(
-            user_name=user_name,
-            project_id=project_id,
-            revision_id=revision_id,
-            projection_hash=projection_hash,
-        )
-
     async def claim_project_semantic_window(
         self,
         window: SemanticWindowRecord,
         messages: list[SemanticWindowMessage],
     ) -> SemanticWindowClaimResult:
         return await self._semantic_window_writer.claim_window(window, messages)
-
-    async def get_project_semantic_window(
-        self,
-        window_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> SemanticWindowRecord | None:
-        return await self._semantic_window_reader.get_window(
-            window_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
-
-    async def get_project_semantic_window_messages(
-        self,
-        window_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> list[SemanticWindowMessage]:
-        return await self._semantic_window_reader.get_window_messages(
-            window_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
 
     async def get_active_project_semantic_window(
         self,
@@ -589,19 +529,6 @@ class KnowledgeStore:
         """Atomically reconcile a Context-committed window into Knowledge."""
 
         return await self._semantic_commit_writer.commit(build)
-
-    async def get_active_context_relationship_supports(
-        self,
-        relationship_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-    ) -> list[dict]:
-        return await self._relationship_observation_reader.get_active_context_supports(
-            relationship_id,
-            user_name=user_name,
-            project_id=project_id,
-        )
 
     async def get_semantic_window_health(
         self,
