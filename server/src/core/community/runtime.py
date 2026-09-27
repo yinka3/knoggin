@@ -17,6 +17,7 @@ from common.schema.agent.community_tools import (
     AAC_SPECIFIC_SCHEMAS,
 )
 from common.schema.agent.identity import AgentConfig
+from common.utils.lifecycle import settle_owned_task
 from core.agent.executor import AgentExecutor
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
@@ -148,6 +149,7 @@ class AACRuntime:
         self._discussion_history: Optional[list[dict[str, str]]] = None
         self._config_unsubscribe: Optional[Callable[[], None]] = None
         self._stopping = False
+        self._started = False
 
     @property
     def active_discussion_id(self) -> Optional[str]:
@@ -155,15 +157,14 @@ class AACRuntime:
 
     async def start(self) -> None:
         """Recover stale rows and start the local, config-reactive opportunity loop."""
-
-        self._stopping = False
-        self._shutdown_event.clear()
-        self._discussion_stop_event.clear()
-        self._opportunity_wake_event.clear()
-        await self.store.interrupt_active_discussions(user_name=self.user_name)
-        self._subscribe_to_config()
-        self._opportunity_wake_event.clear()
-        if self._opportunity_task is None:
+        async with self._ownership_lock:
+            if self._started:
+                return
+            if self._stopping:
+                raise RuntimeError("AAC runtime is shutting down")
+            await self.store.interrupt_active_discussions(user_name=self.user_name)
+            self._subscribe_to_config()
+            self._started = True
             self._opportunity_task = asyncio.create_task(
                 self._opportunity_loop(),
                 name=f"aac-opportunities:{self.user_name}",
@@ -176,6 +177,8 @@ class AACRuntime:
         self._shutdown_event.set()
         self._discussion_stop_event.set()
         self._opportunity_wake_event.set()
+        async with self._ownership_lock:
+            pass  # Wait for a pending durable admission to publish its task.
         unsubscribe, self._config_unsubscribe = self._config_unsubscribe, None
         if unsubscribe is not None:
             try:
@@ -196,6 +199,8 @@ class AACRuntime:
         """Run one seed check and admit at most one local discussion."""
 
         async with self._ownership_lock:
+            if self._stopping:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "shutting_down")
             if not self._community_settings().enabled:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "disabled")
             if self._discussion_task is not None and not self._discussion_task.done():
@@ -211,13 +216,27 @@ class AACRuntime:
             if decision.action != "START" or not decision.topic:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "no_seed")
 
+            if self._stopping:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "shutting_down")
+            if not self._community_settings().enabled:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "disabled")
+            participants = await self._enabled_participants()
+            if not participants:
+                return AACAdmission(AACAdmissionOutcome.SKIPPED, "no_enabled_agents")
+
             discussion_id = str(uuid.uuid4())
-            await self.store.create_discussion(
+            write = asyncio.create_task(self.store.create_discussion(
                 discussion_id=discussion_id,
                 user_name=self.user_name,
                 topic=decision.topic,
                 token_budget=budget.limit,
-            )
+            ))
+            cancelled = False
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                await settle_owned_task(write)
+                cancelled = True
             self._discussion_id = discussion_id
             self._participants = participants
             self._discussion_task = asyncio.create_task(
@@ -230,6 +249,8 @@ class AACRuntime:
                 name=f"aac-discussion:{self.user_name}:{discussion_id}",
             )
             self._discussion_task.add_done_callback(self._clear_discussion)
+            if cancelled:
+                raise asyncio.CancelledError
             return AACAdmission(
                 AACAdmissionOutcome.STARTED,
                 "admitted",
