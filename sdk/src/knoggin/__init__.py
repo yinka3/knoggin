@@ -4,7 +4,6 @@ from .client import Knoggin
 from .contracts import (
     DocumentFocus,
     DocumentFocusDocument,
-    DocumentFocusFolderUpload,
     DocumentFocusSubtree,
     SessionHandle,
     SourceProvenance,
@@ -15,7 +14,6 @@ from .contracts import (
 __all__ = [
     "DocumentFocus",
     "DocumentFocusDocument",
-    "DocumentFocusFolderUpload",
     "DocumentFocusSubtree",
     "Knoggin",
     "SessionHandle",

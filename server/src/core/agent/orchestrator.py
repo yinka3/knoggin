@@ -67,6 +67,7 @@ class AgentOrchestrator:
         pasted_text_spans: Optional[List[Dict]] = None,
         request_document_focus: Optional[DocumentFocus] = None,
         research_mode: ResearchMode = "normal",
+        run_settings=None,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """
         Main entry point for agent execution. Uses modular helpers for initialization.
@@ -79,7 +80,12 @@ class AgentOrchestrator:
                 request_document_focus = parse_document_focus(request_document_focus)
 
             # Configuration
-            config = self._config_manager.config
+            config = (
+                run_settings.config
+                if run_settings is not None
+                else self._config_manager.config
+            )
+            defaults = run_settings if run_settings is not None else context
             limits = config.developer_settings.limits
             research_profile = resolve_research_profile(research_mode)
             run_limits = AgentRunLimits.from_settings(limits).for_research_profile(
@@ -88,13 +94,13 @@ class AgentOrchestrator:
 
             # Identity & Persona
             identity = await self._resolve_agent_identity(
-                agent_id if agent_id is not None else context.agent_id,
+                agent_id if agent_id is not None else defaults.agent_id,
             )
             agent_cfg = identity.config
             effective_model = (
                 model
                 if model is not None
-                else (context.model if context.model is not None else agent_cfg.model)
+                else (defaults.model if context.model is not None else agent_cfg.model)
             )
             effective_temperature = (
                 agent_cfg.temperature
@@ -106,7 +112,7 @@ class AgentOrchestrator:
             # Services (Session-Aware)
             effective_document_focus = await self._resolve_document_focus(
                 context,
-                request_document_focus or context.document_focus,
+                request_document_focus or defaults.document_focus,
             )
             document_selection_context = await self._resolve_document_selection_context(
                 context,
@@ -121,8 +127,8 @@ class AgentOrchestrator:
                 enabled_tools
                 if enabled_tools is not None
                 else (
-                    context.enabled_tools
-                    if context.enabled_tools is not None
+                    list(defaults.enabled_tools)
+                    if defaults.enabled_tools is not None
                     else agent_cfg.enabled_tools
                 )
             )
@@ -175,7 +181,9 @@ class AgentOrchestrator:
                     yield validated_event
 
         except LLMBudgetExceededError:
-            logger.info("Agent orchestration stopped because the LLM budget is exhausted")
+            logger.info(
+                "Agent orchestration stopped because the LLM budget is exhausted"
+            )
             yield validate_agent_execution_event(
                 {
                     "event": "error",

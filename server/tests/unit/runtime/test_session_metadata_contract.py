@@ -26,6 +26,27 @@ class Resources:
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"model": " "},
+        {"agent_id": " "},
+        {"enabled_tools": ["unknown_tool"]},
+        {"enabled_tools": ["search_web", " SEARCH_WEB "]},
+    ],
+)
+async def test_invalid_session_configuration_is_rejected_before_persistence(values):
+    resources = Resources()
+    manager = SessionManager(resources, "ada", None)
+    with pytest.raises(ValueError):
+        await manager.update_session("session-1", values)
+    with pytest.raises(ValueError):
+        await manager.create_session("project-1", **values)
+    assert resources.postgres.calls == []
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_session_metadata_update_allows_only_configuration_columns():
     resources = Resources()
     manager = SessionManager(

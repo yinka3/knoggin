@@ -111,6 +111,7 @@ class ApplicationRuntime:
                 user_name=user_name,
                 project_manager=projects,
                 agent_orchestrator=agent_orchestrator,
+                config_manager=config_manager,
             )
             aac_runtime = await AACRuntime.create(
                 user_name=user_name,

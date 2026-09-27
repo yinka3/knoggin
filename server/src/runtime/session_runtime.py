@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -32,6 +34,16 @@ from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
 
 _REQUEST_FINGERPRINT_METADATA_KEY = "request_fingerprint"
+
+
+@dataclass(frozen=True)
+class SessionRunSettings:
+    config: RootConfig
+    model: str | None
+    agent_id: str | None
+    enabled_tools: tuple[str, ...] | None
+    document_focus: DocumentFocus | None
+    readable_project_ids: tuple[str, ...]
 
 
 class _AdmittedAgentStream:
@@ -120,10 +132,12 @@ class SessionRuntime:
         document_focus: Optional[DocumentFocus] = None,
         health_service: Any | None = None,
         agent_orchestrator: Any | None = None,
+        config_manager: ConfigManager | None = None,
     ):
         self.resources = resources
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
+        self._config_manager = config_manager
         self.user_name: str = user_name
         self.model = model
         self.agent_id = agent_id
@@ -149,7 +163,7 @@ class SessionRuntime:
 
     @property
     def current_config(self) -> RootConfig:
-        return ConfigManager.get().config
+        return (self._config_manager or ConfigManager.get()).config
 
     @property
     def knowledge_store(self):
@@ -280,13 +294,30 @@ class SessionRuntime:
                         raise IdempotencyConflictError()
                     raise RequestInProgressError()
                 raise SessionBusyError()
+            run_settings = SessionRunSettings(
+                config=deepcopy(self.current_config),
+                model=self.model,
+                agent_id=self.agent_id,
+                enabled_tools=tuple(self.enabled_tools)
+                if self.enabled_tools is not None
+                else None,
+                document_focus=deepcopy(self.document_focus),
+                readable_project_ids=tuple(self.project.readable_project_ids),
+            )
+            enabled_tools = list(enabled_tools) if enabled_tools is not None else None
+            document_focus = deepcopy(document_focus)
+            pasted_text_spans = deepcopy(pasted_text_spans)
             self._agent_run_reserved = True
             self._active_idempotency_key = normalized_idempotency_key
             self._active_request_fingerprint = request_fingerprint
             self._active_agent_task = asyncio.current_task()
 
         acceptance_task = asyncio.create_task(
-            self._accept_user_message(message, request_fingerprint=request_fingerprint)
+            self._accept_user_message(
+                message,
+                request_fingerprint=request_fingerprint,
+                edit_window_seconds=run_settings.config.developer_settings.ingestion.message_edit_window_seconds,
+            )
         )
         try:
             accepted, created = await asyncio.shield(acceptance_task)
@@ -337,6 +368,7 @@ class SessionRuntime:
             document_focus=document_focus,
             pasted_text_spans=pasted_text_spans,
             research_mode=research_mode,
+            run_settings=run_settings,
         )
         self._active_agent_stream = stream
         self._active_agent_task = None
@@ -361,6 +393,7 @@ class SessionRuntime:
         document_focus: Optional[DocumentFocus],
         pasted_text_spans: Optional[List[Dict]],
         research_mode: ResearchMode,
+        run_settings: SessionRunSettings,
     ) -> AsyncGenerator[AgentExecutionEvent, None]:
         """Execute one already-persisted, exclusively admitted run."""
 
@@ -372,7 +405,7 @@ class SessionRuntime:
         # Source candidates are authorized while the Agent run is admitted.
         # Keep that scope through finalization retries instead of consulting a
         # mutable runtime list after the response has been produced.
-        captured_readable_project_ids = list(self.project.readable_project_ids)
+        captured_readable_project_ids = list(run_settings.readable_project_ids)
         task = asyncio.current_task()
         if task is None:
             await self._release_agent_run(None)
@@ -386,7 +419,7 @@ class SessionRuntime:
 
         try:
             history = await self.get_conversation_context(
-                self.current_config.developer_settings.limits.conversation_context_turns,
+                run_settings.config.developer_settings.limits.conversation_context_turns,
                 up_to_msg_id=accepted.id - 1,
             )
             orchestrator = orchestrator or self.agent_orchestrator
@@ -406,6 +439,7 @@ class SessionRuntime:
                 user_message_id=accepted.id,
                 pasted_text_spans=pasted_text_spans,
                 research_mode=research_mode,
+                run_settings=run_settings,
             ):
                 if event["event"] == "response":
                     if response_seen:
@@ -431,7 +465,7 @@ class SessionRuntime:
                             resolved_agent_id
                             if isinstance(resolved_agent_id, str)
                             and resolved_agent_id.strip()
-                            else agent_id or self.agent_id
+                            else agent_id or run_settings.agent_id
                         ),
                     )
                     response = dict(response)
@@ -589,6 +623,7 @@ class SessionRuntime:
         msg: Message,
         *,
         request_fingerprint: str | None = None,
+        edit_window_seconds: int | None = None,
     ) -> tuple[Message, bool]:
         """Persist one user message and report whether it was newly created."""
 
@@ -622,6 +657,8 @@ class SessionRuntime:
         msg.id = await self.knowledge_store.allocate_message_id()
 
         persistence_kwargs = {"acceptance_key": acceptance_key}
+        if edit_window_seconds is not None:
+            persistence_kwargs["edit_window_seconds"] = edit_window_seconds
         if request_fingerprint is not None:
             persistence_kwargs["request_fingerprint"] = request_fingerprint
         acceptance = await self._persist_user_turn(msg, **persistence_kwargs)
@@ -723,6 +760,7 @@ class SessionRuntime:
         *,
         acceptance_key: str,
         request_fingerprint: str | None = None,
+        edit_window_seconds: int | None = None,
     ):
         """Durably create an editable canonical user message and revision one."""
         payload = {
@@ -742,7 +780,9 @@ class SessionRuntime:
         return await self.knowledge_store.create_editable_user_message(
             payload,
             edit_window_seconds=(
-                self.current_config.developer_settings.ingestion.message_edit_window_seconds
+                edit_window_seconds
+                if edit_window_seconds is not None
+                else self.current_config.developer_settings.ingestion.message_edit_window_seconds
             ),
         )
 

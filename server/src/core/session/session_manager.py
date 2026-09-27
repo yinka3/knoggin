@@ -7,11 +7,13 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from psycopg import sql
 
+from common.schema.agent.tool_names import get_configurable_tool_names
 from common.schema.document import (
     create_document_focus,
     dump_document_focus,
     parse_document_focus,
 )
+from common.schema.public import CreateSessionRequest
 from common.utils.json_utils import safe_json_loads
 from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
@@ -37,12 +39,14 @@ class SessionManager:
         user_name: str,
         project_manager: ProjectManager,
         agent_orchestrator: Any | None = None,
+        config_manager=None,
     ):
         self.resources = resources
         self.user_name = user_name
         self._active_sessions: Dict[str, SessionRuntime] = {}
         self._health_service: Any | None = None
         self._agent_orchestrator = agent_orchestrator
+        self._config_manager = config_manager
         self.project_manager = project_manager
         self.pg = resources.postgres
         self._session_deletion_writer = SessionDeletionWriter(self.pg)
@@ -111,6 +115,7 @@ class SessionManager:
             self.resources,
             health_service=self._health_service,
             agent_orchestrator=self._agent_orchestrator,
+            config_manager=self._config_manager,
         )
 
     async def _hard_delete_failed_session(self, session_id: str) -> None:
@@ -168,6 +173,15 @@ class SessionManager:
                 "create_session requires a project_id from an existing project"
             )
 
+        metadata = self._normalize_metadata(
+            {"model": model, "agent_id": agent_id, "enabled_tools": enabled_tools}
+        )
+        model, agent_id, enabled_tools = (
+            metadata["model"],
+            metadata["agent_id"],
+            metadata["enabled_tools"],
+        )
+        project_id = project_id.strip()
         session_id = str(uuid.uuid4())
 
         async with self._lifecycle_lock:
@@ -291,6 +305,14 @@ class SessionManager:
             enabled_tools = safe_json_loads(enabled_tools)
         if enabled_tools is not None and not isinstance(enabled_tools, list):
             raise ValueError(f"Session {session_id} has invalid enabled_tools")
+        normalized = self._normalize_metadata(
+            {"model": model, "agent_id": agent_id, "enabled_tools": enabled_tools}
+        )
+        model, agent_id, enabled_tools = (
+            normalized["model"],
+            normalized["agent_id"],
+            normalized["enabled_tools"],
+        )
 
         document_focus = metadata.get("document_focus")
         if isinstance(document_focus, str):
@@ -451,6 +473,7 @@ class SessionManager:
                 "update_session does not allow: " + ", ".join(sorted(unknown_columns))
             )
 
+        new_data = self._normalize_metadata(new_data)
         cols = {
             key: json.dumps(value) if isinstance(value, (dict, list)) else value
             for key, value in new_data.items()
@@ -487,6 +510,17 @@ class SessionManager:
                         else value,
                     )
         return new_data
+
+    @staticmethod
+    def _normalize_metadata(values: dict) -> dict:
+        request = CreateSessionRequest(project_id="validation", **values)
+        result = request.model_dump(include=set(values))
+        names = result.get("enabled_tools")
+        if names is not None:
+            unknown = set(names) - get_configurable_tool_names()
+            if unknown:
+                raise ValueError("Unknown enabled tools: " + ", ".join(sorted(unknown)))
+        return result
 
     async def get_document_focus(
         self,

@@ -1,6 +1,7 @@
 import pytest
 from knoggin import (
     DocumentFocusDocument,
+    DocumentFocusSubtree,
     Knoggin,
     Turn,
     source_provenance_from_response,
@@ -57,8 +58,15 @@ class _FakeDocumentService:
     def __init__(self):
         self.calls = []
 
-    async def resolve_focus_target(self, **kwargs):
+    async def resolve_focus_target(self, *, document_id=None, path_prefix=None):
+        kwargs = (
+            {"document_id": document_id}
+            if document_id is not None
+            else {"path_prefix": path_prefix}
+        )
         self.calls.append(kwargs)
+        if path_prefix is not None:
+            return {"target_type": "subtree", "path_prefix": path_prefix}
         return {
             "target_type": "document",
             "document_id": "document-1",
@@ -76,6 +84,28 @@ class _FakeDocumentService:
     async def get_scan_settings(self):
         self.calls.append(("get_scan_settings",))
         return FolderScanSettings(blocked_extensions={".log"})
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_sdk_preserves_empty_tools_and_uses_library_subtree_focus():
+    session = _FakeSession()
+    session.document_service = _FakeDocumentService()
+    client = Knoggin(_FakeRuntime(session))
+    stream = await client.open_turn_stream(
+        session_id="session-1",
+        turn=Turn(
+            content="Read",
+            enabled_tools=(),
+            document_focus=DocumentFocusSubtree(path_prefix="notes"),
+        ),
+    )
+    assert session.calls[0][0].metadata == {}
+    assert session.calls[0][1]["idempotency_key"] is None
+    assert session.calls[0][1]["enabled_tools"] == []
+    assert session.document_service.calls == [{"path_prefix": "notes"}]
+    assert session.calls[0][1]["document_focus"].target_type == "subtree"
+    await stream.aclose()
 
 
 class _FakeProject:
@@ -118,7 +148,9 @@ class _FakeRuntime:
 
         async def get_resource_health(self, *, project_id):
             assert project_id == "project-1"
-            return HealthSnapshot(activity=HealthActivity.BUSY, summary="Resources busy")
+            return HealthSnapshot(
+                activity=HealthActivity.BUSY, summary="Resources busy"
+            )
 
         async def get_ingestion_health(self, *, user_name, project_id):
             assert (user_name, project_id) == ("ada", "project-1")
@@ -138,9 +170,15 @@ async def test_sdk_exposes_all_health_drilldowns():
     knoggin = Knoggin(_FakeRuntime(_FakeSession()))
 
     assert (await knoggin.get_engine_health())["summary"] == "Engine healthy"
-    assert (await knoggin.get_resource_health(project_id="project-1"))["activity"] == "busy"
-    assert (await knoggin.get_ingestion_health(project_id="project-1"))["summary"] == "Ingestion healthy"
-    assert (await knoggin.get_background_health(project_id="project-1"))["summary"] == "Background healthy"
+    assert (await knoggin.get_resource_health(project_id="project-1"))[
+        "activity"
+    ] == "busy"
+    assert (await knoggin.get_ingestion_health(project_id="project-1"))[
+        "summary"
+    ] == "Ingestion healthy"
+    assert (await knoggin.get_background_health(project_id="project-1"))[
+        "summary"
+    ] == "Background healthy"
 
 
 @pytest.mark.unit
@@ -239,7 +277,8 @@ async def test_sdk_opens_the_direct_engine_stream_without_http_run_events():
         "query": "Knoggin",
         "content": "SDK input",
     }
-    assert session.calls[0][0].metadata == {"idempotency_key": "request-1"}
+    assert session.calls[0][0].metadata == {}
+    assert session.calls[0][1]["idempotency_key"] == "request-1"
 
     sources = source_provenance_from_response(events[-1]["data"])
     assert sources[0].source_ref_id == "source-ref-1"
@@ -266,9 +305,7 @@ async def test_sdk_resolves_document_focus_before_opening_the_engine_stream():
     )
     _ = [event async for event in stream]
 
-    assert session.document_service.calls == [
-        {"session_id": "session-1", "document_id": "document-1"}
-    ]
+    assert session.document_service.calls == [{"document_id": "document-1"}]
     document_focus = session.calls[0][1]["document_focus"]
     assert document_focus.target_type == "document"
     assert document_focus.mode == "request"

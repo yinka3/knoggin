@@ -21,11 +21,13 @@ class SessionRuntimeFactory:
         *,
         health_service=None,
         agent_orchestrator=None,
+        config_manager=None,
     ):
         self.user_name = user_name
         self.resources = resources
         self.health_service = health_service
         self.agent_orchestrator = agent_orchestrator
+        self.config_manager = config_manager
 
     async def create(
         self,
@@ -80,6 +82,7 @@ class SessionRuntimeFactory:
             document_focus=document_focus,
             health_service=self.health_service,
             agent_orchestrator=self.agent_orchestrator,
+            config_manager=self.config_manager,
         )
 
         # Sessions share the project-owned document boundary.

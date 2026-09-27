@@ -17,7 +17,6 @@ from runtime.application import ApplicationRuntime
 from .contracts import (
     DocumentFocus,
     DocumentFocusDocument,
-    DocumentFocusFolderUpload,
     DocumentFocusSubtree,
     SessionHandle,
     Turn,
@@ -119,7 +118,9 @@ class Knoggin:
         try:
             yield project.document_service
         finally:
-            await self.runtime.projects.release_project_for_session(project_id, lease_id)
+            await self.runtime.projects.release_project_for_session(
+                project_id, lease_id
+            )
 
     async def list_documents(self, *, project_id: str, limit: int = 100):
         async with self._project_documents(project_id) as documents:
@@ -238,13 +239,14 @@ class Knoggin:
         document_focus = await _resolve_document_focus(context, turn.document_focus)
         message = Message(
             content=turn.content.strip(),
-            metadata={"idempotency_key": (idempotency_key or "").strip()},
         )
         return await context.open_agent_run_stream(
             message,
             model=turn.model,
             agent_id=turn.agent_id,
-            enabled_tools=list(turn.enabled_tools) if turn.enabled_tools else None,
+            enabled_tools=list(turn.enabled_tools)
+            if turn.enabled_tools is not None
+            else None,
             document_focus=document_focus,
             idempotency_key=(idempotency_key or "").strip() or None,
         )
@@ -280,19 +282,11 @@ async def _resolve_document_focus(
     try:
         if isinstance(focus, DocumentFocusDocument):
             target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
                 document_id=focus.document_id,
             )
         elif isinstance(focus, DocumentFocusSubtree):
             target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
-                folder_root_id=focus.folder_root_id,
                 path_prefix=focus.path_prefix,
-            )
-        elif isinstance(focus, DocumentFocusFolderUpload):
-            target = await context.document_service.resolve_focus_target(
-                session_id=context.session_id,
-                folder_root_id=focus.folder_root_id,
             )
         else:
             raise TypeError("document_focus has an unsupported type")
