@@ -82,6 +82,8 @@ class RuntimeResources:
         self.spacy: Optional[Any] = None
         self.config_unsubscribers: list[Any] = []
         self._started = False
+        self._closing = False
+        self._shutdown_lock = asyncio.Lock()
         self._shutdown_complete = False
         self._shutdown_error: RuntimeResourcesShutdownError | None = None
 
@@ -121,7 +123,7 @@ class RuntimeResources:
     def require_ready(self) -> ReadyRuntimeResources:
         """Return the complete resource view guaranteed by successful startup."""
 
-        if not self._started or self._shutdown_complete:
+        if not self._started or self._closing or self._shutdown_complete:
             raise RuntimeError("Runtime resources are not ready")
         return cast(ReadyRuntimeResources, self)
 
@@ -310,43 +312,61 @@ class RuntimeResources:
 
         failures: list[RuntimeResourceShutdownFailure] = []
 
-        async def attempt(phase: str, callback: Callable[[], object]) -> None:
+        self._closing = True
+
+        async def attempt(phase: str, callback: Callable[[], object]) -> bool:
             try:
                 result = callback()
                 if isawaitable(result):
                     await result
+                return True
             except Exception as exc:
                 logger.exception(f"Runtime resource cleanup failed: {phase}")
                 failures.append(RuntimeResourceShutdownFailure(phase=phase, error=exc))
+                return False
 
-        unsubscribers, self.config_unsubscribers = self.config_unsubscribers, []
-        for index, unsubscribe in enumerate(unsubscribers, start=1):
-            await attempt(f"configuration unsubscribe {index}", unsubscribe)
+        for index, unsubscribe in enumerate(tuple(self.config_unsubscribers), start=1):
+            if await attempt(f"configuration unsubscribe {index}", unsubscribe):
+                self.config_unsubscribers.remove(unsubscribe)
 
-        background_work, self.background_work = self.background_work, None
+        background_work = self.background_work
         if background_work is not None:
-            await attempt("background work", background_work.shutdown)
+            if await attempt("background work", background_work.shutdown):
+                self.background_work = None
+        if self.background_work is not None:
+            return tuple(failures)
 
-        model_work, self.model_work = self.model_work, None
+        model_work = self.model_work
         if model_work is not None:
-            await attempt("model work", model_work.shutdown)
+            if await attempt("model work", model_work.shutdown):
+                self.model_work = None
+        if self.model_work is not None or self.config_unsubscribers:
+            return tuple(failures)
 
-        executor, self.executor = self.executor, None
+        executor = self.executor
         if executor is not None:
-            await attempt("executor", lambda: executor.shutdown(wait=wait))
+            if await attempt("executor", lambda: executor.shutdown(wait=wait)):
+                self.executor = None
+        if self.executor is not None:
+            return tuple(failures)
 
-        postgres, self.postgres = self.postgres, None
+        postgres = self.postgres
         if postgres is not None:
-            await attempt("PostgreSQL", postgres.close)
+            if await attempt("PostgreSQL", postgres.close):
+                self.postgres = None
 
-        embedding, self.embedding = self.embedding, None
+        embedding = self.embedding
         if embedding is not None:
-            await attempt("embedding", embedding.cleanup)
+            if await attempt("embedding", embedding.cleanup):
+                self.embedding = None
 
-        llm_service, self.llm_service = self.llm_service, None
+        llm_service = self.llm_service
         if llm_service is not None:
-            await attempt("LLM client", llm_service.close)
+            if await attempt("LLM client", llm_service.close):
+                self.llm_service = None
 
+        if failures:
+            return tuple(failures)
         self.vp01 = None
         self._vp01_by_language.clear()
         self._vp01_device = None
@@ -368,18 +388,23 @@ class RuntimeResources:
         }
 
     async def shutdown(self) -> None:
-        """Release resources once through the authoritative application owner."""
+        """Serialize cleanup, retaining unsuccessful owners for a later retry."""
+
+        async with self._shutdown_lock:
+            await self._shutdown_locked()
+
+    async def _shutdown_locked(self) -> None:
 
         if self._shutdown_complete:
-            if self._shutdown_error is not None:
-                raise self._shutdown_error
             return
 
-        failures = await self._teardown(wait=True)
+        self._closing = True
         self._started = False
-        self._shutdown_complete = True
+        failures = await self._teardown(wait=True)
         if failures:
             error = RuntimeResourcesShutdownError(failures)
             self._shutdown_error = error
             raise error
+        self._shutdown_error = None
+        self._shutdown_complete = True
         logger.info("Runtime resources shut down")

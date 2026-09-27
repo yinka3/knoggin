@@ -189,12 +189,10 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
         "llm",
     ]
     configured_log_settings = configure_coordination_log.call_args.args[0]
-    assert configured_log_settings.path == (
-        "/tmp/knoggin-config/logs/coordination.log"
-    )
+    assert Path(configured_log_settings.path) == Path("/tmp/knoggin-config/logs/coordination.log")
     assert configure_coordination_log.call_count == 2
     assert all(
-        call.args[0].path == "/tmp/knoggin-config/logs/coordination.log"
+        Path(call.args[0].path) == Path("/tmp/knoggin-config/logs/coordination.log")
         for call in configure_coordination_log.call_args_list
     )
     assert manager.llm_service.updated_settings == [fake_config.config.llm]
@@ -566,12 +564,13 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
 
 
 @pytest.mark.no_network
-async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_errors():
+async def test_runtime_resources_shutdown_retains_failed_owners_and_dependencies():
     calls = []
 
     def failing_unsubscribe():
         calls.append("unsubscribe")
-        raise RuntimeError("unsubscribe failed")
+        if calls.count("unsubscribe") == 1:
+            raise RuntimeError("unsubscribe failed")
 
     class AsyncResource:
         def __init__(self, name, *, fail=False):
@@ -626,7 +625,16 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
         "configuration unsubscribe 1",
         "background work",
     ]
+    assert calls == ["unsubscribe", "background"]
+    assert resources.background_work is background
+    assert resources.postgres is postgres
+    assert resources.model_work is model_work
+    assert not resources._shutdown_complete
+    background.fail = False
+    await resources.shutdown()
     assert calls == [
+        "unsubscribe",
+        "background",
         "unsubscribe",
         "background",
         "model_work",
@@ -635,20 +643,7 @@ async def test_runtime_resources_shutdown_attempts_every_phase_and_aggregates_er
         "embedding",
         "llm",
     ]
-    assert background.close_calls == model_work.close_calls == 1
-    assert postgres.close_calls == llm.close_calls == 1
-    assert executor.shutdown_calls == embedding.cleanup_calls == 1
-
-    with pytest.raises(resources_module.RuntimeResourcesShutdownError) as repeated_error:
-        await resources.shutdown()
-
-    assert repeated_error.value is error.value
-    assert calls == [
-        "unsubscribe",
-        "background",
-        "model_work",
-        "executor",
-        "postgres",
-        "embedding",
-        "llm",
-    ]
+    assert resources._shutdown_complete
+    assert resources.postgres is None
+    await resources.shutdown()
+    assert model_work.close_calls == postgres.close_calls == llm.close_calls == 1
