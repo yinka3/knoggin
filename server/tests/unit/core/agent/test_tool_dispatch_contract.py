@@ -7,7 +7,7 @@ from common.schema.agent.tool_contracts import (
     TOOL_SCHEMAS_BY_NAME,
 )
 from core.agent.notebook import RunNotebook
-from core.agent.tool_runtime import execute_tool
+from core.agent.tool_runtime import _tool_argument_metadata, execute_tool
 from core.agent.tools.memory import MemoryTools
 from core.agent.tools.registry import (
     Tools,
@@ -86,6 +86,28 @@ class DispatchTools:
 
     async def legacy_error(self):
         return {"error": "The requested operation is unavailable"}
+
+
+def test_tool_argument_logs_contain_only_bounded_metadata():
+    secret = "do-not-log-this-secret"
+    content = "private brain content"
+
+    metadata = _tool_argument_metadata(
+        {
+            "content": content,
+            "api_key": secret,
+            "limit": 5,
+        }
+    )
+
+    rendered = str(metadata)
+    assert content not in rendered
+    assert secret not in rendered
+    assert metadata == {
+        "api_key": {"type": "str", "redacted": True},
+        "content": {"type": "str", "size": len(content)},
+        "limit": {"type": "int"},
+    }
 
 
 @pytest.mark.no_network

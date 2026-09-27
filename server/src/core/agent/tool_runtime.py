@@ -138,7 +138,7 @@ async def execute_tool(tools: Tools, name: str, args: Dict) -> Dict:
     authorization = getattr(tools, "tool_authorization", None)
     capability = definition.capability if schema else READ_CAPABILITY
 
-    logger.info(f"[TOOL CALL] {name}: {json.dumps(args, default=str)}")
+    logger.info("[TOOL CALL] {}: {}", name, _tool_argument_metadata(args))
     audit_id = None
     try:
         if authorization is not None:
@@ -298,6 +298,27 @@ def _normalize_tool_result(tool_name: str, result):
             message = "The tool operation failed"
         raise ToolExecutionError(tool_name, message)
     return result
+
+
+def _tool_argument_metadata(arguments: Dict) -> dict:
+    """Describe arguments for logs without copying their values."""
+
+    metadata = {}
+    for key in sorted(arguments)[:20]:
+        safe_key = str(key)[:64]
+        value = arguments[key]
+        entry = {"type": type(value).__name__}
+        if any(
+            marker in safe_key.casefold()
+            for marker in ("token", "secret", "password", "api_key")
+        ):
+            entry["redacted"] = True
+        elif isinstance(value, (str, bytes, list, tuple, dict, set)):
+            entry["size"] = len(value)
+        metadata[safe_key] = entry
+    if len(arguments) > len(metadata):
+        metadata["_truncated"] = {"count": len(arguments) - len(metadata)}
+    return metadata
 
 
 def _is_retryable_tool_failure(exc: Exception) -> bool:
