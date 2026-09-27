@@ -19,6 +19,31 @@ async def test_model_failure_keeps_executor_and_models_alive():
     pool.close.assert_awaited_once()
 
 
+async def test_cancelled_root_waits_until_cleanup_settles():
+    resources = RuntimeResources()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stop():
+        entered.set()
+        await release.wait()
+
+    resources.background_work = AsyncMock()
+    resources.background_work.shutdown.side_effect = stop
+    resources.postgres = AsyncMock()
+    pool = resources.postgres
+    caller = asyncio.create_task(resources.shutdown())
+    await entered.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    assert not caller.done()
+    pool.close.assert_not_called()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    pool.close.assert_awaited_once()
+    assert resources._shutdown_complete
+
+
 async def test_leaf_failure_retries_only_failed_leaf():
     resources = RuntimeResources()
     resources.postgres = AsyncMock()

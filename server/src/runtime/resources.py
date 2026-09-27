@@ -407,7 +407,15 @@ class RuntimeResources:
         """Serialize cleanup, retaining unsuccessful owners for a later retry."""
 
         async with self._shutdown_lock:
-            await self._shutdown_locked()
+            cleanup = asyncio.create_task(self._shutdown_locked())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(cleanup)
+                except Exception:
+                    logger.exception("Resource cleanup failed while caller was cancelled")
+                raise
 
     async def _shutdown_locked(self) -> None:
 

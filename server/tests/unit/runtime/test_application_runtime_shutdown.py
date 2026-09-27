@@ -145,6 +145,35 @@ async def test_concurrent_shutdown_calls_join_serialized_cleanup():
     assert calls == ["aac", "sessions", "projects", "resources"]
 
 
+async def test_cancelled_application_shutdown_finishes_dependency_cleanup():
+    calls = []
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingOwner(RecordingOwner):
+        async def shutdown(self):
+            entered.set()
+            await release.wait()
+            await super().shutdown()
+
+    runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(), resources=RecordingOwner("resources", calls),
+        projects=RecordingOwner("projects", calls),
+        sessions=RecordingSessions("sessions", calls),
+        agent_manager=SimpleNamespace(), agent_orchestrator=SimpleNamespace(),
+        aac_runtime=WaitingOwner("aac", calls),
+    )
+    caller = asyncio.create_task(runtime.shutdown())
+    await entered.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    assert not caller.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert calls == ["aac", "sessions", "projects", "resources"]
+    assert runtime._shutdown_complete
+
+
 
 @pytest.mark.runtime
 @pytest.mark.no_network

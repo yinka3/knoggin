@@ -10,6 +10,7 @@ from pathlib import Path
 from loguru import logger
 
 from common.conf.manager import ConfigManager
+from common.utils.lifecycle import settle_owned_task
 from common.utils.time_utils import get_now
 from core.agent.orchestrator import AgentOrchestrator
 from core.agent.services.agent_manager import AgentManager
@@ -153,7 +154,15 @@ class ApplicationRuntime:
         """Retry failed cleanup without closing dependencies of live consumers."""
 
         async with self._shutdown_lock:
-            await self._shutdown_locked()
+            cleanup = asyncio.create_task(self._shutdown_locked())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(cleanup)
+                except Exception:
+                    logger.exception("Application cleanup failed while caller was cancelled")
+                raise
 
     async def _shutdown_locked(self) -> None:
 
