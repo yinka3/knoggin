@@ -111,7 +111,7 @@ class ApplicationRuntime:
         """Build the canonical runtime whose shutdown owns every live layer."""
 
         config_manager = ConfigManager.initialize(config_dir)
-        resources = await RuntimeResources.create(num_workers=num_workers)
+        resources = await RuntimeResources.create(num_workers=num_workers, config_manager=config_manager)
         startup_cleanup = _StartupCleanup(resources)
         try:
             knowledge_store = resources.knowledge_store

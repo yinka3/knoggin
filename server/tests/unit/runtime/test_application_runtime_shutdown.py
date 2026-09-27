@@ -245,7 +245,7 @@ async def test_application_start_cleans_resources_when_composition_fails(
 
     resources.knowledge_store = KnowledgeStore()
 
-    async def create_resources(cls, *, num_workers=None):
+    async def create_resources(cls, *, num_workers=None, config_manager=None):
         return resources
 
     def fail_project_manager(**_kwargs):
@@ -291,7 +291,7 @@ async def test_application_start_cleans_aac_and_resources_when_aac_start_fails(
 
     resources.knowledge_store = KnowledgeStore()
 
-    async def create_resources(cls, *, num_workers=None):
+    async def create_resources(cls, *, num_workers=None, config_manager=None):
         return resources
 
     class RecordingAgentManager:
@@ -396,7 +396,7 @@ async def test_application_start_establishes_identity_before_managers(
         calls.append("sessions")
         return sessions
 
-    async def create_resources(cls, *, num_workers=None):
+    async def create_resources(cls, *, num_workers=None, config_manager=None):
         return resources
 
     monkeypatch.setattr(

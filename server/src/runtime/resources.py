@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from inspect import isawaitable
 from typing import Any, Callable, Optional, Protocol, cast
@@ -89,10 +90,12 @@ class RuntimeResources:
         self._shutdown_error: RuntimeResourcesShutdownError | None = None
 
     @classmethod
-    async def create(cls, num_workers: int | None = None) -> "RuntimeResources":
+    async def create(cls, num_workers: int | None = None, *, config_manager=None) -> "RuntimeResources":
         """Create fully initialized resources without registering global state."""
 
         instance = cls()
+        instance._config_manager = config_manager
+        instance._startup_config = deepcopy(config_manager.config) if config_manager is not None else None
         try:
             await instance._start(num_workers=num_workers)
         except BaseException as exc:
@@ -140,12 +143,16 @@ class RuntimeResources:
 
         if language not in {"en", "multilingual"}:
             raise ValueError("VP-01 language must be 'en' or 'multilingual'")
+        if self._closing:
+            raise RuntimeError("Runtime resources are shutting down")
         if self.model_work is None:
             raise RuntimeError("VP-01 model work coordinator is unavailable")
         existing = self._vp01_by_language.get(language)
         if existing is not None:
             return existing
         async with self._vp01_load_lock:
+            if self._closing:
+                raise RuntimeError("Runtime resources are shutting down")
             existing = self._vp01_by_language.get(language)
             if existing is not None:
                 return existing
@@ -157,6 +164,8 @@ class RuntimeResources:
                 priority=ModelWorkPriority.BACKGROUND,
                 name=f"vp01-{language}-model-load",
             )
+            if self._closing:
+                raise RuntimeError("Runtime resources are shutting down")
             self._vp01_by_language[language] = model
             if language == "en":
                 self.vp01 = model
@@ -167,6 +176,8 @@ class RuntimeResources:
         load_dotenv()
         resource_profile = ResourceProfile.from_environment()
         if num_workers is not None:
+            if isinstance(num_workers, bool) or not isinstance(num_workers, int) or num_workers < 1:
+                raise ConfigurationError("num_workers must be a positive integer")
             resource_profile = replace(resource_profile, worker_count=num_workers)
         self.resource_profile = resource_profile
 
@@ -222,8 +233,8 @@ class RuntimeResources:
         if self.postgres is None or self.model_work is None or self.resource_profile is None:
             raise RuntimeError("Runtime datastore and worker dependencies are unavailable")
 
-        config_manager = ConfigManager.get()
-        config = config_manager.config
+        config_manager = self._config_manager or ConfigManager.get()
+        config = self._startup_config or deepcopy(config_manager.config)
 
         def configure_runtime_coordination_log(settings):
             configure_coordination_log(
@@ -232,9 +243,6 @@ class RuntimeResources:
                 )
             )
 
-        configure_runtime_coordination_log(
-            config.developer_settings.coordination_log
-        )
         self.config_unsubscribers.append(
             config_manager.subscribe(
                 configure_runtime_coordination_log,

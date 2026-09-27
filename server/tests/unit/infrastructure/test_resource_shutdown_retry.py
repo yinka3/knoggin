@@ -19,6 +19,36 @@ async def test_model_failure_keeps_executor_and_models_alive():
     pool.close.assert_awaited_once()
 
 
+async def test_lazy_model_is_not_published_after_shutdown_starts():
+    resources = RuntimeResources()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def load(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return object()
+
+    resources.model_work = AsyncMock()
+    resources.model_work.run_blocking.side_effect = load
+    pending = asyncio.create_task(resources.get_vp01("multilingual"))
+    await entered.wait()
+    resources._closing = True
+    release.set()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await pending
+    assert "multilingual" not in resources._vp01_by_language
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await resources.get_vp01("en")
+
+
+@pytest.mark.parametrize("workers", [True, 0, -1, "2"])
+def test_explicit_worker_count_rejects_invalid_values(workers):
+    from common.exceptions import ConfigurationError
+
+    with pytest.raises(ConfigurationError, match="positive integer"):
+        RuntimeResources()._configure_startup(num_workers=workers)
+
+
 async def test_cancelled_root_waits_until_cleanup_settles():
     resources = RuntimeResources()
     entered, release = asyncio.Event(), asyncio.Event()

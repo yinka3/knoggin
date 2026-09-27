@@ -190,7 +190,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     ]
     configured_log_settings = configure_coordination_log.call_args.args[0]
     assert Path(configured_log_settings.path) == Path("/tmp/knoggin-config/logs/coordination.log")
-    assert configure_coordination_log.call_count == 2
+    assert configure_coordination_log.call_count == 1
     assert all(
         Path(call.args[0].path) == Path("/tmp/knoggin-config/logs/coordination.log")
         for call in configure_coordination_log.call_args_list
