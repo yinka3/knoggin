@@ -150,6 +150,8 @@ class AACRuntime:
         self._config_unsubscribe: Optional[Callable[[], None]] = None
         self._stopping = False
         self._started = False
+        self._shutdown_lock = asyncio.Lock()
+        self._pending_finalizations: dict[str, dict] = {}
 
     @property
     def active_discussion_id(self) -> Optional[str]:
@@ -173,27 +175,67 @@ class AACRuntime:
     async def shutdown(self) -> None:
         """Stop future opportunities and let the current participant turn finish."""
 
+        # Close admission before scheduling owned cleanup or waiting for its lock.
+        self._stopping = True
+        self._shutdown_event.set()
+        self._discussion_stop_event.set()
+        self._opportunity_wake_event.set()
+        async with self._shutdown_lock:
+            cleanup = asyncio.create_task(self._shutdown_owned())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(cleanup)
+                except Exception:
+                    logger.exception("AAC cleanup failed while caller was cancelled")
+                raise
+
+    async def _shutdown_owned(self) -> None:
+
         self._stopping = True
         self._shutdown_event.set()
         self._discussion_stop_event.set()
         self._opportunity_wake_event.set()
         async with self._ownership_lock:
             pass  # Wait for a pending durable admission to publish its task.
-        unsubscribe, self._config_unsubscribe = self._config_unsubscribe, None
+        failures = []
+        unsubscribe = self._config_unsubscribe
         if unsubscribe is not None:
             try:
                 unsubscribe()
-            except Exception:
+            except Exception as exc:
                 logger.exception("Failed to unsubscribe AAC config listener")
+                failures.append(exc)
+            else:
+                self._config_unsubscribe = None
         opportunity = self._opportunity_task
-        self._opportunity_task = None
         if opportunity is not None and not opportunity.done():
             opportunity.cancel()
             await asyncio.gather(opportunity, return_exceptions=True)
+        self._opportunity_task = None
 
         discussion = self._discussion_task
         if discussion is not None and not discussion.done():
             await asyncio.gather(discussion, return_exceptions=True)
+        try:
+            await self._retry_finalizations()
+        except Exception as exc:
+            failures.append(exc)
+        if failures:
+            raise RuntimeError("AAC shutdown cleanup failed") from failures[0]
+
+    async def _retry_finalizations(self) -> None:
+        failures = []
+        for discussion_id, outcome in tuple(self._pending_finalizations.items()):
+            try:
+                await self.store.finish_discussion(**outcome)
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                del self._pending_finalizations[discussion_id]
+        if failures:
+            raise RuntimeError("AAC discussion finalization failed") from failures[0]
 
     async def trigger_discussion(self) -> AACAdmission:
         """Run one seed check and admit at most one local discussion."""
@@ -201,6 +243,7 @@ class AACRuntime:
         async with self._ownership_lock:
             if self._stopping:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "shutting_down")
+            await self._retry_finalizations()
             if not self._community_settings().enabled:
                 return AACAdmission(AACAdmissionOutcome.SKIPPED, "disabled")
             if self._discussion_task is not None and not self._discussion_task.done():
@@ -432,16 +475,15 @@ class AACRuntime:
                     logger.exception(
                         "Failed to record AAC user-stop event for {}", discussion_id
                     )
+            outcome = dict(discussion_id=discussion_id, user_name=self.user_name,
+                           status=status, end_reason=end_reason, tokens_used=budget.used)
+            self._pending_finalizations[discussion_id] = outcome
             try:
-                await self.store.finish_discussion(
-                    discussion_id=discussion_id,
-                    user_name=self.user_name,
-                    status=status,
-                    end_reason=end_reason,
-                    tokens_used=budget.used,
-                )
+                await self.store.finish_discussion(**outcome)
             except Exception:
                 logger.exception("Failed to finalize AAC discussion {}", discussion_id)
+            else:
+                self._pending_finalizations.pop(discussion_id, None)
             finally:
                 if self._discussion_history is history:
                     self._discussion_history = None

@@ -194,7 +194,14 @@ class AACStore:
             },
         )
         if updated == 0:
-            raise ValueError("AAC discussion is not active for this user")
+            rows = await self._read(
+                "read_aac_terminal_outcome",
+                """SELECT status, end_reason, tokens_used FROM public.aac_discussions
+                   WHERE discussion_id = %(discussion_id)s AND user_name = %(user_name)s""",
+                {"discussion_id": discussion_id, "user_name": user_name},
+            )
+            if not rows or rows[0]["status"] != status or rows[0]["end_reason"] != end_reason or rows[0]["tokens_used"] < tokens_used:
+                raise ValueError("AAC discussion terminal outcome conflicts or is unavailable")
 
     async def interrupt_active_discussions(self, *, user_name: str) -> int:
         """Mark stale active work interrupted during application startup."""
