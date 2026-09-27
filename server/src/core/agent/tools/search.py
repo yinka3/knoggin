@@ -15,10 +15,6 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 if TYPE_CHECKING:
     from core.knowledge.documents import DocumentService
-    from core.knowledge.entity.resolver import EntityResolver
-    from core.knowledge.services.embedding_service import EmbeddingService
-    from core.knowledge.store import KnowledgeStore
-    from infrastructure.postgres_client import PostgresClient
 
 import httpcore
 import httpx
@@ -428,16 +424,25 @@ def _canonical_search_url(value) -> Optional[str]:
 
 
 class SearchTools:
-    knowledge_store: KnowledgeStore
-    postgres: PostgresClient
-    embedding_service: EmbeddingService
     search_cfg: Dict
     document_service: Optional[DocumentService]
     document_focus: Optional[Dict] = None
     user_name: str
     session_id: str
-    entities: EntityResolver
-    readable_project_ids: Optional[List[str]]
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        client = getattr(self, "_http_client", None)
+        if client is None:
+            client = httpx.AsyncClient(timeout=10.0)
+            self._http_client = client
+        return client
+
+    def _get_web_page_client(self) -> httpx.AsyncClient:
+        client = getattr(self, "_web_page_client", None)
+        if client is None:
+            client = create_web_page_http_client()
+            self._web_page_client = client
+        return client
 
     _CONTENT_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -1323,9 +1328,7 @@ class SearchTools:
     async def _fetch_web_page_snapshot(
         self, requested_url: str
     ) -> _WebPageSnapshot | _WebPdfSnapshot:
-        client = getattr(self, "_web_page_client", None)
-        if client is None:
-            raise _web_page_error("webpage fetch client is unavailable")
+        client = self._get_web_page_client()
 
         current_url = requested_url
         for redirect_count in range(_WEB_PAGE_MAX_REDIRECTS + 1):
@@ -1592,7 +1595,9 @@ class SearchTools:
         }
 
         try:
-            response = await self._http_client.post(url, json=payload, timeout=10.0)
+            response = await self._get_http_client().post(
+                url, json=payload, timeout=10.0
+            )
 
             if response.status_code == 401:
                 logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
@@ -1651,7 +1656,9 @@ class SearchTools:
             params["freshness"] = freshness
 
         try:
-            response = await self._http_client.get(url, headers=headers, params=params)
+            response = await self._get_http_client().get(
+                url, headers=headers, params=params
+            )
 
             if response.status_code == 401:
                 logger.warning("Brave API key invalid, falling back")
@@ -1728,7 +1735,9 @@ class SearchTools:
         }
 
         try:
-            response = await self._http_client.get(url, headers=headers, params=params)
+            response = await self._get_http_client().get(
+                url, headers=headers, params=params
+            )
 
             if response.status_code in (401, 429):
                 logger.warning(f"Brave news API returned {response.status_code}")

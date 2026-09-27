@@ -440,7 +440,7 @@ class AACRuntime:
         run_id = f"aac_run_{uuid.uuid4().hex}"
         base_tools = Tools(
             user_name=self.user_name,
-            entities=self.read_context.entities,
+            project_id=self.read_context.knowledge_retrieval.project_id,
             session_id=f"aac:{discussion_id}",
             compiled_domain=None,
             search_config={},

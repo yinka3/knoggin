@@ -2,8 +2,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
-import httpx
-
 from common.conf.domain_config import CompiledDomain
 from common.exceptions import ToolExecutionError
 from common.schema.agent.community_tools import AAC_SPECIFIC_SCHEMAS
@@ -14,11 +12,10 @@ from common.schema.agent.tool_contracts import (
 from core.agent.tools.health import HealthTools
 from core.agent.tools.maintenance import MaintenanceTools
 from core.agent.tools.memory import MemoryTools
-from core.agent.tools.search import SearchTools, create_web_page_http_client
+from core.agent.tools.search import SearchTools
 from core.agent.tools.workspace import ProjectFileTools
 from core.knowledge.documents import DocumentService
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
-from core.knowledge.entity.resolver import EntityResolver
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 
@@ -594,7 +591,7 @@ class Tools(
     def __init__(
         self,
         user_name: str,
-        entities: EntityResolver,
+        project_id: str,
         session_id: str,
         compiled_domain: Optional[CompiledDomain] = None,
         search_config: Optional[dict] = None,
@@ -617,11 +614,8 @@ class Tools(
         self.knowledge_store = knowledge_store
         self.knowledge_retrieval = knowledge_retrieval
         self.postgres = postgres
-        self.entities = entities
         self.user_name = user_name
-        self.embedding_service = getattr(knowledge_retrieval, "embedding_service", None)
-        self.project_id = entities.project_id
-        self.readable_project_ids = entities.readable_project_ids
+        self.project_id = project_id
         self.compiled_domain = compiled_domain
         self.document_service = document_service
         self.document_focus = document_focus
@@ -639,8 +633,8 @@ class Tools(
         self.entity_maintenance_service = entity_maintenance_service
         self.project_maintenance_service = project_maintenance_service
 
-        self._http_client = httpx.AsyncClient(timeout=10.0)
-        self._web_page_client = create_web_page_http_client()
+        self._http_client = None
+        self._web_page_client = None
         self._web_page_snapshots = OrderedDict()
         self._web_page_snapshot_aliases: Dict[str, str] = {}
 
@@ -748,12 +742,14 @@ class Tools(
         ]
 
     async def close(self):
-        try:
+        if self._http_client is not None:
             await self._http_client.aclose()
-        finally:
+            self._http_client = None
+        if self._web_page_client is not None:
             await self._web_page_client.aclose()
-            self._web_page_snapshots.clear()
-            self._web_page_snapshot_aliases.clear()
+            self._web_page_client = None
+        self._web_page_snapshots.clear()
+        self._web_page_snapshot_aliases.clear()
 
 
 validate_registry_contract()

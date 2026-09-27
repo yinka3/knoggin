@@ -35,7 +35,7 @@ class AACTools(Tools):
     ) -> None:
         super().__init__(
             user_name=user_name,
-            entities=base_tools.entities,
+            project_id=base_tools.project_id,
             session_id=base_tools.session_id,
             compiled_domain=None,
             search_config=base_tools.search_cfg,

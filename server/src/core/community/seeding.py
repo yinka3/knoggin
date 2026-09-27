@@ -98,7 +98,7 @@ class AACSeeder:
         run_id = f"aac_seed_{uuid.uuid4().hex}"
         base_tools = Tools(
             user_name=self.user_name,
-            entities=self.read_context.entities,
+            project_id=self.read_context.knowledge_retrieval.project_id,
             session_id=f"aac-seed:{run_id}",
             compiled_domain=None,
             search_config={},

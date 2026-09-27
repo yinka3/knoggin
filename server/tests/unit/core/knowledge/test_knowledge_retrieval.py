@@ -411,19 +411,16 @@ async def test_agent_memory_tools_delegate_to_project_scoped_retrieval():
             return [{"id": "msg_7"}]
 
     retrieval = Retrieval()
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         knowledge_retrieval=retrieval,
         knowledge_store=SimpleNamespace(),
         postgres=SimpleNamespace(),
     )
+    assert tools._http_client is None
+    assert tools._web_page_client is None
     try:
         assert await tools.search_knowledge_messages("project memory", limit=3) == [
             {"id": "msg_7"}
@@ -444,15 +441,10 @@ async def test_run_graph_limit_controls_the_relationship_retrieval_query():
             self.calls.append((entity_id, session_id, limit))
             return [{"relationship_id": "r-1"}]
 
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     retrieval = Retrieval()
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         knowledge_retrieval=retrieval,
         knowledge_store=SimpleNamespace(),
@@ -491,14 +483,9 @@ async def test_recent_episode_tool_passes_its_session_to_retrieval():
             return {"resolution": "recent", "results": []}
 
     retrieval = Retrieval()
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         knowledge_retrieval=retrieval,
         knowledge_store=SimpleNamespace(),
@@ -626,14 +613,9 @@ async def test_topic_context_tool_normalizes_topics_and_rejects_inactive_ones():
             }
 
     retrieval = Retrieval()
-    entities = SimpleNamespace(
-        embedding_service=SimpleNamespace(),
-        project_id="project-1",
-        readable_project_ids=["project-1"],
-    )
     tools = Tools(
         user_name="ada",
-        entities=entities,
+        project_id="project-1",
         session_id="session-1",
         compiled_domain=Domain(),
         knowledge_retrieval=retrieval,

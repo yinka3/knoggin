@@ -30,11 +30,7 @@ def test_aac_schemas_are_owned_by_aac_tools():
 
 def _base_tools(resources):
     return SimpleNamespace(
-        entities=SimpleNamespace(
-            project_id="__identity__",
-            readable_project_ids=["__identity__", "project-1"],
-            embedding_service=resources.embedding,
-        ),
+        project_id="__identity__",
         session_id="aac:discussion-1",
         compiled_domain=None,
         search_cfg={},

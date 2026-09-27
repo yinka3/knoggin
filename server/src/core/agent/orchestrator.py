@@ -246,14 +246,11 @@ class AgentOrchestrator:
     ) -> Tools:
         """Retrieve context services and instantiate the agent tool suite."""
         config = self._config_manager.config
-        search_cfg = {
-            **config.developer_settings.search.model_dump(),
-            **config.search.model_dump(),
-        }
+        search_cfg = config.search.model_dump()
 
         tools = Tools(
             user_name=context.user_name,
-            entities=context.project.entities,
+            project_id=context.project.project_id,
             session_id=context.session_id,
             compiled_domain=context.project.compiled_domain,
             search_config=search_cfg,
