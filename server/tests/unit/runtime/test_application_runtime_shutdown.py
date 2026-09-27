@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -67,7 +68,7 @@ async def test_application_shutdown_is_ordered_and_idempotent():
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_application_shutdown_continues_after_a_phase_failure_and_replays_error():
+async def test_application_shutdown_retries_failure_without_repeating_success():
     calls = []
     runtime = ApplicationRuntime(
         config_manager=SimpleNamespace(),
@@ -82,13 +83,65 @@ async def test_application_shutdown_continues_after_a_phase_failure_and_replays_
     with pytest.raises(ApplicationShutdownError) as error:
         await runtime.shutdown()
 
-    assert calls == ["aac", "sessions", "projects", "resources"]
+    assert calls == ["aac", "sessions", "projects"]
     assert [failure.phase for failure in error.value.failures] == ["aac"]
 
-    with pytest.raises(ApplicationShutdownError) as repeated_error:
-        await runtime.shutdown()
+    runtime.aac_runtime.error = None
+    await runtime.shutdown()
+    assert calls == ["aac", "sessions", "projects", "aac", "resources"]
+    assert runtime._shutdown_complete
 
-    assert repeated_error.value is error.value
+
+@pytest.mark.parametrize("failed_phase", ["sessions", "projects", "resources"])
+async def test_failed_consumer_keeps_dependencies_until_retry(failed_phase):
+    calls = []
+    runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(),
+        resources=RecordingOwner("resources", calls),
+        projects=RecordingOwner("projects", calls),
+        sessions=RecordingSessions("sessions", calls),
+        agent_manager=SimpleNamespace(),
+        agent_orchestrator=SimpleNamespace(),
+        aac_runtime=RecordingOwner("aac", calls),
+    )
+    owner = getattr(runtime, failed_phase)
+    owner.error = RuntimeError("failed cleanup")
+    with pytest.raises(ApplicationShutdownError):
+        await runtime.shutdown()
+    order = ["aac", "sessions", "projects", "resources"]
+    assert calls == order[:order.index(failed_phase) + 1]
+    assert not runtime._shutdown_complete
+    owner.error = None
+    await runtime.shutdown()
+    assert calls == order[:order.index(failed_phase)] + [failed_phase] + order[order.index(failed_phase):]
+
+
+async def test_concurrent_shutdown_calls_join_serialized_cleanup():
+    calls = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class WaitingOwner(RecordingOwner):
+        async def shutdown(self):
+            await super().shutdown()
+            entered.set()
+            await release.wait()
+
+    runtime = ApplicationRuntime(
+        config_manager=SimpleNamespace(),
+        resources=RecordingOwner("resources", calls),
+        projects=RecordingOwner("projects", calls),
+        sessions=RecordingSessions("sessions", calls),
+        agent_manager=SimpleNamespace(), agent_orchestrator=SimpleNamespace(),
+        aac_runtime=WaitingOwner("aac", calls),
+    )
+    first = asyncio.create_task(runtime.shutdown())
+    await entered.wait()
+    second = asyncio.create_task(runtime.shutdown())
+    await asyncio.sleep(0)
+    assert calls == ["aac"]
+    release.set()
+    await asyncio.gather(first, second)
     assert calls == ["aac", "sessions", "projects", "resources"]
 
 

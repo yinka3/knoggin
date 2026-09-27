@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,8 @@ class ApplicationRuntime:
     health_service: RuntimeHealthService = field(init=False)
     started_at: datetime = field(init=False)
     _shutdown_complete: bool = field(init=False, default=False, repr=False)
+    _shutdown_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock, repr=False)
+    _completed_shutdown_phases: set[str] = field(init=False, default_factory=set, repr=False)
     _shutdown_error: ApplicationShutdownError | None = field(
         init=False,
         default=None,
@@ -147,11 +150,14 @@ class ApplicationRuntime:
             raise
 
     async def shutdown(self) -> None:
-        """Release application-owned work in the only safe dependency order."""
+        """Retry failed cleanup without closing dependencies of live consumers."""
+
+        async with self._shutdown_lock:
+            await self._shutdown_locked()
+
+    async def _shutdown_locked(self) -> None:
 
         if self._shutdown_complete:
-            if self._shutdown_error is not None:
-                raise self._shutdown_error
             return
 
         self.health_service.mark_closing()
@@ -162,19 +168,29 @@ class ApplicationRuntime:
             ("projects", self.projects),
             ("resources", self.resources),
         ):
+            if phase in self._completed_shutdown_phases:
+                continue
+            if phase == "projects" and "sessions" not in self._completed_shutdown_phases:
+                continue
+            if phase == "resources" and not {"aac", "sessions", "projects"}.issubset(
+                self._completed_shutdown_phases
+            ):
+                continue
             try:
                 logger.info(f"Application shutdown phase started: {phase}")
                 await owner.shutdown()
+                self._completed_shutdown_phases.add(phase)
                 logger.info(f"Application shutdown phase completed: {phase}")
             except Exception as exc:
                 logger.exception(f"Application shutdown phase failed: {phase}")
                 failures.append(ShutdownFailure(phase=phase, error=exc))
 
-        self._shutdown_complete = True
         if failures:
             error = ApplicationShutdownError(tuple(failures))
             self._shutdown_error = error
             raise error from failures[0].error
+        self._shutdown_error = None
+        self._shutdown_complete = True
 
     def application_port(self, *, default_domain_config=None):
         """Return the public application adapter for this live runtime."""
