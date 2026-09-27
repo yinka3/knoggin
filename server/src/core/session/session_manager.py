@@ -412,33 +412,15 @@ class SessionManager:
                 ) from failures[0]
             self._closed = True
 
-    async def get_session_history_readonly(
-        self, session_id: str, limit: int = 1000
-    ) -> List[Dict]:
-        """Read conversation history natively from Postgres."""
-        query = """
-            SELECT message_id, role, content, timestamp_ms as timestamp
-            FROM public.messages
-            WHERE user_name = %(user_name)s AND session_id = %(session_id)s
-            ORDER BY timestamp_ms ASC
-            LIMIT %(limit)s
-        """
-        rows = await self.pg.fetch_all(
-            query,
-            {"user_name": self.user_name, "session_id": session_id, "limit": limit},
+    async def get_session_history_readonly(self, session_id: str, limit: int = 1000) -> List[Dict]:
+        """Read the same recent canonical window used by model history."""
+        turns = await self.resources.knowledge_store.get_session_history(
+            user_name=self.user_name, session_id=session_id, limit=limit
         )
-        turns = []
-        for row in rows:
-            turns.append(
-                {
-                    "message_id": row["message_id"],
-                    "role": row["role"],
-                    "content": row["content"],
-                    "timestamp": row["timestamp"],
-                }
-            )
-
-        return turns
+        return [
+            {key: turn[key] for key in ("message_id", "role", "content", "timestamp")}
+            for turn in turns
+        ]
 
     async def delete_session(self, session_id: str) -> None:
         """

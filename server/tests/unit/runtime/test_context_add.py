@@ -13,8 +13,7 @@ from common.schema.artifacts import ArtifactDraft, MarkdownArtifactBlock
 from common.schema.document import create_document_focus
 from common.schema.primitives import Message
 from common.schema.source.references import SourceReferenceCandidate
-from common.utils.core_utils import fetch_conversation_turns
-from core.knowledge.db.readers.message_reader import UserAgentExchange
+from core.knowledge.db.readers.message_reader import MessageReader, UserAgentExchange
 from runtime.session_runtime import SessionRuntime
 from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeConfigValue, FakeResources
@@ -249,11 +248,8 @@ async def test_context_add_fails_fast_when_ingestion_wiring_is_incomplete():
 async def test_conversation_history_can_exclude_the_current_first_message():
     resources = FakeResources()
 
-    await fetch_conversation_turns(
-        resources.postgres,
-        "ada",
-        "session-1",
-        num_turns=10,
+    await MessageReader(resources.postgres).get_session_history(
+        user_name="ada", session_id="session-1", limit=10,
         up_to_msg_id=0,
     )
 

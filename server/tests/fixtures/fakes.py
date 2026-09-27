@@ -428,6 +428,9 @@ class FakeKnowledgeStore:
         self.accepted_message_ids = {}
         self.closed_exchanges = []
 
+    async def get_session_history(self, **kwargs):
+        return []
+
     async def allocate_entity_id(self):
         entity_id = self.next_entity_id
         self.next_entity_id += 1

@@ -24,6 +24,33 @@ async def _seed_session(client, session_id: str) -> None:
 @pytest.mark.storage
 @pytest.mark.requires_postgres
 @pytest.mark.no_network
+async def test_acceptance_updates_activity_but_replay_does_not(real_postgres_client):
+    client = real_postgres_client
+    await _seed_session(client, "session-activity")
+    await client.execute(
+        "UPDATE public.sessions SET last_active_at = '2000-01-01' WHERE session_id = %s",
+        ("session-activity",),
+    )
+    writer = MessageLifecycleWriter(client, MessageWriter(client))
+    message = dict(id=902, user_name="ada", project_id="project-1",
+                   session_id="session-activity", role="user", content="Hello",
+                   timestamp=1000, metadata={}, acceptance_key="content:activity")
+    accepted = await writer.create_editable_user_message(message, edit_window_seconds=600)
+    first = await client.fetch_one(
+        "SELECT last_active_at FROM public.sessions WHERE session_id = %s", ("session-activity",)
+    )
+    replayed = await writer.create_editable_user_message(message, edit_window_seconds=600)
+    second = await client.fetch_one(
+        "SELECT last_active_at FROM public.sessions WHERE session_id = %s", ("session-activity",)
+    )
+    assert accepted.created and not replayed.created
+    assert first["last_active_at"].year > 2000
+    assert second["last_active_at"] == first["last_active_at"]
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
 async def test_real_postgres_edit_after_revision_selection_preserves_history(
     real_postgres_client,
 ):

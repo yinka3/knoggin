@@ -34,6 +34,45 @@ class MessageReader:
     def __init__(self, client: PostgresClient):
         self.client = client
 
+    async def get_session_history(self, *, user_name: str, session_id: str, limit: int, up_to_msg_id: int | None = None) -> list[dict]:
+        """Return the newest canonical messages, ordered by durable message ID."""
+        user_name = require_scope_value(user_name, "user_name", "get_session_history")
+        session_id = require_scope_value(session_id, "session_id", "get_session_history")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10000:
+            raise ValueError("limit must be an integer between 1 and 10000")
+        if up_to_msg_id is not None and (not isinstance(up_to_msg_id, int) or isinstance(up_to_msg_id, bool) or up_to_msg_id < 0):
+            raise ValueError("up_to_msg_id must be a non-negative integer")
+        query = """
+            SELECT message.message_id, message.role, message.content,
+                   message.timestamp_ms AS timestamp, message.user_msg_id, message.metadata
+            FROM public.messages AS message
+            JOIN public.sessions AS session
+              ON session.session_id = message.session_id
+             AND session.project_id = message.project_id
+             AND session.user_name = message.user_name
+            WHERE message.user_name = %(user_name)s AND message.session_id = %(session_id)s
+              AND message.lifecycle_state <> 'superseded'
+        """
+        params = {"user_name": user_name, "session_id": session_id, "limit": limit}
+        if up_to_msg_id is not None:
+            query += " AND message.message_id <= %(up_to_msg_id)s"
+            params["up_to_msg_id"] = up_to_msg_id
+        query += " ORDER BY message.message_id DESC LIMIT %(limit)s"
+        try:
+            rows = await self.client.fetch_all(query, params)
+        except Exception as exc:
+            self._raise_storage_read("get_session_history", exc)
+        results = []
+        for row in reversed(rows):
+            metadata = row.get("metadata") or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (TypeError, ValueError):
+                    metadata = {}
+            results.append({**row, "metadata": metadata if isinstance(metadata, dict) else {}})
+        return results
+
     @staticmethod
     def _raise_storage_read(operation: str, exc: Exception) -> None:
         logger.error("Storage read failed for {}: {}", operation, exc)

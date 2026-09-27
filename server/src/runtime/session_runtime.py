@@ -24,11 +24,8 @@ from common.schema.document import DocumentFocus
 from common.schema.primitives import Message
 from common.schema.settings import RootConfig
 from common.schema.source.references import SourceReferenceCandidate
-from common.utils.core_utils import (
-    fetch_conversation_turns,
-)
 from common.utils.events import emit
-from common.utils.time_utils import get_now, parse_iso_time_or_now
+from common.utils.time_utils import get_now
 from core.knowledge.documents import DocumentService
 from runtime.project_runtime import ProjectRuntime
 from runtime.resources import RuntimeResources
@@ -1011,22 +1008,20 @@ class SessionRuntime:
         self, num_turns: int, up_to_msg_id: Optional[int] = None
     ) -> List[Dict]:
         """Returns list of conversation turns in chronological order."""
-        turns = await fetch_conversation_turns(
-            self.resources.postgres,
-            self.user_name,
-            self.session_id,
-            num_turns,
-            up_to_msg_id,
+        turns = await self.knowledge_store.get_session_history(
+            user_name=self.user_name, session_id=self.session_id,
+            limit=num_turns, up_to_msg_id=up_to_msg_id,
         )
 
         results = []
         for turn in turns:
             role_label = "USER" if turn["role"] == "user" else "AGENT"
-            ts = parse_iso_time_or_now(turn["timestamp"])
+            ts = datetime.fromtimestamp(turn["timestamp"] / 1000, tz=timezone.utc)
             date_str = ts.strftime("%Y-%m-%d %H:%M")
             results.append(
                 {
                     **turn,
+                    "timestamp": ts.isoformat(),
                     "message": turn["content"],
                     "role_label": role_label,
                     "relative": f"[{date_str}]",

@@ -132,6 +132,13 @@ class MessageLifecycleWriter:
                     now_ms,
                 ),
             )
+            await cur.execute(
+                """
+                UPDATE public.sessions SET last_active_at = now()
+                WHERE user_name = %s AND project_id = %s AND session_id = %s
+                """,
+                (row["user_name"], row["project_id"], row["session_id"]),
+            )
         return MessageAcceptance(message_id=inserted_id, created=True)
 
     async def prepare_assistant_exchange_finalization(

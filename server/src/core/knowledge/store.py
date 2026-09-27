@@ -123,6 +123,11 @@ class KnowledgeStore:
 
     # Message and exchange lifecycle
 
+    async def get_session_history(self, *, user_name: str, session_id: str, limit: int, up_to_msg_id: int | None = None) -> list[dict]:
+        return await self._message_reader.get_session_history(
+            user_name=user_name, session_id=session_id, limit=limit, up_to_msg_id=up_to_msg_id
+        )
+
     async def allocate_message_id(self) -> int:
         return await self._id_allocator.allocate_message_id()
 
