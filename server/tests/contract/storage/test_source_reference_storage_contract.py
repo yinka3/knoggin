@@ -518,61 +518,55 @@ async def test_episode_reader_traverses_only_episode_message_attachments():
     client = RecordingPostgresClient(fetch_all_results=[[persisted_row(candidate)]])
     reader = SourceReferenceReader(client)
 
-    references = await reader.get_episode_source_refs(
+    references = await reader.get_project_episode_source_refs(
         "episode-1",
+        user_name="ada",
+        project_id="project-1",
+    )
+
+    assert references[0].contributing_message_id == 101
+    query, params = client.calls[0][1], client.calls[0][2]
+    assert "FROM public.episode_messages attachment" in query
+    assert "ref.message_id = attachment.message_id" in query
+    assert params == ("episode-1", "project-1", "ada")
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_reader_returns_sources_for_one_owned_message():
+    candidate = document_candidate()
+    client = RecordingPostgresClient(
+        fetch_all_results=[[persisted_row(candidate)]],
+    )
+    reader = SourceReferenceReader(client)
+
+    references = await reader.get_message_source_refs(
+        101,
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
     )
 
     assert references[0].contributing_message_id == 101
-    query, params = client.calls[0][1], client.calls[0][2]
-    assert "FROM public.episode_messages AS attachment" in query
-    assert "ref.message_id = attachment.message_id" in query
-    assert params == ("episode-1", "project-1", "session-1", "ada")
-
-
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_reader_returns_one_assistant_answer_with_sources_consulted():
-    candidate = document_candidate()
-    client = RecordingPostgresClient(
-        fetch_one_results=[{"message_id": 101, "content": "Answer"}],
-        fetch_all_results=[[persisted_row(candidate)]],
-    )
-    reader = SourceReferenceReader(client)
-
-    answer = await reader.get_assistant_message_with_sources(
-        101,
-        user_name="ada",
-        project_id="project-1",
-        session_id="session-1",
-    )
-
-    assert answer is not None
-    assert answer.content == "Answer"
-    assert answer.sources_consulted[0].contributing_message_id == 101
-    assert "message.role = 'assistant'" in client.calls[0][1]
+    assert "session.user_name = %s" in client.calls[0][1]
 
 
 @pytest.mark.storage
 @pytest.mark.no_network
 async def test_reader_returns_an_empty_source_collection_for_an_answer_without_refs():
     client = RecordingPostgresClient(
-        fetch_one_results=[{"message_id": 101, "content": "Answer"}],
         fetch_all_results=[[]],
     )
     reader = SourceReferenceReader(client)
 
-    answer = await reader.get_assistant_message_with_sources(
+    references = await reader.get_message_source_refs(
         101,
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
     )
 
-    assert answer is not None
-    assert answer.sources_consulted == ()
+    assert references == []
 
 
 @pytest.mark.storage
@@ -593,11 +587,10 @@ async def test_episode_reader_deduplicates_retries_but_keeps_other_answers():
     )
     reader = SourceReferenceReader(client)
 
-    references = await reader.get_episode_source_refs(
+    references = await reader.get_project_episode_source_refs(
         "episode-1",
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
     )
 
     assert [reference.contributing_message_id for reference in references] == [101, 102]
@@ -1022,21 +1015,19 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
         """
     )
 
-    answer = await reader.get_assistant_message_with_sources(
+    message_sources = await reader.get_message_source_refs(
         101,
         user_name="ada",
         project_id="project-1",
         session_id="session-1",
     )
-    episode_sources = await reader.get_episode_source_refs(
+    episode_sources = await reader.get_project_episode_source_refs(
         "episode-1",
         user_name="ada",
         project_id="project-1",
-        session_id="session-1",
     )
 
-    assert answer is not None
-    assert [source.source_kind for source in answer.sources_consulted] == [
+    assert [source.source_kind for source in message_sources] == [
         "pdf_document",
         "text_document",
         "text_document",
@@ -1046,7 +1037,7 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
         "web_page",
         "web_pdf",
     ]
-    assert [source.source_status for source in answer.sources_consulted[-4:]] == [
+    assert [source.source_status for source in message_sources[-4:]] == [
         "search_result_snippet",
         "search_result_snippet",
         "available",
@@ -1062,11 +1053,10 @@ async def test_real_postgres_exposes_all_source_families_on_answer_and_episode(
         "SELECT count(*) AS count FROM public.message_source_refs"
     ) == {"count": 0}
     assert (
-        await reader.get_episode_source_refs(
+        await reader.get_project_episode_source_refs(
             "episode-1",
             user_name="ada",
             project_id="project-1",
-            session_id="session-1",
         )
         == []
     )

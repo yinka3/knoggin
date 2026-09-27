@@ -20,7 +20,6 @@ from common.schema.semantic_window import (
     SemanticWindowStage,
 )
 from common.schema.source.references import (
-    AssistantMessageWithSources,
     SourceConsulted,
     SourceReference,
     SourceReferenceCandidate,
@@ -579,25 +578,16 @@ class KnowledgeStore:
                 cur=cur,
             )
             if existing is not None:
-                await cur.execute(
-                    """
-                    SELECT source_ref_id
-                    FROM public.message_source_refs
-                    WHERE project_id = %s
-                      AND session_id = %s
-                      AND message_id = %s
-                    ORDER BY created_at ASC, result_position ASC, source_ref_id ASC
-                    """,
-                    (
-                        message["project_id"],
-                        message["session_id"],
-                        existing.assistant_message_id,
-                    ),
+                source_ref_ids = await self._source_reference_reader.get_message_source_ref_ids(
+                    existing.assistant_message_id,
+                    user_name=message["user_name"],
+                    project_id=message["project_id"],
+                    session_id=message["session_id"],
+                    cursor=cur,
                 )
-                rows = await cur.fetchall()
                 return (
                     int(existing.assistant_message_id),
-                    [str(row["source_ref_id"]) for row in rows],
+                    source_ref_ids,
                     False,
                 )
 
@@ -757,35 +747,7 @@ class KnowledgeStore:
             session_id=session_id,
         )
 
-    async def get_assistant_message_with_sources(
-        self,
-        message_id: int,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> Optional[AssistantMessageWithSources]:
-        return await self._source_reference_reader.get_assistant_message_with_sources(
-            message_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
 
-    async def get_episode_source_refs(
-        self,
-        episode_id: str,
-        *,
-        user_name: str,
-        project_id: str,
-        session_id: str,
-    ) -> List[SourceConsulted]:
-        return await self._source_reference_reader.get_episode_source_refs(
-            episode_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=session_id,
-        )
 
     async def allocate_entity_id(self) -> int:
         return await self._id_allocator.allocate_entity_id()

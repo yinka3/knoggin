@@ -390,14 +390,13 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     if expected_source is None:
         assert source_events == []
         assert response.result.source_ref_ids == ()
-        answer = await store.get_assistant_message_with_sources(
+        sources = await store.get_message_source_refs(
             response.result.assistant_message_id,
             user_name=scope["user_name"],
             project_id=scope["project_id"],
             session_id=scope["session_id"],
         )
-        assert answer is not None
-        assert answer.sources_consulted == ()
+        assert sources == []
         return
 
     assert len(source_events) == 1
@@ -407,15 +406,14 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
     assert source_events[0].source.locator.model_dump() == expected_source["locator"]
 
     assert len(response.result.source_ref_ids) == 1
-    answer = await store.get_assistant_message_with_sources(
+    sources = await store.get_message_source_refs(
         response.result.assistant_message_id,
         user_name=scope["user_name"],
         project_id=scope["project_id"],
         session_id=scope["session_id"],
     )
-    assert answer is not None
-    assert len(answer.sources_consulted) == 1
-    assert answer.sources_consulted[0].source_status == "available"
+    assert len(sources) == 1
+    assert sources[0].source_status == "available"
     assert (
-        answer.sources_consulted[0].locator.model_dump() == expected_source["locator"]
+        sources[0].locator.model_dump() == expected_source["locator"]
     )
