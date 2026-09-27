@@ -62,37 +62,6 @@ def card_attachments():
     ]
 
 
-@pytest.mark.storage
-@pytest.mark.no_network
-async def test_merge_evidence_selects_episode_session_before_serializing_it():
-    client = RecordingPostgresClient(
-        fetch_all_results=[
-            [],
-            [
-                {
-                    "entity_id": 2,
-                    "episode_id": "episode-1",
-                    "session_id": "session-1",
-                    "summary": "Ada chose the episodic-memory approach.",
-                }
-            ],
-            [],
-        ]
-    )
-
-    evidence = await EpisodeReader(client).get_merge_evidence_for_entities(
-        [2], project_id="project-1"
-    )
-
-    assert evidence[2] == [
-        {
-            "kind": "episode",
-            "episode_id": "episode-1",
-            "text": "Ada chose the episodic-memory approach.",
-        }
-    ]
-    _, query, _ = client.calls[1]
-    assert "e.session_id" not in query
 
 
 @pytest.mark.storage

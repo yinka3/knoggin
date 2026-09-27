@@ -190,9 +190,6 @@ class KnowledgeStore:
             limits=limits,
         )
 
-    async def save_message_logs(self, messages: List[Dict]) -> bool:
-        return await self._message_writer.save_message_logs(messages)
-
     async def create_editable_user_message(
         self, message: Dict, *, edit_window_seconds: int
     ) -> MessageAcceptance:
@@ -988,33 +985,11 @@ class KnowledgeStore:
             visible_project_ids=visible_project_ids,
         )
 
-    async def get_merge_evidence_for_entities(
-        self,
-        entity_ids: List[int],
-        *,
-        project_id: str,
-        evidence_limit: int = 4,
-        source_message_limit: int = 2,
-    ) -> Dict[int, List[Dict]]:
-        return await self._episode_reader.get_merge_evidence_for_entities(
-            entity_ids,
-            project_id=project_id,
-            evidence_limit=evidence_limit,
-            source_message_limit=source_message_limit,
-        )
-
     async def ensure_identity_entity(
         self, user_name: str, aliases: Optional[List[str]] = None
     ) -> Dict:
         return await self._graph_writer.ensure_identity_entity(user_name, aliases)
 
-
-    async def update_entity_aliases(
-        self, alias_updates: Dict[int, List[str]], *, project_id: str
-    ) -> None:
-        return await self._graph_writer.update_entity_aliases(
-            alias_updates, project_id=project_id
-        )
 
     async def preview_historical_reclassification(
         self,
