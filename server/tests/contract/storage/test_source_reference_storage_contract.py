@@ -533,6 +533,20 @@ async def test_episode_reader_traverses_only_episode_message_attachments():
 
 @pytest.mark.storage
 @pytest.mark.no_network
+@pytest.mark.parametrize("field", ["episode_id", "user_name", "project_id"])
+async def test_project_episode_sources_reject_blank_scope_before_reading(field):
+    client = RecordingPostgresClient()
+    scope = {"episode_id": "episode-1", "user_name": "ada", "project_id": "project-1"}
+    scope[field] = " "
+
+    with pytest.raises(ValueError, match=field):
+        await SourceReferenceReader(client).get_project_episode_source_refs(**scope)
+
+    assert client.calls == []
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
 async def test_reader_returns_sources_for_one_owned_message():
     candidate = document_candidate()
     client = RecordingPostgresClient(
@@ -949,7 +963,9 @@ async def test_real_postgres_marks_replaced_document_provenance_historical(
         snapshot_id=replacement_snapshot_id,
         content_hash="a" * 64,
     )
-    references = await SourceReferenceWriter(real_postgres_client).write_for_assistant_message(
+    references = await SourceReferenceWriter(
+        real_postgres_client
+    ).write_for_assistant_message(
         101,
         [document],
         user_name="ada",
