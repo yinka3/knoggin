@@ -58,6 +58,69 @@ async def test_create_session_requires_project_id_without_side_effects(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+@pytest.mark.parametrize("operation", ["deactivate", "shutdown"])
+async def test_failed_session_shutdown_retains_runtime_and_lease_for_retry(
+    session_manager, operation
+):
+    manager, _, projects, _ = session_manager
+    context = await manager.create_session(project_id="project-1")
+    attempts = 0
+
+    async def shutdown():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("cleanup failed")
+
+    context.shutdown = shutdown
+
+    async def stop():
+        if operation == "shutdown":
+            await manager.shutdown()
+        else:
+            await manager.deactivate_runtime_session(context.session_id)
+
+    with pytest.raises(RuntimeError):
+        await stop()
+    assert manager._active_sessions[context.session_id] is context
+    assert projects.release_calls == []
+    with pytest.raises(RuntimeError):
+        await manager.get_or_resume_session(context.session_id)
+    await stop()
+    assert context.session_id not in manager._active_sessions
+    assert projects.release_calls == [("project-1", context.session_id)]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_cancelled_create_finishes_bootstrap_and_releases_its_lease(
+    session_manager, monkeypatch
+):
+    manager, resources, projects, factory = session_manager
+    entered, finish = asyncio.Event(), asyncio.Event()
+    original = factory.create
+
+    async def delayed(*args, **kwargs):
+        entered.set()
+        await finish.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(factory, "create", delayed)
+    task = asyncio.create_task(manager.create_session(project_id="project-1"))
+    await entered.wait()
+    task.cancel()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    session_id = projects.acquire_calls[0][1]
+    assert projects.release_calls == [("project-1", session_id)]
+    assert session_id not in resources.postgres.sessions
+    assert manager._active_sessions == {}
+    assert manager._bootstrap_cleanup == {}
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
 async def test_create_session_persists_metadata_then_bootstraps_runtime(
     session_manager,
 ):
@@ -290,7 +353,9 @@ async def test_delete_returns_after_durable_delete(
     async def delete_session(**kwargs):
         calls.append(kwargs)
 
-    monkeypatch.setattr(manager._session_deletion_writer, "delete_session", delete_session)
+    monkeypatch.setattr(
+        manager._session_deletion_writer, "delete_session", delete_session
+    )
     assert await manager.delete_session("session-1") is None
 
     assert calls == [{"user_name": "ada", "session_id": "session-1"}]

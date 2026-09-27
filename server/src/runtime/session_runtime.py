@@ -145,6 +145,7 @@ class SessionRuntime:
         self._active_request_fingerprint: str | None = None
         self._agent_runs_closed = False
         self._closed = False
+        self._shutdown_event_emitted = False
 
     @property
     def current_config(self) -> RootConfig:
@@ -962,7 +963,9 @@ class SessionRuntime:
             except Exception:
                 # The committed terminal result remains canonical; the project's
                 # periodic durable scan can recover this missed wake.
-                logger.exception("Failed to signal semantic work for {}", self.session_id)
+                logger.exception(
+                    "Failed to signal semantic work for {}", self.session_id
+                )
 
     async def get_conversation_context(
         self, num_turns: int, up_to_msg_id: Optional[int] = None
@@ -1011,8 +1014,8 @@ class SessionRuntime:
                 )
                 failures.append(exc)
 
-            unsubscribers, self.config_unsubscribers = self.config_unsubscribers, []
-            for unsubscribe in unsubscribers:
+            failed_unsubscribers = []
+            for unsubscribe in self.config_unsubscribers:
                 try:
                     unsubscribe()
                 except Exception as exc:
@@ -1020,17 +1023,21 @@ class SessionRuntime:
                         "Session configuration cleanup failed for {}", self.session_id
                     )
                     failures.append(exc)
+                    failed_unsubscribers.append(unsubscribe)
+            self.config_unsubscribers = failed_unsubscribers
 
-            self._closed = True
-            try:
-                await emit(self.session_id, "system", "session_shutdown", {})
-            except Exception as exc:
-                logger.exception(
-                    "Failed to emit shutdown event for session {}", self.session_id
-                )
-                failures.append(exc)
+            if not self._shutdown_event_emitted:
+                try:
+                    await emit(self.session_id, "system", "session_shutdown", {})
+                    self._shutdown_event_emitted = True
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to emit shutdown event for session {}", self.session_id
+                    )
+                    failures.append(exc)
 
             if failures:
                 raise RuntimeError(
                     f"SessionRuntime shutdown failed for {self.session_id}"
                 ) from failures[0]
+            self._closed = True

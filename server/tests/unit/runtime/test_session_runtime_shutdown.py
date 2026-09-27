@@ -62,7 +62,9 @@ async def test_session_shutdown_cancels_agent_work_before_unsubscribers(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_shutdown_runs_remaining_cleanup_despite_unsubscribe_failure(monkeypatch):
+async def test_session_shutdown_runs_remaining_cleanup_despite_unsubscribe_failure(
+    monkeypatch,
+):
     calls = []
 
     async def record_emit(*_args, **_kwargs):
@@ -88,7 +90,9 @@ async def test_session_shutdown_runs_remaining_cleanup_despite_unsubscribe_failu
         await session.shutdown()
 
     assert calls == ["unsubscribe:second", "emit"]
-    assert session._closed is True
+    assert session._closed is False
+    assert session._agent_runs_closed is True
+    assert len(session.config_unsubscribers) == 1
 
 
 @pytest.mark.runtime
