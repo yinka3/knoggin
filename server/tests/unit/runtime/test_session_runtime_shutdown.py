@@ -10,7 +10,7 @@ from tests.fixtures.fakes import FakeResources
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_shutdown_cancels_agent_work_before_unsubscribers(
+async def test_session_shutdown_cancels_agent_work_before_event(
     monkeypatch,
 ):
     calls = []
@@ -36,10 +36,6 @@ async def test_session_shutdown_cancels_agent_work_before_unsubscribers(
         agent_id=None,
         enabled_tools=None,
     )
-    session.config_unsubscribers = [
-        lambda: calls.append("unsubscribe:first"),
-        lambda: calls.append("unsubscribe:second"),
-    ]
     monkeypatch.setattr("runtime.session_runtime.emit", record_emit)
 
     active_task = asyncio.create_task(active_agent_work())
@@ -51,8 +47,6 @@ async def test_session_shutdown_cancels_agent_work_before_unsubscribers(
     assert active_task.cancelled()
     assert calls == [
         "agent_cancelled",
-        "unsubscribe:first",
-        "unsubscribe:second",
         "emit",
     ]
     assert session._closed is True
@@ -62,7 +56,7 @@ async def test_session_shutdown_cancels_agent_work_before_unsubscribers(
 
 @pytest.mark.runtime
 @pytest.mark.no_network
-async def test_session_shutdown_runs_remaining_cleanup_despite_unsubscribe_failure(
+async def test_session_shutdown_retries_failed_cancellation_without_repeating_event(
     monkeypatch,
 ):
     calls = []
@@ -80,19 +74,23 @@ async def test_session_shutdown_runs_remaining_cleanup_despite_unsubscribe_failu
         agent_id=None,
         enabled_tools=None,
     )
-    session.config_unsubscribers = [
-        lambda: (_ for _ in ()).throw(RuntimeError("unsubscribe failed")),
-        lambda: calls.append("unsubscribe:second"),
-    ]
+    async def failing_cancel():
+        calls.append("cancel")
+        if calls.count("cancel") == 1:
+            raise RuntimeError("cancellation failed")
+
+    monkeypatch.setattr(session, "cancel_active_agent_run", failing_cancel)
     monkeypatch.setattr("runtime.session_runtime.emit", record_emit)
 
     with pytest.raises(RuntimeError, match="SessionRuntime shutdown failed"):
         await session.shutdown()
 
-    assert calls == ["unsubscribe:second", "emit"]
+    assert calls == ["cancel", "emit"]
     assert session._closed is False
     assert session._agent_runs_closed is True
-    assert len(session.config_unsubscribers) == 1
+    await session.shutdown()
+    assert calls == ["cancel", "emit", "cancel"]
+    assert session._closed is True
 
 
 @pytest.mark.runtime

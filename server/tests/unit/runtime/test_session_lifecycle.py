@@ -5,6 +5,7 @@ import pytest
 
 from common.schema.document import dump_document_focus
 from core.session.session_manager import SessionManager
+from tests.fixtures.factories import make_project_state
 from tests.fixtures.fakes import FakeProjectManager, FakeResources, FakeSession
 
 
@@ -28,6 +29,19 @@ class RecordingSessionRuntimeFactory:
         return context
 
 
+async def test_manager_builds_runtime_with_shared_document_service():
+    resources = FakeResources()
+    manager = SessionManager(resources, "ada", FakeProjectManager())
+    project = make_project_state()
+    settings = dict(session_id="session-1", model=None, agent_id=None, enabled_tools=None)
+    with pytest.raises(RuntimeError, match="semantic job"):
+        await manager._build_runtime(project, **settings)
+    project.project_semantic_processor = object()
+    runtime = await manager._build_runtime(project, **settings)
+    assert runtime.document_service is project.document_service
+    assert runtime.project is project
+
+
 @pytest.fixture
 def session_manager(monkeypatch):
     resources = FakeResources()
@@ -38,7 +52,7 @@ def session_manager(monkeypatch):
         project_manager=project_manager,
     )
     factory = RecordingSessionRuntimeFactory()
-    monkeypatch.setattr(manager, "_session_runtime_factory", lambda: factory)
+    monkeypatch.setattr(manager, "_build_runtime", factory.create)
     return manager, resources, project_manager, factory
 
 
@@ -105,7 +119,7 @@ async def test_cancelled_create_finishes_bootstrap_and_releases_its_lease(
         await finish.wait()
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(factory, "create", delayed)
+    monkeypatch.setattr(manager, "_build_runtime", delayed)
     task = asyncio.create_task(manager.create_session(project_id="project-1"))
     await entered.wait()
     task.cancel()
@@ -152,7 +166,7 @@ async def test_create_failure_hard_deletes_durable_row_and_releases_exact_lease(
 ):
     manager, resources, project_manager, _ = session_manager
     factory = RecordingSessionRuntimeFactory(failure=RuntimeError("startup failed"))
-    monkeypatch.setattr(manager, "_session_runtime_factory", lambda: factory)
+    monkeypatch.setattr(manager, "_build_runtime", factory.create)
 
     with pytest.raises(RuntimeError, match="startup failed"):
         await manager.create_session(project_id="project-1")
@@ -262,7 +276,7 @@ async def test_resume_failure_releases_the_exact_acquired_lease(
         "status": "open",
     }
     factory = RecordingSessionRuntimeFactory(failure=RuntimeError("resume failed"))
-    monkeypatch.setattr(manager, "_session_runtime_factory", lambda: factory)
+    monkeypatch.setattr(manager, "_build_runtime", factory.create)
 
     with pytest.raises(RuntimeError, match="resume failed"):
         await manager.get_or_resume_session("session-1")
@@ -311,7 +325,7 @@ async def test_shutdown_cannot_publish_a_runtime_after_a_delayed_resume(
             return await super().create(project_state, **kwargs)
 
     factory = DelayedFactory()
-    monkeypatch.setattr(manager, "_session_runtime_factory", lambda: factory)
+    monkeypatch.setattr(manager, "_build_runtime", factory.create)
 
     resume = asyncio.create_task(manager.get_or_resume_session("session-1"))
     await bootstrapping.wait()

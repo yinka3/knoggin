@@ -111,7 +111,7 @@ class SessionRuntime:
     state and dynamic configuration. Semantic processing is owned solely by the
     project runtime's durable semantic-window job.
 
-    Initialization and wiring logic is encapsulated in SessionRuntimeFactory to decouple
+    Initialization and wiring logic is owned by SessionManager to decouple
     the construction of these services from the state container itself.
     """
 
@@ -140,13 +140,12 @@ class SessionRuntime:
         self.agent_id = agent_id
         self.enabled_tools = list(enabled_tools) if enabled_tools is not None else None
         self.document_focus = document_focus
-        self.document_service: Optional[DocumentService] = None
+        self.document_service: Optional[DocumentService] = getattr(project, "document_service", None)
 
         self.session_id = session_id
         self.project_id = project_id
         self.project = project
 
-        self.config_unsubscribers: List = []
         self._agent_run_lock = asyncio.Lock()
         self._shutdown_lock = asyncio.Lock()
         self._agent_run_reserved = False
@@ -188,40 +187,6 @@ class SessionRuntime:
         except asyncio.CancelledError:
             pass
         return True
-
-    async def run_agent_stream(
-        self,
-        message: Message,
-        *,
-        orchestrator: Any = None,
-        user_timezone: Optional[str] = None,
-        model: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        enabled_tools: Optional[List[str]] = None,
-        document_focus: Optional[DocumentFocus] = None,
-        pasted_text_spans: Optional[List[Dict]] = None,
-        idempotency_key: Optional[str] = None,
-        research_mode: ResearchMode = "normal",
-    ) -> AsyncGenerator[AgentExecutionEvent, None]:
-        """Run one admitted canonical user-message-to-answer workflow."""
-
-        stream = await self.open_agent_run_stream(
-            message,
-            orchestrator=orchestrator,
-            user_timezone=user_timezone,
-            model=model,
-            agent_id=agent_id,
-            enabled_tools=enabled_tools,
-            document_focus=document_focus,
-            pasted_text_spans=pasted_text_spans,
-            idempotency_key=idempotency_key,
-            research_mode=research_mode,
-        )
-        try:
-            async for event in stream:
-                yield event
-        finally:
-            await stream.aclose()
 
     async def open_agent_run_stream(
         self,
@@ -409,12 +374,12 @@ class SessionRuntime:
             raise RuntimeError("Agent stream must run in an asyncio task")
 
         async with self._agent_run_lock:
-            if self._agent_runs_closed:
-                self._agent_run_reserved = False
-                raise RuntimeError("Session is shutting down")
+            shutting_down = self._agent_runs_closed
             self._active_agent_task = task
 
         try:
+            if shutting_down:
+                raise asyncio.CancelledError
             history = await self.get_conversation_context(
                 run_settings.config.developer_settings.limits.conversation_context_turns,
                 up_to_msg_id=accepted.id - 1,
@@ -896,8 +861,6 @@ class SessionRuntime:
     ) -> tuple[int, list[str]]:
         """Atomically persist an assistant response and close its user exchange."""
         max_retries = 3
-        if self.project is None:
-            raise RuntimeError("Session project runtime is unavailable")
         captured_readable_project_ids = list(
             readable_project_ids
             if readable_project_ids is not None
@@ -1048,18 +1011,6 @@ class SessionRuntime:
                     "Failed to cancel agent run for session {}", self.session_id
                 )
                 failures.append(exc)
-
-            failed_unsubscribers = []
-            for unsubscribe in self.config_unsubscribers:
-                try:
-                    unsubscribe()
-                except Exception as exc:
-                    logger.exception(
-                        "Session configuration cleanup failed for {}", self.session_id
-                    )
-                    failures.append(exc)
-                    failed_unsubscribers.append(unsubscribe)
-            self.config_unsubscribers = failed_unsubscribers
 
             if not self._shutdown_event_emitted:
                 try:

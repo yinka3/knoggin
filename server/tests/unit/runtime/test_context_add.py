@@ -74,10 +74,10 @@ class _FakeTurnOrchestrator:
 async def _collect_turn(ctx, message, orchestrator):
     return [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             message,
             orchestrator=orchestrator,
-        )
+        ))
     ]
 
 
@@ -602,10 +602,10 @@ async def test_run_agent_stream_persists_the_final_answer_and_sources_before_res
     orchestrator = _FakeTurnOrchestrator(handler)
     events = []
 
-    async for event in ctx.run_agent_stream(
+    async for event in (await ctx.open_agent_run_stream(
         Message(content="What did we decide?"),
         orchestrator=orchestrator,
-    ):
+    )):
         if event["event"] == "response":
             assert persisted is True
         events.append(event)
@@ -769,10 +769,10 @@ async def test_run_agent_stream_persists_clarification_before_exposing_it(contex
 
     resources.knowledge_store.finalize_assistant_exchange = persist_assistant
     events = []
-    async for event in ctx.run_agent_stream(
+    async for event in (await ctx.open_agent_run_stream(
         Message(content="Help me choose a profile"),
         orchestrator=_FakeTurnOrchestrator(handler),
-    ):
+    )):
         assert persisted is True
         events.append(event)
 
@@ -879,11 +879,11 @@ async def test_run_agent_stream_forwards_selected_research_mode(context):
     orchestrator = _FakeTurnOrchestrator(handler)
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Investigate this"),
             orchestrator=orchestrator,
             research_mode="deep_research",
-        )
+        ))
     ]
 
     assert [event["event"] for event in events] == ["response"]
@@ -957,19 +957,19 @@ async def test_duplicate_idempotency_key_replays_the_canonical_response(context)
     resources.knowledge_store.get_user_agent_exchange = replay_exchange
     first = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Please summarize this"),
             orchestrator=_FakeTurnOrchestrator(handler),
             idempotency_key="summary-1",
-        )
+        ))
     ]
     second = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Please summarize this"),
             orchestrator=_FakeTurnOrchestrator(handler),
             idempotency_key="summary-1",
-        )
+        ))
     ]
 
     assert first[-1]["event"] == "response"
@@ -1094,9 +1094,9 @@ async def test_failed_request_replay_preserves_safe_terminal_error(context):
     resources.knowledge_store.get_user_agent_exchange = replay_exchange
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Use the model"), idempotency_key="budget-1"
-        )
+        ))
     ]
 
     assert events[0]["data"]["code"] == "llm_budget_exhausted"
@@ -1120,10 +1120,10 @@ async def test_terminal_error_is_closed_with_safe_replay_fields(context):
 
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Use the model"),
             orchestrator=_FakeTurnOrchestrator(handler),
-        )
+        ))
     ]
 
     assert events[0]["event"] == "error"
@@ -1162,10 +1162,10 @@ async def test_duplicate_idempotency_key_replays_the_canonical_clarification(con
 
     events = [
         event
-        async for event in ctx.run_agent_stream(
+        async for event in (await ctx.open_agent_run_stream(
             Message(content="Help me choose a profile"),
             idempotency_key="clarification-1",
-        )
+        ))
     ]
 
     assert events == [
@@ -1206,11 +1206,11 @@ async def test_same_active_idempotency_key_is_in_progress_and_mismatch_conflicts
     async def run_first():
         return [
             event
-            async for event in ctx.run_agent_stream(
+            async for event in (await ctx.open_agent_run_stream(
                 Message(content="original request"),
                 orchestrator=orchestrator,
                 idempotency_key="same-request",
-            )
+            ))
         ]
 
     first = asyncio.create_task(run_first())

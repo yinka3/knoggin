@@ -19,7 +19,6 @@ from common.utils.time_utils import get_now_iso
 from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.project.project_manager import ProjectManager
 from runtime.session_runtime import SessionRuntime
-from runtime.session_runtime_factory import SessionRuntimeFactory
 
 
 @dataclass
@@ -66,12 +65,6 @@ class SessionManager:
             raise RuntimeError("SessionManager health service is already attached")
         self._health_service = health_service
 
-    def attach_agent_orchestrator(self, agent_orchestrator: Any) -> None:
-        """Attach the application-owned agent service before sessions are exposed."""
-        if self._agent_orchestrator is not None:
-            raise RuntimeError("SessionManager agent orchestrator is already attached")
-        self._agent_orchestrator = agent_orchestrator
-
     def get_runtime_session(self, session_id: str) -> SessionRuntime | None:
         """Return one active session for read-only runtime inspection."""
 
@@ -109,13 +102,20 @@ class SessionManager:
             logger.error(f"Failed to list sessions (check Postgres connection): {e}")
             raise
 
-    def _session_runtime_factory(self) -> SessionRuntimeFactory:
-        return SessionRuntimeFactory(
+    async def _build_runtime(self, project_state, **settings) -> SessionRuntime:
+        if project_state.project_semantic_processor is None:
+            raise RuntimeError("project semantic job is not registered")
+        if project_state.document_service is None:
+            raise RuntimeError("project document service is unavailable")
+        return SessionRuntime(
             self.user_name,
             self.resources,
+            project=project_state,
+            project_id=project_state.project_id,
             health_service=self._health_service,
             agent_orchestrator=self._agent_orchestrator,
             config_manager=self._config_manager,
+            **settings,
         )
 
     async def _hard_delete_failed_session(self, session_id: str) -> None:
@@ -232,7 +232,7 @@ class SessionManager:
                 session_id,
             )
             project_leased = True
-            context = await self._session_runtime_factory().create(
+            context = await self._build_runtime(
                 project_state,
                 session_id=session_id,
                 model=model,
@@ -328,7 +328,7 @@ class SessionManager:
                 session_id,
             )
             project_leased = True
-            context = await self._session_runtime_factory().create(
+            context = await self._build_runtime(
                 project_state,
                 session_id=session_id,
                 model=model,
@@ -433,7 +433,7 @@ class SessionManager:
         """
         user = self.user_name
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._closed or self._closing:
                 raise RuntimeError("SessionManager is shutting down")
             await self._deactivate_runtime_session_locked(session_id)
             await self._session_deletion_writer.delete_session(
@@ -472,7 +472,7 @@ class SessionManager:
             )
         )
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._closed or self._closing:
                 raise RuntimeError("SessionManager is shutting down")
             updated = await self.pg.execute(
                 stmt,
@@ -546,7 +546,10 @@ class SessionManager:
         if behavior not in {"prefer", "restrict"}:
             raise ValueError("document focus behavior must be 'prefer' or 'restrict'")
         async with self._lifecycle_lock:
-            context = await self._get_or_resume_session_locked(session_id)
+            context = await self._finish_lifecycle(
+                self._get_or_resume_session_locked(session_id),
+                cleanup_on_cancel=session_id not in self._active_sessions,
+            )
             if context is None:
                 raise FileNotFoundError("Session not found")
             if context.document_service is None:
@@ -591,6 +594,8 @@ class SessionManager:
         """
         # We simulate returning by checking row count, but psycopg returns rowcount
         async with self._lifecycle_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("SessionManager is shutting down")
             rowcount = await self.pg.execute(
                 query,
                 {"user_name": self.user_name, "session_id": session_id},
