@@ -423,26 +423,13 @@ def _canonical_search_url(value) -> Optional[str]:
     )
 
 
-class SearchTools:
-    search_cfg: Dict
+class DocumentSearchTools:
+    """Project-document discovery and provenance adapters."""
+
     document_service: Optional[DocumentService]
     document_focus: Optional[Dict] = None
     user_name: str
     session_id: str
-
-    def _get_http_client(self) -> httpx.AsyncClient:
-        client = getattr(self, "_http_client", None)
-        if client is None:
-            client = httpx.AsyncClient(timeout=10.0)
-            self._http_client = client
-        return client
-
-    def _get_web_page_client(self) -> httpx.AsyncClient:
-        client = getattr(self, "_web_page_client", None)
-        if client is None:
-            client = create_web_page_http_client()
-            self._web_page_client = client
-        return client
 
     _CONTENT_HASH_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -995,6 +982,25 @@ class SearchTools:
 
         return [self._with_document_source_context(result) for result in results]
 
+class WebTools:
+    """External web discovery, safe fetching, and run-local snapshots."""
+
+    search_cfg: Dict
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        client = getattr(self, "_http_client", None)
+        if client is None:
+            client = httpx.AsyncClient(timeout=10.0)
+            self._http_client = client
+        return client
+
+    def _get_web_page_client(self) -> httpx.AsyncClient:
+        client = getattr(self, "_web_page_client", None)
+        if client is None:
+            client = create_web_page_http_client()
+            self._web_page_client = client
+        return client
+
     async def search_web(
         self, query: str, limit: int = 5, freshness: str = None
     ) -> List[Dict]:
@@ -1192,7 +1198,7 @@ class SearchTools:
             )
         end_line = min(total_lines, start_line + max_lines - 1)
         excerpt = "\n".join(lines[start_line - 1 : end_line])
-        metadata = SearchTools._web_pdf_metadata(snapshot)
+        metadata = WebTools._web_pdf_metadata(snapshot)
         metadata.update(
             {
                 "page_start_line": start_line,
@@ -1304,14 +1310,14 @@ class SearchTools:
 
     @staticmethod
     def _web_page_metadata(snapshot: _WebPageSnapshot) -> Dict:
-        metadata = SearchTools._web_read_metadata(snapshot)
+        metadata = WebTools._web_read_metadata(snapshot)
         if snapshot.html_canonical_url:
             metadata["html_canonical_url"] = snapshot.html_canonical_url
         return metadata
 
     @staticmethod
     def _web_pdf_metadata(snapshot: _WebPdfSnapshot) -> Dict:
-        return SearchTools._web_read_metadata(snapshot)
+        return WebTools._web_read_metadata(snapshot)
 
     @staticmethod
     def _web_read_metadata(snapshot: _WebPageSnapshot | _WebPdfSnapshot) -> Dict:
@@ -1419,7 +1425,7 @@ class SearchTools:
             extracted_characters = 0
             extracted_lines = 0
             for page in reader.pages:
-                text = SearchTools._normalize_web_text(page.extract_text() or "")
+                text = WebTools._normalize_web_text(page.extract_text() or "")
                 if text:
                     extracted_characters += len(text)
                     extracted_lines += len(text.splitlines())
@@ -1485,7 +1491,7 @@ class SearchTools:
             )
             for tag in soup.find_all(_WEB_PAGE_REMOVE_TAGS):
                 tag.decompose()
-            html_canonical_url = SearchTools._html_canonical_url(soup, final_url)
+            html_canonical_url = WebTools._html_canonical_url(soup, final_url)
             content_root = soup.find("main") or soup.find("article") or soup.body or soup
             extracted = MarkItDown().convert_stream(
                 BytesIO(str(content_root).encode("utf-8")),
@@ -1493,7 +1499,7 @@ class SearchTools:
                 url=final_url,
             ).text_content
 
-        canonical_text = SearchTools._normalize_web_text(extracted)
+        canonical_text = WebTools._normalize_web_text(extracted)
         if not canonical_text:
             raise _web_page_error("webpage did not contain readable text")
         return title, canonical_text, html_canonical_url
@@ -1797,3 +1803,7 @@ class SearchTools:
                     "snippet": f"News search failed: {e}",
                 }
             ]
+
+
+class SearchTools(DocumentSearchTools, WebTools):
+    """Combined tool surface used by the agent executor."""
