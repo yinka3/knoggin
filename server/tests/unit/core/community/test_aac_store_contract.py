@@ -151,6 +151,7 @@ async def test_aac_store_exposes_history_and_all_insights_to_the_owning_user():
         "discussion_id": "discussion-1",
         "user_name": "ada",
         "limit": 100,
+        "after_sequence": 0,
     }
     insight_query, insight_params = postgres.read_calls[2]
     assert "visibility = 'shared'" not in insight_query
@@ -159,6 +160,24 @@ async def test_aac_store_exposes_history_and_all_insights_to_the_owning_user():
     assert timeline[0]["timeline_id"] == "timeline-1"
     assert insights[0]["visibility"] == "private"
     assert votes[0]["voter_agent_id"] == "agent-2"
+
+
+async def test_timeline_cursor_is_scoped_and_uses_sequence_order():
+    postgres = RecordingPostgres()
+    await AACStore(postgres).list_timeline(discussion_id="d", user_name="ada", limit=2, after_sequence=17)
+    query, params = postgres.read_calls[0]
+    assert "timeline.event_sequence > %(after_sequence)s" in query
+    assert "ORDER BY timeline.event_sequence" in query
+    assert "discussion.user_name = %(user_name)s" in query
+    assert params["after_sequence"] == 17
+
+
+@pytest.mark.parametrize("cursor", [-1, True, "1", 1.5])
+async def test_timeline_rejects_invalid_cursor_before_database_read(cursor):
+    postgres = RecordingPostgres()
+    with pytest.raises(ValueError, match="cursor"):
+        await AACStore(postgres).list_timeline(discussion_id="d", user_name="ada", after_sequence=cursor)
+    assert not postgres.read_calls
 
 
 @pytest.mark.storage

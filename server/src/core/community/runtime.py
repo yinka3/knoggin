@@ -350,6 +350,7 @@ class AACRuntime:
         discussion_id: str,
         *,
         limit: int = 100,
+        after_sequence: int = 0,
     ) -> list[dict[str, Any]]:
         """Expose one user-owned AAC transcript and its system events."""
 
@@ -357,6 +358,7 @@ class AACRuntime:
             discussion_id=discussion_id,
             user_name=self.user_name,
             limit=limit,
+            after_sequence=after_sequence,
         )
 
     async def list_insights(

@@ -259,26 +259,36 @@ class AACStore:
         discussion_id: str,
         user_name: str,
         limit: int = 100,
+        after_sequence: int = 0,
     ) -> list[dict[str, Any]]:
-        """Return one user's AAC transcript and lightweight system events."""
+        """Read oldest-first; pass the last event_sequence to fetch the next page.
+
+        Sequence gaps are valid, including those consumed by idempotent retries.
+        This is insertion allocation order, not concurrent transaction commit order.
+        """
+
+        if isinstance(after_sequence, bool) or not isinstance(after_sequence, int) or after_sequence < 0:
+            raise ValueError("AAC timeline cursor must be a non-negative integer")
 
         return await self._read(
             "list_aac_timeline",
             """
             SELECT timeline.timeline_id, timeline.kind, timeline.agent_id,
-                   timeline.content, timeline.created_at
+                   timeline.content, timeline.created_at, timeline.event_sequence
             FROM public.aac_timeline AS timeline
             JOIN public.aac_discussions AS discussion
               ON discussion.discussion_id = timeline.discussion_id
             WHERE timeline.discussion_id = %(discussion_id)s
               AND discussion.user_name = %(user_name)s
-            ORDER BY timeline.created_at, timeline.timeline_id
+              AND timeline.event_sequence > %(after_sequence)s
+            ORDER BY timeline.event_sequence
             LIMIT %(limit)s
             """,
             {
                 "discussion_id": self._text(discussion_id, "discussion_id"),
                 "user_name": self._text(user_name, "user_name"),
                 "limit": self._limit(limit),
+                "after_sequence": after_sequence,
             },
         )
 
