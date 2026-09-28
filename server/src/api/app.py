@@ -51,10 +51,13 @@ from common.schema.public import (
     RunResult,
     SavedWebLinkDeletedResponse,
     SavedWebLinkResponse,
+    SessionDeletedResponse,
+    SessionHistoryMessage,
     SessionResponse,
     SetDocumentFocusRequest,
     StartRunRequest,
     UpdateSavedWebLinkRequest,
+    UpdateSessionRequest,
     UploadDocumentRequest,
     public_error_status,
     sanitize_public_error,
@@ -68,8 +71,7 @@ class ApplicationPort(Protocol):
 
     Implementations may wrap the existing project/session managers and
     orchestrator, but the adapter does not require those internal classes.  A
-    port method may return the corresponding public model or a mapping/object
-    that can be projected to it.
+    port method returns canonical public fields, never arbitrary object aliases.
     """
 
     async def get_engine_health(self, *, user_name: str) -> HealthSnapshot: ...
@@ -98,7 +100,21 @@ class ApplicationPort(Protocol):
         *,
         user_name: str,
         request: CreateSessionRequest,
-    ) -> Any: ...
+    ) -> SessionResponse | Mapping[str, Any]: ...
+
+    async def list_sessions(self, *, user_name: str) -> list[SessionResponse]: ...
+
+    async def get_session_history(
+        self, *, user_name: str, session_id: str, limit: int = 100
+    ) -> list[SessionHistoryMessage]: ...
+
+    async def update_session(
+        self, *, user_name: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionResponse: ...
+
+    async def delete_session(
+        self, *, user_name: str, session_id: str
+    ) -> SessionDeletedResponse: ...
 
     async def get_document_focus(
         self,
@@ -483,6 +499,34 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         return _session_response(
             await _call(port.create_session, user_name=user_name, request=body),
         )
+
+    @app.get("/v1/sessions", response_model=list[SessionResponse])
+    async def list_sessions(user_name: str = Depends(current_user)):
+        return await port.list_sessions(user_name=user_name)
+
+    @app.get("/v1/sessions/{session_id}/history", response_model=list[SessionHistoryMessage])
+    async def get_session_history(
+        session_id: str = Path(min_length=1),
+        limit: int = Query(default=100, ge=1, le=1000),
+        user_name: str = Depends(current_user),
+    ):
+        return await port.get_session_history(
+            user_name=user_name, session_id=session_id, limit=limit
+        )
+
+    @app.patch("/v1/sessions/{session_id}", response_model=SessionResponse)
+    async def update_session(
+        body: UpdateSessionRequest,
+        session_id: str = Path(min_length=1),
+        user_name: str = Depends(current_user),
+    ):
+        return await port.update_session(user_name=user_name, session_id=session_id, request=body)
+
+    @app.delete("/v1/sessions/{session_id}", response_model=SessionDeletedResponse)
+    async def delete_session(
+        session_id: str = Path(min_length=1), user_name: str = Depends(current_user)
+    ):
+        return await port.delete_session(user_name=user_name, session_id=session_id)
 
     @app.get(
         "/v1/sessions/{session_id}/document-focus",

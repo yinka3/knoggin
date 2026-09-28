@@ -142,6 +142,28 @@ class SessionResponse(PublicModel):
     last_active_at: datetime | None = None
 
 
+class UpdateSessionRequest(PublicModel):
+    """Omitted fields are unchanged; null resets optional settings."""
+
+    model: str | None = Field(default=None, min_length=1)
+    agent_id: str | None = Field(default=None, min_length=1)
+    enabled_tools: list[str] | None = None
+
+    _normalise_tools = field_validator("enabled_tools")(_normalise_enabled_tools)
+
+
+class SessionHistoryMessage(PublicModel):
+    message_id: int = Field(ge=1)
+    role: Literal["user", "assistant", "system", "tool"]
+    content: str
+    timestamp: datetime
+
+
+class SessionDeletedResponse(PublicModel):
+    session_id: str = Field(min_length=1)
+    deleted: Literal[True] = True
+
+
 class UpdateAgentRequest(PublicModel):
     """Partial agent update with an explicit omitted/null distinction."""
 

@@ -49,12 +49,16 @@ from common.schema.public import (
     RunStartedEvent,
     SavedWebLinkDeletedResponse,
     SavedWebLinkResponse,
+    SessionDeletedResponse,
+    SessionHistoryMessage,
+    SessionResponse,
     SetDocumentFocusRequest,
     SourceAddedEvent,
     StartRunRequest,
     ToolCompletedEvent,
     ToolStartedEvent,
     UpdateSavedWebLinkRequest,
+    UpdateSessionRequest,
     UploadDocumentRequest,
     Usage,
     UsageUpdatedEvent,
@@ -179,6 +183,44 @@ class ApplicationRuntimePort:
             "agent_id": session.agent_id,
             "enabled_tools": session.enabled_tools,
         }
+
+    async def list_sessions(self, *, user_name: str) -> list[SessionResponse]:
+        self._require_user(user_name)
+        rows = await self.runtime.sessions.list_sessions()
+        return [project_public_model(SessionResponse, row) for row in rows.values()]
+
+    async def _session_metadata(self, *, user_name: str, session_id: str) -> SessionResponse:
+        # Durable metadata read only: do not resume a runtime or acquire a lease.
+        rows = await self.list_sessions(user_name=user_name)
+        for row in rows:
+            if row.session_id == session_id:
+                return row
+        raise NotFoundError("session")
+
+    async def get_session_history(
+        self, *, user_name: str, session_id: str, limit: int = 100
+    ) -> list[SessionHistoryMessage]:
+        if not 1 <= limit <= 1000:
+            raise ValueError("History limit must be between 1 and 1000")
+        await self._session_metadata(user_name=user_name, session_id=session_id)
+        rows = await self.runtime.sessions.get_session_history_readonly(session_id, limit=limit)
+        return [project_public_model(SessionHistoryMessage, row) for row in rows]
+
+    async def update_session(
+        self, *, user_name: str, session_id: str, request: UpdateSessionRequest
+    ) -> SessionResponse:
+        await self._session_metadata(user_name=user_name, session_id=session_id)
+        await self.runtime.sessions.update_session(
+            session_id, request.model_dump(exclude_unset=True)
+        )
+        return await self._session_metadata(user_name=user_name, session_id=session_id)
+
+    async def delete_session(
+        self, *, user_name: str, session_id: str
+    ) -> SessionDeletedResponse:
+        await self._session_metadata(user_name=user_name, session_id=session_id)
+        await self.runtime.sessions.delete_session(session_id)
+        return SessionDeletedResponse(session_id=session_id)
 
     async def _session(self, *, user_name: str, session_id: str):
         self._require_user(user_name)

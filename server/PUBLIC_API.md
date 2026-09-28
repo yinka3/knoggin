@@ -10,7 +10,8 @@ they are not a generic serialization path for arbitrary runtime objects.
 ## Existing capabilities
 
 - Health: overall and project resource, ingestion and background snapshots.
-- Projects and sessions: creation; session document-focus reads and changes.
+- Projects and sessions: creation; session listing, history, metadata updates,
+  deletion, and document-focus reads and changes.
 - Runs: nonstream results and owned SSE streams using the same event contract.
 - Documents: list, upload, metadata/content reads, reindex and deletion.
 - Saved web links: list, update and deletion; existing source promotion.
@@ -20,11 +21,23 @@ they are not a generic serialization path for arbitrary runtime objects.
 
 ## Deferred capabilities
 
-This cleanup does not add new endpoints. Session listing, history, updates and
-deletion; AAC triggering, stopping, participation and timeline/Insight browsing;
+The follow-up endpoint pass is now approved. Session endpoints are implemented;
+AAC triggering, stopping, participation and timeline/Insight browsing;
 global settings read/update/reload/application-status operations; and additional
-project listing/update/archive/delete routes remain deferred. Their internal
-methods stay available. Batch source admission is also deferred.
+project listing/update/archive/delete routes remain pending. Their internal
+methods stay available. Batch admission is approved for documents and web links
+and remains pending implementation.
+
+Session routes are `GET /v1/sessions`, `GET /v1/sessions/{session_id}/history`,
+`PATCH /v1/sessions/{session_id}` and `DELETE /v1/sessions/{session_id}`. Listing
+returns the user's open sessions. History returns the recent canonical window,
+oldest first, with `limit` between 1 and 1000 (default 100). Neither read resumes
+a runtime. Missing/non-open sessions return 404 for history/update/delete.
+Deletion tombstones the session through its manager; it is not document deletion.
+PATCH accepts only model, agent_id and enabled_tools. Omitted fields stay unchanged;
+null restores inherited settings and an empty tools list disables all tools.
+Listing currently uses the existing manager's complete open-session metadata read;
+it is not a paginated database query.
 
 The SDK implementation and walkthrough belong to a separate pass after server
 work. Future settings endpoints must keep credentials private and respect the
