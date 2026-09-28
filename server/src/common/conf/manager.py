@@ -125,6 +125,22 @@ class ConfigManager:
         self._validate_runtime_config(candidate)
         return candidate
 
+    def _validation_summary(self, error: ValidationError) -> str:
+        """Report known field locations and error codes, never inputs/messages."""
+        summaries = []
+        for item in error.errors(include_input=False, include_context=False, include_url=False):
+            current: Any = self._config
+            location = []
+            for part in item["loc"]:
+                if isinstance(current, BaseModel) and part in type(current).model_fields:
+                    location.append(str(part))
+                    current = getattr(current, part)
+                else:
+                    location.append("<entry>")
+                    current = None
+            summaries.append(f"{'.'.join(location) or '<root>'}: {item['type']}")
+        return "; ".join(summaries)
+
     @staticmethod
     def _invoke(callback: Callable, value: Any) -> None:
         # Reporting apply failures requires exceptions to remain visible here.
@@ -242,11 +258,11 @@ class ConfigManager:
             try:
                 with self.config_file.open("r", encoding="utf-8") as f:
                     data = yaml.safe_load(f)
-            except Exception as exc:
+            except Exception:
                 load_failed = True
-                message = f"Failed to load {self.config_file}: {exc}"
+                message = f"Failed to load {self.config_file}: unreadable file or invalid YAML"
                 if require_valid:
-                    raise ConfigurationLoadError(message) from exc
+                    raise ConfigurationLoadError(message) from None
                 logger.error(f"{message}; keeping the active configuration")
 
         if load_failed:
@@ -256,23 +272,25 @@ class ConfigManager:
                 if not config_exists:
                     data = {}
                 if not isinstance(data, dict):
-                    raise ValueError("Configuration root must be a mapping")
+                    message = "Configuration root must be a mapping"
+                    if require_valid:
+                        raise ConfigurationLoadError(message)
+                    logger.error(message)
+                    return False
                 new_config = self._validate_config(data)
             except ValidationError as exc:
-                errors = "; ".join(
-                    f"{'.'.join(str(part) for part in error['loc'])}: "
-                    f"{error['msg']}"
-                    for error in exc.errors(include_url=False)
-                )
+                errors = self._validation_summary(exc)
                 message = f"Configuration validation failed for {self.config_file}: {errors}"
                 if require_valid:
-                    raise ConfigurationLoadError(message) from exc
+                    raise ConfigurationLoadError(message) from None
                 logger.error(f"{message}; keeping the active configuration")
                 return False
-            except Exception as exc:
-                message = f"Configuration load failed for {self.config_file}: {exc}"
+            except ConfigurationLoadError:
+                raise
+            except Exception:
+                message = f"Configuration load failed for {self.config_file}: runtime validation failed"
                 if require_valid:
-                    raise ConfigurationLoadError(message) from exc
+                    raise ConfigurationLoadError(message) from None
                 logger.error(f"{message}; keeping the active configuration")
                 return False
         if not config_exists and not self._persist_config(new_config):
@@ -296,22 +314,24 @@ class ConfigManager:
             # Use model_dump(mode="json") to get YAML-compatible primitive types (e.g. str dates)
             data = config.model_dump(mode="json")
 
-            old_umask = os.umask(0o177)
+            # mkstemp creates an exclusive private file without changing process
+            # permissions. Windows ACLs are separate from POSIX mode guarantees.
+            fd, temp_path = tempfile.mkstemp(dir=self.config_dir, text=True)
+            stream = None
             try:
-                fd, temp_path = tempfile.mkstemp(dir=self.config_dir, text=True)
-                try:
-                    with os.fdopen(fd, "w") as f:
-                        f.write(CONFIG_FILE_NOTICE)
-                        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-                    Path(temp_path).replace(self.config_file)
-                except Exception as write_err:
-                    Path(temp_path).unlink(missing_ok=True)
-                    raise write_err
-            finally:
-                os.umask(old_umask)
+                stream = os.fdopen(fd, "w", encoding="utf-8")
+                with stream as f:
+                    f.write(CONFIG_FILE_NOTICE)
+                    yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+                Path(temp_path).replace(self.config_file)
+            except BaseException:
+                if stream is None:
+                    os.close(fd)
+                Path(temp_path).unlink(missing_ok=True)
+                raise
             return True
-        except Exception as e:
-            logger.error(f"Failed to save configuration to YAML: {e}")
+        except Exception:
+            logger.error("Failed to save configuration to YAML")
             return False
 
     async def async_save(self) -> bool:
@@ -408,13 +428,16 @@ class ConfigManager:
         """
         self._require_callback_thread()
         self._record_status(persisted=False, activated=False)
-        current_data = self._config.model_dump()
-        updated_data = deep_merge(current_data, updates)
-
         try:
+            if not isinstance(updates, dict):
+                raise TypeError("Updates must be a mapping")
+            updated_data = deep_merge(self._config.model_dump(), updates)
             new_config = self._validate_config(updated_data)
-        except Exception as e:
-            logger.error(f"Failed to validate configuration updates: {e}")
+        except ValidationError as exc:
+            logger.error("Failed to validate configuration updates: {}", self._validation_summary(exc))
+            return False
+        except Exception:
+            logger.error("Failed to validate configuration updates")
             return False
 
         if not self._persist_config(new_config):

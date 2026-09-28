@@ -176,7 +176,7 @@ def test_invalid_existing_config_prevents_initialization(tmp_path, reset_config_
     config_file = tmp_path / "knoggin.yml"
     config_file.write_text("llm:\n  agent_modell: typo\n", encoding="utf-8")
 
-    with pytest.raises(ConfigurationLoadError, match="agent_modell"):
+    with pytest.raises(ConfigurationLoadError, match="validation failed"):
         ConfigManager.initialize(tmp_path)
 
     assert ConfigManager._instance is None
@@ -223,7 +223,7 @@ def test_runtime_validation_failure_is_reported_for_reload_and_startup(
     assert manager.config == previous
 
     ConfigManager._instance = None
-    with pytest.raises(ConfigurationLoadError, match="registry failed"):
+    with pytest.raises(ConfigurationLoadError, match="runtime validation failed"):
         ConfigManager.initialize(mock_config_paths["dir"])
 
 
@@ -394,6 +394,6 @@ def test_missing_startup_defaults_receive_runtime_validation(tmp_path, reset_con
         raise ValueError("invalid defaults")
 
     monkeypatch.setattr(ConfigManager, "_validate_runtime_config", staticmethod(reject))
-    with pytest.raises(ConfigurationLoadError, match="invalid defaults"):
+    with pytest.raises(ConfigurationLoadError, match="runtime validation failed"):
         ConfigManager.initialize(tmp_path)
     assert not (tmp_path / "knoggin.yml").exists()
