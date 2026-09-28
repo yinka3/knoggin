@@ -56,6 +56,7 @@ class ConfigManager:
         self.config: RootConfig = RootConfig()
         self.subscribers: List[Dict[str, Any]] = []
         self._async_lock = asyncio.Lock()
+        self._loaded = False
 
         self.load(require_valid=True)
 
@@ -99,6 +100,12 @@ class ConfigManager:
         data = None
         load_failed = False
         config_exists = self.config_file.exists()
+        if not config_exists and self._loaded:
+            message = f"Configuration file is missing: {self.config_file}"
+            if require_valid:
+                raise ConfigurationLoadError(message)
+            logger.error(message)
+            return False
         if config_exists:
             try:
                 with self.config_file.open("r", encoding="utf-8") as f:
@@ -112,8 +119,12 @@ class ConfigManager:
 
         if load_failed:
             return False
-        if data:
+        if config_exists or not self._loaded:
             try:
+                if not config_exists:
+                    data = {}
+                if not isinstance(data, dict):
+                    raise ValueError("Configuration root must be a mapping")
                 new_config = RootConfig(**data)
                 self._validate_runtime_config(new_config)
                 self.config = new_config
@@ -141,6 +152,7 @@ class ConfigManager:
             raise ConfigurationPersistenceError(
                 f"Failed to create initial configuration at {self.config_file}"
             )
+        self._loaded = True
         return True
 
     def save(self, config: RootConfig | None = None) -> bool:

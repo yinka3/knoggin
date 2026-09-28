@@ -352,3 +352,48 @@ def test_registered_tool_limit_without_a_default_limit_is_allowed(
         ]
         == 2
     )
+
+
+@pytest.mark.parametrize("source", ["", "null", "false", "0", "[]", "[1]", "hello", "true"])
+def test_non_mapping_roots_fail_startup_and_preserve_reload(tmp_path, reset_config_manager, source):
+    path = tmp_path / "knoggin.yml"
+    path.write_text(source, encoding="utf-8")
+    with pytest.raises(ConfigurationLoadError, match="root must be a mapping"):
+        ConfigManager.initialize(tmp_path)
+    assert ConfigManager._instance is None
+    path.write_text("{}", encoding="utf-8")
+    manager = ConfigManager.initialize(tmp_path)
+    assert manager.update_settings({"user_aliases": ["Ada"]})
+    previous = manager.config
+    path.write_text(source, encoding="utf-8")
+    assert manager.load() is False
+    assert manager.config == previous
+    assert path.read_text(encoding="utf-8") == source
+
+
+def test_empty_mapping_deliberately_resets_defaults(mock_config_paths):
+    manager = mock_config_paths["manager"]
+    manager.update_settings({"user_aliases": ["Ada"]})
+    mock_config_paths["yaml"].write_text("{}", encoding="utf-8")
+    assert manager.load()
+    assert manager.config == RootConfig()
+
+
+def test_missing_reload_preserves_active_state_without_recreating_file(mock_config_paths):
+    manager = mock_config_paths["manager"]
+    manager.update_settings({"user_aliases": ["Ada"]})
+    previous = manager.config
+    mock_config_paths["yaml"].unlink()
+    assert manager.load() is False
+    assert manager.config == previous
+    assert not mock_config_paths["yaml"].exists()
+
+
+def test_missing_startup_defaults_receive_runtime_validation(tmp_path, reset_config_manager, monkeypatch):
+    def reject(_config):
+        raise ValueError("invalid defaults")
+
+    monkeypatch.setattr(ConfigManager, "_validate_runtime_config", staticmethod(reject))
+    with pytest.raises(ConfigurationLoadError, match="invalid defaults"):
+        ConfigManager.initialize(tmp_path)
+    assert not (tmp_path / "knoggin.yml").exists()
