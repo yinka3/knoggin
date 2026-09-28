@@ -9,7 +9,6 @@ need to start PostgreSQL or an embedding model.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import re
 from collections.abc import AsyncIterator, Mapping
@@ -158,7 +157,7 @@ class ApplicationPort(Protocol):
         project_id: str,
         session_id: str | None = None,
         limit: int = 50,
-    ) -> Any: ...
+    ) -> ArtifactListResponse: ...
 
     async def get_artifact(
         self,
@@ -167,7 +166,7 @@ class ApplicationPort(Protocol):
         project_id: str,
         artifact_id: str,
         session_id: str | None = None,
-    ) -> Any: ...
+    ) -> ArtifactResponse | None: ...
 
     async def get_artifact_revision(
         self,
@@ -177,13 +176,13 @@ class ApplicationPort(Protocol):
         artifact_id: str,
         revision: int,
         session_id: str | None = None,
-    ) -> Any: ...
+    ) -> ArtifactRevisionResponse | None: ...
 
     async def list_global_maintenance_reviews(
         self,
         *,
         user_name: str,
-    ) -> Any: ...
+    ) -> list[MaintenanceReviewResponse]: ...
 
     async def decide_global_maintenance_review(
         self,
@@ -191,14 +190,14 @@ class ApplicationPort(Protocol):
         user_name: str,
         review_id: str,
         request: MaintenanceReviewDecisionRequest,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
     async def list_project_maintenance_reviews(
         self,
         *,
         user_name: str,
         project_id: str,
-    ) -> Any: ...
+    ) -> list[MaintenanceReviewResponse]: ...
 
     async def get_project_maintenance_review(
         self,
@@ -206,7 +205,7 @@ class ApplicationPort(Protocol):
         user_name: str,
         project_id: str,
         review_id: str,
-    ) -> Any: ...
+    ) -> MaintenanceReviewDetailResponse: ...
 
     async def preview_project_maintenance_review(
         self,
@@ -214,7 +213,7 @@ class ApplicationPort(Protocol):
         user_name: str,
         project_id: str,
         review_id: str,
-    ) -> Any: ...
+    ) -> MaintenanceReviewPreviewResponse: ...
 
     async def decide_project_maintenance_review(
         self,
@@ -223,14 +222,14 @@ class ApplicationPort(Protocol):
         project_id: str,
         review_id: str,
         request: MaintenanceReviewDecisionRequest,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
     async def preview_entity_merge_rollback(
         self,
         *,
         user_name: str,
         merge_id: str,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
     async def rollback_entity_merge(
         self,
@@ -238,7 +237,7 @@ class ApplicationPort(Protocol):
         user_name: str,
         merge_id: str,
         request: EntityMergeRollbackRequest,
-    ) -> Any: ...
+    ) -> dict[str, Any]: ...
 
 
 class UnsupportedOperation(RuntimeError):
@@ -273,204 +272,36 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _as_data(value: Any) -> dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        dumped = model_dump()
-        if isinstance(dumped, Mapping):
-            return dict(dumped)
-    try:
-        return dict(vars(value))
-    except TypeError:
-        raise PublicStreamContractError("application port returned an unsupported result") from None
+def _project_response(value: ProjectResponse) -> ProjectResponse:
+    return ProjectResponse.model_validate(value)
 
 
-def _value(data: Mapping[str, Any], *names: str, default: Any = None) -> Any:
-    for name in names:
-        if name in data:
-            return data[name]
-    return default
+def _session_response(value: SessionResponse) -> SessionResponse:
+    return SessionResponse.model_validate(value)
 
 
-def _project_response(value: Any) -> ProjectResponse:
-    if isinstance(value, ProjectResponse):
-        return value
-    data = _as_data(value)
-    status = _value(data, "status", default="active")
-    status = getattr(status, "value", status)
-    return ProjectResponse.model_validate(
-        {
-            "id": _value(data, "id", "project_id"),
-            "name": _value(data, "name"),
-            "description": _value(data, "description"),
-            "status": status,
-            "session_count": _value(data, "session_count", default=0) or 0,
-            "allowed_projects": tuple(
-                _value(data, "allowed_projects", default=[]) or []
-            ),
-            "created_at": _value(data, "created_at"),
-            "updated_at": _value(data, "updated_at"),
-        }
-    )
+def _document_focus_response(value: DocumentFocusResponse) -> DocumentFocusResponse:
+    return DocumentFocusResponse.model_validate(value)
 
 
-def _session_response(value: Any, request: CreateSessionRequest):
-    from common.schema.public import SessionResponse
-
-    if isinstance(value, SessionResponse):
-        return value
-    data = _as_data(value)
-    status = _value(data, "status", default="open")
-    status = getattr(status, "value", status)
-    enabled_tools = _value(data, "enabled_tools", default=request.enabled_tools)
-    return SessionResponse.model_validate(
-        {
-            "session_id": _value(data, "session_id", "id"),
-            "project_id": _value(data, "project_id", default=request.project_id),
-            "status": status,
-            "model": _value(data, "model", default=request.model),
-            "agent_id": _value(data, "agent_id", default=request.agent_id),
-            "enabled_tools": tuple(enabled_tools)
-            if enabled_tools is not None
-            else None,
-            "created_at": _value(data, "created_at"),
-            "last_active_at": _value(data, "last_active_at"),
-        }
-    )
+def _artifact_response(value: ArtifactResponse) -> ArtifactResponse:
+    return ArtifactResponse.model_validate(value)
 
 
-def _document_focus_response(value: Any) -> DocumentFocusResponse:
-    if isinstance(value, DocumentFocusResponse):
-        return value
-    return DocumentFocusResponse.model_validate(_as_data(value))
+def _artifact_revision_response(value: ArtifactRevisionResponse) -> ArtifactRevisionResponse:
+    return ArtifactRevisionResponse.model_validate(value)
 
 
-def _run_result(value: Any) -> RunResult:
-    if isinstance(value, RunResult):
-        return value
-    data = _as_data(value)
-    artifact_value = _value(data, "artifact")
-    return RunResult.model_validate(
-        {
-            "run_id": _value(data, "run_id", "id"),
-            "content": _value(data, "content", "response", default=""),
-            "sources": tuple(_value(data, "sources", default=[]) or []),
-            "usage": _value(data, "usage"),
-            "research_mode": _value(data, "research_mode", default="normal"),
-            "assistant_message_id": _value(data, "assistant_message_id"),
-            "source_ref_ids": tuple(_value(data, "source_ref_ids", default=[]) or []),
-            "artifact": (
-                _artifact_response(artifact_value).model_dump(mode="json")
-                if artifact_value is not None
-                else None
-            ),
-        }
-    )
+def _artifact_list_response(value: ArtifactListResponse) -> ArtifactListResponse:
+    return ArtifactListResponse.model_validate(value)
 
 
-def _artifact_response(value: Any) -> ArtifactResponse:
-    if isinstance(value, ArtifactResponse):
-        return value
-    data = _as_data(value)
-    return ArtifactResponse.model_validate(
-        {
-            "artifact_id": str(_value(data, "artifact_id", "id")),
-            "project_id": _value(data, "project_id"),
-            "session_id": _value(data, "session_id"),
-            "originating_message_id": _value(
-                data, "originating_message_id", "message_id"
-            ),
-            "kind": _value(data, "kind"),
-            "title": _value(data, "title"),
-            "status": _value(data, "status"),
-            "current_revision": _value(data, "current_revision", default=1),
-            "created_at": _value(data, "created_at"),
-            "updated_at": _value(data, "updated_at"),
-        }
-    )
+def _maintenance_review_list_response(value: list[MaintenanceReviewResponse]) -> MaintenanceReviewListResponse:
+    return MaintenanceReviewListResponse(reviews=tuple(value))
 
 
-def _artifact_revision_response(value: Any) -> ArtifactRevisionResponse:
-    if isinstance(value, ArtifactRevisionResponse):
-        return value
-    data = _as_data(value)
-    return ArtifactRevisionResponse.model_validate(
-        {
-            "artifact_id": str(_value(data, "artifact_id", "id")),
-            "revision": _value(data, "revision"),
-            "schema_version": _value(data, "schema_version", default=1),
-            "kind": _value(data, "kind"),
-            "title": _value(data, "title"),
-            "blocks": tuple(_value(data, "blocks", default=[]) or []),
-            "status": _value(data, "status"),
-            "markdown": _value(data, "markdown"),
-            "content_hash": _value(data, "content_hash"),
-            "created_at": _value(data, "created_at"),
-        }
-    )
-
-
-def _artifact_list_response(value: Any) -> ArtifactListResponse:
-    if isinstance(value, ArtifactListResponse):
-        return value
-    if value is None:
-        values = []
-    elif isinstance(value, Mapping) and "artifacts" in value:
-        values = value["artifacts"] or []
-    else:
-        values = value
-    return ArtifactListResponse(
-        artifacts=tuple(_artifact_response(item) for item in values)
-    )
-
-
-def _maintenance_review_response(value: Any) -> MaintenanceReviewResponse:
-    if isinstance(value, MaintenanceReviewResponse):
-        return value
-    data = _as_data(value)
-    plan = _value(data, "proposed_plan", default={})
-    if not isinstance(plan, Mapping):
-        plan = _as_data(plan)
-    return MaintenanceReviewResponse.model_validate(
-        {
-            "review_id": _value(data, "review_id", "id"),
-            "scope": _value(data, "scope"),
-            "project_id": _value(data, "project_id"),
-            "kind": _value(data, "kind"),
-            "reasoning": _value(data, "reasoning"),
-            "proposed_plan": dict(plan),
-            "expected_state": dict(_value(data, "expected_state", default={}) or {}),
-            "status": _value(data, "status"),
-            "created_at": _value(data, "created_at"),
-            "resolved_at": _value(data, "resolved_at"),
-        }
-    )
-
-
-def _maintenance_review_list_response(value: Any) -> MaintenanceReviewListResponse:
-    if isinstance(value, MaintenanceReviewListResponse):
-        return value
-    if isinstance(value, Mapping):
-        values = value.get("reviews") or ()
-    else:
-        values = value or ()
-    return MaintenanceReviewListResponse(
-        reviews=tuple(_maintenance_review_response(item) for item in values)
-    )
-
-
-def _maintenance_operation_response(value: Any) -> MaintenanceOperationResponse:
-    if isinstance(value, MaintenanceOperationResponse):
-        return value
-    if isinstance(value, Mapping) and set(value) == {"result"}:
-        value = value["result"]
-    data = _as_data(value)
-    plan = data.get("plan")
-    if plan is not None and not isinstance(plan, Mapping):
-        data["plan"] = _as_data(plan)
-    return MaintenanceOperationResponse(result=data)
+def _maintenance_operation_response(value: dict[str, Any]) -> MaintenanceOperationResponse:
+    return MaintenanceOperationResponse(result=value)
 
 
 def _error_response(
@@ -515,12 +346,7 @@ def _status_for_error(error: Exception) -> int:
 
 
 async def _call(method: Any, **kwargs: Any) -> Any:
-    value = method(**kwargs)
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
+    return await method(**kwargs)
 
 
 async def _open_stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
@@ -644,12 +470,9 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         request: Request,
         user_name: str = Depends(current_user),
     ) -> ProjectResponse:
-        try:
-            return _project_response(
-                await _call(port.create_project, user_name=user_name, request=body)
-            )
-        except Exception as exc:
-            raise exc
+        return _project_response(
+            await _call(port.create_project, user_name=user_name, request=body)
+        )
 
     @app.post("/v1/sessions", response_model=SessionResponse, status_code=201)
     async def create_session(
@@ -657,13 +480,9 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         request: Request,
         user_name: str = Depends(current_user),
     ):
-        try:
-            return _session_response(
-                await _call(port.create_session, user_name=user_name, request=body),
-                body,
-            )
-        except Exception as exc:
-            raise exc
+        return _session_response(
+            await _call(port.create_session, user_name=user_name, request=body),
+        )
 
     @app.get(
         "/v1/sessions/{session_id}/document-focus",

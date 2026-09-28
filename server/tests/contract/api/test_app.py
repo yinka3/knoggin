@@ -21,6 +21,9 @@ from common.schema.artifacts import (
 from common.schema.document import FolderScanSettings
 from common.schema.health import HealthActivity, HealthSnapshot
 from common.schema.public import (
+    ArtifactListResponse,
+    ArtifactResponse,
+    ArtifactRevisionResponse,
     CreateProjectRequest,
     CreateSessionRequest,
     ProjectResponse,
@@ -185,13 +188,13 @@ class FakeApplication:
 
     async def list_artifacts(self, *, user_name, project_id, session_id=None, limit=50):
         self.calls.append(("artifacts", user_name, project_id, session_id, limit))
-        return [self.artifact]
+        return ArtifactListResponse(artifacts=(ArtifactResponse.model_validate(self.artifact),))
 
     async def get_artifact(
         self, *, user_name, project_id, artifact_id, session_id=None
     ):
         self.calls.append(("artifact", user_name, project_id, artifact_id, session_id))
-        return self.artifact if artifact_id == self.artifact["artifact_id"] else None
+        return ArtifactResponse.model_validate(self.artifact) if artifact_id == self.artifact["artifact_id"] else None
 
     async def get_artifact_revision(
         self, *, user_name, project_id, artifact_id, revision, session_id=None
@@ -200,7 +203,7 @@ class FakeApplication:
             ("artifact_revision", user_name, project_id, artifact_id, revision, session_id)
         )
         return (
-            self.artifact_revision
+            ArtifactRevisionResponse.model_validate(self.artifact_revision)
             if artifact_id == self.artifact["artifact_id"] and revision == 1
             else None
         )
@@ -756,3 +759,18 @@ async def test_api_projects_preserve_public_error_retryability(
     assert response.json()["error"]["code"] == code
     assert response.json()["error"]["retryable"] is retryable
     assert "secret" not in response.text
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_project_route_rejects_legacy_object_aliases():
+    class LegacyApplication(FakeApplication):
+        async def create_project(self, **kwargs):
+            return type("LegacyProject", (), {"project_id": "legacy-secret", "name": "Old"})()
+
+    async with await _client(create_app(LegacyApplication())) as client:
+        response = await client.post("/v1/projects", json={"name": "Research"})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+    assert "legacy-secret" not in response.text
