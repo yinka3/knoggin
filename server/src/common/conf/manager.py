@@ -2,6 +2,8 @@ import asyncio
 import os
 import tempfile
 import threading
+from copy import deepcopy
+from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -13,6 +15,7 @@ from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.tool_names import get_configurable_tool_names
 from common.schema.settings import RootConfig
 from common.utils.core_utils import safe_update
+from common.utils.lifecycle import settle_owned_task
 
 CONFIG_FILE_NOTICE = (
     "# This configuration file is managed by Knoggin.\n"
@@ -38,6 +41,14 @@ def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any
     return source
 
 
+def _serialized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+    return call
+
+
 class ConfigManager:
     """
     A unified, thread-safe Configuration Event Bus.
@@ -53,12 +64,24 @@ class ConfigManager:
         self.config_dir = config_dir.expanduser().resolve()
         self.config_file = self.config_dir / "knoggin.yml"
 
-        self.config: RootConfig = RootConfig()
+        self._state_lock = threading.RLock()
+        self._config: RootConfig = RootConfig()
+        self._callback_thread: int | None = None
         self.subscribers: List[Dict[str, Any]] = []
         self._async_lock = asyncio.Lock()
         self._loaded = False
 
         self.load(require_valid=True)
+
+    @property
+    def config(self) -> RootConfig:
+        """Return an isolated snapshot; use update_settings to change live state."""
+        with self._state_lock:
+            return self._config.model_copy(deep=True)
+
+    def _require_callback_thread(self) -> None:
+        if self.subscribers and self._callback_thread != threading.get_ident():
+            raise RuntimeError("Configuration publication must run on the subscriber thread")
 
     @classmethod
     def initialize(cls, config_dir: str | Path) -> "ConfigManager":
@@ -92,11 +115,13 @@ class ConfigManager:
             return path.resolve()
         return (self.config_dir / path).resolve()
 
+    @_serialized
     def load(self, *, require_valid: bool = False) -> bool:
         """Loads configuration from YAML."""
         from common.utils.prompt_loader import validate_prompt_library
 
         validate_prompt_library()
+        self._require_callback_thread()
         data = None
         load_failed = False
         config_exists = self.config_file.exists()
@@ -127,7 +152,7 @@ class ConfigManager:
                     raise ValueError("Configuration root must be a mapping")
                 new_config = RootConfig(**data)
                 self._validate_runtime_config(new_config)
-                self.config = new_config
+                self._config = new_config.model_copy(deep=True)
             except ValidationError as exc:
                 errors = "; ".join(
                     f"{'.'.join(str(part) for part in error['loc'])}: "
@@ -146,7 +171,7 @@ class ConfigManager:
                 logger.error(f"{message}; keeping the active configuration")
                 return False
         else:
-            self.config = RootConfig()
+            self._config = RootConfig()
 
         if not config_exists and not self.save():
             raise ConfigurationPersistenceError(
@@ -155,12 +180,18 @@ class ConfigManager:
         self._loaded = True
         return True
 
-    def save(self, config: RootConfig | None = None) -> bool:
-        """Saves current Pydantic RootConfig to the YAML file."""
+    @_serialized
+    def save(self) -> bool:
+        """Persist the current active snapshot, never an unrelated candidate."""
+        return self._persist_config(self._config)
+
+    @_serialized
+    def _persist_config(self, config: RootConfig) -> bool:
+        """Internal candidate write; callers own ordered activation under the lock."""
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
             # Use model_dump(mode="json") to get YAML-compatible primitive types (e.g. str dates)
-            data = (config or self.config).model_dump(mode="json")
+            data = config.model_dump(mode="json")
 
             old_umask = os.umask(0o177)
             try:
@@ -183,9 +214,14 @@ class ConfigManager:
     async def async_save(self) -> bool:
         """Async wrapper for save()."""
         async with self._async_lock:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, self.save)
+            owned = asyncio.create_task(asyncio.to_thread(self.save))
+            try:
+                return await asyncio.shield(owned)
+            except asyncio.CancelledError:
+                await settle_owned_task(owned)
+                raise
 
+    @_serialized
     def subscribe(self, callback: Callable, path: Optional[str] = None) -> Callable[[], None]:
         """
         Subscribe a service callback to configuration updates.
@@ -195,6 +231,8 @@ class ConfigManager:
             path: Pydantic attribute path (e.g. 'developer_settings.jobs.episode').
                   If provided, the callback is only triggered if this specific subtree changes.
         """
+        self._require_callback_thread()
+        self._callback_thread = threading.get_ident()
         subscription = {
             "callback": callback,
             "path": path
@@ -206,10 +244,11 @@ class ConfigManager:
             safe_update(callback, current_val)
 
         def unsubscribe():
-            try:
-                self.subscribers.remove(subscription)
-            except ValueError:
-                pass
+            with self._state_lock:
+                try:
+                    self.subscribers.remove(subscription)
+                except ValueError:
+                    pass
 
         return unsubscribe
 
@@ -224,12 +263,14 @@ class ConfigManager:
             current = getattr(current, p, None)
         return current
 
+    @_serialized
     def update_settings(self, updates: Dict[str, Any]) -> bool:
         """
         Applies a partial dictionary update to the RootConfig.
         Validates the schema, saves to YAML, and fires all registered subscriber callbacks.
         """
-        current_data = self.config.model_dump()
+        self._require_callback_thread()
+        current_data = self._config.model_dump()
         updated_data = deep_merge(current_data, updates)
 
         try:
@@ -240,10 +281,10 @@ class ConfigManager:
             return False
 
         old_config = self.config
-        if not self.save(new_config):
+        if not self._persist_config(new_config):
             logger.error("Configuration update was not applied because persistence failed")
             return False
-        self.config = new_config
+        self._config = new_config.model_copy(deep=True)
 
         logger.info("Applying hot-reload of runtime settings via ConfigManager...")
 
@@ -258,7 +299,7 @@ class ConfigManager:
             # Only trigger callback if the specific path has changed
             if old_val != new_val:
                 try:
-                    safe_update(cb, new_val)
+                    safe_update(cb, deepcopy(new_val))
                 except Exception as e:
                     logger.error(f"Error calling configuration subscriber {cb.__name__}: {e}")
 

@@ -7,7 +7,7 @@ from common.conf.manager import (
     deep_merge,
 )
 from common.schema.agent.settings import AgentLimitSettings
-from common.schema.settings import LLMSettings, RootConfig
+from common.schema.settings import RootConfig
 
 
 @pytest.fixture
@@ -160,7 +160,7 @@ def test_failed_config_reload_keeps_the_previous_valid_config(
     reset_config_manager,
 ):
     mgr = ConfigManager.get()
-    mgr.config = RootConfig(llm=LLMSettings(agent_model="known-good"))
+    assert mgr.update_settings({"llm": {"agent_model": "known-good"}})
     invalid_source = "llm:\n  agent_modell: typo\n"
     mock_config_paths["yaml"].write_text(invalid_source, encoding="utf-8")
 
@@ -190,7 +190,7 @@ def test_malformed_yaml_reload_preserves_active_config(mock_config_paths):
     mock_config_paths["yaml"].write_text("llm: [", encoding="utf-8")
 
     assert manager.load() is False
-    assert manager.config is previous
+    assert manager.config == previous
 
 
 @pytest.mark.unit
@@ -220,7 +220,7 @@ def test_runtime_validation_failure_is_reported_for_reload_and_startup(
     )
 
     assert manager.load() is False
-    assert manager.config is previous
+    assert manager.config == previous
 
     ConfigManager._instance = None
     with pytest.raises(ConfigurationLoadError, match="registry failed"):
@@ -264,10 +264,10 @@ def test_failed_update_write_preserves_active_config_and_subscribers(
     received = []
     manager.subscribe(received.append, "user_aliases")
     previous = manager.config
-    monkeypatch.setattr(manager, "save", lambda config=None: False)
+    monkeypatch.setattr(manager, "_persist_config", lambda config: False)
 
     assert manager.update_settings({"user_aliases": ["Ada"]}) is False
-    assert manager.config is previous
+    assert manager.config == previous
     assert received == [[]]
 
 
