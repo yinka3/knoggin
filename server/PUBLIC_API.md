@@ -142,3 +142,12 @@ contracts were needed. `.github/workflows/server-tests.yml` provisions PostgreSQ
 and runs the `requires_postgres` lane. That lane was inspected, not run locally.
 Parser dependency verification and the separately tracked lifecycle follow-ups
 remain outside this closeout; this is not a claim that the entire server is done.
+
+## Management endpoint closeout (2026-09-27)
+
+All 22 approved follow-up endpoints are implemented. Final verification passed
+543 API/port/model/config/AAC/project/session/shutdown/document/architecture tests
+plus one OpenAPI surface test. Ruff passed. No storage schema was changed and
+PostgreSQL was not run locally; its existing contracts remain in the CI lane.
+The earlier local Docling dependency limitation and smaller lifecycle reviews
+remain separate. No SDK implementation or walkthrough was included.
