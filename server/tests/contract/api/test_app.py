@@ -151,6 +151,9 @@ class FakeApplication:
         self.calls.append(("scan_settings", user_name, project_id))
         return FolderScanSettings(blocked_extensions={".log"})
 
+    async def open_run_stream(self, *, user_name, request: StartRunRequest):
+        return self.run_stream(user_name=user_name, request=request)
+
     async def run_stream(self, *, user_name, request: StartRunRequest):
         self.calls.append(("run", user_name, request))
         now = datetime.now(timezone.utc)

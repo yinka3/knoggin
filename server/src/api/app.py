@@ -9,6 +9,7 @@ need to start PostgreSQL or an embedding model.
 from __future__ import annotations
 
 import inspect
+import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Mapping
@@ -20,6 +21,9 @@ from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
+from loguru import logger
+
+from common.utils.lifecycle import settle_owned_task
 
 from common.exceptions import (
     DependencyError,
@@ -146,7 +150,7 @@ class ApplicationPort(Protocol):
     async def set_document_scan_settings(self, **kwargs: Any) -> Any: ...
     async def reset_document_scan_settings(self, **kwargs: Any) -> Any: ...
 
-    async def run_stream(
+    async def open_run_stream(
         self,
         *,
         user_name: str,
@@ -550,43 +554,46 @@ async def _call(method: Any, **kwargs: Any) -> Any:
     return value
 
 
-async def _stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
-    method = getattr(port, "run_stream", None)
-    if method is None:
-        method = getattr(port, "stream_run", None)
-    if method is None:
-        raise UnsupportedOperation("run streaming is not configured")
-    result = method(**kwargs)
-    if inspect.isawaitable(result):
-        result = await result
-    if hasattr(result, "__aiter__"):
-        async for event in result:
-            yield event
-        return
-    if isinstance(result, (list, tuple)):
-        for event in result:
-            yield event
-        return
-    raise ValueError("application port returned a non-streaming run result")
 
 
 async def _open_stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[object]:
     """Open a stream early when the port supports explicit run admission."""
 
-    method = getattr(port, "open_run_stream", None)
-    if method is None:
-        return _stream_from_port(port, **kwargs)
-    result = await _call(method, **kwargs)
-    if hasattr(result, "__aiter__"):
+    result = await port.open_run_stream(**kwargs)
+    if hasattr(result, "__aiter__") and callable(getattr(result, "aclose", None)):
         return result
-    if isinstance(result, (list, tuple)):
-
-        async def static_events() -> AsyncIterator[object]:
-            for event in result:
-                yield event
-
-        return static_events()
     raise ValueError("application port returned a non-streaming run result")
+
+
+async def _close_owned_stream(stream) -> None:
+    cleanup = asyncio.create_task(stream.aclose())
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        try:
+            await settle_owned_task(cleanup)
+        except Exception:
+            logger.error("Run stream cleanup failed during cancellation")
+        raise
+    except Exception:
+        logger.error("Run stream cleanup failed")
+
+
+class OwnedStreamingResponse(StreamingResponse):
+    """Own admission even when sending fails before body iteration starts."""
+
+    def __init__(self, content, *, owner, **kwargs):
+        super().__init__(content, **kwargs)
+        self.owner = owner
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                await _close_owned_stream(self.body_iterator)
+            finally:
+                await _close_owned_stream(self.owner)
 
 
 def _sse_frame(event: Any) -> str:
@@ -1071,31 +1078,9 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         request: Request,
         user_name: str = Depends(current_user),
     ) -> RunResult:
+        stream = await _open_stream_from_port(port, user_name=user_name, request=body)
         try:
-            direct = getattr(port, "run", None)
-            if direct is not None:
-                result = await _call(
-                    direct,
-                    user_name=user_name,
-                    request=body,
-                )
-                if isinstance(result, (RunResult, Mapping)) or hasattr(
-                    result, "model_dump"
-                ):
-                    return _run_result(result)
-                if hasattr(result, "__aiter__"):
-                    events = [event async for event in result]
-                elif isinstance(result, (list, tuple)):
-                    events = list(result)
-                else:
-                    raise ValueError("application port returned an invalid run result")
-            else:
-                events = [
-                    event
-                    async for event in await _open_stream_from_port(
-                        port, user_name=user_name, request=body
-                    )
-                ]
+            events = [event async for event in stream]
             parsed = [validate_public_stream_event(event) for event in events]
             completed = [event for event in parsed if isinstance(event, RunCompletedEvent)]
             if completed:
@@ -1104,8 +1089,8 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             if failed:
                 raise PublicOperationError(failed[-1].error)
             raise ValueError("run stream did not contain a terminal result")
-        except Exception as exc:
-            raise exc
+        finally:
+            await _close_owned_stream(stream)
 
     @app.post("/v1/runs/stream")
     async def run_stream(
@@ -1172,8 +1157,9 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
                 )
                 yield _sse_frame(failed)
 
-        return StreamingResponse(
+        return OwnedStreamingResponse(
             events(),
+            owner=stream,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
