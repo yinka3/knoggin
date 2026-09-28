@@ -372,6 +372,10 @@ class ConfigManager:
             self.subscribers[:] = [sub for sub in self.subscribers if sub is not subscription]
             self._pending_applies.pop(subscription["id"], None)
             self._failed_applies.pop(subscription["id"], None)
+            self._record_status(
+                persisted=self._last_apply_status.persisted,
+                activated=self._last_apply_status.activated,
+            )
             if not isinstance(exc, Exception):
                 raise
             raise RuntimeError("Initial configuration subscriber apply failed") from None

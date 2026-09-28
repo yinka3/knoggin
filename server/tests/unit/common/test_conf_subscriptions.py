@@ -100,3 +100,21 @@ def test_failed_initial_apply_leaves_no_registration_or_retry(manager):
     assert "secret" not in str(error.value)
     assert not manager.subscribers
     assert manager.retry_failed_applies().failed_subscriptions == ()
+
+
+def test_reentrant_initial_failure_clears_stale_apply_diagnostics(manager):
+    first = True
+
+    def callback(value):
+        nonlocal first
+        if first:
+            first = False
+            assert manager.update_settings({"user_aliases": ["Ada"]})
+        raise RuntimeError("apply")
+
+    with pytest.raises(RuntimeError, match="Initial"):
+        manager.subscribe(callback, "user_aliases")
+    assert manager.config.user_aliases == ["Ada"]
+    assert not manager.subscribers
+    assert manager.last_apply_status.failed_subscriptions == ()
+    assert manager.last_apply_status.pending_subscriptions == ()
