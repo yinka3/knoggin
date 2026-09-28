@@ -50,3 +50,18 @@ already accepted outcome; no durable transport-cleanup retry queue is provided.
 Completing this boundary pass does not complete every server lifecycle follow-up
 listed in journal section 13.3, or verify PostgreSQL behavior locally. Database
 contracts run in the configured CI PostgreSQL lane.
+
+## Boundary audit (2026-09-27)
+
+The API, public models/errors, session ownership, application shutdown,
+configuration publication, AAC, maintenance and architecture audit passed 393
+tests. Additional document/service/format/search and artifact checks passed 227
+tests; two extraction tests could not reach their assertions because the local
+environment lacks `docling_core`. One PostgreSQL test was deselected. Changed
+API, port, public-model and boundary-test code passed Ruff.
+
+No storage behavior changed in this boundary cleanup, so no new database
+contracts were needed. `.github/workflows/server-tests.yml` provisions PostgreSQL
+and runs the `requires_postgres` lane. That lane was inspected, not run locally.
+Parser dependency verification and the separately tracked lifecycle follow-ups
+remain outside this closeout; this is not a claim that the entire server is done.
