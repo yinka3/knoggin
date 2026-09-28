@@ -70,8 +70,21 @@ class PublicModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         frozen=True,
-        str_strip_whitespace=True,
+        str_strip_whitespace=False,
     )
+
+    @field_validator(
+        "id", "project_id", "session_id", "agent_id", "run_id", "document_id",
+        "source_ref_id", "artifact_id", "request_id", "model", "idempotency_key",
+        mode="before", check_fields=False,
+    )
+    @classmethod
+    def _normalise_identifiers(cls, value, info):
+        if isinstance(value, str) and (
+            info.field_name.endswith("_id") or info.field_name in {"id", "model", "idempotency_key"}
+        ):
+            return value.strip()
+        return value
 
 
 class CreateProjectRequest(PublicModel):
@@ -550,6 +563,39 @@ def validate_public_stream_event(event: object) -> PublicStreamEvent:
     return _public_stream_event_adapter.validate_python(event)
 
 
+class PublicStreamContractError(ValueError):
+    """Invalid server stream output, never an invalid client request."""
+
+
+class PublicStreamState:
+    """Small incremental validator shared by streaming and complete consumers."""
+
+    def __init__(self):
+        self.run_id: str | None = None
+        self.sequence = -1
+        self.terminal: PublicStreamEvent | None = None
+
+    def accept(self, raw: object) -> PublicStreamEvent:
+        if self.terminal is not None:
+            raise PublicStreamContractError("public stream cannot continue after terminal event")
+        try:
+            event = validate_public_stream_event(raw)
+        except ValueError:
+            raise PublicStreamContractError("Malformed public stream event") from None
+        if self.run_id is not None and event.run_id != self.run_id:
+            raise PublicStreamContractError("public stream events must belong to one run")
+        if event.sequence <= self.sequence:
+            raise PublicStreamContractError("public stream sequence must increase monotonically")
+        self.run_id, self.sequence = event.run_id, event.sequence
+        if isinstance(event, (RunCompletedEvent, RunFailedEvent, RunCancelledEvent)):
+            self.terminal = event
+        return event
+
+    def finish(self, *, require_terminal=True):
+        if require_terminal and self.terminal is None:
+            raise PublicStreamContractError("public stream must end with one terminal event")
+
+
 def validate_public_stream(
     events: Sequence[object],
     *,
@@ -557,31 +603,7 @@ def validate_public_stream(
 ) -> tuple[PublicStreamEvent, ...]:
     """Validate ordering and one-run ownership for a complete public stream."""
 
-    parsed = tuple(validate_public_stream_event(event) for event in events)
-    if not parsed:
-        if require_terminal:
-            raise ValueError("public stream must contain a terminal event")
-        return parsed
-
-    run_id = parsed[0].run_id
-    previous_sequence = -1
-    terminal_count = 0
-    for event in parsed:
-        if event.run_id != run_id:
-            raise ValueError("public stream events must belong to one run")
-        if event.sequence <= previous_sequence:
-            raise ValueError("public stream sequence must increase monotonically")
-        previous_sequence = event.sequence
-        if event.type in {"run.completed", "run.failed", "run.cancelled"}:
-            terminal_count += 1
-    if terminal_count > 1:
-        raise ValueError("public stream must contain at most one terminal event")
-    if require_terminal and terminal_count != 1:
-        raise ValueError("public stream must end with one terminal event")
-    if terminal_count == 1 and parsed[-1].type not in {
-        "run.completed",
-        "run.failed",
-        "run.cancelled",
-    }:
-        raise ValueError("public stream events cannot follow a terminal event")
+    state = PublicStreamState()
+    parsed = tuple(state.accept(event) for event in events)
+    state.finish(require_terminal=require_terminal)
     return parsed

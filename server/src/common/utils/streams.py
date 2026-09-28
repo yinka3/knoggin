@@ -1,10 +1,12 @@
 """Explicit close propagation for adapters around an owned async stream."""
 
-from collections.abc import AsyncIterator
 import asyncio
-from loguru import logger
-from common.utils.lifecycle import settle_owned_task
+from collections.abc import AsyncIterator
 from typing import Generic, TypeVar
+
+from loguru import logger
+
+from common.utils.lifecycle import settle_owned_task
 
 T = TypeVar("T")
 

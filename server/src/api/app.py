@@ -8,8 +8,8 @@ need to start PostgreSQL or an embedding model.
 
 from __future__ import annotations
 
-import inspect
 import asyncio
+import inspect
 import json
 import re
 from collections.abc import AsyncIterator, Mapping
@@ -20,10 +20,8 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import ValidationError
 from loguru import logger
-
-from common.utils.lifecycle import settle_owned_task
+from pydantic import ValidationError
 
 from common.exceptions import (
     DependencyError,
@@ -57,7 +55,7 @@ from common.schema.public import (
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
-    RunCancelledEvent,
+    PublicStreamState,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
@@ -66,8 +64,8 @@ from common.schema.public import (
     UpdateSavedWebLinkRequest,
     UploadDocumentRequest,
     to_public_error,
-    validate_public_stream_event,
 )
+from common.utils.lifecycle import settle_owned_task
 
 
 class ApplicationPort(Protocol):
@@ -1080,15 +1078,15 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
     ) -> RunResult:
         stream = await _open_stream_from_port(port, user_name=user_name, request=body)
         try:
-            events = [event async for event in stream]
-            parsed = [validate_public_stream_event(event) for event in events]
-            completed = [event for event in parsed if isinstance(event, RunCompletedEvent)]
-            if completed:
-                return completed[-1].result
-            failed = [event for event in parsed if isinstance(event, RunFailedEvent)]
-            if failed:
-                raise PublicOperationError(failed[-1].error)
-            raise ValueError("run stream did not contain a terminal result")
+            state = PublicStreamState()
+            async for event in stream:
+                state.accept(event)
+            state.finish()
+            if isinstance(state.terminal, RunCompletedEvent):
+                return state.terminal.result
+            if isinstance(state.terminal, RunFailedEvent):
+                raise PublicOperationError(state.terminal.error)
+            raise PublicOperationError(PublicError(code="run_cancelled", message="The run was cancelled."))
         finally:
             await _close_owned_stream(stream)
 
@@ -1106,39 +1104,23 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         )
 
         async def events() -> AsyncIterator[str]:
-            run_id: str | None = None
-            previous_sequence = -1
-            terminal = False
+            state = PublicStreamState()
             try:
                 async for raw_event in stream:
-                    event = validate_public_stream_event(raw_event)
-                    if run_id is None:
-                        run_id = event.run_id
-                    if event.run_id != run_id:
-                        raise ValueError("public stream events must belong to one run")
-                    if event.sequence <= previous_sequence:
-                        raise ValueError("public stream sequence must increase monotonically")
-                    if terminal:
-                        raise ValueError("public stream cannot continue after terminal event")
-                    previous_sequence = event.sequence
+                    event = state.accept(raw_event)
                     yield _sse_frame(event)
-                    if isinstance(
-                        event,
-                        (RunCompletedEvent, RunFailedEvent, RunCancelledEvent),
-                    ):
-                        terminal = True
-                if not terminal:
-                    raise ValueError("public stream must contain a terminal event")
+                state.finish()
             except Exception as exc:
                 # A malformed event after a valid terminal cannot be repaired
                 # without violating the one-terminal stream contract.  Keep
                 # the already-emitted terminal event as the public result.
-                if terminal:
+                if state.terminal is not None:
+                    logger.error("Invalid post-terminal stream request={} run={}", request_id, state.run_id)
                     return
-                run_id = run_id or str(uuid4())
+                run_id = state.run_id or str(uuid4())
                 failed = RunFailedEvent(
                     run_id=run_id,
-                    sequence=previous_sequence + 1,
+                    sequence=state.sequence + 1,
                     timestamp=_now(),
                     error=(
                         PublicError(
