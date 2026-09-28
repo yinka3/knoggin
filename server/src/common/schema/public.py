@@ -45,6 +45,7 @@ from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
 from common.schema.document import DocumentSelection
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from common.schema.maintenance import MaintenanceImpactPreview
+from common.schema.settings import DeveloperSettings, LLMSpendingBudgetSettings
 from common.schema.source.locators import DocumentLocator
 from common.schema.source.references import SourceConsulted
 
@@ -194,6 +195,45 @@ class SessionHistoryMessage(PublicModel):
 class SessionDeletedResponse(PublicModel):
     session_id: str = Field(min_length=1)
     deleted: Literal[True] = True
+
+
+class SettingsUpdateRequest(PublicModel):
+    updates: dict[str, Any]
+
+
+class PublicLLMSettings(PublicModel):
+    agent_model: str
+    extraction_model: str
+    merge_model: str
+    spending_budget: LLMSpendingBudgetSettings
+    api_key_configured: bool
+
+
+class PublicSearchSettings(PublicModel):
+    provider: str
+    brave_api_key_configured: bool
+    tavily_api_key_configured: bool
+
+
+class SettingsResponse(PublicModel):
+    user_aliases: tuple[str, ...]
+    llm: PublicLLMSettings
+    search: PublicSearchSettings
+    developer_settings: DeveloperSettings
+
+
+class SettingsApplyStatusResponse(PublicModel):
+    generation: int = Field(ge=0)
+    persisted: bool
+    activated: bool
+    failed_subscriptions: tuple[int, ...]
+    pending_subscriptions: tuple[int, ...]
+    fully_applied: bool
+
+
+class SettingsOperationResponse(PublicModel):
+    accepted: bool
+    status: SettingsApplyStatusResponse
 
 
 class AACAdmissionResponse(PublicModel):

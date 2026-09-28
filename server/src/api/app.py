@@ -64,6 +64,10 @@ from common.schema.public import (
     SessionHistoryMessage,
     SessionResponse,
     SetDocumentFocusRequest,
+    SettingsApplyStatusResponse,
+    SettingsOperationResponse,
+    SettingsResponse,
+    SettingsUpdateRequest,
     StartRunRequest,
     UpdateProjectRequest,
     UpdateSavedWebLinkRequest,
@@ -104,6 +108,12 @@ class ApplicationPort(Protocol):
         user_name: str,
         request: CreateProjectRequest,
     ) -> ProjectResponse | Mapping[str, Any]: ...
+
+    async def get_settings(self, *, user_name: str) -> SettingsResponse: ...
+    async def get_settings_status(self, *, user_name: str) -> SettingsApplyStatusResponse: ...
+    async def update_settings(self, *, user_name: str, request: SettingsUpdateRequest) -> SettingsOperationResponse: ...
+    async def reload_settings(self, *, user_name: str) -> SettingsOperationResponse: ...
+    async def retry_settings_applies(self, *, user_name: str) -> SettingsApplyStatusResponse: ...
 
     async def trigger_aac(self, *, user_name: str) -> AACAdmissionResponse: ...
     async def stop_aac(self, *, user_name: str) -> AACStopResponse: ...
@@ -513,6 +523,26 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         return _project_response(
             await _call(port.create_project, user_name=user_name, request=body)
         )
+
+    @app.get("/v1/settings", response_model=SettingsResponse)
+    async def get_settings(user_name: str = Depends(current_user)):
+        return await port.get_settings(user_name=user_name)
+
+    @app.patch("/v1/settings", response_model=SettingsOperationResponse)
+    async def update_settings(body: SettingsUpdateRequest, user_name: str = Depends(current_user)):
+        return await port.update_settings(user_name=user_name, request=body)
+
+    @app.post("/v1/settings/reload", response_model=SettingsOperationResponse)
+    async def reload_settings(user_name: str = Depends(current_user)):
+        return await port.reload_settings(user_name=user_name)
+
+    @app.get("/v1/settings/status", response_model=SettingsApplyStatusResponse)
+    async def get_settings_status(user_name: str = Depends(current_user)):
+        return await port.get_settings_status(user_name=user_name)
+
+    @app.post("/v1/settings/retry-applies", response_model=SettingsApplyStatusResponse)
+    async def retry_settings_applies(user_name: str = Depends(current_user)):
+        return await port.retry_settings_applies(user_name=user_name)
 
     @app.post("/v1/aac/trigger", response_model=AACAdmissionResponse)
     async def trigger_aac(user_name: str = Depends(current_user)):

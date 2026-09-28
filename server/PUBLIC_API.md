@@ -22,8 +22,7 @@ they are not a generic serialization path for arbitrary runtime objects.
 ## Management endpoint follow-up
 
 The follow-up endpoint pass is now approved. Session, project and AAC endpoints
-are implemented. Global settings read/update/reload/application-status operations
-remain pending. Their internal
+and settings endpoints are implemented. Their internal
 methods stay available. Batch admission is approved for documents and web links
 and remains pending implementation.
 
@@ -66,6 +65,25 @@ Insight search accepts an optional query. These are user-owned reads: private
 Insights are visible to that user, not exposed through an agent browsing interface.
 Unknown or out-of-scope timeline/vote IDs return empty lists, matching the scoped
 store queries. Votes use the existing complete vote list, without new pagination.
+
+Settings routes are `GET /v1/settings`, `PATCH /v1/settings`,
+`POST /v1/settings/reload`, `GET /v1/settings/status` and
+`POST /v1/settings/retry-applies`. PATCH takes `{ "updates": { ... } }`, a
+partial RootConfig-shaped update validated against current configuration.
+Unknown fields and invalid candidates return safe 422 responses without writes.
+Credentials may be written but never read back. GET returns safe LLM model/budget
+fields and credential-configured flags, not API keys or the provider base URL
+(which can embed credentials). It is a public view, not a complete config export.
+
+PATCH/reload return `accepted` plus application status. Persistence or reload
+failure returns accepted=false without activating the candidate. Accepted=true
+does not imply every subscriber applied it: inspect fully_applied, failed and
+pending subscription IDs. Status is value-free. Reload reads existing YAML
+without rewriting it; persisted refers to the accepted on-disk candidate, not
+whether this request wrote it. Retry reapplies failed subscriptions without
+rewriting config. Publication runs synchronously on the subscriber thread inside
+the async route, not on a worker. File I/O/callbacks can block the event loop;
+this preserves the existing manager's thread-ownership contract.
 
 The SDK implementation and walkthrough belong to a separate pass after server
 work. Future settings endpoints must keep credentials private and respect the

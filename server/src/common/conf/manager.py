@@ -433,10 +433,7 @@ class ConfigManager:
         self._require_callback_thread()
         self._record_status(persisted=False, activated=False)
         try:
-            if not isinstance(updates, dict):
-                raise TypeError("Updates must be a mapping")
-            updated_data = deep_merge(self._config.model_dump(), updates)
-            new_config = self._validate_config(updated_data)
+            new_config = self.validate_updates(updates)
         except ValidationError as exc:
             logger.error("Failed to validate configuration updates: {}", self._validation_summary(exc))
             return False
@@ -449,6 +446,13 @@ class ConfigManager:
             return False
         self._publish(new_config)
         return True
+
+    @_serialized
+    def validate_updates(self, updates: Dict[str, Any]) -> RootConfig:
+        """Validate a partial candidate without persisting or publishing it."""
+        if not isinstance(updates, dict):
+            raise TypeError("Updates must be a mapping")
+        return self._validate_config(deep_merge(self._config.model_dump(), updates))
 
     @staticmethod
     def _validate_runtime_config(config: RootConfig) -> None:

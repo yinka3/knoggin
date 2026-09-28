@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from common.conf.domain_config import DomainConfig
 from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE
 from common.exceptions import NotFoundError, PayloadTooLargeError
@@ -51,6 +53,8 @@ from common.schema.public import (
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
+    PublicLLMSettings,
+    PublicSearchSettings,
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
@@ -61,6 +65,10 @@ from common.schema.public import (
     SessionHistoryMessage,
     SessionResponse,
     SetDocumentFocusRequest,
+    SettingsApplyStatusResponse,
+    SettingsOperationResponse,
+    SettingsResponse,
+    SettingsUpdateRequest,
     SourceAddedEvent,
     StartRunRequest,
     ToolCompletedEvent,
@@ -170,6 +178,52 @@ class ApplicationRuntimePort:
                 "allowed_projects": tuple(project.get("allowed_projects") or ()),
             }
         )
+
+    async def get_settings(self, *, user_name: str) -> SettingsResponse:
+        self._require_user(user_name)
+        config = self.runtime.config_manager.config
+        return SettingsResponse(
+            user_aliases=tuple(config.user_aliases),
+            llm=PublicLLMSettings(
+                agent_model=config.llm.agent_model, extraction_model=config.llm.extraction_model,
+                merge_model=config.llm.merge_model, spending_budget=config.llm.spending_budget,
+                api_key_configured=bool(config.llm.api_key),
+            ),
+            search=PublicSearchSettings(provider=config.search.provider,
+                brave_api_key_configured=bool(config.search.brave_api_key),
+                tavily_api_key_configured=bool(config.search.tavily_api_key)),
+            developer_settings=config.developer_settings,
+        )
+
+    async def get_settings_status(self, *, user_name: str) -> SettingsApplyStatusResponse:
+        self._require_user(user_name)
+        status = self.runtime.config_manager.last_apply_status
+        return SettingsApplyStatusResponse(
+            generation=status.generation, persisted=status.persisted, activated=status.activated,
+            failed_subscriptions=status.failed_subscriptions, pending_subscriptions=status.pending_subscriptions,
+            fully_applied=status.fully_applied,
+        )
+
+    async def update_settings(self, *, user_name: str, request: SettingsUpdateRequest) -> SettingsOperationResponse:
+        self._require_user(user_name)
+        manager = self.runtime.config_manager
+        try:
+            manager.validate_updates(request.updates)
+        except (ValidationError, ValueError, TypeError):
+            raise ValueError("Invalid settings update") from None
+        # These calls must stay on the subscriber thread; never use to_thread.
+        accepted = manager.update_settings(request.updates)
+        return SettingsOperationResponse(accepted=accepted, status=await self.get_settings_status(user_name=user_name))
+
+    async def reload_settings(self, *, user_name: str) -> SettingsOperationResponse:
+        self._require_user(user_name)
+        accepted = self.runtime.config_manager.load()
+        return SettingsOperationResponse(accepted=accepted, status=await self.get_settings_status(user_name=user_name))
+
+    async def retry_settings_applies(self, *, user_name: str) -> SettingsApplyStatusResponse:
+        self._require_user(user_name)
+        self.runtime.config_manager.retry_failed_applies()
+        return await self.get_settings_status(user_name=user_name)
 
     def _aac(self, user_name: str):
         self._require_user(user_name)
