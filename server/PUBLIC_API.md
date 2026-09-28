@@ -19,12 +19,11 @@ they are not a generic serialization path for arbitrary runtime objects.
 - Artifacts and maintenance: existing browsing, revision reads, review decisions
   and preview/application operations.
 
-## Deferred capabilities
+## Management endpoint follow-up
 
-The follow-up endpoint pass is now approved. Session endpoints are implemented;
+The follow-up endpoint pass is now approved. Session and project endpoints are implemented;
 AAC triggering, stopping, participation and timeline/Insight browsing;
-global settings read/update/reload/application-status operations; and additional
-project listing/update/archive/delete routes remain pending. Their internal
+global settings read/update/reload/application-status operations remain pending. Their internal
 methods stay available. Batch admission is approved for documents and web links
 and remains pending implementation.
 
@@ -38,6 +37,18 @@ PATCH accepts only model, agent_id and enabled_tools. Omitted fields stay unchan
 null restores inherited settings and an empty tools list disables all tools.
 Listing currently uses the existing manager's complete open-session metadata read;
 it is not a paginated database query.
+
+Project routes are `GET /v1/projects`, `GET /v1/projects/{project_id}`,
+`PATCH /v1/projects/{project_id}`, `POST /v1/projects/{project_id}/archive` and
+`DELETE /v1/projects/{project_id}`. PATCH accepts name, description and
+allowed_projects, not lifecycle status. Omitted or null fields are unchanged
+(description can be emptied with an empty string); an empty allowed_projects
+list clears additional readable scopes. Active leases block scope changes,
+archive and deletion with 409, without forcibly unloading sessions.
+Deletion uses the manager's hard-delete flow and returns file_cleanup_status
+(`complete` or `pending`), including retries where only a cleanup task survives.
+Missing projects return 404. Metadata responses omit domain configuration and
+internal paths. Listing uses the existing full manager query, not pagination.
 
 The SDK implementation and walkthrough belong to a separate pass after server
 work. Future settings endpoints must keep credentials private and respect the

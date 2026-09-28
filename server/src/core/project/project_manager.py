@@ -9,6 +9,7 @@ from loguru import logger
 
 from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
+from common.exceptions import WorkspaceConflictError
 from common.scoping import build_readable_project_ids
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
@@ -669,7 +670,7 @@ class ProjectManager:
         if allowed_projects is not None:
             active_state = self.active_projects.get(project_id)
             if self._project_leases.get(project_id):
-                raise RuntimeError(
+                raise WorkspaceConflictError(
                     f"Project '{project_id}' has active runtime sessions and "
                     "cannot change its readable project scope"
                 )
@@ -726,7 +727,7 @@ class ProjectManager:
 
         active_state = self.active_projects.get(project_id)
         if self._project_leases.get(project_id):
-            raise RuntimeError(
+            raise WorkspaceConflictError(
                 f"Project '{project_id}' has active runtime sessions and cannot be archived"
             )
         if active_state:
@@ -787,7 +788,7 @@ class ProjectManager:
 
             active_state = self.active_projects.get(project_id)
             if self._project_leases.get(project_id):
-                raise RuntimeError(
+                raise WorkspaceConflictError(
                     f"Project '{project_id}' has active runtime sessions and "
                     "cannot be deleted"
                 )

@@ -122,6 +122,38 @@ class ProjectResponse(PublicModel):
     updated_at: datetime | None = None
 
 
+class UpdateProjectRequest(PublicModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=10_000)
+    allowed_projects: list[str] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _project_name(cls, value):
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("name must not be blank")
+        return value
+
+    @field_validator("allowed_projects")
+    @classmethod
+    def _readable_projects(cls, value):
+        if value is None:
+            return value
+        names = [name.strip() for name in value]
+        if any(not name for name in names) or len(set(names)) != len(names):
+            raise ValueError("allowed_projects must contain unique nonblank IDs")
+        return names
+
+
+class ProjectDeletedResponse(PublicModel):
+    project_id: str = Field(min_length=1)
+    deleted: Literal[True] = True
+    file_cleanup_status: Literal["complete", "pending"]
+
+
 class CreateSessionRequest(PublicModel):
     project_id: str = Field(min_length=1)
     model: str | None = Field(default=None, min_length=1)
@@ -327,7 +359,7 @@ def project_public_model(model, value):
         raise PublicStreamContractError("Invalid public management result")
     projected = {name: value[name] for name in model.model_fields if name in value}
     for name, item in projected.items():
-        if name.endswith("_id") and isinstance(item, UUID):
+        if (name == "id" or name.endswith("_id")) and isinstance(item, UUID):
             projected[name] = str(item)
     return model.model_validate(projected)
 

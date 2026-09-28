@@ -41,6 +41,7 @@ from common.schema.public import (
     MaintenanceReviewListResponse,
     MaintenanceReviewPreviewResponse,
     MaintenanceReviewResponse,
+    ProjectDeletedResponse,
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
@@ -56,6 +57,7 @@ from common.schema.public import (
     SessionResponse,
     SetDocumentFocusRequest,
     StartRunRequest,
+    UpdateProjectRequest,
     UpdateSavedWebLinkRequest,
     UpdateSessionRequest,
     UploadDocumentRequest,
@@ -94,6 +96,12 @@ class ApplicationPort(Protocol):
         user_name: str,
         request: CreateProjectRequest,
     ) -> ProjectResponse | Mapping[str, Any]: ...
+
+    async def list_projects(self, *, user_name: str) -> list[ProjectResponse]: ...
+    async def get_project(self, *, user_name: str, project_id: str) -> ProjectResponse: ...
+    async def update_project(self, *, user_name: str, project_id: str, request: UpdateProjectRequest) -> ProjectResponse: ...
+    async def archive_project(self, *, user_name: str, project_id: str) -> ProjectResponse: ...
+    async def delete_project(self, *, user_name: str, project_id: str) -> ProjectDeletedResponse: ...
 
     async def create_session(
         self,
@@ -489,6 +497,26 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         return _project_response(
             await _call(port.create_project, user_name=user_name, request=body)
         )
+
+    @app.get("/v1/projects", response_model=list[ProjectResponse])
+    async def list_projects(user_name: str = Depends(current_user)):
+        return await port.list_projects(user_name=user_name)
+
+    @app.get("/v1/projects/{project_id}", response_model=ProjectResponse)
+    async def get_project(project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.get_project(user_name=user_name, project_id=project_id)
+
+    @app.patch("/v1/projects/{project_id}", response_model=ProjectResponse)
+    async def update_project(body: UpdateProjectRequest, project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.update_project(user_name=user_name, project_id=project_id, request=body)
+
+    @app.post("/v1/projects/{project_id}/archive", response_model=ProjectResponse)
+    async def archive_project(project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.archive_project(user_name=user_name, project_id=project_id)
+
+    @app.delete("/v1/projects/{project_id}", response_model=ProjectDeletedResponse)
+    async def delete_project(project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.delete_project(user_name=user_name, project_id=project_id)
 
     @app.post("/v1/sessions", response_model=SessionResponse, status_code=201)
     async def create_session(

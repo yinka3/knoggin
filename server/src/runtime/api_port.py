@@ -40,6 +40,7 @@ from common.schema.public import (
     MaintenanceReviewPreviewResponse,
     MaintenanceReviewResponse,
     MessageDeltaEvent,
+    ProjectDeletedResponse,
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
@@ -57,6 +58,7 @@ from common.schema.public import (
     StartRunRequest,
     ToolCompletedEvent,
     ToolStartedEvent,
+    UpdateProjectRequest,
     UpdateSavedWebLinkRequest,
     UpdateSessionRequest,
     UploadDocumentRequest,
@@ -160,6 +162,46 @@ class ApplicationRuntimePort:
                 "id": project.get("id", project.get("project_id")),
                 "allowed_projects": tuple(project.get("allowed_projects") or ()),
             }
+        )
+
+    async def list_projects(self, *, user_name: str) -> list[ProjectResponse]:
+        self._require_user(user_name)
+        rows = await self.runtime.projects.list_projects()
+        return [project_public_model(ProjectResponse, row) for row in rows]
+
+    async def get_project(self, *, user_name: str, project_id: str) -> ProjectResponse:
+        self._require_user(user_name)
+        row = await self.runtime.projects.get_project(project_id)
+        if row is None:
+            raise NotFoundError("project")
+        return project_public_model(ProjectResponse, row)
+
+    async def update_project(
+        self, *, user_name: str, project_id: str, request: UpdateProjectRequest
+    ) -> ProjectResponse:
+        self._require_user(user_name)
+        row = await self.runtime.projects.update_project(
+            project_id, **request.model_dump(exclude_unset=True)
+        )
+        if row is None:
+            raise NotFoundError("project")
+        return project_public_model(ProjectResponse, row)
+
+    async def archive_project(self, *, user_name: str, project_id: str) -> ProjectResponse:
+        self._require_user(user_name)
+        row = await self.runtime.projects.archive_project(project_id)
+        if row is None:
+            raise NotFoundError("project")
+        return project_public_model(ProjectResponse, row)
+
+    async def delete_project(self, *, user_name: str, project_id: str) -> ProjectDeletedResponse:
+        self._require_user(user_name)
+        # Do not pre-read: a retry may only have pending file cleanup left.
+        row = await self.runtime.projects.delete_project(project_id)
+        if row is None:
+            raise NotFoundError("project")
+        return ProjectDeletedResponse(
+            project_id=project_id, file_cleanup_status=row["file_cleanup_status"]
         )
 
     async def create_session(
