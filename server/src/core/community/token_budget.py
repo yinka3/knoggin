@@ -42,10 +42,16 @@ class AACTokenBudget:
         """Add one provider or approximate usage record and return the total."""
 
         total = usage.get("total_tokens")
+        components = []
+        for name in ("prompt_tokens", "completion_tokens"):
+            count = usage.get(name)
+            if count is None:
+                count = 0
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError("AAC model usage must contain non-negative token counts")
+            components.append(count)
         if total is None:
-            total = int(usage.get("prompt_tokens") or 0) + int(
-                usage.get("completion_tokens") or 0
-            )
+            total = sum(components)
         if isinstance(total, bool) or not isinstance(total, int) or total < 0:
             raise ValueError("AAC model usage must contain non-negative token counts")
         with self._lock:

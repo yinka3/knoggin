@@ -24,3 +24,14 @@ def test_aac_token_budget_rejects_invalid_limits_and_usage():
     budget = AACTokenBudget(limit=10)
     with pytest.raises(ValueError):
         budget.record({"total_tokens": -1})
+
+
+@pytest.mark.parametrize("field", ["prompt_tokens", "completion_tokens"])
+@pytest.mark.parametrize("value", [-1, True, "3", 1.5])
+@pytest.mark.parametrize("total", [None, 5])
+def test_invalid_components_are_rejected_without_changing_budget(field, value, total):
+    budget = AACTokenBudget(limit=10, used=2)
+    with pytest.raises(ValueError, match="non-negative token counts"):
+        budget.record({field: value, "total_tokens": total, "approximate": True})
+    assert budget.used == 2
+    assert budget.approximate is False

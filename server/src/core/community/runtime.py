@@ -553,7 +553,9 @@ class AACRuntime:
                 )
             ),
         )
-        configured_tools = agent.enabled_tools or AAC_DEFAULT_ENABLED_TOOLS
+        configured_tools = (
+            AAC_DEFAULT_ENABLED_TOOLS if agent.enabled_tools is None else agent.enabled_tools
+        )
         enabled = [
             name for name in configured_tools if name in AAC_DEFAULT_ENABLED_TOOLS
         ]

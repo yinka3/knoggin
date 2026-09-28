@@ -497,15 +497,16 @@ async def test_private_specialists_cannot_publish_or_spawn_without_promotion(mon
 
 @pytest.mark.runtime
 @pytest.mark.no_network
+@pytest.mark.parametrize("empty_tools", [False, True])
 async def test_aac_participants_cannot_reexpose_project_tools_from_agent_settings(
-    monkeypatch,
+    monkeypatch, empty_tools,
 ):
     resources = FakeResources()
     manager = AgentManager(resources, user_name="ada")
     agent = await manager.create_agent(
         "Researcher",
         "Careful",
-        enabled_tools=[
+        enabled_tools=[] if empty_tools else [
             "search_project_documents",
             "create_project_file",
             "update_project_file",
@@ -550,7 +551,10 @@ async def test_aac_participants_cannot_reexpose_project_tools_from_agent_setting
     visible_tools = {
         schema["function"]["name"] for schema in captured["run"].tool_runtime.schemas
     }
-    assert "search_project_documents" in visible_tools
+    if empty_tools:
+        assert visible_tools == {"submit_answer", "request_clarification", "set_research_plan"}
+    else:
+        assert "search_project_documents" in visible_tools
     assert {
         "create_project_file",
         "update_project_file",

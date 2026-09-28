@@ -88,7 +88,8 @@ class AACSeeder:
 
     async def decide(self, *, budget: Optional[AACTokenBudget] = None) -> SeedDecision:
         settings = self.config_provider.get().config.developer_settings.community
-        budget = budget or AACTokenBudget(settings.token_budget)
+        if budget is None:
+            budget = AACTokenBudget(settings.token_budget)
         agent = await self._resolve_agent()
         if agent is None:
             return SeedDecision("SKIP")
