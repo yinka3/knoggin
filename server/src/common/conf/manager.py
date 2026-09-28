@@ -1,8 +1,10 @@
 import asyncio
+import inspect
 import os
 import tempfile
 import threading
 from copy import deepcopy
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -14,7 +16,6 @@ from pydantic import BaseModel, ValidationError
 from common.schema.agent.settings import validate_tool_limit_overrides
 from common.schema.agent.tool_names import get_configurable_tool_names
 from common.schema.settings import RootConfig
-from common.utils.core_utils import safe_update
 from common.utils.lifecycle import settle_owned_task
 
 CONFIG_FILE_NOTICE = (
@@ -29,6 +30,21 @@ class ConfigurationLoadError(RuntimeError):
 
 class ConfigurationPersistenceError(RuntimeError):
     """Raised when initial configuration cannot be persisted."""
+
+
+@dataclass(frozen=True)
+class ConfigurationApplyStatus:
+    """Value-free diagnostics for the latest publication attempt."""
+
+    generation: int
+    persisted: bool
+    activated: bool
+    failed_subscriptions: tuple[int, ...] = ()
+    pending_subscriptions: tuple[int, ...] = ()
+
+    @property
+    def fully_applied(self) -> bool:
+        return self.activated and not self.failed_subscriptions and not self.pending_subscriptions
 
 
 def deep_merge(source: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -51,8 +67,12 @@ def _serialized(method):
 
 class ConfigManager:
     """
-    A unified, thread-safe Configuration Event Bus.
-    Handles YAML I/O, Pydantic validation, and dispatches targeted config updates to subscribed services.
+    Serialized configuration persistence and synchronous publication.
+
+    Reads return isolated snapshots. Once services subscribe, publication must
+    run on that thread (normally the application loop thread). async_save moves
+    only save-current I/O to a worker; it never calls service subscribers there.
+    Callbacks may reenter on the same thread; queued delivery uses latest state.
     """
     _instance: Optional["ConfigManager"] = None
     _lock = threading.Lock()
@@ -70,6 +90,12 @@ class ConfigManager:
         self.subscribers: List[Dict[str, Any]] = []
         self._async_lock = asyncio.Lock()
         self._loaded = False
+        self._generation = 0
+        self._next_subscription = 0
+        self._pending_applies: dict[int, dict] = {}
+        self._failed_applies: dict[int, dict] = {}
+        self._dispatching = False
+        self._last_apply_status = ConfigurationApplyStatus(0, False, False)
 
         self.load(require_valid=True)
 
@@ -82,6 +108,81 @@ class ConfigManager:
     def _require_callback_thread(self) -> None:
         if self.subscribers and self._callback_thread != threading.get_ident():
             raise RuntimeError("Configuration publication must run on the subscriber thread")
+
+    @property
+    def last_apply_status(self) -> ConfigurationApplyStatus:
+        with self._state_lock:
+            return self._last_apply_status
+
+    def _record_status(self, *, persisted: bool, activated: bool) -> None:
+        self._last_apply_status = ConfigurationApplyStatus(
+            self._generation, persisted, activated,
+            tuple(self._failed_applies), tuple(self._pending_applies),
+        )
+
+    def _validate_config(self, data: dict) -> RootConfig:
+        candidate = RootConfig.model_validate(data)
+        self._validate_runtime_config(candidate)
+        return candidate
+
+    @staticmethod
+    def _invoke(callback: Callable, value: Any) -> None:
+        # Reporting apply failures requires exceptions to remain visible here.
+        if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(getattr(callback, "__call__", None)):
+            raise TypeError("Configuration subscribers must be synchronous")
+        result = callback(deepcopy(value))
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("Configuration subscribers must not return awaitables")
+
+    def _publish(self, candidate: RootConfig) -> None:
+        previous = self._config
+        self._config = candidate.model_copy(deep=True)
+        self._generation += 1
+        for sub in list(self.subscribers):
+            token = sub["id"]
+            if (self._get_nested_model(previous, sub["path"]) !=
+                    self._get_nested_model(self._config, sub["path"]) or token in self._failed_applies):
+                self._pending_applies[token] = sub
+        self._drain_applies()
+
+    def _drain_applies(self) -> None:
+        if self._dispatching:
+            self._record_status(persisted=True, activated=True)
+            return
+        self._dispatching = True
+        try:
+            while self._pending_applies:
+                token = next(iter(self._pending_applies))
+                sub = self._pending_applies.pop(token)
+                if not any(item is sub for item in self.subscribers):
+                    self._failed_applies.pop(token, None)
+                    continue
+                try:
+                    # Resolve now: nested publications must not deliver stale values.
+                    self._invoke(sub["callback"], self._get_nested_model(self._config, sub["path"]))
+                except Exception:
+                    self._failed_applies[token] = sub
+                    logger.error("Configuration subscriber {} failed to apply", token)
+                else:
+                    self._failed_applies.pop(token, None)
+        finally:
+            self._dispatching = False
+            self._record_status(persisted=True, activated=True)
+
+    @_serialized
+    def retry_failed_applies(self) -> ConfigurationApplyStatus:
+        """Retry failed subscribers against current state without rewriting YAML."""
+        self._require_callback_thread()
+        previous_status = self._last_apply_status
+        generation = self._generation
+        self._pending_applies.update(self._failed_applies)
+        self._drain_applies()
+        if self._generation == generation:
+            # Retrying service application is not a new successful disk write.
+            self._record_status(persisted=previous_status.persisted, activated=self._loaded)
+        return self._last_apply_status
 
     @classmethod
     def initialize(cls, config_dir: str | Path) -> "ConfigManager":
@@ -117,11 +218,16 @@ class ConfigManager:
 
     @_serialized
     def load(self, *, require_valid: bool = False) -> bool:
-        """Loads configuration from YAML."""
+        """Validate and publish YAML; True means accepted, not every service applied.
+
+        Consult last_apply_status for subscriber failures. Runtime load is an
+        explicit reload, not a file watcher, and never rewrites the input file.
+        """
         from common.utils.prompt_loader import validate_prompt_library
 
         validate_prompt_library()
         self._require_callback_thread()
+        self._record_status(persisted=False, activated=False)
         data = None
         load_failed = False
         config_exists = self.config_file.exists()
@@ -150,9 +256,7 @@ class ConfigManager:
                     data = {}
                 if not isinstance(data, dict):
                     raise ValueError("Configuration root must be a mapping")
-                new_config = RootConfig(**data)
-                self._validate_runtime_config(new_config)
-                self._config = new_config.model_copy(deep=True)
+                new_config = self._validate_config(data)
             except ValidationError as exc:
                 errors = "; ".join(
                     f"{'.'.join(str(part) for part in error['loc'])}: "
@@ -170,14 +274,12 @@ class ConfigManager:
                     raise ConfigurationLoadError(message) from exc
                 logger.error(f"{message}; keeping the active configuration")
                 return False
-        else:
-            self._config = RootConfig()
-
-        if not config_exists and not self.save():
+        if not config_exists and not self._persist_config(new_config):
             raise ConfigurationPersistenceError(
                 f"Failed to create initial configuration at {self.config_file}"
             )
         self._loaded = True
+        self._publish(new_config)
         return True
 
     @_serialized
@@ -233,7 +335,9 @@ class ConfigManager:
         """
         self._require_callback_thread()
         self._callback_thread = threading.get_ident()
+        self._next_subscription += 1
         subscription = {
+            "id": self._next_subscription,
             "callback": callback,
             "path": path
         }
@@ -241,7 +345,11 @@ class ConfigManager:
         # Immediately invoke the callback with the current settings so the service initializes correctly
         current_val = self._get_nested_model(self.config, path)
         if current_val is not None:
-            safe_update(callback, current_val)
+            try:
+                self._invoke(callback, current_val)
+            except Exception:
+                self.subscribers.remove(subscription)
+                raise RuntimeError("Initial configuration subscriber apply failed") from None
 
         def unsubscribe():
             with self._state_lock:
@@ -249,6 +357,12 @@ class ConfigManager:
                     self.subscribers.remove(subscription)
                 except ValueError:
                     pass
+                self._pending_applies.pop(subscription["id"], None)
+                self._failed_applies.pop(subscription["id"], None)
+                self._record_status(
+                    persisted=self._last_apply_status.persisted,
+                    activated=self._last_apply_status.activated,
+                )
 
         return unsubscribe
 
@@ -268,41 +382,24 @@ class ConfigManager:
         """
         Applies a partial dictionary update to the RootConfig.
         Validates the schema, saves to YAML, and fires all registered subscriber callbacks.
+        True means persisted and activated. Inspect last_apply_status for apply
+        failures; retry_failed_applies retries them without rolling back the file.
         """
         self._require_callback_thread()
+        self._record_status(persisted=False, activated=False)
         current_data = self._config.model_dump()
         updated_data = deep_merge(current_data, updates)
 
         try:
-            new_config = RootConfig(**updated_data)
-            self._validate_runtime_config(new_config)
+            new_config = self._validate_config(updated_data)
         except Exception as e:
             logger.error(f"Failed to validate configuration updates: {e}")
             return False
 
-        old_config = self.config
         if not self._persist_config(new_config):
             logger.error("Configuration update was not applied because persistence failed")
             return False
-        self._config = new_config.model_copy(deep=True)
-
-        logger.info("Applying hot-reload of runtime settings via ConfigManager...")
-
-        # Fire subscribers
-        for sub in list(self.subscribers):
-            cb = sub["callback"]
-            path = sub["path"]
-
-            old_val = self._get_nested_model(old_config, path)
-            new_val = self._get_nested_model(new_config, path)
-
-            # Only trigger callback if the specific path has changed
-            if old_val != new_val:
-                try:
-                    safe_update(cb, deepcopy(new_val))
-                except Exception as e:
-                    logger.error(f"Error calling configuration subscriber {cb.__name__}: {e}")
-
+        self._publish(new_config)
         return True
 
     @staticmethod

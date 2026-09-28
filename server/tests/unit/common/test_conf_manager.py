@@ -247,7 +247,7 @@ def test_failed_atomic_replace_removes_temporary_file(mock_config_paths, monkeyp
 def test_initial_config_write_failure_prevents_initialization(
     tmp_path, reset_config_manager, monkeypatch
 ):
-    monkeypatch.setattr(ConfigManager, "save", lambda self, config=None: False)
+    monkeypatch.setattr(ConfigManager, "_persist_config", lambda self, config: False)
 
     with pytest.raises(ConfigurationPersistenceError, match="initial configuration"):
         ConfigManager.initialize(tmp_path)
