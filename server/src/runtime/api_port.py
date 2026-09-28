@@ -26,6 +26,13 @@ from common.schema.document import (
 from common.schema.health import HealthSnapshot
 from common.schema.primitives import Message
 from common.schema.public import (
+    AACAdmissionResponse,
+    AACDiscussionResponse,
+    AACInsightResponse,
+    AACInsightVoteResponse,
+    AACParticipationResponse,
+    AACStopResponse,
+    AACTimelineResponse,
     ArtifactListResponse,
     ArtifactResponse,
     CreateProjectRequest,
@@ -163,6 +170,40 @@ class ApplicationRuntimePort:
                 "allowed_projects": tuple(project.get("allowed_projects") or ()),
             }
         )
+
+    def _aac(self, user_name: str):
+        self._require_user(user_name)
+        return self.runtime.aac_runtime
+
+    async def trigger_aac(self, *, user_name: str) -> AACAdmissionResponse:
+        admission = await self._aac(user_name).trigger_discussion()
+        return AACAdmissionResponse(outcome=admission.outcome, reason=admission.reason,
+                                    discussion_id=admission.discussion_id)
+
+    async def stop_aac(self, *, user_name: str) -> AACStopResponse:
+        return AACStopResponse(stop_requested=await self._aac(user_name).request_stop())
+
+    async def set_aac_participation(self, *, user_name: str, agent_id: str, enabled: bool) -> AACParticipationResponse:
+        agent = await self._aac(user_name).set_participation(agent_id, enabled)
+        if agent is None:
+            raise NotFoundError("agent")
+        return AACParticipationResponse(agent_id=agent.id, enabled=agent.aac_enabled)
+
+    async def list_aac_discussions(self, *, user_name: str, limit: int = 20) -> list[AACDiscussionResponse]:
+        rows = await self._aac(user_name).list_discussions(limit=limit)
+        return [project_public_model(AACDiscussionResponse, row) for row in rows]
+
+    async def list_aac_timeline(self, *, user_name: str, discussion_id: str, limit: int = 100, after_sequence: int = 0) -> list[AACTimelineResponse]:
+        rows = await self._aac(user_name).list_timeline(discussion_id, limit=limit, after_sequence=after_sequence)
+        return [project_public_model(AACTimelineResponse, row) for row in rows]
+
+    async def list_aac_insights(self, *, user_name: str, query: str | None = None, limit: int = 20) -> list[AACInsightResponse]:
+        rows = await self._aac(user_name).list_insights(query=query, limit=limit)
+        return [project_public_model(AACInsightResponse, row) for row in rows]
+
+    async def list_aac_insight_votes(self, *, user_name: str, insight_id: str) -> list[AACInsightVoteResponse]:
+        rows = await self._aac(user_name).list_insight_votes(insight_id)
+        return [project_public_model(AACInsightVoteResponse, row) for row in rows]
 
     async def list_projects(self, *, user_name: str) -> list[ProjectResponse]:
         self._require_user(user_name)

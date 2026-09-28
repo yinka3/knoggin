@@ -21,9 +21,9 @@ they are not a generic serialization path for arbitrary runtime objects.
 
 ## Management endpoint follow-up
 
-The follow-up endpoint pass is now approved. Session and project endpoints are implemented;
-AAC triggering, stopping, participation and timeline/Insight browsing;
-global settings read/update/reload/application-status operations remain pending. Their internal
+The follow-up endpoint pass is now approved. Session, project and AAC endpoints
+are implemented. Global settings read/update/reload/application-status operations
+remain pending. Their internal
 methods stay available. Batch admission is approved for documents and web links
 and remains pending implementation.
 
@@ -49,6 +49,23 @@ Deletion uses the manager's hard-delete flow and returns file_cleanup_status
 (`complete` or `pending`), including retries where only a cleanup task survives.
 Missing projects return 404. Metadata responses omit domain configuration and
 internal paths. Listing uses the existing full manager query, not pagination.
+
+AAC routes are `POST /v1/aac/trigger`, `POST /v1/aac/stop`,
+`PUT /v1/aac/agents/{agent_id}/participation` (body: enabled),
+`GET /v1/aac/discussions`, `GET /v1/aac/discussions/{discussion_id}/timeline`,
+`GET /v1/aac/insights` and `GET /v1/aac/insights/{insight_id}/votes`.
+Trigger returns started/skipped with a bounded reason code. Stop returns whether
+an active discussion received a stop request; it does not mean its current agent
+run has already ended. Participation returns only the agent ID and persisted flag,
+never the agent's Brain or configuration. Missing agents return 404.
+
+Discussion/Insight lists accept limit 1–100 (default 20); timeline defaults to 100
+and accepts after_sequence >= 0. Use the last event_sequence as the next cursor;
+gaps are valid and allocation order is not concurrent transaction commit order.
+Insight search accepts an optional query. These are user-owned reads: private
+Insights are visible to that user, not exposed through an agent browsing interface.
+Unknown or out-of-scope timeline/vote IDs return empty lists, matching the scoped
+store queries. Votes use the existing complete vote list, without new pagination.
 
 The SDK implementation and walkthrough belong to a separate pass after server
 work. Future settings endpoints must keep credentials private and respect the

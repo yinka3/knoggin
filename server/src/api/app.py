@@ -25,6 +25,14 @@ from api.upload_limits import DocumentUploadLimitMiddleware
 from common.schema.document import FolderScanSettings
 from common.schema.health import HealthSnapshot
 from common.schema.public import (
+    AACAdmissionResponse,
+    AACDiscussionResponse,
+    AACInsightResponse,
+    AACInsightVoteResponse,
+    AACParticipationRequest,
+    AACParticipationResponse,
+    AACStopResponse,
+    AACTimelineResponse,
     ArtifactListResponse,
     ArtifactResponse,
     ArtifactRevisionResponse,
@@ -96,6 +104,14 @@ class ApplicationPort(Protocol):
         user_name: str,
         request: CreateProjectRequest,
     ) -> ProjectResponse | Mapping[str, Any]: ...
+
+    async def trigger_aac(self, *, user_name: str) -> AACAdmissionResponse: ...
+    async def stop_aac(self, *, user_name: str) -> AACStopResponse: ...
+    async def set_aac_participation(self, *, user_name: str, agent_id: str, enabled: bool) -> AACParticipationResponse: ...
+    async def list_aac_discussions(self, *, user_name: str, limit: int = 20) -> list[AACDiscussionResponse]: ...
+    async def list_aac_timeline(self, *, user_name: str, discussion_id: str, limit: int = 100, after_sequence: int = 0) -> list[AACTimelineResponse]: ...
+    async def list_aac_insights(self, *, user_name: str, query: str | None = None, limit: int = 20) -> list[AACInsightResponse]: ...
+    async def list_aac_insight_votes(self, *, user_name: str, insight_id: str) -> list[AACInsightVoteResponse]: ...
 
     async def list_projects(self, *, user_name: str) -> list[ProjectResponse]: ...
     async def get_project(self, *, user_name: str, project_id: str) -> ProjectResponse: ...
@@ -497,6 +513,34 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         return _project_response(
             await _call(port.create_project, user_name=user_name, request=body)
         )
+
+    @app.post("/v1/aac/trigger", response_model=AACAdmissionResponse)
+    async def trigger_aac(user_name: str = Depends(current_user)):
+        return await port.trigger_aac(user_name=user_name)
+
+    @app.post("/v1/aac/stop", response_model=AACStopResponse)
+    async def stop_aac(user_name: str = Depends(current_user)):
+        return await port.stop_aac(user_name=user_name)
+
+    @app.put("/v1/aac/agents/{agent_id}/participation", response_model=AACParticipationResponse)
+    async def set_aac_participation(body: AACParticipationRequest, agent_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.set_aac_participation(user_name=user_name, agent_id=agent_id, enabled=body.enabled)
+
+    @app.get("/v1/aac/discussions", response_model=list[AACDiscussionResponse])
+    async def list_aac_discussions(limit: int = Query(default=20, ge=1, le=100), user_name: str = Depends(current_user)):
+        return await port.list_aac_discussions(user_name=user_name, limit=limit)
+
+    @app.get("/v1/aac/discussions/{discussion_id}/timeline", response_model=list[AACTimelineResponse])
+    async def list_aac_timeline(discussion_id: str = Path(min_length=1), limit: int = Query(default=100, ge=1, le=100), after_sequence: int = Query(default=0, ge=0), user_name: str = Depends(current_user)):
+        return await port.list_aac_timeline(user_name=user_name, discussion_id=discussion_id, limit=limit, after_sequence=after_sequence)
+
+    @app.get("/v1/aac/insights", response_model=list[AACInsightResponse])
+    async def list_aac_insights(query: str | None = Query(default=None, max_length=4000), limit: int = Query(default=20, ge=1, le=100), user_name: str = Depends(current_user)):
+        return await port.list_aac_insights(user_name=user_name, query=query, limit=limit)
+
+    @app.get("/v1/aac/insights/{insight_id}/votes", response_model=list[AACInsightVoteResponse])
+    async def list_aac_insight_votes(insight_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        return await port.list_aac_insight_votes(user_name=user_name, insight_id=insight_id)
 
     @app.get("/v1/projects", response_model=list[ProjectResponse])
     async def list_projects(user_name: str = Depends(current_user)):

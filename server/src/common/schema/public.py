@@ -196,6 +196,62 @@ class SessionDeletedResponse(PublicModel):
     deleted: Literal[True] = True
 
 
+class AACAdmissionResponse(PublicModel):
+    outcome: Literal["started", "skipped"]
+    reason: Literal["admitted", "shutting_down", "disabled", "already_active", "no_enabled_agents", "no_seed"]
+    discussion_id: str | None = None
+
+
+class AACStopResponse(PublicModel):
+    stop_requested: bool
+
+
+class AACParticipationRequest(PublicModel):
+    enabled: bool
+
+
+class AACParticipationResponse(PublicModel):
+    agent_id: str = Field(min_length=1)
+    enabled: bool
+
+
+class AACDiscussionResponse(PublicModel):
+    discussion_id: str
+    topic: str
+    status: Literal["active", "completed", "stopped", "interrupted", "failed"]
+    end_reason: Literal["completed", "token_budget", "user_stopped", "no_participants", "shutdown", "failed", "startup_recovery", "interrupted"] | None = None
+    token_budget: int = Field(ge=0)
+    tokens_used: int = Field(ge=0)
+    started_at: datetime
+    ended_at: datetime | None = None
+
+
+class AACTimelineResponse(PublicModel):
+    timeline_id: str
+    kind: Literal["agent_message", "system_event"]
+    agent_id: str | None = None
+    content: str
+    created_at: datetime
+    event_sequence: int = Field(gt=0)
+
+
+class AACInsightResponse(PublicModel):
+    insight_id: str
+    discussion_id: str | None = None
+    author_agent_id: str
+    visibility: Literal["shared", "private"]
+    content: str
+    created_at: datetime
+
+
+class AACInsightVoteResponse(PublicModel):
+    voter_agent_id: str
+    vote: Literal["up", "down"]
+    reason: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class UpdateAgentRequest(PublicModel):
     """Partial agent update with an explicit omitted/null distinction."""
 
