@@ -21,21 +21,7 @@ from fastapi import Depends, FastAPI, Header, Path, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
-from pydantic import ValidationError
 
-from common.exceptions import (
-    DependencyError,
-    IdempotencyConflictError,
-    LLMBudgetExceededError,
-    LLMProviderError,
-    NotFoundError,
-    RequestInProgressError,
-    RequestInterruptedError,
-    SessionBusyError,
-    StorageError,
-    ToolExecutionError,
-    WorkspaceConflictError,
-)
 from common.schema.document import FolderScanSettings
 from common.schema.health import HealthSnapshot
 from common.schema.public import (
@@ -55,6 +41,7 @@ from common.schema.public import (
     ProjectResponse,
     PromoteSourceRequest,
     PublicError,
+    PublicStreamContractError,
     PublicStreamState,
     RunCompletedEvent,
     RunFailedEvent,
@@ -63,6 +50,8 @@ from common.schema.public import (
     StartRunRequest,
     UpdateSavedWebLinkRequest,
     UploadDocumentRequest,
+    public_error_status,
+    sanitize_public_error,
     to_public_error,
 )
 from common.utils.lifecycle import settle_owned_task
@@ -287,8 +276,8 @@ def _as_data(value: Any) -> dict[str, Any]:
             return dict(dumped)
     try:
         return dict(vars(value))
-    except TypeError as exc:
-        raise ValueError("application port returned an unsupported result") from exc
+    except TypeError:
+        raise PublicStreamContractError("application port returned an unsupported result") from None
 
 
 def _value(data: Mapping[str, Any], *names: str, default: Any = None) -> Any:
@@ -485,16 +474,21 @@ def _error_response(
     run_id: str | None = None,
 ) -> JSONResponse:
     if isinstance(error, PublicOperationError):
-        public_error = error.error.model_copy(update={"request_id": request_id})
-    elif isinstance(error, (RequestValidationError, ValidationError)):
+        public_error = sanitize_public_error(error.error, request_id=request_id, run_id=run_id)
+    elif isinstance(error, RequestValidationError):
         public_error = PublicError(
             code="invalid_request",
             message="The request is invalid.",
             request_id=request_id,
             run_id=run_id,
         )
+    elif isinstance(error, UnsupportedOperation):
+        public_error = PublicError(code="unsupported_operation", message="This operation is not supported.",
+                                   request_id=request_id, run_id=run_id)
     else:
         public_error = to_public_error(error, request_id=request_id, run_id=run_id)
+    if public_error.code == "internal_error":
+        logger.error("Public response failure request={} run={}", request_id, run_id)
     if status_code is None:
         status_code = _status_for_error(error)
     return JSONResponse(
@@ -505,44 +499,12 @@ def _error_response(
 
 
 def _status_for_error(error: Exception) -> int:
-    if isinstance(error, PublicOperationError):
-        if error.error.code == "invalid_request":
-            return 422
-        if error.error.code == "not_found":
-            return 404
-        if error.error.code == "workspace_conflict":
-            return 409
-        if error.error.code == "llm_budget_exhausted":
-            return 429
-        return 503 if error.error.retryable else 502
+    if isinstance(error, RequestValidationError):
+        return 422
     if isinstance(error, UnsupportedOperation):
         return 501
-    if isinstance(
-        error,
-        (
-            SessionBusyError,
-            IdempotencyConflictError,
-            RequestInProgressError,
-            RequestInterruptedError,
-        ),
-    ):
-        return 409
-    if isinstance(error, WorkspaceConflictError):
-        return 409
-    if isinstance(error, LLMBudgetExceededError):
-        return 429
-    if isinstance(error, (ValueError, ValidationError, RequestValidationError)):
-        return 422
-    if isinstance(error, NotFoundError):
-        return 404
-    if isinstance(
-        error,
-        (DependencyError, StorageError, LLMProviderError),
-    ):
-        return 503
-    if isinstance(error, ToolExecutionError):
-        return 503 if error.retryable else 502
-    return 500
+    public = error.error if isinstance(error, PublicOperationError) else to_public_error(error)
+    return public_error_status(sanitize_public_error(public))
 
 
 async def _call(method: Any, **kwargs: Any) -> Any:
@@ -560,10 +522,10 @@ async def _open_stream_from_port(port: Any, **kwargs: Any) -> AsyncIterator[obje
     result = await port.open_run_stream(**kwargs)
     if hasattr(result, "__aiter__") and callable(getattr(result, "aclose", None)):
         return result
-    raise ValueError("application port returned a non-streaming run result")
+    raise PublicStreamContractError("application port returned a non-streaming run result")
 
 
-async def _close_owned_stream(stream) -> None:
+async def _close_owned_stream(stream, *, request_id=None) -> None:
     cleanup = asyncio.create_task(stream.aclose())
     try:
         await asyncio.shield(cleanup)
@@ -571,27 +533,28 @@ async def _close_owned_stream(stream) -> None:
         try:
             await settle_owned_task(cleanup)
         except Exception:
-            logger.error("Run stream cleanup failed during cancellation")
+            logger.error("Run stream cleanup failed during cancellation request={}", request_id)
         raise
     except Exception:
-        logger.error("Run stream cleanup failed")
+        logger.error("Run stream cleanup failed request={}", request_id)
 
 
 class OwnedStreamingResponse(StreamingResponse):
     """Own admission even when sending fails before body iteration starts."""
 
-    def __init__(self, content, *, owner, **kwargs):
+    def __init__(self, content, *, owner, request_id=None, **kwargs):
         super().__init__(content, **kwargs)
         self.owner = owner
+        self.request_id = request_id
 
     async def __call__(self, scope, receive, send):
         try:
             await super().__call__(scope, receive, send)
         finally:
             try:
-                await _close_owned_stream(self.body_iterator)
+                await _close_owned_stream(self.body_iterator, request_id=self.request_id)
             finally:
-                await _close_owned_stream(self.owner)
+                await _close_owned_stream(self.owner, request_id=self.request_id)
 
 
 def _sse_frame(event: Any) -> str:
@@ -1088,7 +1051,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
                 raise PublicOperationError(state.terminal.error)
             raise PublicOperationError(PublicError(code="run_cancelled", message="The run was cancelled."))
         finally:
-            await _close_owned_stream(stream)
+            await _close_owned_stream(stream, request_id=_request_id(request))
 
     @app.post("/v1/runs/stream")
     async def run_stream(
@@ -1108,6 +1071,10 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             try:
                 async for raw_event in stream:
                     event = state.accept(raw_event)
+                    if isinstance(event, RunFailedEvent):
+                        event = event.model_copy(update={"error": sanitize_public_error(
+                            event.error, request_id=request_id, run_id=event.run_id,
+                        )})
                     yield _sse_frame(event)
                 state.finish()
             except Exception as exc:
@@ -1118,23 +1085,14 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
                     logger.error("Invalid post-terminal stream request={} run={}", request_id, state.run_id)
                     return
                 run_id = state.run_id or str(uuid4())
+                logger.error("Public stream failure request={} run={}", request_id, run_id)
                 failed = RunFailedEvent(
                     run_id=run_id,
                     sequence=state.sequence + 1,
                     timestamp=_now(),
-                    error=(
-                        PublicError(
-                            code="invalid_request",
-                            message="The request is invalid.",
-                            request_id=request_id,
-                            run_id=run_id,
-                        )
-                        if isinstance(exc, (RequestValidationError, ValidationError))
-                        else to_public_error(
-                            exc,
-                            request_id=request_id,
-                            run_id=run_id,
-                        )
+                    error=to_public_error(
+                        PublicStreamContractError("Invalid server output") if isinstance(exc, ValueError) else exc,
+                        request_id=request_id, run_id=run_id,
                     ),
                 )
                 yield _sse_frame(failed)
@@ -1142,6 +1100,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         return OwnedStreamingResponse(
             events(),
             owner=stream,
+            request_id=request_id,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

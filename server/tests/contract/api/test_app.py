@@ -657,7 +657,7 @@ async def test_invalid_stream_event_becomes_sanitized_terminal_failure():
 
     assert response.status_code == 200
     assert response.text.count("event: run.failed") == 1
-    assert '"code":"invalid_request"' in response.text
+    assert '"code":"internal_error"' in response.text
     assert "private.tool.payload" not in response.text
     assert "do not expose" not in response.text
 

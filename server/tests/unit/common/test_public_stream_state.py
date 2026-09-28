@@ -49,3 +49,12 @@ def test_identifier_normalization_and_blank_query_validation_are_preserved():
         StartRunRequest(session_id=" ", query="hello")
     with pytest.raises(ValueError):
         StartRunRequest(session_id="session", query=" \n ")
+
+
+@pytest.mark.parametrize("kind", ["run.completed", "run.failed"])
+def test_terminal_payload_cannot_reference_another_run(kind):
+    payload = dict(result=dict(run_id="other", content="done")) if kind == "run.completed" else dict(
+        error=dict(code="internal_error", message="safe", run_id="other"),
+    )
+    with pytest.raises(PublicStreamContractError, match="event run"):
+        PublicStreamState().accept(event(kind, **payload))

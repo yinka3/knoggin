@@ -13,7 +13,14 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from common.exceptions import (
     ConfigurationError,
@@ -379,6 +386,8 @@ class PublicError(PublicModel):
 
 
 _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
+    PermissionError: ("forbidden", "This operation is not allowed.", False),
+    FileNotFoundError: ("not_found", "The requested resource was not found.", False),
     ConfigurationError: (
         "configuration_error",
         "The server configuration is invalid.",
@@ -442,6 +451,35 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
 }
 
 
+def sanitize_public_error(error: PublicError, *, request_id=None, run_id=None) -> PublicError:
+    messages = {code: message for code, message, _ in _PUBLIC_ERROR_PROJECTIONS.values()}
+    messages.update({
+        "invalid_request": "The request is invalid.",
+        "internal_error": "The server could not complete the request.",
+        "tool_failed": "A tool could not complete the request.",
+        "run_failed": "The run could not complete.",
+        "run_cancelled": "The run was cancelled.",
+        "clarification_required": "The run requires clarification.",
+        "unsupported_operation": "This operation is not supported.",
+    })
+    code = error.code if error.code in messages else "internal_error"
+    return PublicError(code=code, message=messages[code], retryable=error.retryable,
+                       request_id=request_id, run_id=run_id or error.run_id)
+
+
+def public_error_status(error: PublicError) -> int:
+    statuses = {
+        "invalid_request": 422, "forbidden": 403, "not_found": 404,
+        "session_busy": 409, "idempotency_conflict": 409, "request_in_progress": 409,
+        "request_interrupted": 409, "workspace_conflict": 409,
+        "run_cancelled": 409, "clarification_required": 409,
+        "llm_budget_exhausted": 429, "internal_error": 500, "configuration_error": 500,
+        "dependency_unavailable": 503, "storage_unavailable": 503, "model_unavailable": 503,
+        "invalid_model_response": 502, "run_failed": 502, "unsupported_operation": 501,
+    }
+    return statuses.get(error.code, 503 if error.retryable else 502)
+
+
 def to_public_error(
     error: Exception,
     *,
@@ -450,6 +488,9 @@ def to_public_error(
 ) -> PublicError:
     """Convert an internal exception without exposing details or stack text."""
 
+    if isinstance(error, (ValidationError, PublicStreamContractError)):
+        return PublicError(code="internal_error", message="The server could not complete the request.",
+                           request_id=request_id, run_id=run_id)
     if isinstance(error, ToolExecutionError):
         projection = (
             "tool_failed",
@@ -586,6 +627,10 @@ class PublicStreamState:
             raise PublicStreamContractError("public stream events must belong to one run")
         if event.sequence <= self.sequence:
             raise PublicStreamContractError("public stream sequence must increase monotonically")
+        if isinstance(event, RunCompletedEvent) and event.result.run_id != event.run_id:
+            raise PublicStreamContractError("public terminal result must belong to the event run")
+        if isinstance(event, RunFailedEvent) and event.error.run_id not in (None, event.run_id):
+            raise PublicStreamContractError("public terminal error must belong to the event run")
         self.run_id, self.sequence = event.run_id, event.sequence
         if isinstance(event, (RunCompletedEvent, RunFailedEvent, RunCancelledEvent)):
             self.terminal = event
