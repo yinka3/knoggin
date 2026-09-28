@@ -163,7 +163,8 @@ class ConfigManager:
                     # Resolve now: nested publications must not deliver stale values.
                     self._invoke(sub["callback"], self._get_nested_model(self._config, sub["path"]))
                 except Exception:
-                    self._failed_applies[token] = sub
+                    if any(item is sub for item in self.subscribers):
+                        self._failed_applies[token] = sub
                     logger.error("Configuration subscriber {} failed to apply", token)
                 else:
                     self._failed_applies.pop(token, None)
@@ -334,6 +335,7 @@ class ConfigManager:
                   If provided, the callback is only triggered if this specific subtree changes.
         """
         self._require_callback_thread()
+        self._validate_subscription(callback, path)
         self._callback_thread = threading.get_ident()
         self._next_subscription += 1
         subscription = {
@@ -344,19 +346,19 @@ class ConfigManager:
         self.subscribers.append(subscription)
         # Immediately invoke the callback with the current settings so the service initializes correctly
         current_val = self._get_nested_model(self.config, path)
-        if current_val is not None:
-            try:
-                self._invoke(callback, current_val)
-            except Exception:
-                self.subscribers.remove(subscription)
-                raise RuntimeError("Initial configuration subscriber apply failed") from None
+        try:
+            self._invoke(callback, current_val)
+        except BaseException as exc:
+            self.subscribers[:] = [sub for sub in self.subscribers if sub is not subscription]
+            self._pending_applies.pop(subscription["id"], None)
+            self._failed_applies.pop(subscription["id"], None)
+            if not isinstance(exc, Exception):
+                raise
+            raise RuntimeError("Initial configuration subscriber apply failed") from None
 
         def unsubscribe():
             with self._state_lock:
-                try:
-                    self.subscribers.remove(subscription)
-                except ValueError:
-                    pass
+                self.subscribers[:] = [sub for sub in self.subscribers if sub is not subscription]
                 self._pending_applies.pop(subscription["id"], None)
                 self._failed_applies.pop(subscription["id"], None)
                 self._record_status(
@@ -365,6 +367,25 @@ class ConfigManager:
                 )
 
         return unsubscribe
+
+    def _validate_subscription(self, callback: Callable, path: Optional[str]) -> None:
+        if not callable(callback):
+            raise TypeError("Configuration subscriber must be callable")
+        if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(getattr(callback, "__call__", None)):
+            raise TypeError("Configuration subscribers must be synchronous")
+        try:
+            inspect.signature(callback).bind(object())
+        except (TypeError, ValueError):
+            raise TypeError("Configuration subscriber must accept one settings value") from None
+        if path is None:
+            return
+        if not isinstance(path, str) or not path or path.strip() != path:
+            raise ValueError("Invalid configuration subscription path")
+        current = self._config
+        for part in path.split("."):
+            if not isinstance(current, BaseModel) or part not in type(current).model_fields:
+                raise ValueError("Invalid configuration subscription path")
+            current = getattr(current, part)
 
     def _get_nested_model(self, model: BaseModel, path: Optional[str]) -> Any:
         if not path:
