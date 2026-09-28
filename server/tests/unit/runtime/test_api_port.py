@@ -51,7 +51,9 @@ class FakeDocumentService:
 
     async def list_documents(self, *, limit):
         self.calls.append(("list", {"limit": limit}))
-        return [{"document_id": "document-1"}]
+        return [dict(document_id="document-1", project_id="project-1", original_name="notes.md",
+                     relative_path="notes.md", extension=".md", size_bytes=4,
+                     content_hash="a" * 64, status="indexed", error_message="private-token")]
 
 
 class FakeSession:
@@ -371,14 +373,46 @@ async def test_runtime_port_exposes_typed_scoped_health(port):
 async def test_runtime_port_scopes_document_calls_to_a_short_project_lease(port):
     application, runtime, _session = port
 
-    assert await application.list_documents(
+    documents = await application.list_documents(
         user_name="ada", project_id="project-1", limit=3
-    ) == [{"document_id": "document-1"}]
+    )
+    assert documents[0].document_id == "document-1"
+    assert "error_message" not in documents[0].model_dump()
 
     acquire, release = runtime.projects.calls[-2:]
     assert acquire[0] == "acquire"
     assert release[0] == "release"
     assert acquire[1:] == release[1:]
+
+
+async def test_invalid_management_projection_still_releases_exact_project_lease(port):
+    from unittest.mock import AsyncMock
+
+    from pydantic import ValidationError
+
+    application, runtime, _session = port
+    runtime.projects.document_service.get_document_info = AsyncMock(return_value={})
+    with pytest.raises(ValidationError):
+        await application.get_document(user_name="ada", project_id="project-1", document_id="d")
+    acquire, release = runtime.projects.calls[-2:]
+    assert acquire[0] == "acquire" and release[0] == "release"
+    assert acquire[1:] == release[1:]
+
+
+async def test_decoded_upload_over_limit_is_rejected_before_project_lease(port, monkeypatch):
+    import base64
+
+    from common.exceptions import PayloadTooLargeError
+    from common.schema.public import UploadDocumentRequest
+    from runtime import api_port as module
+
+    application, runtime, _session = port
+    monkeypatch.setattr(module, "MAX_DOCUMENT_SIZE", 1)
+    before = list(runtime.projects.calls)
+    with pytest.raises(PayloadTooLargeError):
+        await application.upload_document(user_name="ada", project_id="project-1",
+            request=UploadDocumentRequest(original_name="n.md", content_base64=base64.b64encode(b"ab").decode()))
+    assert runtime.projects.calls == before
     with pytest.raises(NotFoundError):
         await application.get_resource_health(user_name="ada", project_id="missing")
 

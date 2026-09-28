@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -22,6 +23,7 @@ from pydantic import (
     field_validator,
 )
 
+from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH
 from common.exceptions import (
     ConfigurationError,
     DependencyError,
@@ -30,6 +32,7 @@ from common.exceptions import (
     LLMProviderError,
     LLMResponseError,
     NotFoundError,
+    PayloadTooLargeError,
     RequestInProgressError,
     RequestInterruptedError,
     SessionBusyError,
@@ -42,6 +45,7 @@ from common.schema.artifacts import ArtifactBlock, ArtifactKind, ArtifactStatus
 from common.schema.document import DocumentSelection
 from common.schema.evidence import EvidenceBundle, EvidencePointer, EvidenceSnapshot
 from common.schema.maintenance import MaintenanceImpactPreview
+from common.schema.source.locators import DocumentLocator
 from common.schema.source.references import SourceConsulted
 
 PUBLIC_CONTRACT_VERSION = "1"
@@ -230,6 +234,81 @@ class UploadDocumentRequest(PublicModel):
     content_base64: str = Field(min_length=1)
     relative_path: str | None = Field(default=None, min_length=1, max_length=2048)
 
+    @field_validator("content_base64", mode="before")
+    @classmethod
+    def _bound_encoded_content(cls, value):
+        if isinstance(value, str) and len(value) > MAX_DOCUMENT_BASE64_LENGTH:
+            raise PayloadTooLargeError()
+        return value
+
+
+class DocumentResponse(PublicModel):
+    document_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    original_name: str = Field(min_length=1)
+    relative_path: str = Field(min_length=1)
+    extension: str
+    size_bytes: int = Field(ge=0)
+    content_hash: str = Field(min_length=1)
+    status: Literal["queued", "indexing", "indexed", "failed", "deleted"]
+    current_snapshot_id: str | None = None
+    chunk_count: int = Field(default=0, ge=0)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    indexed_at: datetime | None = None
+    deleted_at: datetime | None = None
+    next_index_retry_at: datetime | None = None
+    index_attempt_count: int = Field(default=0, ge=0)
+    last_index_failure_kind: Literal["transient_dependency", "invalid_content"] | None = None
+
+
+class DocumentContentResponse(DocumentResponse):
+    document_name: str
+    parse_snapshot_id: str = Field(min_length=1)
+    chunk_index: str
+    content: str
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    total_lines: int = Field(ge=1)
+    truncated: bool
+    locator: DocumentLocator
+    page_number: int | None = Field(default=None, ge=1)
+
+
+class DocumentDeletedResponse(PublicModel):
+    document_id: str = Field(min_length=1)
+    deleted: Literal[True]
+
+
+class SavedWebLinkResponse(PublicModel):
+    link_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    url: str = Field(min_length=1)
+    title: str | None = None
+    summary: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SavedWebLinkDeletedResponse(PublicModel):
+    link_id: str = Field(min_length=1)
+    deleted: Literal[True]
+
+
+def project_public_model(model, value):
+    """Project service dictionaries through a declared public field allowlist."""
+    if isinstance(value, model):
+        return value
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    if not isinstance(value, dict):
+        raise PublicStreamContractError("Invalid public management result")
+    projected = {name: value[name] for name in model.model_fields if name in value}
+    for name, item in projected.items():
+        if name.endswith("_id") and isinstance(item, UUID):
+            projected[name] = str(item)
+    return model.model_validate(projected)
+
 
 class UpdateSavedWebLinkRequest(PublicModel):
     title: str | None = Field(default=None, max_length=512)
@@ -387,6 +466,7 @@ class PublicError(PublicModel):
 
 _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
     PermissionError: ("forbidden", "This operation is not allowed.", False),
+    PayloadTooLargeError: ("payload_too_large", "The upload exceeds the permitted size.", False),
     FileNotFoundError: ("not_found", "The requested resource was not found.", False),
     ConfigurationError: (
         "configuration_error",
@@ -469,7 +549,7 @@ def sanitize_public_error(error: PublicError, *, request_id=None, run_id=None) -
 
 def public_error_status(error: PublicError) -> int:
     statuses = {
-        "invalid_request": 422, "forbidden": 403, "not_found": 404,
+        "invalid_request": 422, "forbidden": 403, "not_found": 404, "payload_too_large": 413,
         "session_busy": 409, "idempotency_conflict": 409, "request_in_progress": 409,
         "request_interrupted": 409, "workspace_conflict": 409,
         "run_cancelled": 409, "clarification_required": 409,

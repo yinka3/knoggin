@@ -13,6 +13,11 @@ class KnogginError(Exception):
         self.details = details or {}
 
 
+class PayloadTooLargeError(KnogginError):
+    def __init__(self):
+        super().__init__("The upload exceeds the permitted size.", code="payload_too_large")
+
+
 class ConfigurationError(KnogginError):
     """Raised when the system is misconfigured or missing required settings."""
 

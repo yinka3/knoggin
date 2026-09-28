@@ -16,7 +16,8 @@ from typing import Any
 from uuid import uuid4
 
 from common.conf.domain_config import DomainConfig
-from common.exceptions import NotFoundError
+from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE
+from common.exceptions import NotFoundError, PayloadTooLargeError
 from common.schema.document import (
     DocumentSelection,
     FolderScanSettings,
@@ -29,7 +30,10 @@ from common.schema.public import (
     ArtifactResponse,
     CreateProjectRequest,
     CreateSessionRequest,
+    DocumentContentResponse,
+    DocumentDeletedResponse,
     DocumentFocusResponse,
+    DocumentResponse,
     EntityMergeRollbackRequest,
     MaintenanceReviewDecisionRequest,
     MaintenanceReviewDetailResponse,
@@ -43,6 +47,8 @@ from common.schema.public import (
     RunFailedEvent,
     RunResult,
     RunStartedEvent,
+    SavedWebLinkDeletedResponse,
+    SavedWebLinkResponse,
     SetDocumentFocusRequest,
     SourceAddedEvent,
     StartRunRequest,
@@ -52,6 +58,7 @@ from common.schema.public import (
     UploadDocumentRequest,
     Usage,
     UsageUpdatedEvent,
+    project_public_model,
 )
 from common.schema.source.references import SourceConsulted
 from runtime.application import ApplicationRuntime
@@ -239,7 +246,7 @@ class ApplicationRuntimePort:
         user_name: str,
         project_id: str,
         request: PromoteSourceRequest,
-    ) -> dict:
+    ) -> SavedWebLinkResponse:
         """Promote a cited assistant source only after an explicit user action."""
         session = await self._session(
             user_name=user_name,
@@ -257,11 +264,11 @@ class ApplicationRuntimePort:
             raise NotFoundError("source")
         if session.document_service is None:
             raise RuntimeError("Session document service is unavailable")
-        return await session.document_service.promote_source(
+        return project_public_model(SavedWebLinkResponse, await session.document_service.promote_source(
             source,
             title=request.title,
             summary=request.summary,
-        )
+        ))
 
     @asynccontextmanager
     async def _project_documents(self, *, user_name: str, project_id: str):
@@ -279,74 +286,78 @@ class ApplicationRuntimePort:
         finally:
             await self.runtime.projects.release_project_for_session(project_id, lease_id)
 
-    async def list_documents(self, *, user_name: str, project_id: str, limit: int = 100):
+    async def list_documents(self, *, user_name: str, project_id: str, limit: int = 100) -> list[DocumentResponse]:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.list_documents(limit=limit)
+            return [project_public_model(DocumentResponse, row) for row in await service.list_documents(limit=limit)]
 
-    async def get_document(self, *, user_name: str, project_id: str, document_id: str):
+    async def get_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.get_document_info(document_id=document_id)
+            return project_public_model(DocumentResponse, await service.get_document_info(document_id=document_id))
 
     async def read_document(
         self, *, user_name: str, project_id: str, document_id: str,
         start_line: int = 1, end_line: int | None = None,
-    ):
+    ) -> DocumentContentResponse:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.read_document(
+            return project_public_model(DocumentContentResponse, await service.read_document(
                 document_id=document_id, start_line=start_line, end_line=end_line
-            )
+            ))
 
     async def upload_document(
         self, *, user_name: str, project_id: str, request: UploadDocumentRequest,
-    ):
+    ) -> DocumentResponse:
+        if len(request.content_base64) > MAX_DOCUMENT_BASE64_LENGTH:
+            raise PayloadTooLargeError()
         try:
             content = base64.b64decode(request.content_base64, validate=True)
         except ValueError as exc:
             raise ValueError("content_base64 must be valid base64") from exc
+        if len(content) > MAX_DOCUMENT_SIZE:
+            raise PayloadTooLargeError()
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.submit_document(
+            return project_public_model(DocumentResponse, await service.submit_document(
                 content=content,
                 original_name=request.original_name,
                 relative_path=request.relative_path,
-            )
+            ))
 
-    async def reindex_document(self, *, user_name: str, project_id: str, document_id: str):
+    async def reindex_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.reindex_document(document_id=document_id)
+            return project_public_model(DocumentResponse, await service.reindex_document(document_id=document_id))
 
-    async def delete_document(self, *, user_name: str, project_id: str, document_id: str):
+    async def delete_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentDeletedResponse:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.delete_document(document_id=document_id)
+            return project_public_model(DocumentDeletedResponse, await service.delete_document(document_id=document_id))
 
-    async def list_saved_web_links(self, *, user_name: str, project_id: str, limit: int = 50):
+    async def list_saved_web_links(self, *, user_name: str, project_id: str, limit: int = 50) -> list[SavedWebLinkResponse]:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.list_saved_web_links(limit=limit)
+            return [project_public_model(SavedWebLinkResponse, row) for row in await service.list_saved_web_links(limit=limit)]
 
     async def update_saved_web_link(
         self, *, user_name: str, project_id: str, link_id: str,
         request: UpdateSavedWebLinkRequest,
-    ):
+    ) -> SavedWebLinkResponse:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.update_saved_web_link(
+            return project_public_model(SavedWebLinkResponse, await service.update_saved_web_link(
                 link_id=link_id,
                 **request.model_dump(exclude_unset=True),
-            )
+            ))
 
-    async def delete_saved_web_link(self, *, user_name: str, project_id: str, link_id: str):
+    async def delete_saved_web_link(self, *, user_name: str, project_id: str, link_id: str) -> SavedWebLinkDeletedResponse:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
-            return await service.delete_saved_web_link(link_id=link_id)
+            return project_public_model(SavedWebLinkDeletedResponse, await service.delete_saved_web_link(link_id=link_id))
 
-    async def get_document_scan_settings(self, *, user_name: str, project_id: str):
+    async def get_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
             return await service.get_scan_settings()
 
     async def set_document_scan_settings(
         self, *, user_name: str, project_id: str, settings: FolderScanSettings,
-    ):
+    ) -> FolderScanSettings:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
             return await service.save_scan_settings(settings)
 
-    async def reset_document_scan_settings(self, *, user_name: str, project_id: str):
+    async def reset_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:
             return await service.reset_scan_settings()
 

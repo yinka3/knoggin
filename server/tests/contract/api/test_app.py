@@ -141,11 +141,14 @@ class FakeApplication:
 
     async def list_documents(self, *, user_name, project_id, limit):
         self.calls.append(("documents", user_name, project_id, limit))
-        return [{"document_id": "document-1", "status": "indexed"}]
+        return [dict(document_id="document-1", project_id=project_id, original_name="notes.md",
+                     relative_path="notes.md", extension=".md", size_bytes=4,
+                     content_hash="a" * 64, status="indexed")]
 
     async def list_saved_web_links(self, *, user_name, project_id, limit):
         self.calls.append(("saved_links", user_name, project_id, limit))
-        return [{"link_id": "link-1", "url": "https://example.com"}]
+        return [dict(link_id="link-1", project_id=project_id, url="https://example.com",
+                     created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))]
 
     async def get_document_scan_settings(self, *, user_name, project_id):
         self.calls.append(("scan_settings", user_name, project_id))

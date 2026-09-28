@@ -22,6 +22,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from loguru import logger
 
+from api.upload_limits import DocumentUploadLimitMiddleware
 from common.schema.document import FolderScanSettings
 from common.schema.health import HealthSnapshot
 from common.schema.public import (
@@ -30,7 +31,10 @@ from common.schema.public import (
     ArtifactRevisionResponse,
     CreateProjectRequest,
     CreateSessionRequest,
+    DocumentContentResponse,
+    DocumentDeletedResponse,
     DocumentFocusResponse,
+    DocumentResponse,
     EntityMergeRollbackRequest,
     MaintenanceOperationResponse,
     MaintenanceReviewDecisionRequest,
@@ -46,6 +50,9 @@ from common.schema.public import (
     RunCompletedEvent,
     RunFailedEvent,
     RunResult,
+    SavedWebLinkDeletedResponse,
+    SavedWebLinkResponse,
+    SessionResponse,
     SetDocumentFocusRequest,
     StartRunRequest,
     UpdateSavedWebLinkRequest,
@@ -122,20 +129,20 @@ class ApplicationPort(Protocol):
         user_name: str,
         project_id: str,
         request: PromoteSourceRequest,
-    ) -> Any: ...
+    ) -> SavedWebLinkResponse: ...
 
-    async def list_documents(self, **kwargs: Any) -> Any: ...
-    async def get_document(self, **kwargs: Any) -> Any: ...
-    async def read_document(self, **kwargs: Any) -> Any: ...
-    async def upload_document(self, **kwargs: Any) -> Any: ...
-    async def reindex_document(self, **kwargs: Any) -> Any: ...
-    async def delete_document(self, **kwargs: Any) -> Any: ...
-    async def list_saved_web_links(self, **kwargs: Any) -> Any: ...
-    async def update_saved_web_link(self, **kwargs: Any) -> Any: ...
-    async def delete_saved_web_link(self, **kwargs: Any) -> Any: ...
-    async def get_document_scan_settings(self, **kwargs: Any) -> Any: ...
-    async def set_document_scan_settings(self, **kwargs: Any) -> Any: ...
-    async def reset_document_scan_settings(self, **kwargs: Any) -> Any: ...
+    async def list_documents(self, *, user_name: str, project_id: str, limit: int = 100) -> list[DocumentResponse]: ...
+    async def get_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse: ...
+    async def read_document(self, *, user_name: str, project_id: str, document_id: str, start_line: int = 1, end_line: int | None = None) -> DocumentContentResponse: ...
+    async def upload_document(self, *, user_name: str, project_id: str, request: UploadDocumentRequest) -> DocumentResponse: ...
+    async def reindex_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentResponse: ...
+    async def delete_document(self, *, user_name: str, project_id: str, document_id: str) -> DocumentDeletedResponse: ...
+    async def list_saved_web_links(self, *, user_name: str, project_id: str, limit: int = 50) -> list[SavedWebLinkResponse]: ...
+    async def update_saved_web_link(self, *, user_name: str, project_id: str, link_id: str, request: UpdateSavedWebLinkRequest) -> SavedWebLinkResponse: ...
+    async def delete_saved_web_link(self, *, user_name: str, project_id: str, link_id: str) -> SavedWebLinkDeletedResponse: ...
+    async def get_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings: ...
+    async def set_document_scan_settings(self, *, user_name: str, project_id: str, settings: FolderScanSettings) -> FolderScanSettings: ...
+    async def reset_document_scan_settings(self, *, user_name: str, project_id: str) -> FolderScanSettings: ...
 
     async def open_run_stream(
         self,
@@ -569,6 +576,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
     """Build the public API around an injected application port."""
 
     app = FastAPI(title=title, version="1", docs_url="/docs", redoc_url=None)
+    app.add_middleware(DocumentUploadLimitMiddleware)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -643,7 +651,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         except Exception as exc:
             raise exc
 
-    @app.post("/v1/sessions", status_code=201)
+    @app.post("/v1/sessions", response_model=SessionResponse, status_code=201)
     async def create_session(
         body: CreateSessionRequest,
         request: Request,
@@ -706,6 +714,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
 
     @app.post(
         "/v1/projects/{project_id}/sources/promote",
+        response_model=SavedWebLinkResponse,
         status_code=201,
     )
     async def promote_source(
@@ -721,7 +730,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             request=body,
         )
 
-    @app.get("/v1/projects/{project_id}/documents")
+    @app.get("/v1/projects/{project_id}/documents", response_model=list[DocumentResponse])
     async def list_documents(
         project_id: str,
         limit: int = Query(default=100, ge=1, le=100),
@@ -729,21 +738,21 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
     ):
         return await _call(port.list_documents, user_name=user_name, project_id=project_id, limit=limit)
 
-    @app.post("/v1/projects/{project_id}/documents", status_code=201)
+    @app.post("/v1/projects/{project_id}/documents", response_model=DocumentResponse, status_code=201)
     async def upload_document(
         project_id: str, body: UploadDocumentRequest,
         user_name: str = Depends(current_user),
     ):
         return await _call(port.upload_document, user_name=user_name, project_id=project_id, request=body)
 
-    @app.get("/v1/projects/{project_id}/documents/{document_id}")
+    @app.get("/v1/projects/{project_id}/documents/{document_id}", response_model=DocumentResponse)
     async def get_document(
         project_id: str, document_id: str,
         user_name: str = Depends(current_user),
     ):
         return await _call(port.get_document, user_name=user_name, project_id=project_id, document_id=document_id)
 
-    @app.get("/v1/projects/{project_id}/documents/{document_id}/content")
+    @app.get("/v1/projects/{project_id}/documents/{document_id}/content", response_model=DocumentContentResponse)
     async def read_document(
         project_id: str, document_id: str,
         start_line: int = Query(default=1, ge=1),
@@ -755,21 +764,21 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             document_id=document_id, start_line=start_line, end_line=end_line,
         )
 
-    @app.post("/v1/projects/{project_id}/documents/{document_id}/reindex")
+    @app.post("/v1/projects/{project_id}/documents/{document_id}/reindex", response_model=DocumentResponse)
     async def reindex_document(
         project_id: str, document_id: str,
         user_name: str = Depends(current_user),
     ):
         return await _call(port.reindex_document, user_name=user_name, project_id=project_id, document_id=document_id)
 
-    @app.delete("/v1/projects/{project_id}/documents/{document_id}")
+    @app.delete("/v1/projects/{project_id}/documents/{document_id}", response_model=DocumentDeletedResponse)
     async def delete_document(
         project_id: str, document_id: str,
         user_name: str = Depends(current_user),
     ):
         return await _call(port.delete_document, user_name=user_name, project_id=project_id, document_id=document_id)
 
-    @app.get("/v1/projects/{project_id}/saved-web-links")
+    @app.get("/v1/projects/{project_id}/saved-web-links", response_model=list[SavedWebLinkResponse])
     async def list_saved_web_links(
         project_id: str,
         limit: int = Query(default=50, ge=1, le=100),
@@ -777,7 +786,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
     ):
         return await _call(port.list_saved_web_links, user_name=user_name, project_id=project_id, limit=limit)
 
-    @app.patch("/v1/projects/{project_id}/saved-web-links/{link_id}")
+    @app.patch("/v1/projects/{project_id}/saved-web-links/{link_id}", response_model=SavedWebLinkResponse)
     async def update_saved_web_link(
         project_id: str, link_id: str, body: UpdateSavedWebLinkRequest,
         user_name: str = Depends(current_user),
@@ -787,7 +796,7 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
             link_id=link_id, request=body,
         )
 
-    @app.delete("/v1/projects/{project_id}/saved-web-links/{link_id}")
+    @app.delete("/v1/projects/{project_id}/saved-web-links/{link_id}", response_model=SavedWebLinkDeletedResponse)
     async def delete_saved_web_link(
         project_id: str, link_id: str,
         user_name: str = Depends(current_user),
