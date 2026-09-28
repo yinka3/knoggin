@@ -270,6 +270,13 @@ async def test_cleanup_failure_does_not_mask_startup_failure(
     pool = recording_pool.instances[0]
     assert exc_info.value is startup_error
     assert pool.close_calls == 1
+    assert client._pool is pool
+    with pytest.raises(RuntimeError, match="already connected"):
+        await client.connect()
+    assert recording_pool.instances == [pool]
+    pool.close_error = None
+    await client.close()
+    assert pool.close_calls == 2
     assert client._pool is None
 
 
@@ -302,7 +309,7 @@ async def test_close_is_idempotent(recording_pool):
 
 @pytest.mark.storage
 @pytest.mark.no_network
-async def test_close_clears_pool_when_pool_close_fails(recording_pool):
+async def test_close_retains_failed_pool_until_cleanup_retry_succeeds(recording_pool):
     recording_pool.next_close_error = RuntimeError("close failed")
     client = PostgresClient("postgresql://example")
     await client.connect()
@@ -311,12 +318,19 @@ async def test_close_clears_pool_when_pool_close_fails(recording_pool):
     with pytest.raises(RuntimeError, match="close failed"):
         await client.close()
 
+    assert client._pool is first_pool
+    with pytest.raises(RuntimeError, match="already connected"):
+        await client.connect()
+    assert recording_pool.instances == [first_pool]
+    first_pool.close_error = None
+    await client.close()
+    assert first_pool.close_calls == 2
     assert client._pool is None
-
+    recording_pool.next_close_error = None
     await client.connect()
-
     assert recording_pool.instances[1] is not first_pool
     assert client._pool is recording_pool.instances[1]
+    await client.close()
 
 
 @pytest.mark.storage
