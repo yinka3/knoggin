@@ -37,6 +37,12 @@ from common.schema.public import (
     AACTimelineResponse,
     ArtifactListResponse,
     ArtifactResponse,
+    BatchDocumentAccepted,
+    BatchDocumentItem,
+    BatchSourceFailed,
+    BatchSourceRequest,
+    BatchSourceResponse,
+    BatchWebLinkAccepted,
     CreateProjectRequest,
     CreateSessionRequest,
     DocumentContentResponse,
@@ -80,6 +86,7 @@ from common.schema.public import (
     Usage,
     UsageUpdatedEvent,
     project_public_model,
+    to_public_error,
 )
 from common.schema.source.references import SourceConsulted
 from runtime.application import ApplicationRuntime
@@ -481,6 +488,46 @@ class ApplicationRuntimePort:
             return project_public_model(DocumentContentResponse, await service.read_document(
                 document_id=document_id, start_line=start_line, end_line=end_line
             ))
+
+    async def admit_sources_batch(
+        self, *, user_name: str, project_id: str, request: BatchSourceRequest
+    ) -> BatchSourceResponse:
+        self._require_user(user_name)
+        decoded = {}
+        failures = {}
+        total_bytes = 0
+        for index, item in enumerate(request.items):
+            if isinstance(item, BatchDocumentItem):
+                try:
+                    content = base64.b64decode(item.content_base64, validate=True)
+                except ValueError:
+                    failures[index] = ValueError("Invalid base64 content")
+                    continue
+                total_bytes += len(content)
+                if total_bytes > MAX_DOCUMENT_SIZE:
+                    raise PayloadTooLargeError()
+                decoded[index] = content
+        results = []
+        # One exact project lease covers the bounded sequential batch.
+        async with self._project_documents(user_name=user_name, project_id=project_id) as service:
+            for index, item in enumerate(request.items):
+                try:
+                    if index in failures:
+                        raise failures[index]
+                    if isinstance(item, BatchDocumentItem):
+                        row = await service.submit_document(content=decoded[index], original_name=item.original_name,
+                                                            relative_path=item.relative_path)
+                        results.append(BatchDocumentAccepted(index=index, document=project_public_model(DocumentResponse, row)))
+                    else:
+                        try:
+                            row = await service.save_web_link(url=item.url, title=item.title, summary=item.summary)
+                        except ValidationError:
+                            raise ValueError("Invalid web link") from None
+                        results.append(BatchWebLinkAccepted(index=index, link=project_public_model(SavedWebLinkResponse, row)))
+                except Exception as error:
+                    # Cancellation is not swallowed; accepted items are not rolled back.
+                    results.append(BatchSourceFailed(index=index, error=to_public_error(error)))
+        return BatchSourceResponse(results=tuple(results))
 
     async def upload_document(
         self, *, user_name: str, project_id: str, request: UploadDocumentRequest,

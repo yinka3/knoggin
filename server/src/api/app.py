@@ -36,6 +36,9 @@ from common.schema.public import (
     ArtifactListResponse,
     ArtifactResponse,
     ArtifactRevisionResponse,
+    BatchSourceFailed,
+    BatchSourceRequest,
+    BatchSourceResponse,
     CreateProjectRequest,
     CreateSessionRequest,
     DocumentContentResponse,
@@ -108,6 +111,8 @@ class ApplicationPort(Protocol):
         user_name: str,
         request: CreateProjectRequest,
     ) -> ProjectResponse | Mapping[str, Any]: ...
+
+    async def admit_sources_batch(self, *, user_name: str, project_id: str, request: BatchSourceRequest) -> BatchSourceResponse: ...
 
     async def get_settings(self, *, user_name: str) -> SettingsResponse: ...
     async def get_settings_status(self, *, user_name: str) -> SettingsApplyStatusResponse: ...
@@ -523,6 +528,14 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
         return _project_response(
             await _call(port.create_project, user_name=user_name, request=body)
         )
+
+    @app.post("/v1/projects/{project_id}/sources/batch", response_model=BatchSourceResponse)
+    async def admit_sources_batch(body: BatchSourceRequest, request: Request, project_id: str = Path(min_length=1), user_name: str = Depends(current_user)):
+        result = await port.admit_sources_batch(user_name=user_name, project_id=project_id, request=body)
+        return result.model_copy(update={"results": tuple(
+            item.model_copy(update={"error": sanitize_public_error(item.error, request_id=_request_id(request))})
+            if isinstance(item, BatchSourceFailed) else item for item in result.results
+        )})
 
     @app.get("/v1/settings", response_model=SettingsResponse)
     async def get_settings(user_name: str = Depends(current_user)):

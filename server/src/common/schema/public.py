@@ -23,7 +23,7 @@ from pydantic import (
     field_validator,
 )
 
-from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH
+from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_SOURCE_BATCH_ITEMS
 from common.exceptions import (
     ConfigurationError,
     DependencyError,
@@ -882,3 +882,47 @@ def validate_public_stream(
     parsed = tuple(state.accept(event) for event in events)
     state.finish(require_terminal=require_terminal)
     return parsed
+
+
+class BatchDocumentItem(UploadDocumentRequest):
+    source_type: Literal["document"]
+
+
+class BatchWebLinkItem(PublicModel):
+    source_type: Literal["web_link"]
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=512)
+    summary: str | None = Field(default=None, max_length=4000)
+
+
+class BatchSourceRequest(PublicModel):
+    items: tuple[Annotated[Union[BatchDocumentItem, BatchWebLinkItem], Field(discriminator="source_type")], ...] = Field(min_length=1, max_length=MAX_SOURCE_BATCH_ITEMS)
+
+    @field_validator("items")
+    @classmethod
+    def _aggregate_encoded_limit(cls, items):
+        if sum(len(item.content_base64) for item in items if isinstance(item, BatchDocumentItem)) > MAX_DOCUMENT_BASE64_LENGTH:
+            raise PayloadTooLargeError()
+        return items
+
+
+class BatchDocumentAccepted(PublicModel):
+    index: int = Field(ge=0)
+    status: Literal["accepted_document"] = "accepted_document"
+    document: DocumentResponse
+
+
+class BatchWebLinkAccepted(PublicModel):
+    index: int = Field(ge=0)
+    status: Literal["accepted_web_link"] = "accepted_web_link"
+    link: SavedWebLinkResponse
+
+
+class BatchSourceFailed(PublicModel):
+    index: int = Field(ge=0)
+    status: Literal["failed"] = "failed"
+    error: PublicError
+
+
+class BatchSourceResponse(PublicModel):
+    results: tuple[Annotated[Union[BatchDocumentAccepted, BatchWebLinkAccepted, BatchSourceFailed], Field(discriminator="status")], ...]

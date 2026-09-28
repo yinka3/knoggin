@@ -24,7 +24,7 @@ they are not a generic serialization path for arbitrary runtime objects.
 The follow-up endpoint pass is now approved. Session, project and AAC endpoints
 and settings endpoints are implemented. Their internal
 methods stay available. Batch admission is approved for documents and web links
-and remains pending implementation.
+and is implemented as described below.
 
 Session routes are `GET /v1/sessions`, `GET /v1/sessions/{session_id}/history`,
 `PATCH /v1/sessions/{session_id}` and `DELETE /v1/sessions/{session_id}`. Listing
@@ -84,6 +84,24 @@ whether this request wrote it. Retry reapplies failed subscriptions without
 rewriting config. Publication runs synchronously on the subscriber thread inside
 the async route, not on a worker. File I/O/callbacks can block the event loop;
 this preserves the existing manager's thread-ownership contract.
+
+Batch admission is `POST /v1/projects/{project_id}/sources/batch` with an items
+array (1–20 entries). Each item has source_type `document` plus the existing
+upload fields, or `web_link` plus url and optional title/summary. The batch shares
+the single-upload transport/encoded ceiling and a 50 MiB total decoded-content
+ceiling. Oversized batches fail with 413 before admission; malformed JSON/item
+shapes fail with 422. Items run sequentially under one exact project lease.
+
+A 200 response contains ordered results with the original zero-based index and
+status accepted_document, accepted_web_link or failed. Failures carry safe public
+errors and request correlation. Invalid base64/URLs and service failures do not
+prevent later items from running. Documents are admitted to indexing, not promised
+fully indexed; web links are bookmarks, not fetched or indexed. There is no batch
+transaction/rollback or batch idempotency key. Cancellation stops further items
+but does not undo accepted items. A reported failure (for example after storage
+commit but before response projection) does not guarantee nothing was persisted;
+inspect the existing catalog before blindly retrying. Caller cancellation can
+also leave accepted items without a received response.
 
 The SDK implementation and walkthrough belong to a separate pass after server
 work. Future settings endpoints must keep credentials private and respect the

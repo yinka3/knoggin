@@ -16,7 +16,7 @@ class DocumentUploadLimitMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] != "POST" or not re.fullmatch(
-            r"/v1/projects/[^/]+/documents/?", scope["path"],
+            r"/v1/projects/[^/]+/(?:documents|sources/batch)/?", scope["path"],
         ):
             return await self.app(scope, receive, send)
 
