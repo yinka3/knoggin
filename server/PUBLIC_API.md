@@ -44,6 +44,11 @@ allowed_projects, not lifecycle status. Omitted or null fields are unchanged
 (description can be emptied with an empty string); an empty allowed_projects
 list clears additional readable scopes. Active leases block scope changes,
 archive and deletion with 409, without forcibly unloading sessions.
+Project metadata/scope updates, archive and reactivation serialize with session
+admission through the manager's ownership lock. Caller cancellation waits for an
+already-started mutation to settle before releasing that lock; a mutation may
+therefore complete even if its caller no longer receives the response. Failed
+runtime shutdown retains its owner for retry instead of publishing a replacement.
 Deletion uses the manager's hard-delete flow and returns file_cleanup_status
 (`complete` or `pending`), including retries where only a cleanup task survives.
 Missing projects return 404. Metadata responses omit domain configuration and

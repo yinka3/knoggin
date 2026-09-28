@@ -17,6 +17,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.no_network]
 @pytest.mark.parametrize("operation", ["update_project", "archive_project", "delete_project"])
 async def test_real_project_manager_keeps_active_lease_guard(operation):
     manager = object.__new__(ProjectManager)
+    manager._closed = False
     manager.get_project = AsyncMock(return_value={"id": "p1", "status": "active"})
     manager.active_projects = {}
     manager._project_leases = {"p1": {"session-owner"}}

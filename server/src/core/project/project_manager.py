@@ -11,6 +11,7 @@ from common.conf.domain_config import DomainConfig
 from common.conf.manager import ConfigManager
 from common.exceptions import WorkspaceConflictError
 from common.scoping import build_readable_project_ids
+from common.utils.lifecycle import settle_owned_task
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
@@ -652,6 +653,30 @@ class ProjectManager:
         allowed_projects: Optional[List[str]] = None,
     ) -> Optional[dict]:
         """Update project metadata that does not control lifecycle status."""
+        return await self._mutate_project(
+            self._update_project_locked, project_id,
+            name=name, description=description, allowed_projects=allowed_projects,
+        )
+
+    async def _mutate_project(self, operation, *args, **kwargs):
+        """Keep admission excluded until an already-started mutation settles."""
+        async with self.maintenance_service.lock:
+            if self._closed:
+                raise RuntimeError("ProjectManager is shutting down")
+            task = asyncio.create_task(operation(*args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(task)
+                except Exception:
+                    logger.error("Cancelled project mutation failed while settling")
+                raise
+
+    async def _update_project_locked(
+        self, project_id: str, name: Optional[str] = None,
+        description: Optional[str] = None, allowed_projects: Optional[List[str]] = None,
+    ) -> Optional[dict]:
         meta = await self.get_project(project_id)
         if not meta:
             return None
@@ -717,6 +742,9 @@ class ProjectManager:
 
     async def archive_project(self, project_id: str) -> Optional[dict]:
         """Retire a project while retaining its sessions and knowledge."""
+        return await self._mutate_project(self._archive_project_locked, project_id)
+
+    async def _archive_project_locked(self, project_id: str) -> Optional[dict]:
         meta = await self.get_project(project_id)
         if not meta:
             return None
@@ -748,6 +776,9 @@ class ProjectManager:
 
     async def reactivate_project(self, project_id: str) -> Optional[dict]:
         """Make an archived project eligible for sessions again."""
+        return await self._mutate_project(self._reactivate_project_locked, project_id)
+
+    async def _reactivate_project_locked(self, project_id: str) -> Optional[dict]:
         meta = await self.get_project(project_id)
         if not meta:
             return None
