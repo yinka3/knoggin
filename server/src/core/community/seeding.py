@@ -5,9 +5,8 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Optional
-
-from loguru import logger
 
 from common.conf.manager import ConfigManager
 from common.schema.agent.community_tools import (
@@ -20,6 +19,7 @@ from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.tools.registry import Tools
 from core.community.aac_store import AACStore
+from core.community.execution import config_owner, execute_aac_run
 from core.community.read_context import AACReadContext
 from core.community.token_budget import AACTokenBudget
 from core.community.tools import AACTools
@@ -87,7 +87,7 @@ class AACSeeder:
         self.config_provider = config_provider
 
     async def decide(self, *, budget: Optional[AACTokenBudget] = None) -> SeedDecision:
-        settings = self.config_provider.get().config.developer_settings.community
+        settings = config_owner(self.config_provider).config.developer_settings.community
         if budget is None:
             budget = AACTokenBudget(settings.token_budget)
         agent = await self._resolve_agent()
@@ -123,7 +123,7 @@ class AACSeeder:
             for schema in AAC_SPECIFIC_SCHEMAS
             if schema["function"]["name"] == "search_community_insights"
         ]
-        run = AgentRun.open_aac(
+        open_run = partial(AgentRun.open_aac,
             user_name=self.user_name,
             session_id=f"aac-seed:{run_id}",
             user_query=(
@@ -144,26 +144,16 @@ class AACSeeder:
             enabled_tools=list(AAC_READ_TOOL_NAMES),
             additional_tool_schemas=read_insight_schema,
         )
-        executor = AgentExecutor(
-            run,
-            self.resources.llm_service,
-            tools,
-            on_successful_completion=self.agent_manager.mark_turn_completed,
-            aac_budget=budget,
+        response = await execute_aac_run(
+            open_run=open_run, executor_factory=AgentExecutor,
+            llm=self.resources.llm_service, tools=tools,
+            on_completion=self.agent_manager.mark_turn_completed, budget=budget,
+            skip_on_error=True,
         )
-        response: Optional[str] = None
-        try:
-            async for event in executor.execute():
-                if event.get("event") == "response":
-                    response = event.get("data", {}).get("content")
-        except Exception as exc:
-            logger.warning("AAC seeding failed; skipping opportunity: {}", exc)
-        finally:
-            await tools.close()
         return SeedDecision.parse(response)
 
     async def _resolve_agent(self) -> Optional[AgentConfig]:
-        settings = self.config_provider.get().config.developer_settings.community
+        settings = config_owner(self.config_provider).config.developer_settings.community
         if settings.seeding_agent_id:
             configured = await self.agent_manager.get_agent(settings.seeding_agent_id)
             if configured is not None:

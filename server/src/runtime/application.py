@@ -153,7 +153,7 @@ class ApplicationRuntime:
                 user_name=user_name,
                 resources=resources,
                 agent_manager=agent_manager,
-                config_provider=ConfigManager,
+                config_provider=config_manager,
             )
             startup_cleanup.owners["aac"] = aac_runtime
             await aac_runtime.start()

@@ -6,6 +6,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Any, Callable, Optional
 
 from loguru import logger
@@ -23,6 +24,7 @@ from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.services.agent_manager import AgentManager
 from core.agent.tools.registry import Tools
 from core.community.aac_store import AACStore
+from core.community.execution import config_owner, execute_aac_run
 from core.community.read_context import AACReadContext
 from core.community.seeding import AACSeeder
 from core.community.token_budget import AACTokenBudget
@@ -92,7 +94,7 @@ class AACRuntime:
         agent_manager: AgentManager,
         config_provider=ConfigManager,
     ) -> "AACRuntime":
-        config = config_provider.get().config
+        config = config_owner(config_provider).config
         read_context = await AACReadContext.create(
             user_name=user_name,
             postgres=resources.postgres,
@@ -568,7 +570,7 @@ class AACRuntime:
             for schema in AAC_SPECIFIC_SCHEMAS
             if schema["function"]["name"] in enabled
         ]
-        run = AgentRun.open_aac(
+        open_run = partial(AgentRun.open_aac,
             user_name=self.user_name,
             session_id=f"aac:{discussion_id}",
             user_query=(
@@ -594,20 +596,11 @@ class AACRuntime:
             is_community=not is_specialist,
             current_participants=participants,
         )
-        response: Optional[str] = None
-        executor = AgentExecutor(
-            run,
-            self.resources.llm_service,
-            tools,
-            on_successful_completion=self.agent_manager.mark_turn_completed,
-            aac_budget=budget,
+        response = await execute_aac_run(
+            open_run=open_run, executor_factory=AgentExecutor,
+            llm=self.resources.llm_service, tools=tools,
+            on_completion=self.agent_manager.mark_turn_completed, budget=budget,
         )
-        try:
-            async for event in executor.execute():
-                if event.get("event") == "response":
-                    response = event.get("data", {}).get("content")
-        finally:
-            await tools.close()
         return response.strip() if isinstance(response, str) and response.strip() else None
 
     def _specialist_runner(self, *, discussion_id: str, topic: str, budget: AACTokenBudget):
@@ -670,12 +663,12 @@ class AACRuntime:
                 del self._pending_participation_events[event_id]
 
     def _community_settings(self):
-        return self.config_provider.get().config.developer_settings.community
+        return config_owner(self.config_provider).config.developer_settings.community
 
     def _subscribe_to_config(self) -> None:
         if self._config_unsubscribe is not None:
             return
-        subscribe = getattr(self.config_provider.get(), "subscribe", None)
+        subscribe = getattr(config_owner(self.config_provider), "subscribe", None)
         if callable(subscribe):
             self._config_unsubscribe = subscribe(
                 self._on_community_settings_changed,
@@ -692,7 +685,7 @@ class AACRuntime:
     async def _refresh_read_context(self) -> None:
         """Refresh user project visibility before each AAC decision or run."""
 
-        config = self.config_provider.get().config
+        config = config_owner(self.config_provider).config
         context = await AACReadContext.create(
             user_name=self.user_name,
             postgres=self.resources.postgres,
