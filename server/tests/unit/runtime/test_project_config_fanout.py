@@ -502,6 +502,11 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
     indexer = RecordingIndexer(events)
     job = RecordingStartupJob(events)
 
+    def create_retrieval(**kwargs):
+        assert "search_config" not in kwargs
+        assert kwargs["search_settings"] is initial_config.developer_settings.search
+        return object()
+
     class DomainStore:
         def __init__(self, _postgres):
             pass
@@ -527,7 +532,7 @@ async def test_runtime_start_synchronizes_context_before_other_project_work(
         lambda **_kwargs: RecordingStartupEntities(),
     )
     monkeypatch.setattr(
-        "runtime.project_factory.KnowledgeRetrieval", lambda **_kwargs: object()
+        "runtime.project_factory.KnowledgeRetrieval", create_retrieval
     )
     monkeypatch.setattr(
         "runtime.project_factory.ProjectRuntime", RecordingStartupRuntime

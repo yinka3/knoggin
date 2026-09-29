@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.schema.evidence import EvidenceBundle
+from common.schema.settings import SearchSettings
 from core.knowledge.retrieval import KnowledgeRetrieval
 
 
@@ -20,7 +21,7 @@ def _retrieval(store, *, readable_project_ids=None):
         entities=Entities(),
         embedding_service=SimpleNamespace(),
         knowledge_store=store,
-        search_config={"default_activity_hours": 72},
+        search_settings=SearchSettings(default_activity_hours=72),
     )
 
 

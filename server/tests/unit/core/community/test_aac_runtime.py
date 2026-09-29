@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from common.schema.settings import SearchSettings
 from core.agent.services.agent_manager import AgentManager
 from core.community.aac_store import AACStore
 from core.community.read_context import AACReadContext
@@ -24,7 +25,7 @@ def _provider(*, enabled: bool = True):
     config = SimpleNamespace(
         search=SimpleNamespace(model_dump=lambda: {}),
         developer_settings=SimpleNamespace(
-            search=SimpleNamespace(model_dump=lambda: {}),
+            search=SearchSettings(),
             community=community,
         ),
     )
@@ -41,7 +42,7 @@ class ConfigBus:
         self.config = SimpleNamespace(
             search=SimpleNamespace(model_dump=lambda: {}),
             developer_settings=SimpleNamespace(
-                search=SimpleNamespace(model_dump=lambda: {}),
+                search=SearchSettings(),
                 community=self.community,
             ),
         )
@@ -73,6 +74,36 @@ class FakeSeeder:
     async def decide(self, *, budget):
         self.budgets.append(budget)
         return self.decision
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_aac_search_policy_changes_only_on_context_refresh():
+    resources = FakeResources()
+    config = ConfigBus(enabled=False)
+    config.config.developer_settings.search = SearchSettings(default_entity_limit=3)
+
+    def forbid_web_settings():
+        raise AssertionError("Internal retrieval must not consume web settings")
+
+    config.config.search.model_dump = forbid_web_settings
+    resources.knowledge_store.search_entity = AsyncMock(return_value=[])
+    runtime = await AACRuntime.create(
+        user_name="ada", resources=resources,
+        agent_manager=AgentManager(resources, user_name="ada"),
+        config_provider=config,
+    )
+    previous = runtime.read_context
+    config.config.developer_settings.search.default_entity_limit = 7
+    await previous.knowledge_retrieval.search_entities("query")
+    assert resources.knowledge_store.search_entity.await_args.kwargs["limit"] == 3
+
+    await runtime._refresh_read_context()
+    assert runtime.read_context is not previous
+    await runtime.read_context.knowledge_retrieval.search_entities("query")
+    assert resources.knowledge_store.search_entity.await_args.kwargs["limit"] == 7
+    await previous.knowledge_retrieval.search_entities("query")
+    assert resources.knowledge_store.search_entity.await_args.kwargs["limit"] == 3
 
 
 @pytest.mark.runtime

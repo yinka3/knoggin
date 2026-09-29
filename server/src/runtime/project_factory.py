@@ -103,10 +103,7 @@ class ProjectRuntimeFactory:
             entities=entities,
             embedding_service=resources.embedding,
             knowledge_store=resources.knowledge_store,
-            search_config={
-                **runtime_config.developer_settings.search.model_dump(),
-                **runtime_config.search.model_dump(),
-            },
+            search_settings=developer_settings.search,
         )
 
         text_processor = await asyncio.get_running_loop().run_in_executor(

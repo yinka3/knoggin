@@ -100,10 +100,7 @@ class AACRuntime:
             postgres=resources.postgres,
             knowledge_store=resources.knowledge_store,
             embedding_service=resources.embedding,
-            search_config={
-                **config.developer_settings.search.model_dump(),
-                **config.search.model_dump(),
-            },
+            search_settings=config.developer_settings.search,
         )
         return cls(
             user_name=user_name,
@@ -693,10 +690,7 @@ class AACRuntime:
             postgres=self.resources.postgres,
             knowledge_store=self.resources.knowledge_store,
             embedding_service=self.resources.embedding,
-            search_config={
-                **config.developer_settings.search.model_dump(),
-                **config.search.model_dump(),
-            },
+            search_settings=config.developer_settings.search,
         )
         self.read_context = context
         if isinstance(self.seeder, AACSeeder):

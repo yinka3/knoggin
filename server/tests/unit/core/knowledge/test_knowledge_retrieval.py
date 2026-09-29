@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.exceptions import ToolExecutionError
+from common.schema.settings import SearchSettings
 from core.agent.run import AgentIdentity, AgentRun, AgentRunLimits
 from core.agent.tools.registry import Tools, install_tool_runtime
 from core.knowledge.retrieval import KnowledgeRetrieval
@@ -42,7 +43,7 @@ async def test_message_context_uses_durable_storage():
         entities=SimpleNamespace(),
         embedding_service=SimpleNamespace(),
         knowledge_store=Store(),
-        search_config={"fts_limit": 10},
+        search_settings=SearchSettings(fts_limit=10, semantic_message_limit=10),
     )
 
     results = await retrieval.search_messages(

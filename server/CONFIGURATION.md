@@ -65,6 +65,7 @@ the raw RootConfig as a public settings response.
 | LLM connection/model defaults and coordination logging | Existing resource subscribers; in-flight model calls retain their owned request/client. Service-scheduled budget updates have their own completion semantics. |
 | Entity resolution, NLP, ingestion, episode and conflict discovery | Existing loaded project subscribers receive changed subtrees. This does not rebuild project resources. |
 | Session defaults and run limits | Captured at admission; changes affect later runs, not the admitted run's policy. |
+| Internal knowledge search (`developer_settings.search`) | Validated snapshot at project load; updates affect newly loaded/reloaded project runtimes, not existing ones. AAC captures settings when its read context is refreshed before a decision/run; existing contexts retain their policy. External web provider settings are separate. |
 | AAC enabled/cadence and budget | Enabled/cadence wakes opportunities; disable prevents new work rather than cancelling an admitted discussion. Shared token budget is captured for that discussion. |
 | Resource profile, worker count, model/device environment | Startup-captured; restart to change existing resources. |
 | Document library/service construction settings | Existing owners are not rebuilt automatically. Folder scan settings use their separate project-persisted boundary. |

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Tuple
 
+from common.schema.settings import SearchSettings
 from common.scoping import IDENTITY_SCOPE, require_scope_value
 from core.knowledge.db.readers.document_reader import DocumentReader
 from core.knowledge.documents import DocumentService
@@ -31,7 +32,7 @@ class AACReadContext:
         postgres: Any,
         knowledge_store: Any,
         embedding_service: Any,
-        search_config: Dict | None = None,
+        search_settings: SearchSettings | None = None,
     ) -> "AACReadContext":
         """Build independent user-wide retrieval services for AAC.
 
@@ -70,7 +71,7 @@ class AACReadContext:
             entities=entities,
             embedding_service=embedding_service,
             knowledge_store=knowledge_store,
-            search_config=search_config,
+            search_settings=search_settings,
         )
         reader = DocumentReader(
             postgres,

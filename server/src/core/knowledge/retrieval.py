@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from common.schema.evidence import EvidenceTraversalLimits
+from common.schema.settings import SearchSettings
 from common.scoping import require_scope_value, require_visible_project_ids
 from common.utils.events import emit
 
@@ -29,6 +30,10 @@ class KnowledgeRetrieval:
     directional ``readable_project_ids`` set governs all cross-project reads.
     Methods accept a session ID only where message context or telemetry needs
     it; the service itself is intentionally not session-owned.
+
+    Internal search policy is validated and captured at construction. Config
+    publication does not change this instance; project reload or AAC context
+    refresh constructs a new owner. External web settings never belong here.
     """
 
     def __init__(
@@ -40,7 +45,7 @@ class KnowledgeRetrieval:
         entities,
         embedding_service,
         knowledge_store,
-        search_config: Optional[Dict] = None,
+        search_settings: SearchSettings | None = None,
     ) -> None:
         self.project_id = require_scope_value(
             project_id, "project_id", "KnowledgeRetrieval"
@@ -54,7 +59,11 @@ class KnowledgeRetrieval:
         self.entities = entities
         self.embedding_service = embedding_service
         self.knowledge_store = knowledge_store
-        self.search_cfg = search_config or {}
+        if search_settings is not None and not isinstance(search_settings, SearchSettings):
+            raise TypeError("search_settings must be SearchSettings")
+        self._search_settings = SearchSettings.model_validate(
+            (search_settings or SearchSettings()).model_dump()
+        )
 
     async def search_messages(
         self,
@@ -71,7 +80,7 @@ class KnowledgeRetrieval:
         limit = self._positive_int(
             limit,
             "search_messages limit",
-            default=self.search_cfg.get("default_message_limit", 8),
+            default=self._search_settings.default_message_limit,
         )
         results = await self._search_messages(query, session_id=session_id, k=limit)
         if not results:
@@ -131,7 +140,7 @@ class KnowledgeRetrieval:
         limit = self._positive_int(
             limit,
             "search_entities limit",
-            default=self.search_cfg.get("default_entity_limit", 5),
+            default=self._search_settings.default_entity_limit,
         )
         results = await self.knowledge_store.search_entity(
             query,
@@ -170,7 +179,7 @@ class KnowledgeRetrieval:
         hours = self._positive_int(
             hours,
             "get_recent_activity hours",
-            default=self.search_cfg.get("default_activity_hours", 24),
+            default=self._search_settings.default_activity_hours,
         )
         if await self.entities.get_profile(entity_id) is None:
             return [{"error": f"Entity not found: '{entity_id}'"}]
@@ -466,10 +475,10 @@ class KnowledgeRetrieval:
     async def _search_messages(
         self, query: str, *, session_id: str, k: int
     ) -> List[Tuple[str, float, Optional[str]]]:
-        fts_limit = self.search_cfg.get("fts_limit", 50)
-        semantic_limit = self.search_cfg.get("semantic_message_limit", fts_limit)
-        semantic_threshold = self.search_cfg.get("semantic_message_threshold", 0.25)
-        rerank_candidates = self.search_cfg.get("rerank_candidates", 25)
+        fts_limit = self._search_settings.fts_limit
+        semantic_limit = self._search_settings.semantic_message_limit
+        semantic_threshold = self._search_settings.semantic_message_threshold
+        rerank_candidates = self._search_settings.rerank_candidates
         visible_sessions = await self.knowledge_store.get_visible_session_ids(
             user_name=self.user_name,
             visible_project_ids=self.readable_project_ids,
