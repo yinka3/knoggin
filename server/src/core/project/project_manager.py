@@ -12,6 +12,7 @@ from common.conf.manager import ConfigManager
 from common.exceptions import WorkspaceConflictError
 from common.scoping import build_readable_project_ids
 from common.utils.lifecycle import settle_owned_task
+from core.knowledge.db.writers.artifact_retention_writer import ArtifactRetentionWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
 from core.knowledge.documents.filesystem import ProjectFilesystemFactory
 from core.knowledge.entity.maintenance_service import EntityMaintenanceService
@@ -123,6 +124,7 @@ class ProjectManager:
         self.maintenance_scheduler = ApplicationMaintenanceScheduler(
             maintenance_service=self.entity_maintenance_service,
             user_name=user_name,
+            artifact_retention_writer=ArtifactRetentionWriter(self.pg),
             background_work=getattr(resources, "background_work", None),
         )
         self._closed = False

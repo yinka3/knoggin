@@ -20,6 +20,31 @@ they are not a generic serialization path for arbitrary runtime objects.
 - Artifacts and maintenance: existing browsing, revision reads, review decisions
   and preview/application operations.
 
+## Artifact retention after session deletion
+
+Artifacts remain readable for 30 days from their originating session's first
+deleted_at timestamp. All scoped reads (project listing, identity, revisions and
+assistant-message attachment) use that same window. A supplied session filter is
+honored without resuming the deleted session. Open sessions' artifacts do not
+expire simply because the artifact itself is old. Expired reads return not found
+or are omitted from listing, even if physical cleanup has not yet run.
+
+The application-owned maintenance loop sweeps on startup and every five minutes,
+independent of loaded project runtimes or entity-preflight success. Each sweep
+permanently deletes up to 500 expired artifacts for the configured user, including
+those in archived projects; all revisions cascade in the same transaction. Failed
+sweeps retry later. Concurrent sweeps skip locked rows, and large backlogs can take
+several sweeps. If the server is stopped or its queue is busy, physical removal
+waits for an available sweep; this is not an exact-deadline external daemon.
+
+Repeated session deletion does not restart the timer. A deleted session without
+a known deletion timestamp is hidden but not purged by guessing its age. Cleanup
+does not delete canonical source messages, episodes, citations, uploaded documents
+or saved web links. It removes artifact/revision rows, not database backups or
+copies previously exported elsewhere. Project hard deletion still uses its own
+immediate cascading lifecycle. Retention is a fixed 30-day server policy, not a
+new SDK/configuration surface.
+
 ## Episode editing
 
 `GET /v1/projects/{project_id}/episodes/{episode_id}` returns the narrative,

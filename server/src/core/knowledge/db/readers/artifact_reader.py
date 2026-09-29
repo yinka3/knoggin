@@ -5,12 +5,13 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from common.artifact_retention import ARTIFACT_RETENTION_PERIOD
 from common.schema.artifacts import ArtifactReference, ArtifactRevision
 from common.scoping import require_scope_value
 
 
 class ArtifactReader:
-    """Read artifacts only through the owning user/project/session scope."""
+    """Read scoped artifacts, including the deleted-session retention window."""
 
     def __init__(self, client) -> None:
         self.client = client
@@ -42,7 +43,11 @@ class ArtifactReader:
               AND artifact.project_id = %s
               AND (%s::text IS NULL OR artifact.session_id = %s)
               AND session.user_name = %s
-              AND session.status = 'open'
+              AND (
+                  session.status = 'open'
+                  OR (session.status = 'deleted'
+                      AND session.deleted_at > statement_timestamp() - %s::interval)
+              )
             """,
             (
                 str(artifact_id),
@@ -51,6 +56,7 @@ class ArtifactReader:
                 session_id,
                 session_id,
                 user_name,
+                ARTIFACT_RETENTION_PERIOD,
             ),
         )
         return None if row is None else self._reference_from_row(row)
@@ -83,11 +89,16 @@ class ArtifactReader:
               AND artifact.project_id = %s
               AND (%s::text IS NULL OR artifact.session_id = %s)
               AND session.user_name = %s
-              AND session.status = 'open'
+              AND (
+                  session.status = 'open'
+                  OR (session.status = 'deleted'
+                      AND session.deleted_at > statement_timestamp() - %s::interval)
+              )
             ORDER BY artifact.updated_at DESC, artifact.artifact_id DESC
             LIMIT %s
             """,
-            (user_name, project_id, session_id, session_id, user_name, limit),
+            (user_name, project_id, session_id, session_id, user_name,
+             ARTIFACT_RETENTION_PERIOD, limit),
         )
         return [self._reference_from_row(row) for row in rows]
 
@@ -124,9 +135,14 @@ class ArtifactReader:
               AND artifact.project_id = %s
               AND artifact.session_id = %s
               AND session.user_name = %s
-              AND session.status = 'open'
+              AND (
+                  session.status = 'open'
+                  OR (session.status = 'deleted'
+                      AND session.deleted_at > statement_timestamp() - %s::interval)
+              )
             """,
-            (message_id, user_name, project_id, session_id, user_name),
+            (message_id, user_name, project_id, session_id, user_name,
+             ARTIFACT_RETENTION_PERIOD),
         )
         return None if row is None else self._reference_from_row(row)
 
@@ -163,7 +179,11 @@ class ArtifactReader:
               AND artifact.project_id = %s
               AND (%s::text IS NULL OR artifact.session_id = %s)
               AND session.user_name = %s
-              AND session.status = 'open'
+              AND (
+                  session.status = 'open'
+                  OR (session.status = 'deleted'
+                      AND session.deleted_at > statement_timestamp() - %s::interval)
+              )
             """,
             (
                 str(artifact_id),
@@ -173,6 +193,7 @@ class ArtifactReader:
                 session_id,
                 session_id,
                 user_name,
+                ARTIFACT_RETENTION_PERIOD,
             ),
         )
         if row is None:

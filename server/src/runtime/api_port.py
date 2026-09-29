@@ -874,6 +874,7 @@ class ApplicationRuntimePort:
         artifacts = await self.runtime.resources.knowledge_store.list_project_artifacts(
             user_name=user_name,
             project_id=project_id,
+            session_id=session_id,
             limit=limit,
         )
         return ArtifactListResponse(
@@ -893,6 +894,7 @@ class ApplicationRuntimePort:
             artifact_id,
             user_name=user_name,
             project_id=project_id,
+            session_id=session_id,
         )
         return None if artifact is None else self._artifact_response(artifact)
 
@@ -911,6 +913,7 @@ class ApplicationRuntimePort:
             revision,
             user_name=user_name,
             project_id=project_id,
+            session_id=session_id,
         )
 
     async def open_run_stream(
