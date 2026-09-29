@@ -8,6 +8,7 @@ internal agent event stream back into the versioned public stream contract.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -15,11 +16,16 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from loguru import logger
 from pydantic import ValidationError
 
 from common.conf.domain_config import DomainConfig
 from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_DOCUMENT_SIZE
-from common.exceptions import NotFoundError, PayloadTooLargeError
+from common.exceptions import (
+    EpisodeEditConflictError,
+    NotFoundError,
+    PayloadTooLargeError,
+)
 from common.schema.document import (
     DocumentSelection,
     FolderScanSettings,
@@ -50,6 +56,8 @@ from common.schema.public import (
     DocumentFocusResponse,
     DocumentResponse,
     EntityMergeRollbackRequest,
+    EpisodeEditedResponse,
+    EpisodeResponse,
     MaintenanceReviewDecisionRequest,
     MaintenanceReviewDetailResponse,
     MaintenanceReviewPreviewResponse,
@@ -79,6 +87,7 @@ from common.schema.public import (
     StartRunRequest,
     ToolCompletedEvent,
     ToolStartedEvent,
+    UpdateEpisodeRequest,
     UpdateProjectRequest,
     UpdateSavedWebLinkRequest,
     UpdateSessionRequest,
@@ -89,6 +98,8 @@ from common.schema.public import (
     to_public_error,
 )
 from common.schema.source.references import SourceConsulted
+from common.scoping import require_scope_value
+from common.utils.lifecycle import settle_owned_task
 from runtime.application import ApplicationRuntime
 
 
@@ -306,6 +317,74 @@ class ApplicationRuntimePort:
             project_id=project_id, file_cleanup_status=row["file_cleanup_status"]
         )
 
+    async def _owned_episode(self, *, user_name: str, project_id: str, episode_id: str):
+        episode = await self.runtime.resources.knowledge_store.get_project_episode(
+            episode_id, user_name=user_name, project_id=project_id,
+            visible_project_ids=[project_id],
+        )
+        if episode is None or episode.project_id != project_id or episode.episode_id != episode_id:
+            raise NotFoundError("episode")
+        return episode
+
+    async def get_episode(
+        self, *, user_name: str, project_id: str, episode_id: str,
+    ) -> EpisodeResponse:
+        self._require_user(user_name)
+        project_id = require_scope_value(project_id, "project_id", "get_episode")
+        episode_id = require_scope_value(episode_id, "episode_id", "get_episode")
+        project = await self.runtime.projects.get_project(project_id)
+        if project is None or project["status"] not in {"active", "archived"}:
+            raise NotFoundError("project")
+        episode = await self._owned_episode(
+            user_name=user_name, project_id=project_id, episode_id=episode_id,
+        )
+        return project_public_model(EpisodeResponse, episode)
+
+    async def update_episode(
+        self, *, user_name: str, project_id: str, episode_id: str,
+        request: UpdateEpisodeRequest,
+    ) -> EpisodeEditedResponse:
+        self._require_user(user_name)
+        project_id = require_scope_value(project_id, "project_id", "update_episode")
+        episode_id = require_scope_value(episode_id, "episode_id", "update_episode")
+        project = await self.runtime.projects.get_project(project_id)
+        if project is None or project["status"] == "deleted":
+            raise NotFoundError("project")
+        if project["status"] != "active":
+            raise PermissionError("Archived projects are read-only")
+        maximum = self.runtime.config_manager.config.developer_settings.jobs.episode.max_narrative_chars
+        if request.narrative_character_count() > maximum:
+            raise ValueError("Episode narrative exceeds the configured character limit")
+
+        # The exact lease blocks archive/delete while embedding and CAS persist.
+        # This is project-owned editing; no session is resumed or fabricated.
+        async with self._project_runtime(
+            user_name=user_name, project_id=project_id, lease_prefix="api-episode-edit",
+        ):
+            episode = await self._owned_episode(
+                user_name=user_name, project_id=project_id, episode_id=episode_id,
+            )
+            if episode.updated_at != request.expected_updated_at:
+                raise EpisodeEditConflictError()
+            worker = asyncio.create_task(self.runtime.resources.knowledge_store.edit_episode(
+                episode_id=episode_id, user_name=user_name, project_id=project_id,
+                summary=request.summary, new_developments=request.new_developments,
+                updates=request.updates, unresolved=request.unresolved,
+                expected_updated_at=request.expected_updated_at,
+            ))
+            try:
+                updated_at = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                try:
+                    await settle_owned_task(worker)
+                except Exception:
+                    # Preserve caller cancellation, not a worker's raw failure.
+                    logger.error("Cancelled episode edit worker failed")
+                raise
+            return EpisodeEditedResponse(
+                episode_id=episode_id, project_id=project_id, updated_at=updated_at,
+            )
+
     async def create_session(
         self,
         *,
@@ -457,9 +536,11 @@ class ApplicationRuntimePort:
         ))
 
     @asynccontextmanager
-    async def _project_documents(self, *, user_name: str, project_id: str):
+    async def _project_runtime(
+        self, *, user_name: str, project_id: str, lease_prefix: str = "api-documents",
+    ):
         self._require_user(user_name)
-        lease_id = f"api-documents:{uuid4()}"
+        lease_id = f"{lease_prefix}:{uuid4()}"
         try:
             project = await self.runtime.projects.acquire_project_for_session(
                 project_id,
@@ -468,9 +549,21 @@ class ApplicationRuntimePort:
         except ValueError as exc:
             raise NotFoundError("project") from exc
         try:
-            yield project.document_service
+            yield project
         finally:
-            await self.runtime.projects.release_project_for_session(project_id, lease_id)
+            cleanup = asyncio.create_task(
+                self.runtime.projects.release_project_for_session(project_id, lease_id)
+            )
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await settle_owned_task(cleanup)
+                raise
+
+    @asynccontextmanager
+    async def _project_documents(self, *, user_name: str, project_id: str):
+        async with self._project_runtime(user_name=user_name, project_id=project_id) as project:
+            yield project.document_service
 
     async def list_documents(self, *, user_name: str, project_id: str, limit: int = 100) -> list[DocumentResponse]:
         async with self._project_documents(user_name=user_name, project_id=project_id) as service:

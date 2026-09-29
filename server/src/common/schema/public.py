@@ -15,18 +15,21 @@ from typing import Annotated, Any, Literal, Union
 from uuid import UUID
 
 from pydantic import (
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
     TypeAdapter,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from common.document_limits import MAX_DOCUMENT_BASE64_LENGTH, MAX_SOURCE_BATCH_ITEMS
 from common.exceptions import (
     ConfigurationError,
     DependencyError,
+    EpisodeEditConflictError,
     IdempotencyConflictError,
     LLMBudgetExceededError,
     LLMProviderError,
@@ -87,7 +90,7 @@ class PublicModel(BaseModel):
 
     @field_validator(
         "id", "project_id", "session_id", "agent_id", "run_id", "document_id",
-        "source_ref_id", "artifact_id", "request_id", "model", "idempotency_key",
+        "source_ref_id", "artifact_id", "episode_id", "request_id", "model", "idempotency_key",
         mode="before", check_fields=False,
     )
     @classmethod
@@ -465,6 +468,64 @@ class UpdateSavedWebLinkRequest(PublicModel):
     summary: str | None = Field(default=None, max_length=4000)
 
 
+class UpdateEpisodeRequest(PublicModel):
+    """Replace the complete narrative, not the episode's canonical sources."""
+
+    summary: str = Field(min_length=1, max_length=20_000)
+    new_developments: list[Annotated[str, Field(min_length=1, max_length=20_000)]] = Field(max_length=100)
+    updates: list[Annotated[str, Field(min_length=1, max_length=20_000)]] = Field(max_length=100)
+    unresolved: list[Annotated[str, Field(min_length=1, max_length=20_000)]] = Field(max_length=100)
+    expected_updated_at: AwareDatetime
+
+    @field_validator("summary")
+    @classmethod
+    def _summary(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("summary must not be blank")
+        return value
+
+    @field_validator("new_developments", "updates", "unresolved")
+    @classmethod
+    def _items(cls, values: list[str]) -> list[str]:
+        result = [value.strip() for value in values]
+        if any(not value for value in result):
+            raise ValueError("narrative items must not be blank")
+        return result
+
+    @model_validator(mode="after")
+    def _hard_narrative_limit(self):
+        if self.narrative_character_count() > 20_000:
+            raise ValueError("episode narrative exceeds the hard character limit")
+        return self
+
+    def narrative_character_count(self) -> int:
+        return sum(len(value) for value in (
+            self.summary, *self.new_developments, *self.updates, *self.unresolved,
+        ))
+
+
+class EpisodeResponse(PublicModel):
+    """Narrative and revision only; no vectors, raw sources or generator metadata."""
+
+    episode_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    new_developments: tuple[str, ...]
+    updates: tuple[str, ...]
+    unresolved: tuple[str, ...]
+    user_modified: bool
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
+
+
+class EpisodeEditedResponse(PublicModel):
+    episode_id: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    user_modified: Literal[True] = True
+    updated_at: AwareDatetime
+
+
 class MaintenanceReviewResponse(PublicModel):
     """Application-facing projection of one typed maintenance proposal."""
 
@@ -658,6 +719,11 @@ _PUBLIC_ERROR_PROJECTIONS: dict[type[Exception], tuple[str, str, bool]] = {
         "The workspace changed before the request could be applied.",
         False,
     ),
+    EpisodeEditConflictError: (
+        "episode_conflict",
+        "The episode changed or is unavailable. Read it again before editing.",
+        False,
+    ),
     StorageError: (
         "storage_unavailable",
         "Storage is temporarily unavailable.",
@@ -701,7 +767,7 @@ def public_error_status(error: PublicError) -> int:
     statuses = {
         "invalid_request": 422, "forbidden": 403, "not_found": 404, "payload_too_large": 413,
         "session_busy": 409, "idempotency_conflict": 409, "request_in_progress": 409,
-        "request_interrupted": 409, "workspace_conflict": 409,
+        "request_interrupted": 409, "workspace_conflict": 409, "episode_conflict": 409,
         "run_cancelled": 409, "clarification_required": 409,
         "llm_budget_exhausted": 429, "internal_error": 500, "configuration_error": 500,
         "dependency_unavailable": 503, "storage_unavailable": 503, "model_unavailable": 503,

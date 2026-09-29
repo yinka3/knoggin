@@ -46,6 +46,8 @@ from common.schema.public import (
     DocumentFocusResponse,
     DocumentResponse,
     EntityMergeRollbackRequest,
+    EpisodeEditedResponse,
+    EpisodeResponse,
     MaintenanceOperationResponse,
     MaintenanceReviewDecisionRequest,
     MaintenanceReviewDetailResponse,
@@ -72,6 +74,7 @@ from common.schema.public import (
     SettingsResponse,
     SettingsUpdateRequest,
     StartRunRequest,
+    UpdateEpisodeRequest,
     UpdateProjectRequest,
     UpdateSavedWebLinkRequest,
     UpdateSessionRequest,
@@ -133,6 +136,15 @@ class ApplicationPort(Protocol):
     async def update_project(self, *, user_name: str, project_id: str, request: UpdateProjectRequest) -> ProjectResponse: ...
     async def archive_project(self, *, user_name: str, project_id: str) -> ProjectResponse: ...
     async def delete_project(self, *, user_name: str, project_id: str) -> ProjectDeletedResponse: ...
+
+    async def get_episode(
+        self, *, user_name: str, project_id: str, episode_id: str
+    ) -> EpisodeResponse: ...
+
+    async def update_episode(
+        self, *, user_name: str, project_id: str, episode_id: str,
+        request: UpdateEpisodeRequest,
+    ) -> EpisodeEditedResponse: ...
 
     async def create_session(
         self,
@@ -933,6 +945,34 @@ def create_app(port: ApplicationPort, *, title: str = "Knoggin API") -> FastAPI:
                 merge_id=merge_id,
                 request=body,
             )
+        )
+
+    @app.get(
+        "/v1/projects/{project_id}/episodes/{episode_id}",
+        response_model=EpisodeResponse,
+    )
+    async def get_episode(
+        project_id: str = Path(min_length=1, max_length=200),
+        episode_id: str = Path(min_length=1, max_length=200),
+        user_name: str = Depends(current_user),
+    ) -> EpisodeResponse:
+        return await port.get_episode(
+            user_name=user_name, project_id=project_id, episode_id=episode_id,
+        )
+
+    @app.patch(
+        "/v1/projects/{project_id}/episodes/{episode_id}",
+        response_model=EpisodeEditedResponse,
+    )
+    async def update_episode(
+        body: UpdateEpisodeRequest,
+        project_id: str = Path(min_length=1, max_length=200),
+        episode_id: str = Path(min_length=1, max_length=200),
+        user_name: str = Depends(current_user),
+    ) -> EpisodeEditedResponse:
+        return await port.update_episode(
+            user_name=user_name, project_id=project_id, episode_id=episode_id,
+            request=body,
         )
 
     @app.get(

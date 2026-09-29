@@ -6,7 +6,7 @@ from typing import Dict, List, Set
 from loguru import logger
 from psycopg import Error as PsycopgError
 
-from common.exceptions import StorageWriteError
+from common.exceptions import EpisodeEditConflictError, StorageWriteError
 from common.schema.episode.models import (
     EntityEpisode,
     Episode,
@@ -374,6 +374,7 @@ class EpisodeWriter:
                       FROM projects AS project
                       WHERE project.project_id = episode.project_id
                         AND project.user_name = %s
+                        AND project.status = 'active'
                   )
                 RETURNING episode.updated_at
                 """,
@@ -391,9 +392,7 @@ class EpisodeWriter:
             )
             edited = await cur.fetchone()
             if edited is None:
-                raise ValueError(
-                    "Episode is unavailable or has changed since it was read"
-                )
+                raise EpisodeEditConflictError()
             updated_at = edited.get("updated_at")
             if not isinstance(updated_at, datetime):
                 raise RuntimeError("Episode edit did not return its revision timestamp")

@@ -16,8 +16,40 @@ they are not a generic serialization path for arbitrary runtime objects.
 - Documents: list, upload, metadata/content reads, reindex and deletion.
 - Saved web links: list, update and deletion; existing source promotion.
 - Folder scan settings: read, update and clear.
+- Episodes: project-scoped narrative/revision reads and optimistic user edits.
 - Artifacts and maintenance: existing browsing, revision reads, review decisions
   and preview/application operations.
+
+## Episode editing
+
+`GET /v1/projects/{project_id}/episodes/{episode_id}` returns the narrative,
+user_modified flag and created/updated timestamps. It reads only the exact
+user-owned project, not additional readable projects, and never resumes a
+session. Archived projects can be read. Vectors, generator metadata and raw
+source messages/evidence links are not included in this response.
+
+`PATCH` on the same path replaces all four narrative fields: summary,
+new_developments, updates and unresolved. All are required, including explicit
+empty lists to clear a field. Include the timezone-aware expected_updated_at
+from GET (or the last successful PATCH). Text is trimmed; blank entries,
+unknown fields and client-supplied embeddings/source/ownership changes are
+rejected. Lists are bounded to 100 entries each, individual text and aggregate
+narrative to 20,000 characters, with the configured
+developer_settings.jobs.episode.max_narrative_chars applied before embedding.
+
+Successful PATCH returns episode_id, project_id, user_modified=true and the new
+updated_at. Narrative and its regenerated search vector persist together through
+KnowledgeStore; canonical source and evidence links do not change. Existing
+automation respects user_modified rather than silently replacing curated text.
+Missing/out-of-scope targets return 404; archived edits return 403; stale edits
+return safe 409 episode_conflict. Read again before retrying a conflict.
+
+An edit holds an exact active-project lease, preventing local archive/delete
+until its owned work settles. The writer also checks active project ownership
+and the revision timestamp atomically. Caller cancellation waits for an already
+started edit and lease cleanup; the edit may commit without its caller receiving
+the response. GET can confirm the persisted revision after disconnection.
+These are server operations only; no SDK implementation is included.
 
 ## Management endpoint follow-up
 

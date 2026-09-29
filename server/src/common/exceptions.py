@@ -123,6 +123,17 @@ class WorkspaceConflictError(KnogginError, ValueError):
         )
 
 
+class EpisodeEditConflictError(KnogginError, ValueError):
+    """An optimistic episode edit no longer matches the owned revision."""
+
+    def __init__(self):
+        KnogginError.__init__(
+            self,
+            "Episode is unavailable or has changed since it was read",
+            code="episode_conflict",
+        )
+
+
 class LLMError(KnogginError):
     """Base class for LLM request and response failures."""
 
