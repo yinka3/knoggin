@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from uuid import UUID
 
 import pytest
 
@@ -146,6 +147,17 @@ async def test_saved_web_links_are_project_owned_lightweight_bookmarks():
         and "document_parse_snapshots" not in query
         for query in store.queries
     )
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_saved_web_link_projects_postgres_uuid_identifier_as_text():
+    store = BookmarkStore()
+    service = make_service(store)
+    saved = await service.save_web_link(url="https://example.com/source")
+    database_row = {**store.rows[0], "link_id": UUID(saved["link_id"])}
+
+    assert service._public_saved_web_link(database_row) == saved
 
 
 @pytest.mark.unit

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Dict, List, Literal, Optional, Set, Union
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -29,6 +30,11 @@ class SavedWebLink(BaseModel):
     summary: str | None = Field(default=None, max_length=4000)
     created_at: datetime
     updated_at: datetime
+
+    @field_validator("link_id", mode="before")
+    @classmethod
+    def _normalize_database_uuid(cls, value: str | UUID) -> str | UUID:
+        return str(value) if isinstance(value, UUID) else value
 
     @field_validator("link_id", "project_id")
     @classmethod
