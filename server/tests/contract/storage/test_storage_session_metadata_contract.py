@@ -28,7 +28,7 @@ async def test_session_metadata_update_persists_an_allowed_configuration_change(
 
     await manager.update_session(
         "metadata-session",
-        {"model": "gpt-5", "enabled_tools": ["search_documents"]},
+        {"model": "gpt-5", "enabled_tools": ["search_project_documents"]},
     )
 
     assert await real_postgres_client.fetch_one(
@@ -37,4 +37,4 @@ async def test_session_metadata_update_persists_an_allowed_configuration_change(
         FROM sessions
         WHERE session_id = 'metadata-session'
         """
-    ) == {"model": "gpt-5", "enabled_tools": ["search_documents"]}
+    ) == {"model": "gpt-5", "enabled_tools": ["search_project_documents"]}

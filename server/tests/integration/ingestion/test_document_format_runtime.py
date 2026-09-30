@@ -112,6 +112,7 @@ class _StaticSessionManager:
 
 def _session(resources, *, user_name, project_id, session_id):
     project = SimpleNamespace(
+        project_id=project_id,
         scheduler=object(),
         project_semantic_processor=object(),
         record_session_activity=lambda: asyncio.sleep(0),
@@ -329,6 +330,7 @@ async def test_public_runtime_preserves_format_specific_document_provenance(
         session_id=scope["session_id"],
     )
     context.project = SimpleNamespace(
+        project_id=scope["project_id"],
         scheduler=object(),
         project_semantic_processor=object(),
         record_session_activity=lambda: asyncio.sleep(0),
