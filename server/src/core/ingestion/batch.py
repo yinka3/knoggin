@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List, Mapping
+from typing import TYPE_CHECKING, Iterable, List, Mapping
 from uuid import UUID
 
 from common.schema.context import ContextBlockSupportRecord, ContextSnapshot
@@ -17,6 +17,9 @@ from common.schema.ingestion.contracts import (
 )
 from common.schema.semantic_window import SemanticWindowRecord, SemanticWindowStage
 from core.ingestion.policy import IngestionPolicy
+
+if TYPE_CHECKING:
+    from infrastructure.jev_client import JevWorkBudget
 
 
 @dataclass(slots=True)
@@ -43,6 +46,8 @@ class SemanticWindowBuild:
     entity_result: ContextEntityResult | None = None
     relationship_writes: tuple[ContextRelationshipWrite, ...] = ()
     unknown_endpoint_diagnostics: tuple[UnknownEndpointDiagnostic, ...] = ()
+    identity_pass_number: int = 0
+    jev_work_budget: JevWorkBudget | None = None
 
     @classmethod
     def from_committed_window(
@@ -68,7 +73,9 @@ class SemanticWindowBuild:
         if window.stage is not SemanticWindowStage.CONTEXT_COMMITTED:
             raise ValueError("Semantic window build requires context_committed stage")
         if window.context_revision_id != context.revision_id:
-            raise ValueError("Semantic window Context revision does not match its checkpoint")
+            raise ValueError(
+                "Semantic window Context revision does not match its checkpoint"
+            )
         if window.project_id != context.project_id:
             raise ValueError("Semantic window and Context must share a project")
         if window.domain_version != context.domain_version:
@@ -79,9 +86,7 @@ class SemanticWindowBuild:
         if policy.domain.version != window.domain_version:
             raise ValueError("Semantic window policy and domain versions differ")
         effective_impact_block_ids = (
-            impact_block_ids
-            if context.window_id == window.window_id
-            else frozenset()
+            impact_block_ids if context.window_id == window.window_id else frozenset()
         )
         return cls(
             window_id=window.window_id,
@@ -105,7 +110,9 @@ class SemanticWindowBuild:
         if not isinstance(self.policy, IngestionPolicy):
             raise TypeError("SemanticWindowBuild.policy must be an IngestionPolicy")
         if self.policy.domain.version != self.context.domain_version:
-            raise ValueError("SemanticWindowBuild policy and Context domain versions differ")
+            raise ValueError(
+                "SemanticWindowBuild policy and Context domain versions differ"
+            )
         if not isinstance(self.policy_snapshot, Mapping):
             raise TypeError("SemanticWindowBuild.policy_snapshot must be a mapping")
         current_ids = {block.block_id for block in self.context.blocks}
@@ -115,17 +122,27 @@ class SemanticWindowBuild:
             raise TypeError("SemanticWindowBuild impact block IDs must be UUIDs")
         for block_id, supports in self.block_supports.items():
             if block_id not in current_ids:
-                raise ValueError("Context supports must belong to current Context blocks")
+                raise ValueError(
+                    "Context supports must belong to current Context blocks"
+                )
             if not isinstance(supports, tuple) or any(
                 not isinstance(support, ContextBlockSupportRecord)
                 for support in supports
             ):
                 raise TypeError("Context supports must be typed support records")
             if any(support.block_id != block_id for support in supports):
-                raise ValueError("Context support block IDs must match their mapping key")
+                raise ValueError(
+                    "Context support block IDs must match their mapping key"
+                )
         for message_id, text in self.message_text_by_id.items():
-            if not isinstance(message_id, int) or message_id <= 0 or not isinstance(text, str):
-                raise TypeError("Context evidence messages must map positive IDs to text")
+            if (
+                not isinstance(message_id, int)
+                or message_id <= 0
+                or not isinstance(text, str)
+            ):
+                raise TypeError(
+                    "Context evidence messages must map positive IDs to text"
+                )
 
     @property
     def knowledge_input_blocks(self):
@@ -156,7 +173,9 @@ class SemanticWindowBuild:
 
     def set_entity_result(self, result: ContextEntityResult) -> None:
         if not isinstance(result, ContextEntityResult):
-            raise TypeError("SemanticWindowBuild entity result must be ContextEntityResult")
+            raise TypeError(
+                "SemanticWindowBuild entity result must be ContextEntityResult"
+            )
         input_ids = {block.block_id for block in self.knowledge_input_blocks}
         if any(
             association.block_id not in input_ids
@@ -169,7 +188,9 @@ class SemanticWindowBuild:
         """Attach the valid no-work result for an empty effective impact."""
 
         if self.impact_block_ids:
-            raise ValueError("Empty Knowledge result requires an empty effective impact")
+            raise ValueError(
+                "Empty Knowledge result requires an empty effective impact"
+            )
         result = ContextEntityResult(
             entity_ids=(),
             new_entity_ids=frozenset(),
@@ -193,7 +214,9 @@ class SemanticWindowBuild:
         if any(not isinstance(write, ContextRelationshipWrite) for write in values):
             raise TypeError("SemanticWindowBuild relationship writes must be typed")
         if self.entity_result is None:
-            raise ValueError("Context relationship extraction requires resolved entities")
+            raise ValueError(
+                "Context relationship extraction requires resolved entities"
+            )
         input_ids = {block.block_id for block in self.knowledge_input_blocks}
         entity_ids = set(self.entity_result.entity_ids)
         from common.scoping import IDENTITY_ENTITY_ID

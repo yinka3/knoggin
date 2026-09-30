@@ -109,6 +109,16 @@ close PostgreSQL underneath unfinished accounting.
 
 ## Decision provenance and pending storage work
 
+The Phase B identity pilot calls JEV in observe mode only when deterministic
+matching abstains and at least one eligible visible candidate exists. It sends
+bounded occurrence support and local candidate handles with Choice and independent
+Noul questions. Results include the baseline ID and hypothetical candidate
+suggestion in the private in-memory identity trace. Both reconciliation passes
+share a call budget. No observation changes an entity ID, alias, classification,
+or commit. `identity_mode: active` still uses baseline behavior until a reviewed
+acceptance policy is implemented. Awaiting JEV currently holds the resolver lock;
+latency and lock occupancy need measurement before active rollout.
+
 `JevDecisionRecord` retains scoped occurrence/evidence references, domain/model/
 question versions, option mapping, Choice/Noul results, usage/cost/timing, baseline
 outcome, and acceptance status. Observe records cannot be marked accepted.

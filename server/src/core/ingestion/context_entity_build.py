@@ -12,6 +12,7 @@ from common.schema.ingestion.contracts import (
 from core.ingestion.batch import SemanticWindowBuild
 from core.ingestion.text_processor import TextProcessor
 from core.knowledge.entity.resolver import ContextEntityResolution, EntityResolver
+from infrastructure.jev_client import JevWorkBudget
 
 
 def _literal_mention_is_present(mention: str, text: str) -> bool:
@@ -97,6 +98,11 @@ class ContextEntityBuildService:
     async def build(self, semantic_build: SemanticWindowBuild) -> ContextEntityResult:
         """Extract and resolve one Context impact closure in memory only."""
 
+        if semantic_build.jev_work_budget is None:
+            semantic_build.jev_work_budget = JevWorkBudget(
+                semantic_build.policy.jev.max_calls_per_window
+            )
+        semantic_build.identity_pass_number += 1
         mentions = await self.processor.extract_context_mentions(semantic_build)
         resolution = await self.resolver.resolve_context_block_mentions(
             mentions,
@@ -106,8 +112,9 @@ class ContextEntityBuildService:
             },
             policy=semantic_build.policy,
             allocate_entity_id=self._allocate_entity_id,
+            window_id=semantic_build.window_id,
+            pass_number=semantic_build.identity_pass_number,
+            work_budget=semantic_build.jev_work_budget,
         )
-        semantic_build.trace.identity_decisions.extend(
-            resolution.identity_decisions
-        )
+        semantic_build.trace.identity_decisions.extend(resolution.identity_decisions)
         return assemble_context_entity_result(semantic_build, resolution)

@@ -1,0 +1,383 @@
+"""Identity observation uses scoped candidates without changing stored decisions."""
+
+import asyncio
+import json
+from uuid import uuid4
+
+import httpx
+import pytest
+
+from common.conf.domain_config import DomainConfig
+from common.schema.ingestion.contracts import ContextBlockMention
+from common.schema.jev import JevPolicy, JevResponse, JevResult, JevSettings
+from common.schema.settings import EntityResolutionSettings, TextProcessorSettings
+from core.ingestion.policy import IngestionPolicy
+from core.knowledge.entity.resolver import EntityResolver
+from infrastructure.external_model_budget import ExternalModelSpendingLedger
+from infrastructure.jev_client import JevClient
+
+
+class Store:
+    def __init__(self, entities):
+        self.entities = entities
+
+    async def get_visible_entities_for_resolution(self, *, visible_project_ids):
+        return [
+            entity
+            for entity in self.entities
+            if entity.get("status", "active") == "active"
+            and any(
+                context["project_id"] in visible_project_ids
+                for context in entity["contexts"]
+            )
+        ]
+
+
+class FakeJev:
+    def __init__(self, *, choice="candidate_1", unavailable=False):
+        self.calls = []
+        self.choice = choice
+        self.unavailable = unavailable
+
+    async def evaluate(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.unavailable:
+            return JevResult(outcome="unavailable", reason="transport_error")
+        handles = kwargs["questions"]["identity_choice"].criteria
+        return JevResult(
+            outcome="available",
+            response=JevResponse.model_validate(
+                {
+                    "model": "jev-1.13.0",
+                    "answers": {
+                        "identity_choice": {
+                            "type": "choice",
+                            "choice": self.choice,
+                            "probabilities": {
+                                handle: float(handle == self.choice)
+                                for handle in handles
+                            },
+                            "confidence": 0.7,
+                        },
+                        "identity_evidence": {"type": "noul", "noul": 0.6},
+                    },
+                    "usage": {"input_tokens": 100, "output_tokens": 0},
+                }
+            ),
+        )
+
+
+def entity(entity_id, canonical_name, entity_type, *, project_id="project-1"):
+    return {
+        "id": entity_id,
+        "canonical_name": canonical_name,
+        "aliases": ["Bob"],
+        "contexts": [
+            {
+                "project_id": project_id,
+                "entity_type": entity_type,
+                "topic": "Work",
+            }
+        ],
+    }
+
+
+def identity_policy(mode="observe", *, max_candidates=8, max_calls_per_window=12):
+    domain = DomainConfig.from_mapping(
+        {
+            "version": 1,
+            "topics": {"Work": {"active": True}},
+            "entity_types": {
+                "Person": {"topic": "Work", "labels": ["person"]},
+                "Company": {"topic": "Work", "labels": ["company"]},
+            },
+        }
+    ).compile()
+    return IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=domain,
+        jev=JevPolicy(
+            identity_mode=mode,
+            max_candidates=max_candidates,
+            max_calls_per_window=max_calls_per_window,
+        ),
+    )
+
+
+async def resolve(resolver, policy, supports, *, name="Bob", work_budget=None):
+    block_ids = [uuid4() for _ in supports]
+    next_id = iter(range(900, 900 + len(supports)))
+
+    async def allocate():
+        return next(next_id)
+
+    return await resolver.resolve_context_block_mentions(
+        [
+            ContextBlockMention(
+                block_ids=(block_id,),
+                name=name,
+                entity_type="Person",
+                topic="Work",
+                origin="vp01",
+            )
+            for block_id in block_ids
+        ],
+        block_text_by_id=dict(zip(block_ids, supports, strict=True)),
+        policy=policy,
+        allocate_entity_id=allocate,
+        window_id=uuid4(),
+        work_budget=work_budget,
+    )
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize("mode", ["disabled", "active"])
+async def test_non_observe_modes_keep_baseline_without_judging(mode):
+    jev = FakeJev()
+    store = Store(
+        [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+    )
+    resolver = EntityResolver(store, "project-1", ["project-1"], jev_client=jev)
+
+    result = await resolve(resolver, identity_policy(mode), ["Bob joined the meeting."])
+
+    assert result.entity_ids == (900,)
+    assert result.identity_decisions[0]["outcome"] == "abstained"
+    assert "jev" not in result.identity_decisions[0]
+    assert jev.calls == []
+
+
+@pytest.mark.no_network
+async def test_clear_deterministic_match_does_not_call_jev():
+    jev = FakeJev()
+    resolver = EntityResolver(
+        Store([entity(701, "Robert Chen", "Person")]),
+        "project-1",
+        ["project-1"],
+        jev_client=jev,
+    )
+
+    result = await resolve(
+        resolver,
+        identity_policy(),
+        ["Robert Chen joined the meeting."],
+        name="Robert Chen",
+    )
+
+    assert result.entity_ids == (701,)
+    assert jev.calls == []
+
+
+@pytest.mark.no_network
+async def test_observe_keeps_baseline_and_limits_handles_to_eligible_candidates():
+    jev = FakeJev()
+    store = Store(
+        [
+            entity(701, "Robert Chen", "Person"),
+            entity(702, "Bob Smith", "Person"),
+            entity(703, "Bob Incorporated", "Company"),
+            entity(704, "Bob Foreign", "Person", project_id="project-2"),
+            entity(705, "Bob Hidden", "Person", project_id="private"),
+        ]
+    )
+    resolver = EntityResolver(
+        store, "project-1", ["project-1", "project-2"], jev_client=jev
+    )
+
+    result = await resolve(
+        resolver,
+        identity_policy(max_candidates=2),
+        ["Bob joined one meeting.", "Bob joined a different meeting."],
+    )
+
+    assert result.entity_ids == (900, 901)
+    assert len(jev.calls) == 2
+    assert [call["state"]["support_text"] for call in jev.calls] == [
+        "Bob joined one meeting.",
+        "Bob joined a different meeting.",
+    ]
+    for decision in result.identity_decisions:
+        shadow = decision["jev"]
+        assert shadow["eligible_candidate_count"] == 3
+        assert shadow["offered_candidate_count"] == 2
+        assert shadow["candidate_set_truncated"] is True
+        assert shadow["baseline_entity_id"] in {900, 901}
+        record = shadow["record"]
+        assert record["mode"] == "observe"
+        assert record["acceptance_status"] == "proposed"
+        assert record["baseline_outcome"] == "deterministic_abstention"
+        assert set(record["option_mapping"].values()).issubset({"701", "702", "704"})
+        assert "703" not in record["option_mapping"].values()
+        assert "705" not in record["option_mapping"].values()
+        assert set(jev.calls[0]["questions"]) == {
+            "identity_choice",
+            "identity_evidence",
+        }
+    assert (
+        result.identity_decisions[0]["jev"]["record"]["occurrence_key"]
+        != (result.identity_decisions[1]["jev"]["record"]["occurrence_key"])
+    )
+    assert resolver.has_cached_entity(701) is False
+
+
+@pytest.mark.no_network
+@pytest.mark.parametrize(
+    "choice,unavailable", [("invented_handle", False), ("candidate_1", True)]
+)
+async def test_invalid_or_unavailable_suggestion_cannot_change_resolution(
+    choice, unavailable
+):
+    jev = FakeJev(choice=choice, unavailable=unavailable)
+    store = Store(
+        [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+    )
+    resolver = EntityResolver(store, "project-1", ["project-1"], jev_client=jev)
+
+    result = await resolve(resolver, identity_policy(), ["Bob joined the meeting."])
+
+    assert result.entity_ids == (900,)
+    assert result.identity_decisions[0]["jev"]["suggested_entity_id"] is None
+    assert result.identity_decisions[0]["jev"]["record"]["acceptance_status"] == (
+        "unavailable" if unavailable else "proposed"
+    )
+
+
+@pytest.mark.no_network
+async def test_only_hard_incompatible_candidate_never_reaches_jev():
+    jev = FakeJev()
+    resolver = EntityResolver(
+        Store([entity(703, "Bob Incorporated", "Company")]),
+        "project-1",
+        ["project-1"],
+        jev_client=jev,
+    )
+
+    result = await resolve(resolver, identity_policy(), ["Bob joined the meeting."])
+
+    assert result.entity_ids == (900,)
+    assert jev.calls == []
+
+
+@pytest.mark.no_network
+async def test_foreign_project_classification_is_neutral_in_request():
+    jev = FakeJev()
+    resolver = EntityResolver(
+        Store([entity(701, "Bob Foreign", "Person", project_id="project-2")]),
+        "project-1",
+        ["project-1", "project-2"],
+        jev_client=jev,
+    )
+
+    result = await resolve(resolver, identity_policy(), ["Bob joined the meeting."])
+
+    assert result.entity_ids == (900,)
+    assert jev.calls[0]["state"]["candidates"][0]["classification"] == (
+        "foreign_project_classification_not_applicable"
+    )
+
+
+@pytest.mark.no_network
+async def test_provider_exception_falls_back_to_baseline():
+    class FailingJev:
+        async def evaluate(self, **_kwargs):
+            raise RuntimeError("provider failed")
+
+    resolver = EntityResolver(
+        Store(
+            [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+        ),
+        "project-1",
+        ["project-1"],
+        jev_client=FailingJev(),
+    )
+
+    result = await resolve(resolver, identity_policy(), ["Bob joined the meeting."])
+
+    assert result.entity_ids == (900,)
+    assert result.identity_decisions[0]["jev"]["record"]["result"]["reason"] == (
+        "provider_error"
+    )
+
+
+@pytest.mark.no_network
+async def test_shared_work_budget_limits_occurrences_in_one_build():
+    sent = []
+
+    def answer(request):
+        sent.append(request)
+        payload = json.loads(request.content)
+        handles = payload["questions"]["identity_choice"]["criteria"]
+        return httpx.Response(
+            200,
+            json={
+                "model": "jev-1.13.0",
+                "answers": {
+                    "identity_choice": {
+                        "type": "choice",
+                        "choice": "insufficient_evidence",
+                        "probabilities": {
+                            handle: float(handle == "insufficient_evidence")
+                            for handle in handles
+                        },
+                        "confidence": 0.8,
+                    },
+                    "identity_evidence": {"type": "noul", "noul": 0.1},
+                },
+                "usage": {"input_tokens": 100, "output_tokens": 0},
+            },
+        )
+
+    settings = JevSettings(
+        api_key="fake", identity_mode="observe", max_calls_per_window=1
+    )
+    client = JevClient(
+        settings,
+        spending_ledger=ExternalModelSpendingLedger(),
+        transport=httpx.MockTransport(answer),
+    )
+    resolver = EntityResolver(
+        Store(
+            [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+        ),
+        "project-1",
+        ["project-1"],
+        jev_client=client,
+    )
+    try:
+        result = await resolve(
+            resolver,
+            identity_policy(max_candidates=2, max_calls_per_window=1),
+            ["Bob joined one meeting.", "Bob joined another meeting."],
+        )
+    finally:
+        await client.close()
+
+    assert len(sent) == 1
+    assert result.entity_ids == (900, 901)
+    assert result.identity_decisions[0]["jev"]["record"]["result"]["outcome"] == (
+        "available"
+    )
+    assert result.identity_decisions[1]["jev"]["record"]["result"]["reason"] == (
+        "work_budget_exhausted"
+    )
+
+
+@pytest.mark.no_network
+async def test_cancellation_propagates_without_allocating_pending_identity():
+    class CancellingJev:
+        async def evaluate(self, **_kwargs):
+            raise asyncio.CancelledError
+
+    resolver = EntityResolver(
+        Store(
+            [entity(701, "Robert Chen", "Person"), entity(702, "Bob Smith", "Person")]
+        ),
+        "project-1",
+        ["project-1"],
+        jev_client=CancellingJev(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await resolve(resolver, identity_policy(), ["Bob joined the meeting."])
+    assert resolver.has_cached_entity(701) is False

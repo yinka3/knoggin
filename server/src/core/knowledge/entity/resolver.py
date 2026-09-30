@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from uuid import UUID
 
 from loguru import logger
 from rapidfuzz import fuzz, process
@@ -18,6 +19,7 @@ from common.schema.ingestion.contracts import (
     ProjectEntityClassification,
     ResolvedContextBlockMention,
 )
+from common.schema.jev import JevDecisionRecord, JevResult
 from common.schema.settings import EntityResolutionSettings
 from common.scoping import (
     IDENTITY_ENTITY_ID,
@@ -31,7 +33,13 @@ from core.knowledge.entity.candidates import (
     entity_record_for_project,
 )
 from core.knowledge.entity.index import EntityIndex
+from core.knowledge.entity.jev_identity import (
+    IdentityOption,
+    prepare_identity_request,
+    proposed_identity,
+)
 from core.knowledge.entity.profile import EntityProfile
+from infrastructure.jev_client import JevWorkBudget
 
 if TYPE_CHECKING:
     from core.knowledge.store import KnowledgeStore
@@ -174,6 +182,9 @@ class EntityResolver:
         block_text_by_id: dict[object, str],
         policy: IngestionPolicy,
         allocate_entity_id,
+        window_id: UUID | None = None,
+        pass_number: int = 1,
+        work_budget: JevWorkBudget | None = None,
     ) -> ContextEntityResolution:
         """Resolve typed Context-block mentions without manufacturing message refs.
 
@@ -193,6 +204,9 @@ class EntityResolver:
 
         async with self.resolution_lock:
             state = _ContextEntityResolutionState()
+            identity_work_budget = work_budget or JevWorkBudget(
+                policy.jev.max_calls_per_window
+            )
 
             candidate_snapshot: EntityCandidateSnapshot | None = None
             candidate_entries: list[Optional[Tuple[str, Any]]] = []
@@ -278,16 +292,34 @@ class EntityResolver:
                             or winner[0] - runner_up_score >= policy.resolution_margin
                         )
                     )
-                    state.identity_decisions.append(
-                        {
-                            "mention": mention.name,
-                            "candidate_id": winner[1] if winner else None,
-                            "score": winner[0] if winner else None,
-                            "runner_up_score": runner_up_score,
-                            "signals": sorted(winner[4]) if winner else [],
-                            "outcome": "reused" if accepted else "abstained",
-                        }
-                    )
+                    decision = {
+                        "mention": mention.name,
+                        "candidate_id": winner[1] if winner else None,
+                        "score": winner[0] if winner else None,
+                        "runner_up_score": runner_up_score,
+                        "signals": sorted(winner[4]) if winner else [],
+                        "outcome": "reused" if accepted else "abstained",
+                    }
+                    state.identity_decisions.append(decision)
+                    if (
+                        not accepted
+                        and policy.jev.identity_mode == "observe"
+                        and self._jev_client is not None
+                    ):
+                        observation = await self._observe_jev_identity(
+                            mention=mention,
+                            support_text=support_text,
+                            ranked=ranked,
+                            snapshot=candidate_snapshot,
+                            policy=policy,
+                            staged=state.project_classifications,
+                            window_id=window_id,
+                            pass_number=pass_number,
+                            occurrence_index=index,
+                            work_budget=identity_work_budget,
+                        )
+                        if observation is not None:
+                            decision["jev"] = observation
                     if accepted and winner is not None:
                         candidate_id, profile = winner[1], winner[2]
                         classification = self._classification_for_resolution(
@@ -326,20 +358,23 @@ class EntityResolver:
                             break
                     if entity_id is None:
                         entity_id = await allocate_entity_id()
-                        state.pending_entity_writes[
-                            entity_id
-                        ] = self._prepare_pending_entity(
-                            entity_id,
-                            mention.name.strip(),
-                            [mention.name.strip()],
-                            mention.entity_type,
-                            mention.topic,
+                        state.pending_entity_writes[entity_id] = (
+                            self._prepare_pending_entity(
+                                entity_id,
+                                mention.name.strip(),
+                                [mention.name.strip()],
+                                mention.entity_type,
+                                mention.topic,
+                            )
                         )
                         state.new_ids.add(entity_id)
                         state.pending_ids_by_surface.setdefault(surface_key, []).append(
                             entity_id
                         )
                         state.pending_support_by_id[entity_id] = support_text
+
+                if entry[0] == "candidates" and "jev" in decision:
+                    decision["jev"]["baseline_entity_id"] = entity_id
 
                 classification = self._classification_for_resolution(
                     entity_id,
@@ -395,6 +430,91 @@ class EntityResolver:
                 identity_decisions=tuple(state.identity_decisions),
             )
 
+    async def _observe_jev_identity(
+        self,
+        *,
+        mention: ContextBlockMention,
+        support_text: str,
+        ranked: list,
+        snapshot: EntityCandidateSnapshot,
+        policy: IngestionPolicy,
+        staged: dict[int, ProjectEntityClassification],
+        window_id: UUID | None,
+        pass_number: int,
+        occurrence_index: int,
+        work_budget: JevWorkBudget,
+    ) -> dict[str, Any] | None:
+        """Collect a shadow suggestion without changing resolver acceptance."""
+
+        options = []
+        for _score, candidate_id, profile, _candidate, _signals in ranked:
+            if (
+                candidate_id == IDENTITY_ENTITY_ID
+                or candidate_id <= 0
+                or not self.is_profile_visible(profile)
+                or self.schema_compatibility(
+                    mention.entity_type, mention.topic, profile, policy
+                )
+                == "incompatible"
+                or self._classification_conflicts(
+                    staged,
+                    self._classification_for_resolution(candidate_id, mention, profile),
+                )
+            ):
+                continue
+            options.append(IdentityOption(candidate_id, profile))
+        request = prepare_identity_request(
+            mention,
+            support_text,
+            options,
+            snapshot,
+            policy.jev,
+            project_id=self.project_id,
+        )
+        if request is None:
+            return None
+        if window_id is None:
+            raise TypeError("JEV identity observation requires the semantic window ID")
+        state, questions, mapping = request
+        try:
+            result = await self._jev_client.evaluate(
+                state=state,
+                questions=questions,
+                capability="identity",
+                policy=policy.jev,
+                work_budget=work_budget,
+            )
+        except Exception:
+            # Optional observation must not turn an otherwise valid baseline
+            # resolution into a failed Knowledge build. Cancellation propagates.
+            result = JevResult(outcome="unavailable", reason="provider_error")
+        record = JevDecisionRecord(
+            capability="identity",
+            mode="observe",
+            project_id=self.project_id,
+            window_id=window_id,
+            pass_number=pass_number,
+            occurrence_key=f"{occurrence_index}:{','.join(map(str, mention.block_ids))}",
+            evidence_block_ids=mention.block_ids,
+            domain_version=policy.domain.version,
+            question_version=policy.jev.identity_question_version,
+            acceptance_policy_version=policy.jev.acceptance_policy_version,
+            pinned_model=policy.jev.model,
+            option_mapping=mapping,
+            result=result,
+            baseline_outcome="deterministic_abstention",
+            acceptance_status=(
+                "proposed" if result.outcome == "available" else "unavailable"
+            ),
+        )
+        return {
+            "record": record.model_dump(mode="json"),
+            "suggested_entity_id": proposed_identity(result, mapping),
+            "eligible_candidate_count": len(options),
+            "offered_candidate_count": len(mapping),
+            "candidate_set_truncated": len(options) > len(mapping),
+        }
+
     def _identity_decision_signals(
         self,
         name: str,
@@ -419,7 +539,9 @@ class EntityResolver:
         if len(owners) == 1 and mention == canonical:
             signals.add("unique_canonical_name")
             score += 0.30
-        elif len(owners) == 1 and mention in candidate_snapshot.get_mentions(candidate_id):
+        elif len(owners) == 1 and mention in candidate_snapshot.get_mentions(
+            candidate_id
+        ):
             signals.add("unique_alias")
             score += 0.25
         elif len(owners) > 1:
@@ -706,10 +828,7 @@ class EntityResolver:
             name, mention_type, message_text, profile, compatibility, policy
         ):
             return "weak"
-        if (
-            candidate is not None
-            and len(candidate.signals & {"exact", "fuzzy"}) > 1
-        ):
+        if candidate is not None and len(candidate.signals & {"exact", "fuzzy"}) > 1:
             return "strong"
         if len(self._word_tokens(name)) > 1:
             return "strong"

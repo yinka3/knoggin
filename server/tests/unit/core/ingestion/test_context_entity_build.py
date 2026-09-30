@@ -20,6 +20,7 @@ from common.schema.ingestion.contracts import (
     ProjectEntityClassification,
     UnknownEndpointDiagnostic,
 )
+from common.schema.jev import JevPolicy
 from common.schema.semantic_window import (
     SemanticWindowOrigin,
     SemanticWindowRecord,
@@ -735,6 +736,34 @@ async def test_llm_fallback_mentions_use_the_normal_resolution_write_shape():
     assert result.pending_entity_writes[703].canonical_name == "Zephyr Dynamics"
     assert result.pending_entity_writes[703].entity_type == "Company"
     assert result.block_entity_associations[0].block_id == current.block_id
+
+
+@pytest.mark.unit
+@pytest.mark.no_network
+async def test_identity_passes_share_one_window_work_budget():
+    compiled_domain = domain()
+    current = block("No entity to resolve.")
+    semantic_build = build(blocks=(current,), compiled_domain=compiled_domain)
+    semantic_build.policy = IngestionPolicy.capture(
+        text_processor=TextProcessorSettings(llm_ner_mode="disabled"),
+        entity_resolution=EntityResolutionSettings(),
+        compiled_domain=compiled_domain,
+        jev=JevPolicy(identity_mode="observe", max_calls_per_window=1),
+    )
+    service = ContextEntityBuildService(
+        processor=processor(FakeVP01(), llm_ner_mode="disabled"),
+        resolver=resolver(),
+        allocate_entity_id=lambda: _async_value(703),
+    )
+
+    await service.build(semantic_build)
+    budget = semantic_build.jev_work_budget
+    assert semantic_build.identity_pass_number == 1
+    assert budget.max_calls == 1
+
+    await service.build(semantic_build)
+    assert semantic_build.identity_pass_number == 2
+    assert semantic_build.jev_work_budget is budget
 
 
 @pytest.mark.unit

@@ -157,9 +157,9 @@ verified. A1 human review and A6 durable decision provenance are still pending.
 
 - [ ] I1: Separate visibility/scope/type eligibility from deterministic acceptance
   heuristics; verify disabled behavior remains unchanged.
-- [ ] I2: Build bounded candidate handles from the durable candidate snapshot.
+- [x] I2: Build bounded candidate handles from the durable candidate snapshot.
   Keep per-occurrence evidence even when searches share a normalized name.
-- [ ] I3: Run Choice/Noul for eligible uncertain cases in observe mode. Record the
+- [x] I3: Run Choice/Noul for eligible uncertain cases in observe mode. Record the
   baseline result and hypothetical semantic result without changing resolution.
 - [ ] I4: Measure candidate recall separately from judgment quality. Optionally
   sample deterministic matches to estimate false reuse.
@@ -167,6 +167,18 @@ verified. A1 human review and A6 durable decision provenance are still pending.
   Do not compare JEV probabilities with the existing score capped at 1.5.
 - [ ] I6: Add active decisions behind mode configuration. Preserve hard boundaries,
   pending reuse/new-ID fallback, existing classifications, and postcommit publication.
+
+Phase B start (2026-09-30): uncertain deterministic abstentions now receive
+bounded, occurrence-specific Choice and Noul observations from the scoped
+candidate snapshot. The request uses local handles; incompatible and invisible
+candidates are excluded, while foreign-project classifications are neutral.
+Both identity passes share one in-memory call budget. The current baseline ID
+and JEV suggestion appear in the private in-memory identity trace; the JEV
+result never selects an ID or writes an alias. Disabled and active settings retain
+baseline behavior until the active acceptance gate is designed and evaluated.
+I1 hard-boundary extraction and I4 reviewed candidate-recall measurement remain
+incomplete. A1 human-reviewed examples and A6 durable decision provenance also
+remain pending; the pilot trace does not survive a process restart.
 
 ### Phase C — Bounded extraction observe pilot
 
