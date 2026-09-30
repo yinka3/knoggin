@@ -20,6 +20,21 @@ they are not a generic serialization path for arbitrary runtime objects.
 - Artifacts and maintenance: existing browsing, revision reads, review decisions
   and preview/application operations.
 
+## Promoting a retained source
+
+`POST /v1/projects/{project_id}/sources/promote` saves one assistant-observed
+web source as a project bookmark. Supply the original `session_id` and
+`source_ref_id`; the reference must belong to an assistant message in that
+exact user/project/session scope. A deleted session's retained source can still
+be promoted without resuming the session. This does not revive its messages or
+turn the source excerpt into an indexed document. Only web-source kinds with a
+canonical URL can become saved links.
+
+The destination project must be active. Archived projects reject promotion as
+read-only; deleted or unowned projects and missing/out-of-scope source references
+are not found. The operation holds a short exact-project lease through lookup
+and bookmark creation, so local archive/deletion cannot cross the write.
+
 ## Artifact retention after session deletion
 
 Artifacts remain readable for 30 days from their originating session's first

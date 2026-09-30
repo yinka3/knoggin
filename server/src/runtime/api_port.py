@@ -513,27 +513,34 @@ class ApplicationRuntimePort:
         request: PromoteSourceRequest,
     ) -> SavedWebLinkResponse:
         """Promote a cited assistant source only after an explicit user action."""
-        session = await self._session(
-            user_name=user_name,
-            session_id=request.session_id,
-        )
-        if session.project_id != project_id:
-            raise PermissionError("Source promotion must target the session project")
-        source = await self.runtime.resources.knowledge_store.get_source_reference(
-            request.source_ref_id,
-            user_name=user_name,
-            project_id=project_id,
-            session_id=request.session_id,
-        )
-        if source is None:
-            raise NotFoundError("source")
-        if session.document_service is None:
-            raise RuntimeError("Session document service is unavailable")
-        return project_public_model(SavedWebLinkResponse, await session.document_service.promote_source(
-            source,
-            title=request.title,
-            summary=request.summary,
-        ))
+        self._require_user(user_name)
+        project = await self.runtime.projects.get_project(project_id)
+        if project is None or project["status"] == "deleted":
+            raise NotFoundError("project")
+        if project["status"] != "active":
+            raise PermissionError("Archived projects are read-only")
+
+        # Source provenance survives session deletion. The project lease keeps
+        # archive/delete from crossing the lookup and bookmark write; no session
+        # runtime is resumed or fabricated for this project-owned mutation.
+        async with self._project_runtime(
+            user_name=user_name, project_id=project_id, lease_prefix="api-source-promote",
+        ) as project_runtime:
+            source = await self.runtime.resources.knowledge_store.get_source_reference(
+                request.source_ref_id,
+                user_name=user_name,
+                project_id=project_id,
+                session_id=request.session_id,
+            )
+            if source is None:
+                raise NotFoundError("source")
+            if project_runtime.document_service is None:
+                raise RuntimeError("Project document service is unavailable")
+            return project_public_model(SavedWebLinkResponse, await project_runtime.document_service.promote_source(
+                source,
+                title=request.title,
+                summary=request.summary,
+            ))
 
     @asynccontextmanager
     async def _project_runtime(

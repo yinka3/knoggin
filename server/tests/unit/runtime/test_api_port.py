@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -12,6 +13,7 @@ from common.schema.public import (
     CreateSessionRequest,
     EntityMergeRollbackRequest,
     MaintenanceReviewDecisionRequest,
+    PromoteSourceRequest,
     SetDocumentFocusDocument,
     StartRunRequest,
     validate_public_stream,
@@ -383,6 +385,122 @@ async def test_runtime_port_scopes_document_calls_to_a_short_project_lease(port)
     assert acquire[0] == "acquire"
     assert release[0] == "release"
     assert acquire[1:] == release[1:]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_uses_retained_reference_without_resuming_session(port, monkeypatch):
+    application, runtime, _session = port
+    request = PromoteSourceRequest(session_id="deleted-session", source_ref_id="source-1")
+    source = {"source_kind": "web_page", "canonical_url": "https://example.test"}
+    read = AsyncMock(return_value=source)
+    promote = AsyncMock(return_value={
+        "link_id": "link-1", "project_id": "project-1", "url": "https://example.test",
+        "created_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 1, 2, tzinfo=timezone.utc),
+    })
+    resume = AsyncMock(side_effect=AssertionError("deleted session must not resume"))
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+    monkeypatch.setattr(runtime.projects.document_service, "promote_source", promote, raising=False)
+    monkeypatch.setattr(runtime.sessions, "get_or_resume_session", resume)
+
+    link = await application.promote_source(
+        user_name="ada", project_id="project-1", request=request,
+    )
+
+    assert link.url == "https://example.test"
+    read.assert_awaited_once_with(
+        "source-1", user_name="ada", project_id="project-1", session_id="deleted-session",
+    )
+    promote.assert_awaited_once_with(source, title=None, summary=None)
+    resume.assert_not_awaited()
+    acquire, release = runtime.projects.calls[-2:]
+    assert acquire[0] == "acquire" and release[0] == "release"
+    assert acquire[1:] == release[1:]
+    assert acquire[2].startswith("api-source-promote:")
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+@pytest.mark.parametrize("project_status, expected_error", [
+    ("archived", PermissionError), ("deleted", NotFoundError), (None, NotFoundError),
+])
+async def test_source_promotion_rejects_nonactive_project_before_source_read(
+    port, monkeypatch, project_status, expected_error,
+):
+    application, runtime, _session = port
+    project = AsyncMock(return_value=(
+        None if project_status is None else {"id": "project-1", "status": project_status}
+    ))
+    read = AsyncMock()
+    monkeypatch.setattr(runtime.projects, "get_project", project)
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+
+    with pytest.raises(expected_error):
+        await application.promote_source(
+            user_name="ada", project_id="project-1",
+            request=PromoteSourceRequest(session_id="deleted-session", source_ref_id="source-1"),
+        )
+
+    read.assert_not_awaited()
+    assert not runtime.projects.calls
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_rejects_unscoped_reference_and_releases_lease(port, monkeypatch):
+    application, runtime, _session = port
+    read = AsyncMock(return_value=None)
+    promote = AsyncMock()
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+    monkeypatch.setattr(runtime.projects.document_service, "promote_source", promote, raising=False)
+
+    with pytest.raises(NotFoundError, match="source"):
+        await application.promote_source(
+            user_name="ada", project_id="project-1",
+            request=PromoteSourceRequest(session_id="foreign-session", source_ref_id="source-1"),
+        )
+
+    read.assert_awaited_once_with(
+        "source-1", user_name="ada", project_id="project-1", session_id="foreign-session",
+    )
+    promote.assert_not_awaited()
+    assert runtime.projects.calls[-2][1:] == runtime.projects.calls[-1][1:]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_releases_lease_when_bookmark_write_fails(port, monkeypatch):
+    application, runtime, _session = port
+    read = AsyncMock(return_value={"source_kind": "web_page", "canonical_url": "https://example.test"})
+    promote = AsyncMock(side_effect=RuntimeError("bookmark write failed"))
+    monkeypatch.setattr(runtime.resources.knowledge_store, "get_source_reference", read, raising=False)
+    monkeypatch.setattr(runtime.projects.document_service, "promote_source", promote, raising=False)
+
+    with pytest.raises(RuntimeError, match="bookmark write failed"):
+        await application.promote_source(
+            user_name="ada", project_id="project-1",
+            request=PromoteSourceRequest(session_id="deleted-session", source_ref_id="source-1"),
+        )
+
+    promote.assert_awaited_once()
+    assert runtime.projects.calls[-2][1:] == runtime.projects.calls[-1][1:]
+
+
+@pytest.mark.runtime
+@pytest.mark.no_network
+async def test_source_promotion_rejects_wrong_user_before_project_read(port, monkeypatch):
+    application, runtime, _session = port
+    get_project = AsyncMock()
+    monkeypatch.setattr(runtime.projects, "get_project", get_project)
+
+    with pytest.raises(PermissionError):
+        await application.promote_source(
+            user_name="other", project_id="project-1",
+            request=PromoteSourceRequest(session_id="session-1", source_ref_id="source-1"),
+        )
+
+    get_project.assert_not_awaited()
 
 
 async def test_invalid_management_projection_still_releases_exact_project_lease(port):

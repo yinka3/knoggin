@@ -8,7 +8,9 @@ from common.schema.source.references import SourceReferenceCandidate
 from core.knowledge.db.readers.source_reference_reader import SourceReferenceReader
 from core.knowledge.db.writers.document_writer import DocumentWriter
 from core.knowledge.db.writers.project_deletion_writer import ProjectDeletionWriter
+from core.knowledge.db.writers.session_deletion_writer import SessionDeletionWriter
 from core.knowledge.db.writers.source_reference_writer import SourceReferenceWriter
+from core.knowledge.documents import DocumentService
 from tests.fixtures.fakes import RecordingPostgresClient
 
 DOCUMENT_ID = "00000000-0000-0000-0000-000000000101"
@@ -710,6 +712,54 @@ async def _seed_parse_snapshot(
         """,
         (snapshot_id, document_id),
     )
+
+
+@pytest.mark.storage
+@pytest.mark.requires_postgres
+@pytest.mark.no_network
+async def test_real_postgres_retained_web_source_can_be_bookmarked_after_session_deletion(
+    real_postgres_client,
+):
+    await _seed_scope(real_postgres_client)
+    source = (
+        await SourceReferenceWriter(real_postgres_client).write_for_assistant_message(
+            101, [web_candidate()], user_name="ada", project_id="project-1",
+            session_id="session-1", readable_project_ids=["project-1"],
+        )
+    )[0]
+    await SessionDeletionWriter(real_postgres_client).delete_session(
+        user_name="ada", session_id="session-1",
+    )
+    reader = SourceReferenceReader(real_postgres_client)
+    retained = await reader.get_source_reference(
+        source.source_ref_id, user_name="ada", project_id="project-1",
+        session_id="session-1",
+    )
+
+    assert retained is not None
+    assert retained.canonical_url == "https://example.test/release"
+    assert await reader.get_source_reference(
+        source.source_ref_id, user_name="other", project_id="project-1",
+        session_id="session-1",
+    ) is None
+    assert await reader.get_source_reference(
+        source.source_ref_id, user_name="ada", project_id="project-1",
+        session_id="other-session",
+    ) is None
+
+    service = DocumentService.__new__(DocumentService)
+    service.project_id = "project-1"
+    service._writer = DocumentWriter(real_postgres_client, "project-1")
+    link = await service.promote_source(retained)
+
+    assert link["url"] == "https://example.test/release"
+    assert link["title"] == "Release note"
+    assert await real_postgres_client.fetch_one(
+        "SELECT status FROM public.sessions WHERE session_id = 'session-1'"
+    ) == {"status": "deleted"}
+    assert await real_postgres_client.fetch_one(
+        "SELECT count(*) AS count FROM public.saved_web_links WHERE project_id = 'project-1'"
+    ) == {"count": 1}
 
 
 @pytest.mark.storage
