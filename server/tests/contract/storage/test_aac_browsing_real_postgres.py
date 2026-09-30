@@ -46,7 +46,10 @@ async def test_insight_visibility_and_concurrent_votes_are_scoped(real_postgres_
     assert await store.search_insights(user_name="other", viewer_agent_id="author") == []
     for insight_id, scoped_user, voter in ((shared, user, "author"), (private, user, "reader"), (shared, "other", "reader")):
         with pytest.raises(ValueError, match="another agent"):
-            await store.cast_insight_vote(insight_id=insight_id, user_name=scoped_user, voter_agent_id=voter, vote="up")
+            await store.cast_insight_vote(
+                insight_id=insight_id, user_name=scoped_user,
+                voter_agent_id=voter, vote="up", reason="Scope check",
+            )
     await asyncio.gather(*(
         store.cast_insight_vote(insight_id=shared, user_name=user,
                                 voter_agent_id="reader", vote=vote, reason=vote)
