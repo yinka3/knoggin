@@ -95,10 +95,13 @@ async def test_project_sources_are_distinct_from_copied_episode_and_merge_histor
         );
         """
     )
-    # Seed the durable support that semantic commits produce; this test owns
-    # project deletion behavior, not the ingestion alias-writing workflow.
+    # A surviving project's support must name a current canonical name or
+    # alias. Seed both parts that a semantic commit would have produced; this
+    # test owns deletion behavior, not the ingestion alias-writing workflow.
     await real_postgres_client.execute(
         """
+        INSERT INTO public.entity_aliases (entity_id, alias)
+        VALUES (2, 'Ada in project two');
         INSERT INTO public.entity_name_supports (
             entity_id, name, project_id, source_kind, source_key
         ) VALUES
