@@ -105,7 +105,7 @@ async def test_aac_store_keeps_insights_independent_and_scopes_agent_reads():
 
     insight_query, insight_params = postgres.write_calls[0]
     assert "INSERT INTO public.aac_insights" in insight_query
-    assert "WHERE %(discussion_id)s IS NULL OR EXISTS" in insight_query
+    assert "WHERE %(discussion_id)s::text IS NULL OR EXISTS" in insight_query
     assert insight_params["insight_id"] == insight_id
     read_query, read_params = postgres.read_calls[0]
     assert "visibility = 'shared' OR author_agent_id = %(viewer_agent_id)s" in read_query
@@ -116,6 +116,21 @@ async def test_aac_store_keeps_insights_independent_and_scopes_agent_reads():
         "limit": 20,
     }
     assert rows[0]["insight_id"] == "insight-1"
+
+
+@pytest.mark.storage
+@pytest.mark.no_network
+async def test_aac_insight_without_discussion_uses_typed_null_predicate():
+    postgres = RecordingPostgres()
+    store = AACStore(postgres)
+
+    await store.create_insight(
+        user_name="ada", author_agent_id="agent-1", content="Independent insight.",
+    )
+
+    query, params = postgres.write_calls[0]
+    assert "WHERE %(discussion_id)s::text IS NULL OR EXISTS" in query
+    assert params["discussion_id"] is None
 
 
 @pytest.mark.storage

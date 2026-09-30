@@ -318,7 +318,7 @@ class AACStore:
             SELECT
                 %(insight_id)s, %(user_name)s, %(discussion_id)s,
                 %(author_agent_id)s, %(visibility)s, %(content)s
-            WHERE %(discussion_id)s IS NULL OR EXISTS (
+            WHERE %(discussion_id)s::text IS NULL OR EXISTS (
                 SELECT 1
                 FROM public.aac_discussions
                 WHERE discussion_id = %(discussion_id)s
