@@ -7,6 +7,7 @@ import torch
 
 from common.exceptions import ConfigurationError, DependencyError
 from common.schema.settings import LLMSettings, RootConfig
+from infrastructure.external_model_budget import ExternalModelSpendingLedger
 from runtime import resources as resources_module
 
 
@@ -80,6 +81,8 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
             subscribe_calls.append((callback, path))
             if path == "llm":
                 callback(self.config.llm)
+            elif path == "jev":
+                callback(self.config.jev)
             elif path == "developer_settings.coordination_log":
                 callback(self.config.developer_settings.coordination_log)
             else:
@@ -103,6 +106,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
         def __init__(self, **kwargs):
             captured_llm_kwargs.update(kwargs)
             self.updated_settings = []
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -188,9 +192,13 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
     assert [path for _callback, path in subscribe_calls] == [
         "developer_settings.coordination_log",
         "llm",
+        "jev",
     ]
+    assert manager.jev_client._ledger is manager.llm_service.spending_ledger
     configured_log_settings = configure_coordination_log.call_args.args[0]
-    assert Path(configured_log_settings.path) == Path("/tmp/knoggin-config/logs/coordination.log")
+    assert Path(configured_log_settings.path) == Path(
+        "/tmp/knoggin-config/logs/coordination.log"
+    )
     assert configure_coordination_log.call_count == 1
     assert all(
         Path(call.args[0].path) == Path("/tmp/knoggin-config/logs/coordination.log")
@@ -200,7 +208,7 @@ async def test_resource_manager_passes_base_url_and_subscribes_llm_updates(
 
     await manager.shutdown()
 
-    assert unsubscribe_calls == ["developer_settings.coordination_log", "llm"]
+    assert unsubscribe_calls == ["developer_settings.coordination_log", "llm", "jev"]
 
 
 @pytest.mark.no_network
@@ -349,7 +357,7 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
 
     class FakeLLMService:
         def __init__(self, **kwargs):
-            pass
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -395,7 +403,9 @@ async def test_resource_manager_resolves_gpu_cuda(monkeypatch, tmp_path):
     monkeypatch.setenv("KNOGGIN_GPU", "true")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
 
-    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(
+        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+    )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
@@ -419,7 +429,7 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
 
     class FakeLLMService:
         def __init__(self, **kwargs):
-            pass
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -483,7 +493,9 @@ async def test_resource_manager_resolves_gpu_mps(monkeypatch, tmp_path):
     else:
         monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 
-    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(
+        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+    )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
@@ -506,7 +518,7 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
 
     class FakeLLMService:
         def __init__(self, **kwargs):
-            pass
+            self.spending_ledger = ExternalModelSpendingLedger()
 
         async def load_tokenizer(self):
             pass
@@ -552,7 +564,9 @@ async def test_resource_manager_resolves_cpu_when_gpu_false(monkeypatch, tmp_pat
     monkeypatch.setenv("KNOGGIN_GPU", "false")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # Should ignore this
 
-    monkeypatch.setattr(resources_module.ConfigManager, "get", lambda: MagicMock())
+    monkeypatch.setattr(
+        resources_module.ConfigManager, "get", lambda: MagicMock(config=RootConfig())
+    )
     monkeypatch.setattr(resources_module, "KnowledgeStore", FakeKnowledgeStore)
     monkeypatch.setattr(resources_module, "PostgresClient", FakePostgresClient)
     monkeypatch.setattr(resources_module, "LLMService", FakeLLMService)
