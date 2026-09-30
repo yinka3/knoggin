@@ -73,6 +73,7 @@ class TextProcessor:
         get_vp01: Callable[[str], Awaitable[VP01EntityExtractor]] | None = None,
         llm=None,
         user_name: str | None = None,
+        jev_client=None,
     ):
         self.get_known_aliases = get_known_aliases
         self.get_alias_version = get_alias_version
@@ -84,6 +85,7 @@ class TextProcessor:
             raise TypeError("get_vp01 must be callable")
         self._get_vp01 = get_vp01
         self._llm = llm
+        self._jev_client = jev_client
         self._user_name = user_name
         self._spacy_lock = threading.Lock()
         self._phrase_matcher_cache_version: Optional[int] = None

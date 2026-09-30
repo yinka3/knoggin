@@ -93,6 +93,7 @@ class ProjectRuntimeFactory:
             readable_project_ids=readable_project_ids,
             knowledge_store=resources.knowledge_store,
             candidate_fuzzy_threshold=entity_settings.candidate_fuzzy_threshold,
+            jev_client=getattr(resources, "jev_client", None),
         )
         await self._verify_user_entity(entities)
 
@@ -119,6 +120,7 @@ class ProjectRuntimeFactory:
                 model_work=resources.model_work,
                 get_vp01=resources.get_vp01,
                 llm=resources.llm_service,
+                jev_client=getattr(resources, "jev_client", None),
                 user_name=self.user_name,
             ),
         )

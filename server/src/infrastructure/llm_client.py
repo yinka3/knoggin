@@ -1,9 +1,6 @@
 import asyncio
 import json
-import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import (
     Any,
     AsyncIterator,
@@ -37,6 +34,10 @@ from common.schema.agent.stream import (
     StreamUsage,
 )
 from common.schema.settings import LLMSettings, LLMSpendingBudgetSettings
+from infrastructure.external_model_budget import (
+    ExternalModelSpendingLedger,
+    _BudgetReservation,
+)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 TRANSPORT_RETRIES = 3
@@ -46,215 +47,12 @@ CLIENT_SHUTDOWN_TIMEOUT = 5.0
 ResponseT = TypeVar("ResponseT")
 
 
-@dataclass(frozen=True, slots=True)
-class LLMUsageRecord:
-    """One provider attempt recorded by the server-wide LLM service."""
-
-    model: str
-    prompt_tokens: int
-    completion_tokens: int
-    cost_usd: float
-    approximate_usage: bool
-    failed: bool
-    recorded_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class _BudgetReservation:
-    token: Any
-    reserved_cost_usd: float
-    price: Any
-    generation: int
-
-
-class _LLMSpendingLedger:
-    """Concurrency-safe in-process accounting for all external model attempts."""
-
-    MAX_RECORDS = 10_000
-
-    def __init__(
-        self, settings: LLMSpendingBudgetSettings | None = None, *, postgres_client=None
-    ) -> None:
-        self._lock = asyncio.Lock()
-        self._settings = settings or LLMSpendingBudgetSettings()
-        self._spent_usd = 0.0
-        self._reserved_usd = 0.0
-        self._records: list[LLMUsageRecord] = []
-        self._next_token = 0
-        self._reset_key = self._settings.reset_key
-        self._generation = 0
-        self._postgres = postgres_client
-
-    async def update_settings(self, settings: LLMSpendingBudgetSettings) -> None:
-        async with self._lock:
-            self._replace_settings_unlocked(settings)
-
-    def replace_settings_without_lock(self, settings: LLMSpendingBudgetSettings) -> None:
-        """Use only before the service enters an event loop."""
-
-        self._replace_settings_unlocked(settings)
-
-    def _replace_settings_unlocked(self, settings: LLMSpendingBudgetSettings) -> None:
-        if settings.reset_key != self._reset_key:
-            self._spent_usd = 0.0
-            self._reserved_usd = 0.0
-            self._records.clear()
-            self._reset_key = settings.reset_key
-            self._generation += 1
-        self._settings = settings
-
-    async def reserve(
-        self,
-        *,
-        model: str,
-        estimated_prompt_tokens: int,
-    ) -> _BudgetReservation:
-        if self._postgres is not None and self._settings.limit_usd is not None:
-            return await self._reserve_durable(
-                model=model, estimated_prompt_tokens=estimated_prompt_tokens
-            )
-        async with self._lock:
-            limit = self._settings.limit_usd
-            if limit is not None and self._spent_usd + self._reserved_usd >= limit:
-                raise LLMBudgetExceededError(
-                    "The configured global LLM spending budget has been reached. "
-                    "Increase the limit or change its reset key before starting "
-                    "new LLM-backed work.",
-                    details=self._snapshot_unlocked(),
-                )
-            price = self._price_for(model)
-            if limit is not None and price is None:
-                raise ConfigurationError(
-                    "The configured LLM spending budget has no price for model "
-                    f"'{model}'. Add model_pricing for it or configure "
-                    "fallback_pricing before starting LLM-backed work."
-                )
-            reserved_cost = self._cost_for(
-                estimated_prompt_tokens,
-                self._settings.reservation_output_tokens,
-                price,
-            )
-            self._next_token += 1
-            self._reserved_usd += reserved_cost
-            return _BudgetReservation(
-                self._next_token,
-                reserved_cost,
-                price,
-                self._generation,
-            )
-
-    async def record(
-        self,
-        reservation: _BudgetReservation,
-        *,
-        model: str,
-        prompt_tokens: int,
-        completion_tokens: int,
-        approximate_usage: bool,
-        failed: bool,
-    ) -> None:
-        if self._postgres is not None and self._settings.limit_usd is not None:
-            await self._record_durable(
-                reservation,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
-            return
-        async with self._lock:
-            # A reset explicitly starts a new user-controlled accounting period.
-            # Do not let an older in-flight request charge that new period.
-            if reservation.generation != self._generation:
-                return
-            self._reserved_usd = max(
-                0.0,
-                self._reserved_usd - reservation.reserved_cost_usd,
-            )
-            cost = self._cost_for(
-                prompt_tokens,
-                completion_tokens,
-                reservation.price,
-            )
-            self._spent_usd += cost
-            self._records.append(
-                LLMUsageRecord(
-                    model=model,
-                    prompt_tokens=max(prompt_tokens, 0),
-                    completion_tokens=max(completion_tokens, 0),
-                    cost_usd=cost,
-                    approximate_usage=approximate_usage,
-                    failed=failed,
-                    recorded_at=datetime.now(timezone.utc),
-                )
-            )
-            if len(self._records) > self.MAX_RECORDS:
-                del self._records[: len(self._records) - self.MAX_RECORDS]
-
-    async def _reserve_durable(self, *, model: str, estimated_prompt_tokens: int) -> _BudgetReservation:
-        price = self._price_for(model)
-        if price is None:
-            raise ConfigurationError(f"The configured LLM spending budget has no price for model '{model}'.")
-        reserved = self._cost_for(estimated_prompt_tokens, self._settings.reservation_output_tokens, price)
-        reservation_id = str(uuid.uuid4())
-        reset_key = self._settings.reset_key
-        async with self._postgres.transaction() as cur:
-            await cur.execute("INSERT INTO public.llm_budget_windows (reset_key) VALUES (%s) ON CONFLICT DO NOTHING", (reset_key,))
-            await cur.execute("SELECT spent_usd, reserved_usd FROM public.llm_budget_windows WHERE reset_key = %s FOR UPDATE", (reset_key,))
-            window = await cur.fetchone()
-            await cur.execute("""WITH expired AS (UPDATE public.llm_budget_reservations SET status = 'expired' WHERE reset_key = %s AND status = 'active' AND expires_at <= now() RETURNING reserved_usd) UPDATE public.llm_budget_windows SET reserved_usd = GREATEST(0, reserved_usd - COALESCE((SELECT sum(reserved_usd) FROM expired), 0)), updated_at = now() WHERE reset_key = %s""", (reset_key, reset_key))
-            await cur.execute("SELECT spent_usd, reserved_usd FROM public.llm_budget_windows WHERE reset_key = %s", (reset_key,))
-            window = await cur.fetchone()
-            if float(window["spent_usd"]) + float(window["reserved_usd"]) + reserved > float(self._settings.limit_usd):
-                raise LLMBudgetExceededError("The configured global LLM spending budget has been reached.")
-            await cur.execute("INSERT INTO public.llm_budget_reservations (reservation_id, reset_key, reserved_usd, expires_at, status) VALUES (%s, %s, %s, now() + interval '15 minutes', 'active')", (reservation_id, reset_key, reserved))
-            await cur.execute("UPDATE public.llm_budget_windows SET reserved_usd = reserved_usd + %s, updated_at = now() WHERE reset_key = %s", (reserved, reset_key))
-        return _BudgetReservation(reservation_id, reserved, price, self._generation)
-
-    async def _record_durable(self, reservation: _BudgetReservation, *, prompt_tokens: int, completion_tokens: int) -> None:
-        actual = self._cost_for(prompt_tokens, completion_tokens, reservation.price)
-        async with self._postgres.transaction() as cur:
-            await cur.execute("SELECT reset_key, reserved_usd FROM public.llm_budget_reservations WHERE reservation_id = %s AND status = 'active' FOR UPDATE", (reservation.token,))
-            row = await cur.fetchone()
-            if row is None:
-                return
-            await cur.execute("UPDATE public.llm_budget_reservations SET status = 'recorded', recorded_at = now() WHERE reservation_id = %s", (reservation.token,))
-            await cur.execute("UPDATE public.llm_budget_windows SET reserved_usd = GREATEST(0, reserved_usd - %s), spent_usd = spent_usd + %s, updated_at = now() WHERE reset_key = %s", (float(row["reserved_usd"]), actual, row["reset_key"]))
-
-    async def snapshot(self) -> dict[str, Any]:
-        async with self._lock:
-            return self._snapshot_unlocked()
-
-    def _snapshot_unlocked(self) -> dict[str, Any]:
-        limit = self._settings.limit_usd
-        return {
-            "configured_limit_usd": limit,
-            "spent_usd": round(self._spent_usd, 8),
-            "reserved_usd": round(self._reserved_usd, 8),
-            "remaining_usd": (
-                None
-                if limit is None
-                else round(max(limit - self._spent_usd - self._reserved_usd, 0.0), 8)
-            ),
-            "request_count": len(self._records),
-            "enforced": limit is not None,
-        }
-
-    def _price_for(self, model: str):
-        return self._settings.model_pricing.get(
-            model,
-            self._settings.fallback_pricing,
-        )
-
-    @staticmethod
-    def _cost_for(prompt_tokens: int, completion_tokens: int, price) -> float:
-        if price is None:
-            return 0.0
-        return (
-            (max(prompt_tokens, 0) * price.input_usd_per_million_tokens)
-            + (max(completion_tokens, 0) * price.output_usd_per_million_tokens)
-        ) / 1_000_000
-
-
 class LLMService:
+    @property
+    def spending_ledger(self) -> ExternalModelSpendingLedger:
+        """The shared server-wide ledger, also used by optional JEV requests."""
+        return self._spending_ledger
+
     def __init__(
         self,
         api_key: str = None,
@@ -273,7 +71,9 @@ class LLMService:
         self._agent_model = agent_model
         self._extraction_model = extraction_model
         self._merge_model = merge_model
-        self._spending_ledger = _LLMSpendingLedger(spending_budget, postgres_client=postgres_client)
+        self._spending_ledger = ExternalModelSpendingLedger(
+            spending_budget, postgres_client=postgres_client
+        )
         self._client = None
         self._raw_client = None
         self._tokenizer = None

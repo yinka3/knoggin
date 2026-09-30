@@ -156,6 +156,7 @@ class ProjectRuntime:
                 ),
                 entity_resolution=settings.entity_resolution,
                 compiled_domain=self.compiled_domain,
+                jev=self._config_manager.config.jev.capture_policy(),
             )
 
     async def _select_vp01(self, compiled_domain: CompiledDomain) -> None:

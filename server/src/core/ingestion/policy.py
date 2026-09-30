@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 from common.conf.domain_config import CompiledDomain
+from common.schema.jev import JevPolicy
 from common.schema.settings import (
     EntityResolutionSettings,
     TextProcessorSettings,
@@ -24,6 +25,11 @@ class IngestionPolicy:
     common_word_frequency_threshold: float
     sparse_context_verbs: tuple[str, ...]
     domain: CompiledDomain
+    jev: JevPolicy = field(default_factory=JevPolicy)
+
+    def __post_init__(self):
+        if type(self.jev) is not JevPolicy:
+            raise TypeError("Ingestion JEV policy must exclude runtime settings")
 
     @classmethod
     def capture(
@@ -32,6 +38,7 @@ class IngestionPolicy:
         text_processor: TextProcessorSettings,
         entity_resolution: EntityResolutionSettings,
         compiled_domain: CompiledDomain,
+        jev: JevPolicy | None = None,
     ) -> "IngestionPolicy":
         if not isinstance(compiled_domain, CompiledDomain):
             raise TypeError("IngestionPolicy requires an active CompiledDomain")
@@ -50,6 +57,7 @@ class IngestionPolicy:
                 if verb and verb.strip()
             ),
             domain=compiled_domain,
+            jev=jev or JevPolicy(),
         )
 
     def semantic_window_snapshot(self) -> dict[str, object]:
@@ -64,6 +72,7 @@ class IngestionPolicy:
             "common_word_frequency_threshold": self.common_word_frequency_threshold,
             "sparse_context_verbs": list(self.sparse_context_verbs),
             "compiled_domain": self.domain.to_dict(),
+            "jev_policy": self.jev.model_dump(mode="json"),
         }
 
     @classmethod
@@ -82,7 +91,8 @@ class IngestionPolicy:
             "sparse_context_verbs",
             "compiled_domain",
         }
-        if set(payload) != expected:
+        # Old development windows predate JEV and replay with it disabled.
+        if set(payload) not in (expected, expected | {"jev_policy"}):
             raise ValueError("Invalid ingestion policy snapshot shape")
         try:
             gliner_threshold = payload["gliner_threshold"]
@@ -95,6 +105,7 @@ class IngestionPolicy:
             ]
             sparse_context_verbs = tuple(payload["sparse_context_verbs"])
             domain = CompiledDomain.from_dict(payload["compiled_domain"])
+            jev = JevPolicy.model_validate(payload.get("jev_policy", {}))
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("Invalid ingestion policy snapshot") from exc
         if (
@@ -121,4 +132,5 @@ class IngestionPolicy:
             common_word_frequency_threshold=float(common_word_frequency_threshold),
             sparse_context_verbs=sparse_context_verbs,
             domain=domain,
+            jev=jev,
         )

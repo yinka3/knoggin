@@ -24,6 +24,7 @@ from core.knowledge.db.embedding_rebuilder import EmbeddingRebuilder
 from core.knowledge.services.embedding_service import EmbeddingService
 from core.knowledge.store import KnowledgeStore
 from infrastructure.background_work import BackgroundWorkCoordinator
+from infrastructure.jev_client import JevClient
 from infrastructure.llm_client import LLMService
 from infrastructure.model_work import ModelWorkCoordinator, ModelWorkPriority
 from infrastructure.postgres_client import PostgresClient
@@ -55,6 +56,7 @@ class ReadyRuntimeResources(Protocol):
     postgres: PostgresClient
     embedding: EmbeddingService
     llm_service: LLMService
+    jev_client: JevClient
     executor: ThreadPoolExecutor
     background_work: BackgroundWorkCoordinator
     model_work: ModelWorkCoordinator
@@ -73,6 +75,7 @@ class RuntimeResources:
         self.postgres: Optional[PostgresClient] = None
         self.embedding: Optional[EmbeddingService] = None
         self.llm_service: Optional[LLMService] = None
+        self.jev_client: JevClient | None = None
         self.executor: Optional[ThreadPoolExecutor] = None
         self.background_work: Optional[BackgroundWorkCoordinator] = None
         self.model_work: Optional[ModelWorkCoordinator] = None
@@ -268,6 +271,13 @@ class RuntimeResources:
         self.config_unsubscribers.append(
             config_manager.subscribe(self.llm_service.update_settings, "llm")
         )
+        # The lightweight owner makes no HTTP client/request at disabled startup.
+        self.jev_client = JevClient(
+            config.jev, spending_ledger=self.llm_service.spending_ledger
+        )
+        self.config_unsubscribers.append(
+            config_manager.subscribe(self.jev_client.update_settings, "jev")
+        )
         self.embedding = EmbeddingService(
             embedding_model=os.getenv(
                 "KNOGGIN_EMBEDDING_MODEL", "dunzhang/stella_en_1.5B_v5"
@@ -372,6 +382,14 @@ class RuntimeResources:
                 self.executor = None
         if self.executor is not None:
             return tuple(failures)
+
+        # JEV cancellation settles shared accounting while PostgreSQL is alive.
+        jev_client = self.jev_client
+        if jev_client is not None:
+            if await attempt("JEV client", jev_client.close):
+                self.jev_client = None
+            else:
+                return tuple(failures)
 
         postgres = self.postgres
         if postgres is not None:

@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 
 from common.schema.agent.settings import AgentLimitSettings
 from common.schema.config import ConfigModel
+from common.schema.jev import JevSettings
 
 DEFAULT_SPARSE_CONTEXT_VERBS = [
     "accepted",
@@ -215,5 +216,6 @@ class DeveloperSettings(ConfigModel):
 class RootConfig(ConfigModel):
     user_aliases: List[str] = Field(default_factory=list)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    jev: JevSettings = Field(default_factory=JevSettings)
     search: SearchAPIKeySettings = Field(default_factory=SearchAPIKeySettings)
     developer_settings: DeveloperSettings = Field(default_factory=DeveloperSettings)

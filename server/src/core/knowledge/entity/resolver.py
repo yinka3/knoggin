@@ -35,6 +35,7 @@ from core.knowledge.entity.profile import EntityProfile
 
 if TYPE_CHECKING:
     from core.knowledge.store import KnowledgeStore
+    from infrastructure.jev_client import JevClient
 
 
 @dataclass
@@ -119,9 +120,11 @@ class EntityResolver:
         project_id: str,
         readable_project_ids: List[str],
         candidate_fuzzy_threshold: int = 85,
+        jev_client: "JevClient | None" = None,
     ):
 
         self.knowledge_store = knowledge_store
+        self._jev_client = jev_client
         self.project_id = require_scope_value(
             project_id,
             "project_id",

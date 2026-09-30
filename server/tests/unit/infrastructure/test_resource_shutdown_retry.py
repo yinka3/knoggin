@@ -6,6 +6,29 @@ import pytest
 from runtime.resources import RuntimeResources, RuntimeResourcesShutdownError
 
 
+async def test_jev_shutdown_precedes_postgres_and_retains_failed_owner():
+    resources = RuntimeResources()
+    calls = []
+    resources.jev_client = AsyncMock()
+    resources.postgres = AsyncMock()
+
+    async def stop_jev():
+        calls.append("jev")
+
+    async def stop_postgres():
+        calls.append("postgres")
+
+    resources.jev_client.close.side_effect = [RuntimeError("busy"), None]
+    resources.postgres.close.side_effect = stop_postgres
+    with pytest.raises(RuntimeResourcesShutdownError):
+        await resources.shutdown()
+    resources.postgres.close.assert_not_awaited()
+    resources.jev_client.close.side_effect = stop_jev
+    await resources.shutdown()
+    assert calls == ["jev", "postgres"]
+    assert resources.jev_client is None
+
+
 async def test_model_failure_keeps_executor_and_models_alive():
     resources = RuntimeResources()
     resources.model_work = AsyncMock()
